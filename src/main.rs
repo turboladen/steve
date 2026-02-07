@@ -22,13 +22,13 @@ async fn main() -> Result<()> {
     // Load AGENTS.md (if present)
     let agents_md = config::load_agents_md(&project_info.root);
 
-    // Build provider registry (may fail if env vars not set — that's ok, handle gracefully)
-    let provider_registry = match provider::ProviderRegistry::from_config(&cfg) {
-        Ok(registry) => Some(registry),
-        Err(_) => None,
+    // Build provider registry (may fail if env vars not set)
+    let (provider_registry, provider_error) = match provider::ProviderRegistry::from_config(&cfg) {
+        Ok(registry) => (Some(registry), None),
+        Err(e) => (None, Some(e.to_string())),
     };
 
-    let mut app = app::App::new(project_info, cfg, store, agents_md, provider_registry);
+    let mut app = app::App::new(project_info, cfg, store, agents_md, provider_registry, provider_error);
     app.run().await?;
     Ok(())
 }

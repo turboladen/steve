@@ -46,11 +46,26 @@ impl App {
         storage: Storage,
         agents_md: Option<String>,
         provider_registry: Option<ProviderRegistry>,
+        provider_error: Option<String>,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
         // Determine the default model from config
         let current_model = config.model.clone();
+
+        // Build startup messages
+        let mut messages = Vec::new();
+        if config.providers.is_empty() {
+            messages.push(DisplayMessage {
+                role: DisplayRole::Assistant,
+                text: "No providers configured. Create a steve.json or steve.jsonc config file to get started.".to_string(),
+            });
+        } else if let Some(err) = provider_error {
+            messages.push(DisplayMessage {
+                role: DisplayRole::Assistant,
+                text: format!("Provider setup failed: {err}"),
+            });
+        }
 
         Self {
             project,
@@ -60,7 +75,7 @@ impl App {
             provider_registry,
             current_model,
             input: InputState::default(),
-            messages: Vec::new(),
+            messages,
             message_area_state: MessageAreaState::default(),
             theme: Theme::default(),
             is_loading: false,
@@ -74,15 +89,6 @@ impl App {
         let mut terminal = ui::setup_terminal()?;
         let mut crossterm_events = crossterm::event::EventStream::new();
         let mut tick_interval = tokio::time::interval(Duration::from_millis(100));
-
-        // Show welcome / status
-        if self.provider_registry.is_none() {
-            self.messages.push(DisplayMessage {
-                role: DisplayRole::Assistant,
-                text: "No providers configured. Create a steve.json config file to get started."
-                    .to_string(),
-            });
-        }
 
         // Initial render
         terminal.draw(|frame| ui::render(frame, self))?;
