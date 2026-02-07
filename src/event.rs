@@ -1,4 +1,8 @@
 use crossterm::event::Event;
+use serde_json::Value;
+
+use crate::permission::types::PermissionRequest;
+use crate::tool::ToolOutput;
 
 #[derive(Debug)]
 pub enum AppEvent {
@@ -6,8 +10,38 @@ pub enum AppEvent {
     Input(Event),
     /// Periodic tick for UI refresh (spinners, etc.)
     Tick,
-    /// Non-streaming LLM response (Phase 3). Will be replaced with streaming deltas in Phase 4.
-    LlmResponse { text: String },
-    /// LLM error
+
+    // -- LLM streaming events --
+
+    /// A text delta from the LLM stream (token-by-token).
+    LlmDelta { text: String },
+    /// A tool call has been assembled from the stream and is ready to execute.
+    LlmToolCall {
+        call_id: String,
+        tool_name: String,
+        arguments: Value,
+    },
+    /// A tool call has finished executing.
+    ToolResult {
+        call_id: String,
+        tool_name: String,
+        output: ToolOutput,
+    },
+    /// The LLM stream has finished (no more tool calls). Contains token usage if available.
+    LlmFinish { usage: Option<StreamUsage> },
+    /// LLM error (stream failure or API error).
     LlmError { error: String },
+
+    // -- Permission events --
+
+    /// A tool call needs user permission before executing.
+    PermissionRequest(PermissionRequest),
+}
+
+/// Token usage reported at the end of a streaming response.
+#[derive(Debug, Clone, Default)]
+pub struct StreamUsage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
 }

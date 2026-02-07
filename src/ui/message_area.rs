@@ -8,7 +8,7 @@ use ratatui::{
 
 use super::theme::Theme;
 
-/// Minimal message type for Phase 1. Will be replaced with session::Message later.
+/// A display message for the message area.
 #[derive(Debug, Clone)]
 pub struct DisplayMessage {
     pub role: DisplayRole,
@@ -19,6 +19,11 @@ pub struct DisplayMessage {
 pub enum DisplayRole {
     User,
     Assistant,
+    Tool,
+    ToolResult,
+    Error,
+    System,
+    Permission,
 }
 
 /// State for the scrollable message area.
@@ -62,6 +67,7 @@ pub fn render_messages(
     messages: &[DisplayMessage],
     state: &mut MessageAreaState,
     theme: &Theme,
+    is_loading: bool,
 ) {
     let mut lines: Vec<Line> = Vec::new();
 
@@ -82,10 +88,66 @@ pub fn render_messages(
                 ]));
             }
             DisplayRole::Assistant => {
+                if msg.text.is_empty() && is_loading {
+                    // Show a streaming indicator for the empty message being filled
+                    lines.push(Line::from(Span::styled(
+                        "...",
+                        Style::default()
+                            .fg(theme.dim)
+                            .add_modifier(Modifier::DIM),
+                    )));
+                } else {
+                    for text_line in msg.text.lines() {
+                        lines.push(Line::from(Span::styled(
+                            text_line.to_string(),
+                            Style::default().fg(theme.assistant_msg),
+                        )));
+                    }
+                }
+            }
+            DisplayRole::Tool => {
                 for text_line in msg.text.lines() {
                     lines.push(Line::from(Span::styled(
                         text_line.to_string(),
-                        Style::default().fg(theme.assistant_msg),
+                        Style::default()
+                            .fg(theme.tool_call)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                }
+            }
+            DisplayRole::ToolResult => {
+                for text_line in msg.text.lines() {
+                    lines.push(Line::from(Span::styled(
+                        text_line.to_string(),
+                        Style::default().fg(theme.dim),
+                    )));
+                }
+            }
+            DisplayRole::Error => {
+                for text_line in msg.text.lines() {
+                    lines.push(Line::from(Span::styled(
+                        text_line.to_string(),
+                        Style::default().fg(theme.error),
+                    )));
+                }
+            }
+            DisplayRole::System => {
+                for text_line in msg.text.lines() {
+                    lines.push(Line::from(Span::styled(
+                        text_line.to_string(),
+                        Style::default()
+                            .fg(theme.dim)
+                            .add_modifier(Modifier::ITALIC),
+                    )));
+                }
+            }
+            DisplayRole::Permission => {
+                for text_line in msg.text.lines() {
+                    lines.push(Line::from(Span::styled(
+                        text_line.to_string(),
+                        Style::default()
+                            .fg(theme.warning)
+                            .add_modifier(Modifier::BOLD),
                     )));
                 }
             }

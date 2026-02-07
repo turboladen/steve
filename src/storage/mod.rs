@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
+use fs2::FileExt;
 use serde::{Serialize, de::DeserializeOwned};
 
 /// JSON file storage under `~/.local/share/steve/storage/`.
@@ -37,7 +38,6 @@ impl Storage {
             .with_context(|| format!("failed to open: {}", path.display()))?;
 
         // Shared (read) lock
-        use fs2::FileExt;
         file.lock_shared()
             .with_context(|| format!("failed to lock: {}", path.display()))?;
 
@@ -64,7 +64,6 @@ impl Storage {
             .with_context(|| format!("failed to create: {}", tmp_path.display()))?;
 
         // Exclusive (write) lock
-        use fs2::FileExt;
         file.lock_exclusive()
             .with_context(|| format!("failed to lock: {}", tmp_path.display()))?;
 

@@ -3,7 +3,7 @@ pub mod client;
 use std::collections::HashMap;
 use std::env;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use crate::config::types::{Config, ModelConfig, ProviderConfig};
 use client::LlmClient;

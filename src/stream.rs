@@ -1,0 +1,505 @@
+//! LLM streaming bridge with tool call loop.
+//!
+//! Spawns a tokio task that:
+//! 1. Opens an SSE stream via async-openai
+//! 2. Processes chunks, sending text deltas to the UI
+//! 3. Accumulates tool call fragments from the stream
+//! 4. When the stream finishes with tool calls, executes them and loops back
+
+use std::collections::HashMap;
+
+use async_openai::{
+    config::OpenAIConfig,
+    types::chat::{
+        ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
+        ChatCompletionRequestAssistantMessage, ChatCompletionRequestMessage,
+        ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
+        ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
+        ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
+        ChatCompletionResponseStream, ChatCompletionTool, ChatCompletionTools,
+        CreateChatCompletionRequest, FunctionCall, FunctionObject, FinishReason,
+    },
+    Client,
+};
+use futures::StreamExt;
+use serde_json::Value;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+use crate::event::{AppEvent, StreamUsage};
+use crate::permission::PermissionEngine;
+use crate::permission::types::{PermissionAction, PermissionReply, PermissionRequest};
+use crate::tool::{ToolContext, ToolRegistry};
+
+/// Parameters for launching a streaming LLM request.
+pub struct StreamRequest {
+    pub client: Client<OpenAIConfig>,
+    pub model: String,
+    pub system_prompt: Option<String>,
+    /// Previous conversation history (user + assistant messages from prior exchanges).
+    pub history: Vec<ChatCompletionRequestMessage>,
+    pub user_message: String,
+    pub event_tx: mpsc::UnboundedSender<AppEvent>,
+    pub tool_registry: Option<std::sync::Arc<ToolRegistry>>,
+    pub tool_context: Option<ToolContext>,
+    pub permission_engine: Option<std::sync::Arc<tokio::sync::Mutex<PermissionEngine>>>,
+    pub cancel_token: CancellationToken,
+}
+
+/// Spawn a tokio task that streams the LLM response and sends events.
+/// Returns the JoinHandle so the caller can track task completion.
+pub fn spawn_stream(req: StreamRequest) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if let Err(_) = run_stream(req).await {
+            // Error already sent via channel in run_stream
+        }
+    })
+}
+
+/// Accumulated tool call from streaming fragments.
+#[derive(Default)]
+struct PendingToolCall {
+    id: String,
+    function_name: String,
+    arguments: String,
+}
+
+async fn run_stream(req: StreamRequest) -> Result<(), ()> {
+    let StreamRequest {
+        client,
+        model,
+        system_prompt,
+        history,
+        user_message,
+        event_tx,
+        tool_registry,
+        tool_context,
+        permission_engine,
+        cancel_token,
+    } = req;
+
+    tracing::info!(model = %model, "starting LLM stream");
+
+    // Build initial messages: system prompt + history + new user message
+    let mut messages: Vec<ChatCompletionRequestMessage> = Vec::new();
+
+    if let Some(system) = system_prompt {
+        messages.push(ChatCompletionRequestMessage::System(
+            ChatCompletionRequestSystemMessage {
+                content: ChatCompletionRequestSystemMessageContent::Text(system),
+                name: None,
+            },
+        ));
+    }
+
+    // Append prior conversation history
+    messages.extend(history);
+
+    messages.push(ChatCompletionRequestMessage::User(
+        ChatCompletionRequestUserMessage {
+            content: ChatCompletionRequestUserMessageContent::Text(user_message),
+            name: None,
+        },
+    ));
+
+    // Build tool definitions for the API
+    let tools: Option<Vec<ChatCompletionTools>> = tool_registry.as_ref().map(|registry| {
+        registry
+            .tool_definitions()
+            .into_iter()
+            .filter_map(|def| {
+                let func = def.get("function")?;
+                Some(ChatCompletionTools::Function(ChatCompletionTool {
+                    function: FunctionObject {
+                        name: func.get("name")?.as_str()?.to_string(),
+                        description: func.get("description").and_then(|d| d.as_str()).map(String::from),
+                        parameters: func.get("parameters").cloned(),
+                        strict: None,
+                    },
+                }))
+            })
+            .collect()
+    });
+
+    let mut total_usage = StreamUsage::default();
+
+    // Tool call loop — keep going until the LLM produces a response with no tool calls
+    loop {
+        // Check for cancellation before each LLM call
+        if cancel_token.is_cancelled() {
+            tracing::info!("stream cancelled before LLM call");
+            let _ = event_tx.send(AppEvent::LlmFinish {
+                usage: Some(total_usage),
+            });
+            return Ok(());
+        }
+
+        let mut request = CreateChatCompletionRequest {
+            model: model.clone(),
+            messages: messages.clone(),
+            stream: Some(true),
+            ..Default::default()
+        };
+
+        if let Some(ref t) = tools {
+            if !t.is_empty() {
+                request.tools = Some(t.clone());
+            }
+        }
+
+        // Open the stream
+        let mut stream: ChatCompletionResponseStream =
+            match client.chat().create_stream(request).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to start stream");
+                    let _ = event_tx.send(AppEvent::LlmError {
+                        error: format!("failed to start stream: {e}"),
+                    });
+                    return Err(());
+                }
+            };
+
+        // Accumulate tool call fragments
+        let mut pending_tool_calls: HashMap<u32, PendingToolCall> = HashMap::new();
+        let mut finish_reason: Option<FinishReason> = None;
+        let mut assistant_content = String::new();
+
+        // Process chunks — use select! to check cancellation while streaming
+        loop {
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    tracing::info!("stream cancelled during processing");
+                    let _ = event_tx.send(AppEvent::LlmFinish {
+                        usage: Some(total_usage),
+                    });
+                    return Ok(());
+                }
+                maybe_chunk = stream.next() => {
+                    let Some(result) = maybe_chunk else {
+                        // Stream ended
+                        break;
+                    };
+
+                    match result {
+                        Ok(response) => {
+                            // Check for usage in the final chunk
+                            if let Some(u) = response.usage {
+                                total_usage.prompt_tokens += u.prompt_tokens;
+                                total_usage.completion_tokens += u.completion_tokens;
+                                total_usage.total_tokens += u.total_tokens;
+                            }
+
+                            // Process each choice's delta
+                            for choice in &response.choices {
+                                // Text content delta
+                                if let Some(content) = &choice.delta.content {
+                                    if !content.is_empty() {
+                                        assistant_content.push_str(content);
+                                        let _ = event_tx.send(AppEvent::LlmDelta {
+                                            text: content.clone(),
+                                        });
+                                    }
+                                }
+
+                                // Tool call fragments
+                                if let Some(tool_calls) = &choice.delta.tool_calls {
+                                    for tc in tool_calls {
+                                        let entry = pending_tool_calls
+                                            .entry(tc.index)
+                                            .or_insert_with(PendingToolCall::default);
+
+                                        if let Some(id) = &tc.id {
+                                            entry.id = id.clone();
+                                        }
+                                        if let Some(func) = &tc.function {
+                                            if let Some(name) = &func.name {
+                                                entry.function_name = name.clone();
+                                            }
+                                            if let Some(args) = &func.arguments {
+                                                entry.arguments.push_str(args);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Track finish reason
+                                if let Some(reason) = &choice.finish_reason {
+                                    finish_reason = Some(reason.clone());
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "stream chunk error");
+                            let _ = event_tx.send(AppEvent::LlmError {
+                                error: format!("stream error: {e}"),
+                            });
+                            return Err(());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Stream ended — check if we have tool calls to execute
+        if pending_tool_calls.is_empty()
+            || !matches!(finish_reason, Some(FinishReason::ToolCalls))
+        {
+            // No tool calls — we're done
+            tracing::info!("stream finished (no tool calls)");
+            let _ = event_tx.send(AppEvent::LlmFinish {
+                usage: Some(total_usage),
+            });
+            return Ok(());
+        }
+
+        // We have tool calls — execute them and loop
+        let Some(ref registry) = tool_registry else {
+            let _ = event_tx.send(AppEvent::LlmFinish {
+                usage: Some(total_usage),
+            });
+            return Ok(());
+        };
+
+        let ctx = tool_context.clone().unwrap_or_else(|| ToolContext {
+            project_root: std::path::PathBuf::from("."),
+        });
+
+        // Sort tool calls by index for deterministic ordering
+        let mut sorted_indices: Vec<u32> = pending_tool_calls.keys().cloned().collect();
+        sorted_indices.sort();
+
+        tracing::info!(count = sorted_indices.len(), "executing tool calls");
+
+        // Build the assistant message with tool calls for the conversation history
+        let api_tool_calls: Vec<ChatCompletionMessageToolCalls> = sorted_indices
+            .iter()
+            .map(|idx| {
+                let tc = &pending_tool_calls[idx];
+                ChatCompletionMessageToolCalls::Function(ChatCompletionMessageToolCall {
+                    id: tc.id.clone(),
+                    function: FunctionCall {
+                        name: tc.function_name.clone(),
+                        arguments: tc.arguments.clone(),
+                    },
+                })
+            })
+            .collect();
+
+        // Add assistant message with tool calls to conversation
+        #[allow(deprecated)]
+        messages.push(ChatCompletionRequestMessage::Assistant(
+            ChatCompletionRequestAssistantMessage {
+                content: if assistant_content.is_empty() {
+                    None
+                } else {
+                    Some(
+                        async_openai::types::chat::ChatCompletionRequestAssistantMessageContent::Text(
+                            assistant_content.clone(),
+                        ),
+                    )
+                },
+                name: None,
+                audio: None,
+                tool_calls: Some(api_tool_calls),
+                function_call: None,
+                refusal: None,
+            },
+        ));
+
+        // Execute each tool call and add results
+        for idx in &sorted_indices {
+            // Check for cancellation between tool calls
+            if cancel_token.is_cancelled() {
+                tracing::info!("stream cancelled during tool execution");
+                let _ = event_tx.send(AppEvent::LlmFinish {
+                    usage: Some(total_usage),
+                });
+                return Ok(());
+            }
+
+            let tc = &pending_tool_calls[idx];
+
+            // Parse arguments
+            let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
+
+            // Check permissions
+            let action = if let Some(ref engine) = permission_engine {
+                let engine = engine.lock().await;
+                engine.check(&tc.function_name, None)
+            } else {
+                PermissionAction::Allow
+            };
+
+            match action {
+                PermissionAction::Allow => {
+                    // Allowed — proceed directly
+                }
+                PermissionAction::Deny => {
+                    tracing::info!(tool = %tc.function_name, "tool call denied by policy");
+                    // Denied — report as tool error
+                    let _ = event_tx.send(AppEvent::LlmToolCall {
+                        call_id: tc.id.clone(),
+                        tool_name: tc.function_name.clone(),
+                        arguments: args.clone(),
+                    });
+
+                    let output = crate::tool::ToolOutput {
+                        title: tc.function_name.clone(),
+                        output: format!("Permission denied: {} is not allowed in the current mode.", tc.function_name),
+                        is_error: true,
+                    };
+
+                    let _ = event_tx.send(AppEvent::ToolResult {
+                        call_id: tc.id.clone(),
+                        tool_name: tc.function_name.clone(),
+                        output: output.clone(),
+                    });
+
+                    messages.push(ChatCompletionRequestMessage::Tool(
+                        ChatCompletionRequestToolMessage {
+                            content: ChatCompletionRequestToolMessageContent::Text(output.output),
+                            tool_call_id: tc.id.clone(),
+                        },
+                    ));
+                    continue;
+                }
+                PermissionAction::Ask => {
+                    // Need to ask the user — send a request and await their reply
+                    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+                    // Build a summary of what the tool wants to do
+                    let summary = build_permission_summary(&tc.function_name, &args);
+
+                    let _ = event_tx.send(AppEvent::PermissionRequest(PermissionRequest {
+                        call_id: tc.id.clone(),
+                        tool_name: tc.function_name.clone(),
+                        arguments_summary: summary,
+                        response_tx,
+                    }));
+
+                    // Wait for user response (also check cancellation)
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => {
+                            tracing::info!("stream cancelled while waiting for permission");
+                            let _ = event_tx.send(AppEvent::LlmFinish {
+                                usage: Some(total_usage),
+                            });
+                            return Ok(());
+                        }
+                        reply = response_rx => {
+                            match reply {
+                                Ok(PermissionReply::AllowOnce) => {
+                                    tracing::info!(tool = %tc.function_name, "permission granted (once)");
+                                }
+                                Ok(PermissionReply::AllowAlways) => {
+                                    tracing::info!(tool = %tc.function_name, "permission granted (always)");
+                                    if let Some(ref engine) = permission_engine {
+                                        let mut engine = engine.lock().await;
+                                        engine.grant_session(&tc.function_name);
+                                    }
+                                }
+                                Ok(PermissionReply::Deny) | Err(_) => {
+                                    tracing::info!(tool = %tc.function_name, "permission denied by user");
+                                    let output = crate::tool::ToolOutput {
+                                        title: tc.function_name.clone(),
+                                        output: format!("Permission denied by user for: {}", tc.function_name),
+                                        is_error: true,
+                                    };
+
+                                    let _ = event_tx.send(AppEvent::ToolResult {
+                                        call_id: tc.id.clone(),
+                                        tool_name: tc.function_name.clone(),
+                                        output: output.clone(),
+                                    });
+
+                                    messages.push(ChatCompletionRequestMessage::Tool(
+                                        ChatCompletionRequestToolMessage {
+                                            content: ChatCompletionRequestToolMessageContent::Text(output.output),
+                                            tool_call_id: tc.id.clone(),
+                                        },
+                                    ));
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Notify UI about the tool call
+            let _ = event_tx.send(AppEvent::LlmToolCall {
+                call_id: tc.id.clone(),
+                tool_name: tc.function_name.clone(),
+                arguments: args.clone(),
+            });
+
+            tracing::info!(tool = %tc.function_name, "executing tool");
+
+            // Execute the tool
+            let output = match registry.execute(&tc.function_name, args, ctx.clone()) {
+                Ok(output) => output,
+                Err(e) => {
+                    tracing::error!(tool = %tc.function_name, error = %e, "tool execution failed");
+                    crate::tool::ToolOutput {
+                        title: tc.function_name.clone(),
+                        output: format!("Error: {e}"),
+                        is_error: true,
+                    }
+                }
+            };
+
+            // Notify UI about the tool result
+            let _ = event_tx.send(AppEvent::ToolResult {
+                call_id: tc.id.clone(),
+                tool_name: tc.function_name.clone(),
+                output: output.clone(),
+            });
+
+            // Add tool result to conversation for next LLM call
+            messages.push(ChatCompletionRequestMessage::Tool(
+                ChatCompletionRequestToolMessage {
+                    content: ChatCompletionRequestToolMessageContent::Text(output.output),
+                    tool_call_id: tc.id.clone(),
+                },
+            ));
+        }
+
+        // Loop back to send the messages (with tool results) to the LLM again
+    }
+}
+
+/// Build a human-readable summary of what a tool call wants to do.
+fn build_permission_summary(tool_name: &str, args: &Value) -> String {
+    match tool_name {
+        "bash" => {
+            let cmd = args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown command)");
+            format!("Run command: {cmd}")
+        }
+        "edit" => {
+            let file = args
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown file)");
+            format!("Edit file: {file}")
+        }
+        "write" => {
+            let file = args
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown file)");
+            format!("Write file: {file}")
+        }
+        "patch" => {
+            let file = args
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown file)");
+            format!("Patch file: {file}")
+        }
+        _ => format!("{tool_name}: {}", serde_json::to_string(args).unwrap_or_default()),
+    }
+}

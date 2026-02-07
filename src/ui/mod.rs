@@ -1,6 +1,7 @@
 pub mod input;
 pub mod layout;
 pub mod message_area;
+pub mod sidebar;
 pub mod theme;
 
 use std::io::{self, Stdout};
@@ -17,6 +18,7 @@ use crate::app::App;
 use layout::compute_layout;
 use message_area::render_messages;
 use input::render_input;
+use sidebar::render_sidebar;
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -42,7 +44,8 @@ pub fn restore_terminal(terminal: &mut Tui) -> Result<()> {
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
-    let layout = compute_layout(area, false); // sidebar disabled for Phase 1
+    let show_sidebar = area.width >= 120;
+    let layout = compute_layout(area, show_sidebar);
 
     render_messages(
         frame,
@@ -50,7 +53,17 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         &app.messages,
         &mut app.message_area_state,
         &app.theme,
+        app.is_loading,
     );
+
+    if let Some(sidebar_area) = layout.sidebar {
+        render_sidebar(
+            frame,
+            sidebar_area,
+            &app.sidebar_state,
+            &app.theme,
+        );
+    }
 
     render_input(
         frame,
