@@ -13,10 +13,10 @@ pub fn load(project_root: &Path) -> Result<Config> {
     let json_path = project_root.join("steve.json");
     let jsonc_path = project_root.join("steve.jsonc");
 
-    let (path, is_jsonc) = if json_path.exists() {
-        (json_path, false)
+    let path = if json_path.exists() {
+        json_path
     } else if jsonc_path.exists() {
-        (jsonc_path, true)
+        jsonc_path
     } else {
         // No config file found — return defaults
         return Ok(Config::default());
@@ -25,18 +25,14 @@ pub fn load(project_root: &Path) -> Result<Config> {
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read config file: {}", path.display()))?;
 
-    let config = if is_jsonc {
-        // Parse JSONC (strip comments) then deserialize
-        let json_value = jsonc_parser::parse_to_serde_value(&content, &Default::default())
-            .map_err(|e| anyhow::anyhow!("failed to parse JSONC: {e}"))?;
-        match json_value {
-            Some(value) => serde_json::from_value(value)
-                .context("failed to deserialize config")?,
-            None => Config::default(),
-        }
-    } else {
-        serde_json::from_str(&content)
-            .with_context(|| format!("failed to parse config: {}", path.display()))?
+    // Always parse through JSONC parser — it handles both plain JSON and JSONC (with comments)
+    let json_value = jsonc_parser::parse_to_serde_value(&content, &Default::default())
+        .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", path.display()))?;
+
+    let config = match json_value {
+        Some(value) => serde_json::from_value(value)
+            .with_context(|| format!("failed to deserialize config from {}", path.display()))?,
+        None => Config::default(),
     };
 
     Ok(config)
