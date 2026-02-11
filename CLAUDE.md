@@ -26,10 +26,14 @@ Steve reads `steve.json` or `steve.jsonc` from the project root. Config is alway
 
 Model references use `"provider_id/model_id"` format throughout (config, commands, internal types).
 
+Optional top-level fields: `small_model` (used for compaction/summarization, falls back to `model`), `auto_compact` (default `true` — auto-compacts at 80% context window usage).
+
 Example `steve.json`:
 ```jsonc
 {
   "model": "openai/gpt-4o",
+  // "small_model": "openai/gpt-4o-mini",  // optional: used for /compact
+  // "auto_compact": true,                  // optional: default true
   "providers": {
     "openai": {
       "base_url": "https://api.openai.com/v1",
@@ -55,6 +59,7 @@ Example `steve.json`:
 | `/rename <title>` | Rename current session |
 | `/models` | List available models |
 | `/model <ref>` | Switch to a model (e.g., `/model openai/gpt-4o`) |
+| `/compact` | Compact conversation into a summary (frees context window) |
 | `/init` | Create AGENTS.md in project root |
 | `/help` | Show help |
 | `/exit` | Quit |

@@ -139,6 +139,22 @@ impl<'a> SessionManager<'a> {
         self.save_session(session)
     }
 
+    /// Delete all messages for a session.
+    pub fn delete_messages(&self, session_id: &str) -> Result<()> {
+        let ids = self.storage.list(&["messages", session_id])?;
+        for id in &ids {
+            self.storage.delete(&["messages", session_id, id])?;
+        }
+        Ok(())
+    }
+
+    /// Reset token usage counters on the session and save.
+    pub fn reset_usage(&self, session: &mut SessionInfo) -> Result<()> {
+        session.token_usage = TokenUsage::default();
+        session.updated_at = Utc::now();
+        self.save_session(session)
+    }
+
     /// Add token usage to the session and save.
     pub fn add_usage(
         &self,

@@ -36,6 +36,13 @@ pub enum AppEvent {
 
     /// A tool call needs user permission before executing.
     PermissionRequest(PermissionRequest),
+
+    // -- Compact events --
+
+    /// Compaction completed successfully with a summary.
+    CompactFinish { summary: String },
+    /// Compaction failed.
+    CompactError { error: String },
 }
 
 /// Token usage reported at the end of a streaming response.

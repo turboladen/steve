@@ -13,6 +13,10 @@ pub struct Config {
     #[serde(default)]
     pub small_model: Option<String>,
 
+    /// Whether to automatically compact when approaching context window limit.
+    #[serde(default = "default_auto_compact")]
+    pub auto_compact: bool,
+
     /// Provider definitions keyed by provider ID.
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
@@ -79,4 +83,8 @@ pub struct ModelCapabilities {
 
 fn default_context_window() -> u32 {
     128_000
+}
+
+fn default_auto_compact() -> bool {
+    true
 }
