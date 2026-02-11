@@ -13,10 +13,12 @@ cargo build            # Build (debug)
 cargo build --release  # Build (release)
 cargo run              # Run the TUI (requires steve.json config in project root)
 cargo check            # Type-check without building
-RUST_LOG=steve=debug cargo run  # Run with debug logging (logs go to file, not stdout)
+RUST_LOG=steve=debug cargo run  # Override log level (default: steve=info)
 ```
 
 There are no tests yet. The project uses Rust edition 2024.
+
+Logs are written to `~/.local/share/steve/logs/steve.log` (daily rolling via `tracing-appender`).
 
 ## Configuration
 
@@ -24,9 +26,49 @@ Steve reads `steve.json` or `steve.jsonc` from the project root. Config is alway
 
 Model references use `"provider_id/model_id"` format throughout (config, commands, internal types).
 
+Example `steve.json`:
+```jsonc
+{
+  "model": "openai/gpt-4o",
+  "providers": {
+    "openai": {
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "models": {
+        "gpt-4o": {
+          "id": "gpt-4o",
+          "name": "GPT-4o",
+          "context_window": 128000,
+          "capabilities": { "tool_call": true, "reasoning": false }
+        }
+      }
+    }
+  }
+}
+```
+
+## Commands & Keys
+
+| Command | Action |
+|---------|--------|
+| `/new` | Start a new session |
+| `/rename <title>` | Rename current session |
+| `/models` | List available models |
+| `/model <ref>` | Switch to a model (e.g., `/model openai/gpt-4o`) |
+| `/init` | Create AGENTS.md in project root |
+| `/help` | Show help |
+| `/exit` | Quit |
+
+| Key | Action |
+|-----|--------|
+| Tab | Toggle Build/Plan mode |
+| Ctrl+C | Cancel current stream (first press) / quit (second press) |
+| Enter | Send message |
+| Mouse wheel | Scroll messages |
+
 ## Architecture
 
-Single binary crate (~30 source files), no workspace. All modules share core types.
+Single binary crate (33 source files), no workspace. All modules share core types.
 
 ### Event-Driven Architecture
 
@@ -74,6 +116,8 @@ Messages are stored one-per-file under `messages/{session_id}/{message_id}.json`
 
 Built with ratatui 0.29 + crossterm 0.28 + tui-textarea 0.7 (version-pinned for compatibility). Sidebar appears at terminal width >= 120. The TUI owns stdout, so all logging goes to a file via `tracing-appender`.
 
+Messages render with role-based styling via `DisplayRole` enum: `User`, `Assistant`, `Tool`, `ToolResult`, `Error`, `System`, `Permission` — each mapped to distinct theme colors in `message_area.rs`.
+
 ## Key Dependency Notes
 
 - **tui-textarea 0.7** requires ratatui 0.29 and crossterm 0.28 — do not upgrade independently
@@ -82,4 +126,9 @@ Built with ratatui 0.29 + crossterm 0.28 + tui-textarea 0.7 (version-pinned for 
 - **jsonc-parser** requires `features = ["serde"]` for `parse_to_serde_value`
 - **html2text v0.14** `from_read()` returns `Result<String, Error>`, not `String`
 - **tracing** outputs to file appender, never stdout (TUI owns stdout)
-- `AGENTS.md` in the project root is loaded at startup and injected as part of the system prompt
+- `AGENTS.md` in the project root is optional — if present, it's loaded at startup and injected as part of the system prompt. Create one with `/init`
+
+## Data Locations
+
+- **Storage**: `~/.local/share/steve/storage/{project_id}/` — sessions, messages, project metadata
+- **Logs**: `~/.local/share/steve/logs/steve.log` — daily rolling tracing output
