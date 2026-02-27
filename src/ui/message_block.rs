@@ -76,6 +76,116 @@ pub enum ToolGroupStatus {
     Complete,
 }
 
+impl MessageBlock {
+    /// Returns true if this is an `Assistant` block.
+    pub fn is_assistant(&self) -> bool {
+        matches!(self, MessageBlock::Assistant { .. })
+    }
+
+    /// Returns true if this is an `Assistant` block with empty text and no tool groups.
+    pub fn is_empty_assistant(&self) -> bool {
+        matches!(self, MessageBlock::Assistant { text, tool_groups, thinking, .. }
+            if text.is_empty() && tool_groups.is_empty() && thinking.is_none())
+    }
+
+    /// Append text to an `Assistant` block. No-op on other variants.
+    pub fn append_text(&mut self, delta: &str) {
+        if let MessageBlock::Assistant { text, .. } = self {
+            text.push_str(delta);
+        }
+    }
+
+    /// Ensure the last tool group is in `Preparing` status. Creates one if needed.
+    /// No-op on non-Assistant blocks.
+    pub fn ensure_preparing_tool_group(&mut self) {
+        if let MessageBlock::Assistant { tool_groups, .. } = self {
+            let needs_new = tool_groups
+                .last()
+                .map(|g| g.status != ToolGroupStatus::Preparing)
+                .unwrap_or(true);
+            if needs_new {
+                tool_groups.push(ToolGroup {
+                    calls: vec![],
+                    status: ToolGroupStatus::Preparing,
+                });
+            }
+        }
+    }
+
+    /// Add a tool call to the last tool group, setting its status to `Running`.
+    /// No-op on non-Assistant blocks.
+    pub fn add_tool_call(&mut self, tool_name: ToolName, args_summary: String) {
+        if let MessageBlock::Assistant { tool_groups, .. } = self {
+            if let Some(group) = tool_groups.last_mut() {
+                group.calls.push(ToolCall {
+                    tool_name,
+                    args_summary,
+                    full_output: None,
+                    result_summary: None,
+                    is_error: false,
+                    expanded: false,
+                });
+                group.status = ToolGroupStatus::Running {
+                    current_tool: tool_name,
+                };
+            }
+        }
+    }
+
+    /// Complete a tool call by filling in its result. Marks the group `Complete`
+    /// if all calls have results.
+    /// No-op on non-Assistant blocks.
+    pub fn complete_tool_call(
+        &mut self,
+        tool_name: ToolName,
+        result_summary: String,
+        full_output: String,
+        is_error: bool,
+    ) {
+        if let MessageBlock::Assistant { tool_groups, .. } = self {
+            if let Some(group) = tool_groups.last_mut() {
+                // Find the matching call (last one with this tool name and no result)
+                if let Some(call) = group
+                    .calls
+                    .iter_mut()
+                    .rev()
+                    .find(|c| c.tool_name == tool_name && c.result_summary.is_none())
+                {
+                    call.result_summary = Some(result_summary);
+                    call.full_output = Some(full_output);
+                    call.is_error = is_error;
+                }
+
+                // Check if all calls are complete
+                if group.calls.iter().all(|c| c.result_summary.is_some()) {
+                    group.status = ToolGroupStatus::Complete;
+                }
+            }
+        }
+    }
+
+    /// Append reasoning/thinking content. Creates the ThinkingBlock on first call.
+    /// Increments token_count for each call (approximation: one call per delta).
+    /// No-op on non-Assistant blocks.
+    pub fn append_thinking(&mut self, delta: &str) {
+        if let MessageBlock::Assistant { thinking, .. } = self {
+            match thinking {
+                Some(t) => {
+                    t.content.push_str(delta);
+                    t.token_count += 1;
+                }
+                None => {
+                    *thinking = Some(ThinkingBlock {
+                        token_count: 1,
+                        content: delta.to_string(),
+                        expanded: false,
+                    });
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,5 +269,182 @@ mod tests {
             MessageBlock::Error { text } => assert_eq!(text, "Connection failed."),
             _ => panic!("expected Error block"),
         }
+    }
+
+    #[test]
+    fn assistant_append_text() {
+        let mut block = MessageBlock::Assistant {
+            thinking: None,
+            text: "Hello".into(),
+            tool_groups: vec![],
+        };
+        block.append_text(" world");
+        match &block {
+            MessageBlock::Assistant { text, .. } => assert_eq!(text, "Hello world"),
+            _ => panic!("expected Assistant"),
+        }
+    }
+
+    #[test]
+    fn assistant_append_text_noop_on_non_assistant() {
+        let mut block = MessageBlock::User {
+            text: "hello".into(),
+        };
+        block.append_text(" world");
+        match &block {
+            MessageBlock::User { text } => assert_eq!(text, "hello"),
+            _ => panic!("expected User"),
+        }
+    }
+
+    #[test]
+    fn assistant_ensure_tool_group_creates_new() {
+        let mut block = MessageBlock::Assistant {
+            thinking: None,
+            text: String::new(),
+            tool_groups: vec![],
+        };
+        block.ensure_preparing_tool_group();
+        match &block {
+            MessageBlock::Assistant { tool_groups, .. } => {
+                assert_eq!(tool_groups.len(), 1);
+                assert_eq!(tool_groups[0].status, ToolGroupStatus::Preparing);
+            }
+            _ => panic!("expected Assistant"),
+        }
+    }
+
+    #[test]
+    fn assistant_ensure_tool_group_reuses_preparing() {
+        let mut block = MessageBlock::Assistant {
+            thinking: None,
+            text: String::new(),
+            tool_groups: vec![ToolGroup {
+                calls: vec![],
+                status: ToolGroupStatus::Preparing,
+            }],
+        };
+        block.ensure_preparing_tool_group();
+        match &block {
+            MessageBlock::Assistant { tool_groups, .. } => {
+                assert_eq!(tool_groups.len(), 1);
+            }
+            _ => panic!("expected Assistant"),
+        }
+    }
+
+    #[test]
+    fn assistant_add_tool_call() {
+        let mut block = MessageBlock::Assistant {
+            thinking: None,
+            text: String::new(),
+            tool_groups: vec![ToolGroup {
+                calls: vec![],
+                status: ToolGroupStatus::Preparing,
+            }],
+        };
+        block.add_tool_call(ToolName::Read, "src/main.rs".into());
+        match &block {
+            MessageBlock::Assistant { tool_groups, .. } => {
+                assert_eq!(tool_groups.last().unwrap().calls.len(), 1);
+                let call = &tool_groups.last().unwrap().calls[0];
+                assert_eq!(call.tool_name, ToolName::Read);
+                assert_eq!(call.args_summary, "src/main.rs");
+                assert!(call.result_summary.is_none());
+                assert!(call.full_output.is_none());
+            }
+            _ => panic!("expected Assistant"),
+        }
+    }
+
+    #[test]
+    fn assistant_complete_tool_call() {
+        let mut block = MessageBlock::Assistant {
+            thinking: None,
+            text: String::new(),
+            tool_groups: vec![ToolGroup {
+                calls: vec![ToolCall {
+                    tool_name: ToolName::Read,
+                    args_summary: "src/main.rs".into(),
+                    full_output: None,
+                    result_summary: None,
+                    is_error: false,
+                    expanded: false,
+                }],
+                status: ToolGroupStatus::Running {
+                    current_tool: ToolName::Read,
+                },
+            }],
+        };
+        block.complete_tool_call(
+            ToolName::Read,
+            "150 lines".into(),
+            "fn main() {}".into(),
+            false,
+        );
+        match &block {
+            MessageBlock::Assistant { tool_groups, .. } => {
+                let call = &tool_groups.last().unwrap().calls[0];
+                assert_eq!(call.result_summary.as_deref(), Some("150 lines"));
+                assert_eq!(call.full_output.as_deref(), Some("fn main() {}"));
+                assert!(!call.is_error);
+                // Group should be marked Complete since all calls have results
+                assert_eq!(
+                    tool_groups.last().unwrap().status,
+                    ToolGroupStatus::Complete
+                );
+            }
+            _ => panic!("expected Assistant"),
+        }
+    }
+
+    #[test]
+    fn assistant_append_thinking() {
+        let mut block = MessageBlock::Assistant {
+            thinking: None,
+            text: String::new(),
+            tool_groups: vec![],
+        };
+        block.append_thinking("Let me ");
+        block.append_thinking("think...");
+        match &block {
+            MessageBlock::Assistant { thinking, .. } => {
+                let t = thinking.as_ref().unwrap();
+                assert_eq!(t.content, "Let me think...");
+                assert_eq!(t.token_count, 2);
+                assert!(!t.expanded);
+            }
+            _ => panic!("expected Assistant"),
+        }
+    }
+
+    #[test]
+    fn is_assistant_check() {
+        let a = MessageBlock::Assistant {
+            thinking: None,
+            text: String::new(),
+            tool_groups: vec![],
+        };
+        let u = MessageBlock::User {
+            text: "hi".into(),
+        };
+        assert!(a.is_assistant());
+        assert!(!u.is_assistant());
+    }
+
+    #[test]
+    fn is_empty_assistant() {
+        let empty = MessageBlock::Assistant {
+            thinking: None,
+            text: String::new(),
+            tool_groups: vec![],
+        };
+        let non_empty = MessageBlock::Assistant {
+            thinking: None,
+            text: "hello".into(),
+            tool_groups: vec![],
+        };
+        assert!(empty.is_empty_assistant());
+        assert!(!non_empty.is_empty_assistant());
     }
 }
