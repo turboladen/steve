@@ -280,6 +280,34 @@ impl App {
             }
 
             // -- Tool events --
+            AppEvent::LlmToolCallStreaming { count, tool_name } => {
+                // Update the last streaming indicator or add a new one
+                let text = if count == 1 {
+                    format!("Preparing: {tool_name}...")
+                } else {
+                    format!("Preparing {count} tool calls: {tool_name}...")
+                };
+
+                // Replace the previous streaming indicator if present
+                if let Some(last) = self.messages.last_mut() {
+                    if last.role == DisplayRole::System
+                        && last.text.starts_with("Preparing")
+                    {
+                        last.text = text;
+                    } else {
+                        self.messages.push(DisplayMessage {
+                            role: DisplayRole::System,
+                            text,
+                        });
+                    }
+                } else {
+                    self.messages.push(DisplayMessage {
+                        role: DisplayRole::System,
+                        text,
+                    });
+                }
+                self.message_area_state.scroll_to_bottom();
+            }
             AppEvent::LlmToolCall {
                 call_id: _,
                 tool_name,

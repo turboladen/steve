@@ -15,6 +15,12 @@ pub enum AppEvent {
 
     /// A text delta from the LLM stream (token-by-token).
     LlmDelta { text: String },
+    /// A new tool call is being streamed (name just identified, not yet complete).
+    LlmToolCallStreaming {
+        /// Number of tool calls seen so far in this response.
+        count: usize,
+        tool_name: String,
+    },
     /// A tool call has been assembled from the stream and is ready to execute.
     LlmToolCall {
         call_id: String,

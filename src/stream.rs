@@ -292,6 +292,19 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                                             }
                                         }
                                     }
+
+                                    // Notify UI when new tool calls appear
+                                    // (done outside the entry borrow to satisfy the borrow checker)
+                                    for tc in tool_calls {
+                                        if tc.function.as_ref().and_then(|f| f.name.as_ref()).is_some() {
+                                            if let Some(entry) = pending_tool_calls.get(&tc.index) {
+                                                let _ = event_tx.send(AppEvent::LlmToolCallStreaming {
+                                                    count: pending_tool_calls.len(),
+                                                    tool_name: entry.function_name.clone(),
+                                                });
+                                            }
+                                        }
+                                    }
                                 }
 
                                 // Track finish reason
