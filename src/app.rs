@@ -259,8 +259,9 @@ impl App {
         match event {
             AppEvent::Input(Event::Key(key)) => self.handle_key(key).await?,
             AppEvent::Input(Event::Mouse(mouse)) => match mouse.kind {
-                MouseEventKind::ScrollUp => self.message_area_state.scroll_up(3),
-                MouseEventKind::ScrollDown => self.message_area_state.scroll_down(3),
+                // macOS natural scrolling: ScrollDown = swipe up = see older content
+                MouseEventKind::ScrollDown => self.message_area_state.scroll_up(3),
+                MouseEventKind::ScrollUp => self.message_area_state.scroll_down(3),
                 _ => {}
             },
             AppEvent::Input(Event::Resize(_, _)) => {}
