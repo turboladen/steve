@@ -16,6 +16,7 @@ pub struct Theme {
     pub border: Color,
     pub mode_build: Color,
     pub mode_plan: Color,
+    pub permission: Color,
 }
 
 impl Default for Theme {
@@ -42,6 +43,7 @@ impl Theme {
             border: Color::DarkGray,
             mode_build: Color::Green,
             mode_plan: Color::Cyan,
+            permission: Color::Yellow,
         }
     }
 }

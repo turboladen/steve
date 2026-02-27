@@ -94,9 +94,10 @@ pub fn render_autocomplete(
     let popup_height = item_count + 2; // +2 for borders
     let popup_width = 40u16.min(input_area.width);
 
-    // Position above the input area, offset past mode indicator
+    // Position above the input area, offset past "> " chevron.
+    // input_area.y is the context line; textarea starts at y+1.
     let popup_area = Rect {
-        x: input_area.x + 9, // offset past "[Build] " mode indicator
+        x: input_area.x + 2, // offset past "> " chevron
         y: input_area.y.saturating_sub(popup_height),
         width: popup_width,
         height: popup_height,

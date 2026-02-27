@@ -4,54 +4,39 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 pub struct AppLayout {
     pub message_area: Rect,
     pub input_area: Rect,
-    pub status_line: Rect,
     pub sidebar: Option<Rect>,
 }
 
 const SIDEBAR_WIDTH: u16 = 40;
 const SIDEBAR_MIN_TERMINAL_WIDTH: u16 = 120;
-const INPUT_HEIGHT: u16 = 3;
-const STATUS_HEIGHT: u16 = 1;
+/// Input height: 1 context line + 3 textarea rows = 4.
+const INPUT_HEIGHT: u16 = 4;
 
 /// Compute the layout given the full terminal area.
 ///
 /// Layout order (top to bottom):
 /// - Message area (fills remaining space)
-/// - Input area (3 rows, adjacent to messages)
-/// - Status line (1 row footer, spans full width including sidebar)
+/// - Input area (4 rows: 1 context line + 3 textarea)
 ///
-/// Sidebar (if shown) sits to the right of messages + input, but status line
-/// spans below everything.
+/// Sidebar (if shown) sits to the right of messages + input.
 pub fn compute_layout(area: Rect, show_sidebar: bool) -> AppLayout {
     let sidebar_visible = show_sidebar && area.width >= SIDEBAR_MIN_TERMINAL_WIDTH;
 
-    // First, split off the status line at the bottom (full width)
-    let vertical_outer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),              // main content
-            Constraint::Length(STATUS_HEIGHT), // status line
-        ])
-        .split(area);
-
-    let main_area = vertical_outer[0];
-    let status_line = vertical_outer[1];
-
     if sidebar_visible {
-        // Split main area horizontally: content | sidebar
+        // Split horizontally: content | sidebar
         let horizontal = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
                 Constraint::Min(40),
                 Constraint::Length(SIDEBAR_WIDTH),
             ])
-            .split(main_area);
+            .split(area);
 
         let content_area = horizontal[0];
         let sidebar = horizontal[1];
 
         // Split content vertically: messages | input
-        let vertical_inner = Layout::default()
+        let vertical = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(1),
@@ -60,25 +45,23 @@ pub fn compute_layout(area: Rect, show_sidebar: bool) -> AppLayout {
             .split(content_area);
 
         AppLayout {
-            message_area: vertical_inner[0],
-            input_area: vertical_inner[1],
-            status_line,
+            message_area: vertical[0],
+            input_area: vertical[1],
             sidebar: Some(sidebar),
         }
     } else {
-        // No sidebar: just messages | input above status line
-        let vertical_inner = Layout::default()
+        // No sidebar: just messages | input
+        let vertical = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(1),
                 Constraint::Length(INPUT_HEIGHT),
             ])
-            .split(main_area);
+            .split(area);
 
         AppLayout {
-            message_area: vertical_inner[0],
-            input_area: vertical_inner[1],
-            status_line,
+            message_area: vertical[0],
+            input_area: vertical[1],
             sidebar: None,
         }
     }
@@ -96,12 +79,9 @@ mod tests {
     fn layout_without_sidebar() {
         let layout = compute_layout(rect(80, 24), false);
         assert!(layout.sidebar.is_none());
-        // Status line at bottom, 1 row
-        assert_eq!(layout.status_line.height, STATUS_HEIGHT);
-        assert_eq!(layout.status_line.y, 23); // last row of 24
-        // Input above status
+        // Input at bottom, 4 rows (1 context + 3 textarea)
         assert_eq!(layout.input_area.height, INPUT_HEIGHT);
-        assert_eq!(layout.input_area.y, 20); // 24 - 1(status) - 3(input)
+        assert_eq!(layout.input_area.y, 20); // 24 - 4(input)
         // Messages fill the rest
         assert_eq!(layout.message_area.y, 0);
         assert_eq!(layout.message_area.height, 20);
@@ -115,8 +95,6 @@ mod tests {
         assert_eq!(sidebar.width, SIDEBAR_WIDTH);
         // Message area width = 120 - 40 = 80
         assert_eq!(layout.message_area.width, 80);
-        // Status line spans full width
-        assert_eq!(layout.status_line.width, 120);
     }
 
     #[test]
@@ -126,8 +104,9 @@ mod tests {
     }
 
     #[test]
-    fn layout_status_line_always_full_width() {
-        let layout = compute_layout(rect(150, 30), true);
-        assert_eq!(layout.status_line.width, 150);
+    fn layout_input_height_includes_context_line() {
+        let layout = compute_layout(rect(80, 24), false);
+        // 4 rows: 1 for context line + 3 for textarea
+        assert_eq!(layout.input_area.height, 4);
     }
 }

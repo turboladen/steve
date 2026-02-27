@@ -6,6 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
+use super::status_line::format_tokens;
 use super::theme::Theme;
 
 /// State for the sidebar panel.
@@ -135,12 +136,3 @@ pub fn render_sidebar(
     frame.render_widget(paragraph, area);
 }
 
-fn format_tokens(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.1}k", n as f64 / 1_000.0)
-    } else {
-        n.to_string()
-    }
-}

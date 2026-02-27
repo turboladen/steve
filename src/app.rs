@@ -157,6 +157,9 @@ pub struct App {
     /// Whether auto-compact has failed in this session (suppresses retries).
     auto_compact_failed: bool,
 
+    /// User override for sidebar visibility: None = auto, Some(true) = show, Some(false) = hide.
+    pub sidebar_override: Option<bool>,
+
     // Runtime
     event_tx: mpsc::UnboundedSender<AppEvent>,
     event_rx: mpsc::UnboundedReceiver<AppEvent>,
@@ -232,6 +235,7 @@ impl App {
             pending_permission: None,
             stream_cancel: None,
             auto_compact_failed: false,
+            sidebar_override: None,
             event_tx,
             event_rx,
             should_quit: false,
@@ -331,6 +335,13 @@ impl App {
                 MouseEventKind::ScrollUp => self.message_area_state.scroll_down(3),
                 _ => {}
             },
+            AppEvent::Input(Event::Paste(text)) => {
+                if self.pending_permission.is_none() {
+                    self.input.textarea.insert_str(&text);
+                    let current_text = self.input.textarea.lines().join("\n");
+                    self.autocomplete_state.update(&current_text);
+                }
+            }
             AppEvent::Input(Event::Resize(_, _)) => {}
             AppEvent::Tick => {
                 self.status_line_state.tick();
@@ -470,11 +481,10 @@ impl App {
             }
             AppEvent::PermissionRequest(req) => {
                 // Show permission prompt to user
-                let summary = format!(
-                    "\u{26a0} {}: {} \u{2014} Allow? (y)es / (n)o / (a)lways",
-                    req.tool_name, req.arguments_summary
-                );
-                self.messages.push(MessageBlock::System { text: summary });
+                self.messages.push(MessageBlock::Permission {
+                    tool_name: req.tool_name.to_string(),
+                    args_summary: req.arguments_summary.clone(),
+                });
                 self.status_line_state.activity = Activity::WaitingForPermission;
                 self.message_area_state.scroll_to_bottom();
                 self.pending_permission = Some(PendingPermission {
@@ -622,6 +632,13 @@ impl App {
                     self.sync_permission_mode();
                 }
             }
+            (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
+                self.sidebar_override = match self.sidebar_override {
+                    None => Some(false),        // auto (likely visible) -> hide
+                    Some(false) => Some(true),  // hidden -> show
+                    Some(true) => None,         // forced visible -> auto
+                };
+            }
             (KeyCode::Enter, KeyModifiers::SHIFT) => {
                 // Shift+Enter: insert newline in textarea (forward as plain Enter)
                 self.input.textarea.input(KeyEvent::new(
@@ -676,6 +693,14 @@ impl App {
         });
         self.status_line_state.activity = Activity::Idle;
         self.message_area_state.scroll_to_bottom();
+    }
+
+    /// Whether the sidebar should be shown, considering user override and terminal width.
+    pub fn should_show_sidebar(&self, terminal_width: u16) -> bool {
+        match self.sidebar_override {
+            Some(forced) => forced,
+            None => terminal_width >= 120,
+        }
     }
 
     async fn handle_input(&mut self, text: String) -> Result<()> {
@@ -1232,7 +1257,7 @@ impl App {
             }
             Command::Help => {
                 self.messages.push(MessageBlock::System {
-                    text: "Commands:\n  /new        \u{2014} Start a new session\n  /rename <t> \u{2014} Rename current session\n  /models     \u{2014} List available models\n  /model <r>  \u{2014} Switch to a model\n  /compact    \u{2014} Compact conversation into a summary\n  /init       \u{2014} Create AGENTS.md in project root\n  /help       \u{2014} Show this help\n  /exit       \u{2014} Quit\n\nKeys:\n  Tab         \u{2014} Toggle Build/Plan mode\n  Ctrl+C      \u{2014} Cancel stream / quit\n  Mouse wheel \u{2014} Scroll messages".to_string(),
+                    text: "Commands:\n  /new        \u{2014} Start a new session\n  /rename <t> \u{2014} Rename current session\n  /models     \u{2014} List available models\n  /model <r>  \u{2014} Switch to a model\n  /compact    \u{2014} Compact conversation into a summary\n  /init       \u{2014} Create AGENTS.md in project root\n  /help       \u{2014} Show this help\n  /exit       \u{2014} Quit\n\nKeys:\n  Enter       \u{2014} Send message\n  Shift+Enter \u{2014} Insert newline\n  Tab         \u{2014} Cycle autocomplete / toggle Build\u{2013}Plan mode\n  Ctrl+C      \u{2014} Cancel stream / quit\n  Ctrl+B      \u{2014} Toggle sidebar\n  Mouse wheel \u{2014} Scroll messages\n\nTips:\n  Shift+click/drag \u{2014} Select text for copy (terminal feature)".to_string(),
                 });
             }
         }
@@ -1373,5 +1398,49 @@ mod tests {
             // Just ensure it doesn't panic
             let _ = extract_args_summary(tool, &args);
         }
+    }
+
+    #[test]
+    fn should_show_sidebar_auto_mode() {
+        // In auto mode (None), sidebar shows at >= 120 width
+        let app = make_test_app();
+        assert!(app.should_show_sidebar(120));
+        assert!(app.should_show_sidebar(200));
+        assert!(!app.should_show_sidebar(119));
+        assert!(!app.should_show_sidebar(80));
+    }
+
+    #[test]
+    fn should_show_sidebar_forced_show() {
+        let mut app = make_test_app();
+        app.sidebar_override = Some(true);
+        // Force show regardless of width
+        assert!(app.should_show_sidebar(80));
+        assert!(app.should_show_sidebar(120));
+    }
+
+    #[test]
+    fn should_show_sidebar_forced_hide() {
+        let mut app = make_test_app();
+        app.sidebar_override = Some(false);
+        // Force hide regardless of width
+        assert!(!app.should_show_sidebar(120));
+        assert!(!app.should_show_sidebar(200));
+    }
+
+    /// Create a minimal App for testing (without real storage/config).
+    fn make_test_app() -> App {
+        use crate::config::types::Config;
+        use crate::project::ProjectInfo;
+        use crate::storage::Storage;
+        use std::path::PathBuf;
+
+        let project = ProjectInfo {
+            root: PathBuf::from("/tmp/test"),
+            id: "test".to_string(),
+        };
+        let config = Config::default();
+        let storage = Storage::new("test-sidebar").expect("test storage");
+        App::new(project, config, storage, None, None, None)
     }
 }

@@ -84,7 +84,7 @@ pub fn render_message_blocks(
     messages: &[MessageBlock],
     state: &mut MessageAreaState,
     theme: &Theme,
-    is_loading: bool,
+    activity: Option<(char, String)>,
 ) {
     let mut lines: Vec<Line> = Vec::new();
 
@@ -184,20 +184,11 @@ pub fn render_message_blocks(
                 }
 
                 // Response text
-                if text.is_empty() && is_loading {
+                for text_line in text.lines() {
                     lines.push(Line::from(Span::styled(
-                        "...",
-                        Style::default()
-                            .fg(theme.dim)
-                            .add_modifier(Modifier::DIM),
+                        text_line.to_string(),
+                        Style::default().fg(theme.assistant_msg),
                     )));
-                } else {
-                    for text_line in text.lines() {
-                        lines.push(Line::from(Span::styled(
-                            text_line.to_string(),
-                            Style::default().fg(theme.assistant_msg),
-                        )));
-                    }
                 }
             }
 
@@ -220,9 +211,80 @@ pub fn render_message_blocks(
                     )));
                 }
             }
+
+            MessageBlock::Permission {
+                tool_name,
+                args_summary,
+            } => {
+                // Top rule
+                lines.push(Line::from(Span::styled(
+                    "\u{2500}".repeat(40),
+                    Style::default().fg(theme.permission),
+                )));
+                // Prompt line
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "\u{26a0} Allow ",
+                        Style::default()
+                            .fg(theme.permission)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        tool_name.to_string(),
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(": {args_summary}?"),
+                        Style::default()
+                            .fg(theme.permission)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+                // Options line with highlighted key letters
+                lines.push(Line::from(vec![
+                    Span::raw("  ["),
+                    Span::styled(
+                        "y",
+                        Style::default()
+                            .fg(theme.success)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("]es / ["),
+                    Span::styled(
+                        "n",
+                        Style::default()
+                            .fg(theme.error)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("]o / ["),
+                    Span::styled(
+                        "a",
+                        Style::default()
+                            .fg(theme.permission)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("]lways"),
+                ]));
+                // Bottom rule
+                lines.push(Line::from(Span::styled(
+                    "\u{2500}".repeat(40),
+                    Style::default().fg(theme.permission),
+                )));
+            }
         }
 
         // Blank line between messages
+        lines.push(Line::from(""));
+    }
+
+    // Inline activity spinner (replaces the old "..." and status bar spinner)
+    if let Some((spinner, text)) = activity {
+        lines.push(Line::from(Span::styled(
+            format!("{spinner} {text}"),
+            Style::default().fg(theme.accent),
+        )));
         lines.push(Line::from(""));
     }
 

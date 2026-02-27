@@ -26,6 +26,12 @@ pub enum MessageBlock {
 
     /// Error message.
     Error { text: String },
+
+    /// Permission prompt requiring user input.
+    Permission {
+        tool_name: String,
+        args_summary: String,
+    },
 }
 
 /// Reasoning/thinking content from the model, collapsed by default.
@@ -430,6 +436,31 @@ mod tests {
         };
         assert!(a.is_assistant());
         assert!(!u.is_assistant());
+    }
+
+    #[test]
+    fn permission_block_construction() {
+        let block = MessageBlock::Permission {
+            tool_name: "bash".into(),
+            args_summary: "ls -la".into(),
+        };
+        match &block {
+            MessageBlock::Permission { tool_name, args_summary } => {
+                assert_eq!(tool_name, "bash");
+                assert_eq!(args_summary, "ls -la");
+            }
+            _ => panic!("expected Permission block"),
+        }
+    }
+
+    #[test]
+    fn permission_is_not_assistant() {
+        let block = MessageBlock::Permission {
+            tool_name: "bash".into(),
+            args_summary: "ls".into(),
+        };
+        assert!(!block.is_assistant());
+        assert!(!block.is_empty_assistant());
     }
 
     #[test]

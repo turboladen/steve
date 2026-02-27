@@ -21,9 +21,9 @@ use crate::app::App;
 use layout::compute_layout;
 use message_area::render_message_blocks;
 use autocomplete::render_autocomplete;
-use input::render_input;
+use input::{render_input, abbreviate_path, InputContext};
 use sidebar::render_sidebar;
-use status_line::render_status_line;
+use status_line::Activity;
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -50,8 +50,20 @@ pub fn restore_terminal(terminal: &mut Tui) -> Result<()> {
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
-    let show_sidebar = area.width >= 120;
+    let show_sidebar = app.should_show_sidebar(area.width);
     let layout = compute_layout(area, show_sidebar);
+
+    // Build activity info for inline display in message area
+    let activity = if app.is_loading {
+        let state = &app.status_line_state;
+        if state.activity != Activity::Idle {
+            state.spinner_char().map(|ch| (ch, state.activity_text()))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     render_message_blocks(
         frame,
@@ -59,7 +71,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         &app.messages,
         &mut app.message_area_state,
         &app.theme,
-        app.is_loading,
+        activity,
     );
 
     if let Some(sidebar_area) = layout.sidebar {
@@ -71,11 +83,18 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         );
     }
 
+    let context = InputContext {
+        working_dir: abbreviate_path(&app.project.root),
+        total_tokens: app.status_line_state.total_tokens,
+        context_window: app.status_line_state.context_window,
+    };
+
     render_input(
         frame,
         layout.input_area,
         &mut app.input,
         &app.theme,
+        &context,
     );
 
     render_autocomplete(
@@ -83,13 +102,5 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         layout.input_area,
         &app.autocomplete_state,
         &app.theme,
-    );
-
-    render_status_line(
-        frame,
-        layout.status_line,
-        &app.status_line_state,
-        &app.theme,
-        app.input.mode,
     );
 }

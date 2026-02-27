@@ -1,22 +1,11 @@
-//! Status line state and rendering for the TUI footer.
-
-use ratatui::{
-    Frame,
-    layout::Rect,
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
-};
+//! Status line state for the TUI. Rendering moved to input prompt context line.
 
 use crate::tool::ToolName;
 
-use super::input::AgentMode;
-use super::theme::Theme;
-
 /// Braille spinner frames, cycled on each 100ms tick.
-const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
+pub const SPINNER_FRAMES: &[char] = &['\u{280b}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283c}', '\u{2834}', '\u{2826}', '\u{2827}'];
 
-/// Current activity shown in the status line.
+/// Current activity shown in the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Activity {
     /// No activity — agent is idle.
@@ -34,7 +23,7 @@ pub enum Activity {
     Compacting,
 }
 
-/// State for the status line footer.
+/// State for the status/activity display.
 pub struct StatusLineState {
     /// Current activity.
     pub activity: Activity,
@@ -106,7 +95,7 @@ impl StatusLineState {
 }
 
 /// Format a token count with K/M suffixes.
-fn format_tokens(n: u64) -> String {
+pub fn format_tokens(n: u64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {
@@ -114,98 +103,6 @@ fn format_tokens(n: u64) -> String {
     } else {
         n.to_string()
     }
-}
-
-/// Render the status line into the given 1-row area.
-pub fn render_status_line(
-    frame: &mut Frame,
-    area: Rect,
-    state: &StatusLineState,
-    theme: &Theme,
-    mode: AgentMode,
-) {
-    let mut spans: Vec<Span> = Vec::new();
-
-    // Left side: mode | model | tokens/context (pct%)
-    let mode_color = match mode {
-        AgentMode::Build => theme.mode_build,
-        AgentMode::Plan => theme.mode_plan,
-    };
-    spans.push(Span::styled(
-        format!(" {} ", mode.display_name()),
-        Style::default().fg(theme.bg).bg(mode_color).add_modifier(Modifier::BOLD),
-    ));
-    spans.push(Span::raw(" "));
-
-    if !state.model_name.is_empty() {
-        spans.push(Span::styled(
-            state.model_name.clone(),
-            Style::default().fg(theme.fg),
-        ));
-    }
-
-    if state.context_window > 0 {
-        let pct = state.context_usage_pct();
-        let token_color = if pct >= 80 {
-            theme.error
-        } else if pct >= 50 {
-            theme.warning
-        } else {
-            theme.dim
-        };
-        spans.push(Span::styled(
-            " \u{2502} ",
-            Style::default().fg(theme.border),
-        ));
-        spans.push(Span::styled(
-            format!(
-                "{}/{} ({}%)",
-                format_tokens(state.total_tokens),
-                format_tokens(state.context_window),
-                pct,
-            ),
-            Style::default().fg(token_color),
-        ));
-    } else if state.total_tokens > 0 {
-        spans.push(Span::styled(
-            " \u{2502} ",
-            Style::default().fg(theme.border),
-        ));
-        spans.push(Span::styled(
-            format_tokens(state.total_tokens),
-            Style::default().fg(theme.dim),
-        ));
-    }
-
-    // Right side: spinner + activity text
-    let mut right_spans: Vec<Span> = Vec::new();
-    if let Some(spinner) = state.spinner_char() {
-        right_spans.push(Span::styled(
-            format!("{spinner} "),
-            Style::default().fg(theme.accent),
-        ));
-    }
-    let activity = state.activity_text();
-    if !activity.is_empty() {
-        right_spans.push(Span::styled(
-            activity,
-            Style::default().fg(theme.accent),
-        ));
-    }
-
-    // Calculate padding between left and right
-    let left_width: usize = spans.iter().map(|s| s.width()).sum();
-    let right_width: usize = right_spans.iter().map(|s| s.width()).sum();
-    let available = area.width as usize;
-    let padding = available.saturating_sub(left_width + right_width);
-
-    spans.push(Span::raw(" ".repeat(padding)));
-    spans.extend(right_spans);
-
-    let line = Line::from(spans);
-    let block = Block::default().borders(Borders::NONE);
-    let paragraph = Paragraph::new(line).block(block);
-    frame.render_widget(paragraph, area);
 }
 
 #[cfg(test)]
@@ -244,9 +141,9 @@ mod tests {
     fn spinner_char_some_when_active() {
         let mut state = StatusLineState::default();
         state.activity = Activity::Thinking;
-        assert_eq!(state.spinner_char(), Some('⠋'));
+        assert_eq!(state.spinner_char(), Some('\u{280b}'));
         state.tick();
-        assert_eq!(state.spinner_char(), Some('⠙'));
+        assert_eq!(state.spinner_char(), Some('\u{2819}'));
     }
 
     #[test]
