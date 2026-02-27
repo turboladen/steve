@@ -366,6 +366,13 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 total = total_usage.total_tokens,
                 "final usage totals"
             );
+            // Warn user if the model stopped due to context exhaustion
+            if matches!(finish_reason, Some(FinishReason::Length)) {
+                let _ = event_tx.send(AppEvent::LlmError {
+                    error: "Context window full — response was cut off. Run /compact to free space, or /new to start fresh.".to_string(),
+                });
+                return Ok(());
+            }
             let _ = event_tx.send(AppEvent::LlmFinish {
                 usage: Some(total_usage),
             });
@@ -424,8 +431,8 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
         if sorted_indices.is_empty() {
             tracing::info!("all tool calls were truncated — finishing stream");
-            let _ = event_tx.send(AppEvent::LlmFinish {
-                usage: Some(total_usage),
+            let _ = event_tx.send(AppEvent::LlmError {
+                error: "Context window full — tool calls were truncated. Run /compact to free space, or /new to start fresh.".to_string(),
             });
             return Ok(());
         }
