@@ -3,7 +3,8 @@
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
+use mpatch::ApplyOptions;
 use serde_json::Value;
 
 use super::{ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput};
@@ -76,132 +77,19 @@ pub fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
     })
 }
 
-/// Simple unified diff applier.
-/// Handles basic @@ -start,count +start,count @@ hunks.
+/// Apply a unified diff to the original content using mpatch (with fuzzy matching).
 fn apply_unified_diff(original: &str, patch: &str) -> Result<String> {
-    let original_lines: Vec<&str> = original.lines().collect();
-    let mut result_lines: Vec<String> = original_lines.iter().map(|s| s.to_string()).collect();
+    let options = ApplyOptions::new();
+    let mut result = mpatch::patch_content_str(patch, Some(original), &options)
+        .map_err(|e| anyhow::anyhow!("failed to apply patch: {e}"))?;
 
-    // Parse hunks from the patch
-    let mut offset: i64 = 0;
-
-    let patch_lines: Vec<&str> = patch.lines().collect();
-    let mut i = 0;
-
-    while i < patch_lines.len() {
-        let line = patch_lines[i];
-
-        // Skip --- and +++ headers
-        if line.starts_with("---") || line.starts_with("+++") {
-            i += 1;
-            continue;
-        }
-
-        // Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
-        if line.starts_with("@@") {
-            let (old_start, old_count) = parse_hunk_header(line)?;
-
-            // Collect hunk lines
-            let mut removals = Vec::new();
-            let mut additions = Vec::new();
-            let mut context_before = 0;
-
-            i += 1;
-            let mut hunk_old_consumed = 0;
-
-            while i < patch_lines.len() {
-                let hunk_line = patch_lines[i];
-
-                if hunk_line.starts_with("@@") {
-                    break; // Next hunk
-                }
-
-                if hunk_line.starts_with('-') {
-                    removals.push(&hunk_line[1..]);
-                    hunk_old_consumed += 1;
-                } else if hunk_line.starts_with('+') {
-                    additions.push(&hunk_line[1..]);
-                } else if hunk_line.starts_with(' ') || hunk_line.is_empty() {
-                    // Context line
-                    if removals.is_empty() && additions.is_empty() {
-                        context_before += 1;
-                    }
-                    hunk_old_consumed += 1;
-                } else {
-                    // Treat as context
-                    hunk_old_consumed += 1;
-                }
-
-                i += 1;
-
-                // Once all old lines are consumed, continue only for
-                // trailing '+' lines that belong to this hunk.
-                if hunk_old_consumed >= old_count {
-                    while i < patch_lines.len() && patch_lines[i].starts_with('+') {
-                        additions.push(&patch_lines[i][1..]);
-                        i += 1;
-                    }
-                    break;
-                }
-            }
-
-            // Apply this hunk
-            let actual_start = ((old_start as i64 - 1 + offset) + context_before as i64) as usize;
-
-            if !removals.is_empty() {
-                // Remove lines
-                let end = actual_start + removals.len();
-                if end > result_lines.len() {
-                    bail!("patch hunk extends beyond end of file");
-                }
-                result_lines.splice(
-                    actual_start..end,
-                    additions.iter().map(|s| s.to_string()),
-                );
-                offset += additions.len() as i64 - removals.len() as i64;
-            } else if !additions.is_empty() {
-                // Pure addition
-                for (j, line) in additions.iter().enumerate() {
-                    result_lines.insert(actual_start + j, line.to_string());
-                }
-                offset += additions.len() as i64;
-            }
-        } else {
-            i += 1;
-        }
-    }
-
-    // Preserve original trailing newline behavior
-    let mut result = result_lines.join("\n");
-    if original.ends_with('\n') {
-        result.push('\n');
+    // Preserve original trailing newline behavior: mpatch always adds a trailing
+    // newline, but if the original file didn't have one, strip it.
+    if !original.ends_with('\n') && result.ends_with('\n') {
+        result.pop();
     }
 
     Ok(result)
-}
-
-/// Parse a hunk header like "@@ -1,5 +1,7 @@" and return (old_start, old_count).
-fn parse_hunk_header(line: &str) -> Result<(usize, usize)> {
-    // Find the range between @@ markers
-    let stripped = line
-        .trim_start_matches("@@")
-        .trim_end_matches("@@")
-        .trim();
-
-    // Parse -old_start,old_count
-    let parts: Vec<&str> = stripped.split_whitespace().collect();
-    let old_part = parts
-        .first()
-        .context("invalid hunk header")?
-        .trim_start_matches('-');
-
-    let (start, count) = if let Some((s, c)) = old_part.split_once(',') {
-        (s.parse::<usize>()?, c.parse::<usize>()?)
-    } else {
-        (old_part.parse::<usize>()?, 1)
-    };
-
-    Ok((start, count))
 }
 
 fn resolve_path(path_str: &str, project_root: &std::path::Path) -> PathBuf {
@@ -216,27 +104,6 @@ fn resolve_path(path_str: &str, project_root: &std::path::Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_hunk_header_with_counts() {
-        let (start, count) = parse_hunk_header("@@ -5,3 +5,4 @@").unwrap();
-        assert_eq!(start, 5);
-        assert_eq!(count, 3);
-    }
-
-    #[test]
-    fn parse_hunk_header_single_line() {
-        let (start, count) = parse_hunk_header("@@ -1 +1 @@").unwrap();
-        assert_eq!(start, 1);
-        assert_eq!(count, 1); // default count when no comma
-    }
-
-    #[test]
-    fn parse_hunk_header_with_context_label() {
-        let (start, count) = parse_hunk_header("@@ -10,2 +10,3 @@ fn main()").unwrap();
-        assert_eq!(start, 10);
-        assert_eq!(count, 2);
-    }
 
     #[test]
     fn apply_simple_replacement() {

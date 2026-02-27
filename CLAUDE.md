@@ -26,6 +26,7 @@ cargo test              # Run all tests
 
 Every change that introduces new types, trait impls, or behavior must include unit tests. Specifically:
 
+- **Strum-derived enums** (`ToolName`): `FromStr`/`Display` are auto-derived via strum. When adding new variants, just add to the enum — no manual match arms needed. Existing round-trip tests validate the derives.
 - **New enums**: `FromStr`/`Display` round-trip for all variants, serde round-trip, rejection of invalid input
 - **Match arms**: Prefer explicit variant lists over `_ =>` wildcards — exhaustive matching is a primary safety mechanism
 - **Helper methods** (e.g., `is_write_tool()`): Exhaustive assertions covering every variant, not just spot checks
@@ -163,6 +164,9 @@ Auto-scroll calculates content height using wrapped line widths (not `lines.len(
 
 ## Key Dependency Notes
 
+- **strum 0.28** derives `EnumString`, `Display`, `IntoStaticStr` on `ToolName`. Use `IntoStaticStr` (not `AsRefStr`) when you need `&'static str` — `AsRefStr` returns `&str` tied to `&self` lifetime
+- **wait-timeout 0.2** provides `ChildExt::wait_timeout()` for bash tool timeout enforcement. Requires `Stdio::piped()` + `spawn()` (not `output()`)
+- **mpatch 1.3** applies unified diffs with fuzzy matching via `patch_content_str()`. Always appends trailing newline — `apply_unified_diff()` in `patch.rs` post-processes to preserve original newline behavior
 - **tui-textarea 0.7** requires ratatui 0.29 and crossterm 0.28 — do not upgrade independently
 - **async-openai 0.32** requires `features = ["chat-completion"]`; types live under `async_openai::types::chat::`, not `async_openai::types::`
 - **async-openai 0.32 tool types**: `ChatCompletionTools` (plural enum with `Function` variant), `ChatCompletionMessageToolCalls` (plural enum with `Function` variant). `ChatCompletionRequestAssistantMessage` requires `audio: None` and `function_call: None` fields. `ChatCompletionStreamOptions` has `include_usage` and `include_obfuscation` fields

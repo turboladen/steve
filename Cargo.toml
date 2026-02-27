@@ -41,6 +41,15 @@ tracing-appender = "0.2"
 # Async utilities
 tokio-util = "0.7"
 
+# Enum derive macros
+strum = { version = "0.28", features = ["derive"] }
+
+# Process timeout
+wait-timeout = "0.2"
+
+# Unified diff application (fuzzy matching for AI-generated patches)
+mpatch = "1.3"
+
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

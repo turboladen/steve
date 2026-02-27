@@ -1,10 +1,12 @@
 //! Bash tool — executes shell commands.
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
+use wait_timeout::ChildExt;
 
 use super::{ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput};
 
@@ -71,21 +73,44 @@ pub fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
     })
 }
 
+#[derive(Debug)]
 struct CommandResult {
     output: String,
     success: bool,
 }
 
 fn run_command(command: &str, cwd: &Path, timeout_secs: u64) -> Result<CommandResult> {
-    let output = Command::new("bash")
+    let mut child = Command::new("bash")
         .arg("-c")
         .arg(command)
         .current_dir(cwd)
-        .output()
-        .context("failed to execute bash command")?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to spawn bash command")?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let timeout = Duration::from_secs(timeout_secs);
+    let status = match child.wait_timeout(timeout)? {
+        Some(status) => status,
+        None => {
+            // Timed out — kill the child and reap it
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("command timed out after {timeout_secs}s");
+        }
+    };
+
+    let stdout = child.stdout.take().map(|mut s| {
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut s, &mut buf).unwrap_or(0);
+        String::from_utf8_lossy(&buf).into_owned()
+    }).unwrap_or_default();
+
+    let stderr = child.stderr.take().map(|mut s| {
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut s, &mut buf).unwrap_or(0);
+        String::from_utf8_lossy(&buf).into_owned()
+    }).unwrap_or_default();
 
     let mut result = String::new();
 
@@ -101,7 +126,7 @@ fn run_command(command: &str, cwd: &Path, timeout_secs: u64) -> Result<CommandRe
     }
 
     if result.is_empty() {
-        result = format!("(exit code: {})", output.status.code().unwrap_or(-1));
+        result = format!("(exit code: {})", status.code().unwrap_or(-1));
     }
 
     // Truncate very long output
@@ -111,10 +136,54 @@ fn run_command(command: &str, cwd: &Path, timeout_secs: u64) -> Result<CommandRe
         result.push_str("\n\n... (output truncated)");
     }
 
-    let _ = timeout_secs; // TODO: implement actual timeout with tokio
-
     Ok(CommandResult {
         output: result,
-        success: output.status.success(),
+        success: status.success(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_command_captures_stdout() {
+        let result = run_command("echo hello", Path::new("/tmp"), 30).unwrap();
+        assert!(result.success);
+        assert_eq!(result.output.trim(), "hello");
+    }
+
+    #[test]
+    fn run_command_captures_stderr() {
+        let result = run_command("echo oops >&2", Path::new("/tmp"), 30).unwrap();
+        assert!(result.success);
+        assert!(result.output.contains("STDERR:"));
+        assert!(result.output.contains("oops"));
+    }
+
+    #[test]
+    fn run_command_reports_failure() {
+        let result = run_command("exit 1", Path::new("/tmp"), 30).unwrap();
+        assert!(!result.success);
+    }
+
+    #[test]
+    fn run_command_timeout_kills_long_running() {
+        let err = run_command("sleep 60", Path::new("/tmp"), 1).unwrap_err();
+        assert!(
+            err.to_string().contains("timed out"),
+            "expected timeout error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn execute_with_timeout_param() {
+        let args = serde_json::json!({
+            "command": "sleep 60",
+            "timeout": 1
+        });
+        let ctx = ToolContext { project_root: Path::new("/tmp").to_path_buf() };
+        let err = execute(args, ctx).unwrap_err();
+        assert!(err.to_string().contains("timed out"));
+    }
 }

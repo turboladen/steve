@@ -11,17 +11,18 @@ pub mod webfetch;
 pub mod write;
 
 use std::collections::HashMap;
-use std::fmt;
 use std::path::PathBuf;
-use std::str::FromStr;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use strum::{Display, EnumString, IntoStaticStr};
 
 /// Names of all registered tools.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize,
+         EnumString, Display, IntoStaticStr)]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
 pub enum ToolName {
     Read,
     Grep,
@@ -39,19 +40,7 @@ pub enum ToolName {
 impl ToolName {
     /// Return the lowercase string representation.
     pub fn as_str(self) -> &'static str {
-        match self {
-            ToolName::Read => "read",
-            ToolName::Grep => "grep",
-            ToolName::Glob => "glob",
-            ToolName::List => "list",
-            ToolName::Edit => "edit",
-            ToolName::Write => "write",
-            ToolName::Patch => "patch",
-            ToolName::Bash => "bash",
-            ToolName::Question => "question",
-            ToolName::Todo => "todo",
-            ToolName::Webfetch => "webfetch",
-        }
+        self.into()
     }
 
     /// Whether this is a write tool that modifies files (edit, write, patch).
@@ -73,33 +62,6 @@ impl ToolName {
             self,
             ToolName::Read | ToolName::Grep | ToolName::Glob | ToolName::List
         )
-    }
-}
-
-impl fmt::Display for ToolName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl FromStr for ToolName {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "read" => Ok(ToolName::Read),
-            "grep" => Ok(ToolName::Grep),
-            "glob" => Ok(ToolName::Glob),
-            "list" => Ok(ToolName::List),
-            "edit" => Ok(ToolName::Edit),
-            "write" => Ok(ToolName::Write),
-            "patch" => Ok(ToolName::Patch),
-            "bash" => Ok(ToolName::Bash),
-            "question" => Ok(ToolName::Question),
-            "todo" => Ok(ToolName::Todo),
-            "webfetch" => Ok(ToolName::Webfetch),
-            _ => Err(anyhow::anyhow!("unknown tool name: {s}")),
-        }
     }
 }
 
