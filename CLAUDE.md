@@ -92,7 +92,7 @@ The main loop in `app.rs` uses `tokio::select!` across these sources, then re-re
 
 ### LLM Stream + Tool Call Loop (`stream.rs`)
 
-A spawned tokio task opens an SSE stream via async-openai, processes chunks (sending `AppEvent::LlmDelta` to the UI), and accumulates tool call fragments. When the stream finishes with `FinishReason::ToolCalls`, it executes each tool (with permission checks), appends results as `ChatCompletionRequestToolMessage`s, and loops back to the LLM. This continues until the LLM produces a response with no tool calls.
+A spawned tokio task opens an SSE stream via async-openai, processes chunks (sending `AppEvent::LlmDelta` to the UI), and accumulates tool call fragments. When the stream finishes, it checks for valid tool call data (non-empty `id` and `function_name`) regardless of `finish_reason` — some providers (e.g., Fuel iX/litellm) don't reliably set `FinishReason::ToolCalls`. Tool calls with invalid/truncated JSON arguments (common when `finish_reason=Length`) are filtered out before execution. Valid tool calls are executed (with permission checks), results appended as `ChatCompletionRequestToolMessage`s, and the loop continues until no valid tool calls remain.
 
 Cancellation uses `tokio_util::sync::CancellationToken` with `select!` — the token is checked before each LLM call, during chunk processing, and between tool executions.
 
@@ -115,7 +115,7 @@ Summarizes the conversation into a single message to reclaim context window spac
 
 Reduces LLM API token usage via two subsystems in `src/context/`:
 - **Compressor** (`compressor.rs`): Before each LLM API call in the tool loop, replaces already-seen tool results with compact heuristic summaries (e.g., `"[Previously read: src/main.rs, 150 lines, Rust]"`). Preserves `tool_call_id` for valid conversation structure.
-- **Cache** (`cache.rs`): Session-scoped `ToolResultCache` maps `(tool_name, canonical_args)` → cached output. On cache hit, returns a compact reference instead of re-executing. Invalidated when write ops modify files — grep/glob entries are wholesale-invalidated since they can't be tracked by individual path.
+- **Cache** (`cache.rs`): Session-scoped `ToolResultCache` lives in `App` behind `Arc<std::sync::Mutex<ToolResultCache>>`, passed to the stream task via `StreamRequest`. Maps `(tool_name, canonical_args)` → cached output. On cache hit, returns a compact reference instead of re-executing. Invalidated when write ops modify files — grep/glob entries are wholesale-invalidated since they can't be tracked by individual path. Reset on `/new` session.
 
 **Critical invariant**: Write tools (`edit`, `write`, `patch`) must never run in the parallel execution phase — they must go through the sequential phase for proper cache invalidation, even if they have `AllowAlways` permission.
 
@@ -161,8 +161,15 @@ Auto-scroll calculates content height using wrapped line widths (not `lines.len(
 - **No `unreachable!()` in stream tasks** — panics in the stream tokio task crash silently. Use graceful error handling with `tracing::error!` instead
 - `AGENTS.md` in the project root is optional — if present, it's loaded at startup and injected as part of the system prompt. Create one with `/init`
 
+## Provider Compatibility
+
+Steve targets any OpenAI-compatible API. Known quirks with non-OpenAI providers (e.g., Fuel iX/litellm):
+- **`finish_reason`**: May not be `ToolCalls` even when tool calls are streamed — detect tool calls by checking for valid data, not finish reason
+- **`finish_reason=Length`**: Truncates the last tool call's JSON arguments mid-stream — validate JSON with `serde_json::from_str` before execution, drop invalid entries
+- **`stream_options`**: `include_usage: Some(true)` works with Fuel iX; without it, token usage is never reported
+
 ## Data Locations
 
 - **Data dir**: macOS `~/Library/Application Support/steve/`, Linux `~/.local/share/steve/` (via `directories::ProjectDirs`)
 - **Storage**: `{data_dir}/storage/{project_id}/` — sessions, messages, project metadata
-- **Logs**: `{data_dir}/logs/steve.log` — daily rolling tracing output
+- **Logs**: `{data_dir}/logs/steve.log.YYYY-MM-DD` — daily rolling tracing output (date-suffixed by `tracing-appender`)
