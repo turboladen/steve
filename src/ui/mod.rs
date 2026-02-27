@@ -73,4 +73,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         &mut app.input,
         &app.theme,
     );
+
+    // Status line rendering will be wired up in Task 6
+    let _ = layout.status_line;
 }
