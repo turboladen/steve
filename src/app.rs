@@ -28,6 +28,7 @@ use crate::stream::{self, StreamRequest};
 use crate::context::cache::ToolResultCache;
 use crate::tool::{ToolContext, ToolName, ToolRegistry};
 use crate::ui;
+use crate::ui::autocomplete::AutocompleteState;
 use crate::ui::input::InputState;
 use crate::ui::message_area::MessageAreaState;
 use crate::ui::message_block::MessageBlock;
@@ -126,6 +127,7 @@ pub struct App {
 
     // UI state
     pub input: InputState,
+    pub autocomplete_state: AutocompleteState,
     pub messages: Vec<MessageBlock>,
     pub message_area_state: MessageAreaState,
     pub sidebar_state: SidebarState,
@@ -217,6 +219,7 @@ impl App {
             tool_cache,
             stored_messages: Vec::new(),
             input: InputState::default(),
+            autocomplete_state: AutocompleteState::default(),
             messages,
             message_area_state: MessageAreaState::default(),
             sidebar_state: SidebarState::default(),
@@ -593,10 +596,31 @@ impl App {
                     self.should_quit = true;
                 }
             }
+            (KeyCode::Enter, KeyModifiers::NONE) if self.autocomplete_state.visible => {
+                if let Some(cmd_name) = self.autocomplete_state.selected_command() {
+                    let cmd_name = cmd_name.to_string();
+                    let mut textarea = tui_textarea::TextArea::default();
+                    textarea.set_cursor_line_style(ratatui::style::Style::default());
+                    textarea.set_placeholder_text("Type a message...");
+                    textarea.insert_str(&cmd_name);
+                    self.input.textarea = textarea;
+                    self.autocomplete_state.hide();
+                }
+            }
+            (KeyCode::Esc, KeyModifiers::NONE) if self.autocomplete_state.visible => {
+                self.autocomplete_state.hide();
+            }
             (KeyCode::Tab, KeyModifiers::NONE) => {
-                self.input.mode = self.input.mode.toggle();
-                // Update permission rules for the new mode
-                self.sync_permission_mode();
+                let current_text = self.input.textarea.lines().join("\n");
+                if self.autocomplete_state.visible {
+                    self.autocomplete_state.next();
+                } else if current_text.starts_with('/') {
+                    self.autocomplete_state.update(&current_text);
+                } else {
+                    self.input.mode = self.input.mode.toggle();
+                    // Update permission rules for the new mode
+                    self.sync_permission_mode();
+                }
             }
             (KeyCode::Enter, KeyModifiers::SHIFT) => {
                 // Shift+Enter: insert newline in textarea (forward as plain Enter)
@@ -616,6 +640,8 @@ impl App {
             }
             _ => {
                 self.input.textarea.input(key);
+                let current_text = self.input.textarea.lines().join("\n");
+                self.autocomplete_state.update(&current_text);
             }
         }
         Ok(())

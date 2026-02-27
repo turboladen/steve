@@ -1,3 +1,4 @@
+pub mod autocomplete;
 pub mod input;
 pub mod layout;
 pub mod message_area;
@@ -19,6 +20,7 @@ use ratatui::{Frame, Terminal, backend::CrosstermBackend};
 use crate::app::App;
 use layout::compute_layout;
 use message_area::render_message_blocks;
+use autocomplete::render_autocomplete;
 use input::render_input;
 use sidebar::render_sidebar;
 use status_line::render_status_line;
@@ -73,6 +75,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         frame,
         layout.input_area,
         &mut app.input,
+        &app.theme,
+    );
+
+    render_autocomplete(
+        frame,
+        layout.input_area,
+        &app.autocomplete_state,
         &app.theme,
     );
 
