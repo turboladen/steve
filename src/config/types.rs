@@ -88,3 +88,84 @@ fn default_context_window() -> u32 {
 fn default_auto_compact() -> bool {
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_has_auto_compact_true() {
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert!(config.auto_compact);
+    }
+
+    #[test]
+    fn auto_compact_can_be_disabled() {
+        let config: Config = serde_json::from_str(r#"{"auto_compact": false}"#).unwrap();
+        assert!(!config.auto_compact);
+    }
+
+    #[test]
+    fn default_context_window_is_128k() {
+        let model: ModelConfig = serde_json::from_str(
+            r#"{"id": "test", "name": "Test"}"#,
+        )
+        .unwrap();
+        assert_eq!(model.context_window, 128_000);
+    }
+
+    #[test]
+    fn custom_context_window() {
+        let model: ModelConfig = serde_json::from_str(
+            r#"{"id": "test", "name": "Test", "context_window": 32000}"#,
+        )
+        .unwrap();
+        assert_eq!(model.context_window, 32_000);
+    }
+
+    #[test]
+    fn capabilities_default_to_false() {
+        let model: ModelConfig = serde_json::from_str(
+            r#"{"id": "test", "name": "Test"}"#,
+        )
+        .unwrap();
+        assert!(!model.capabilities.tool_call);
+        assert!(!model.capabilities.reasoning);
+    }
+
+    #[test]
+    fn full_config_parses() {
+        let json = r#"{
+            "model": "openai/gpt-4o",
+            "small_model": "openai/gpt-4o-mini",
+            "auto_compact": true,
+            "providers": {
+                "openai": {
+                    "base_url": "https://api.openai.com/v1",
+                    "api_key_env": "OPENAI_API_KEY",
+                    "models": {
+                        "gpt-4o": {
+                            "id": "gpt-4o",
+                            "name": "GPT-4o",
+                            "context_window": 128000,
+                            "capabilities": { "tool_call": true, "reasoning": false }
+                        }
+                    }
+                }
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.model, Some("openai/gpt-4o".into()));
+        assert_eq!(config.small_model, Some("openai/gpt-4o-mini".into()));
+        assert!(config.providers.contains_key("openai"));
+        let openai = &config.providers["openai"];
+        assert_eq!(openai.models["gpt-4o"].context_window, 128_000);
+        assert!(openai.models["gpt-4o"].capabilities.tool_call);
+    }
+
+    #[test]
+    fn empty_providers_is_valid() {
+        let config: Config = serde_json::from_str(r#"{"model": "test/m"}"#).unwrap();
+        assert!(config.providers.is_empty());
+    }
+}

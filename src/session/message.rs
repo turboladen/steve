@@ -123,3 +123,76 @@ impl Message {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_message_has_correct_role() {
+        let msg = Message::user("sess-1", "hello");
+        assert_eq!(msg.role, Role::User);
+        assert_eq!(msg.session_id, "sess-1");
+    }
+
+    #[test]
+    fn assistant_message_has_correct_role() {
+        let msg = Message::assistant("sess-1", "hi");
+        assert_eq!(msg.role, Role::Assistant);
+    }
+
+    #[test]
+    fn text_content_returns_text() {
+        let msg = Message::user("s", "hello world");
+        assert_eq!(msg.text_content(), "hello world");
+    }
+
+    #[test]
+    fn text_content_concatenates_multiple_text_parts() {
+        let mut msg = Message::assistant("s", "hello ");
+        msg.parts.push(MessagePart::Text {
+            text: "world".to_string(),
+        });
+        assert_eq!(msg.text_content(), "hello world");
+    }
+
+    #[test]
+    fn text_content_skips_non_text_parts() {
+        let mut msg = Message::assistant("s", "before");
+        msg.parts.push(MessagePart::ToolCall {
+            call_id: "c1".into(),
+            tool_name: "read".into(),
+            input: serde_json::json!({}),
+            state: ToolCallState::Completed,
+        });
+        msg.parts.push(MessagePart::Text {
+            text: "after".to_string(),
+        });
+        assert_eq!(msg.text_content(), "beforeafter");
+    }
+
+    #[test]
+    fn set_text_replaces_first_part() {
+        let mut msg = Message::assistant("s", "original");
+        msg.set_text("replaced");
+        assert_eq!(msg.text_content(), "replaced");
+    }
+
+    #[test]
+    fn append_text_accumulates() {
+        let mut msg = Message::assistant("s", "");
+        msg.append_text("hello");
+        msg.append_text(" world");
+        assert_eq!(msg.text_content(), "hello world");
+    }
+
+    #[test]
+    fn message_serialization_roundtrip() {
+        let msg = Message::user("sess-1", "test message");
+        let json = serde_json::to_string(&msg).unwrap();
+        let deserialized: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.text_content(), "test message");
+        assert_eq!(deserialized.role, Role::User);
+        assert_eq!(deserialized.session_id, "sess-1");
+    }
+}

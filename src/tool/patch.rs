@@ -202,3 +202,102 @@ fn resolve_path(path_str: &str, project_root: &std::path::Path) -> PathBuf {
         project_root.join(path)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_hunk_header_with_counts() {
+        let (start, count) = parse_hunk_header("@@ -5,3 +5,4 @@").unwrap();
+        assert_eq!(start, 5);
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn parse_hunk_header_single_line() {
+        let (start, count) = parse_hunk_header("@@ -1 +1 @@").unwrap();
+        assert_eq!(start, 1);
+        assert_eq!(count, 1); // default count when no comma
+    }
+
+    #[test]
+    fn parse_hunk_header_with_context_label() {
+        let (start, count) = parse_hunk_header("@@ -10,2 +10,3 @@ fn main()").unwrap();
+        assert_eq!(start, 10);
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn apply_simple_replacement() {
+        // Replacements need context lines so old_count encompasses the + lines
+        let original = "line1\nline2\nline3\n";
+        let patch = "--- a/file\n+++ b/file\n@@ -1,3 +1,3 @@\n line1\n-line2\n+replaced\n line3\n";
+        let result = apply_unified_diff(original, patch).unwrap();
+        assert_eq!(result, "line1\nreplaced\nline3\n");
+    }
+
+    #[test]
+    fn apply_pure_addition() {
+        let original = "line1\nline2\n";
+        let patch = "--- a/file\n+++ b/file\n@@ -1,2 +1,3 @@\n line1\n+inserted\n line2\n";
+        let result = apply_unified_diff(original, patch).unwrap();
+        assert_eq!(result, "line1\ninserted\nline2\n");
+    }
+
+    #[test]
+    fn apply_pure_deletion() {
+        let original = "line1\nline2\nline3\n";
+        let patch = "--- a/file\n+++ b/file\n@@ -1,3 +1,2 @@\n line1\n-line2\n line3\n";
+        let result = apply_unified_diff(original, patch).unwrap();
+        assert_eq!(result, "line1\nline3\n");
+    }
+
+    #[test]
+    fn apply_multi_line_replacement() {
+        let original = "aaa\nbbb\nccc\nddd\n";
+        let patch =
+            "--- a/f\n+++ b/f\n@@ -1,4 +1,5 @@\n aaa\n-bbb\n-ccc\n+xxx\n+yyy\n+zzz\n ddd\n";
+        let result = apply_unified_diff(original, patch).unwrap();
+        assert_eq!(result, "aaa\nxxx\nyyy\nzzz\nddd\n");
+    }
+
+    #[test]
+    fn preserves_trailing_newline() {
+        let original = "hello\nworld\n";
+        let patch = "--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n-hello\n+goodbye\n world\n";
+        let result = apply_unified_diff(original, patch).unwrap();
+        assert_eq!(result, "goodbye\nworld\n");
+    }
+
+    #[test]
+    fn preserves_no_trailing_newline() {
+        let original = "hello\nworld";
+        let patch = "--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n-hello\n+goodbye\n world\n";
+        let result = apply_unified_diff(original, patch).unwrap();
+        assert_eq!(result, "goodbye\nworld");
+    }
+
+    #[test]
+    fn hunk_beyond_eof_fails() {
+        let original = "one\n";
+        let patch = "--- a/f\n+++ b/f\n@@ -5,1 +5,1 @@\n-missing\n+new\n";
+        assert!(apply_unified_diff(original, patch).is_err());
+    }
+
+    #[test]
+    fn execute_patches_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello\nworld\n").unwrap();
+
+        let args = serde_json::json!({
+            "file_path": file.to_str().unwrap(),
+            "patch": "--- a/test.txt\n+++ b/test.txt\n@@ -1,2 +1,2 @@\n-hello\n+goodbye\n world\n"
+        });
+        let ctx = ToolContext { project_root: dir.path().to_path_buf() };
+        let result = execute(args, ctx).unwrap();
+        assert!(!result.is_error);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "goodbye\nworld\n");
+    }
+}
