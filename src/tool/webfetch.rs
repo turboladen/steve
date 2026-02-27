@@ -67,16 +67,18 @@ fn execute(args: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         // Convert HTML to plain text
         let text = html2text::from_read(body.as_bytes(), 100)
             .unwrap_or_else(|_| body.clone());
-        // Truncate very long content
+        // Truncate very long content (use floor_char_boundary for UTF-8 safety)
         if text.len() > 50_000 {
-            format!("{}\n\n... (content truncated at 50KB)", &text[..50_000])
+            let boundary = floor_char_boundary(&text, 50_000);
+            format!("{}\n\n... (content truncated at 50KB)", &text[..boundary])
         } else {
             text
         }
     } else {
         // Return raw text (JSON, plain text, etc.)
         if body.len() > 50_000 {
-            format!("{}\n\n... (content truncated at 50KB)", &body[..50_000])
+            let boundary = floor_char_boundary(&body, 50_000);
+            format!("{}\n\n... (content truncated at 50KB)", &body[..boundary])
         } else {
             body
         }
@@ -88,4 +90,17 @@ fn execute(args: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         output: format!("[{status}]\n{output}"),
         is_error: !status.is_success(),
     })
+}
+
+/// Find the largest valid UTF-8 char boundary at or before `index`.
+/// This is a polyfill for the unstable `str::floor_char_boundary`.
+fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut i = index;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }

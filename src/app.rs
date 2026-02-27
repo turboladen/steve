@@ -822,8 +822,9 @@ impl App {
             });
 
         if let Some(text) = first_user_msg {
-            let title = if text.len() > 60 {
-                format!("{}...", &text[..57])
+            let title = if text.chars().count() > 60 {
+                let truncated: String = text.chars().take(57).collect();
+                format!("{truncated}...")
             } else {
                 text
             };

@@ -268,8 +268,9 @@ fn compress_bash(content: &str) -> String {
             .nth(1)
             .unwrap_or("(error details omitted)")
             .trim();
-        let truncated = if first_err.len() > 100 {
-            format!("{}...", &first_err[..97])
+        let truncated = if first_err.chars().count() > 100 {
+            let t: String = first_err.chars().take(97).collect();
+            format!("{t}...")
         } else {
             first_err.to_string()
         };

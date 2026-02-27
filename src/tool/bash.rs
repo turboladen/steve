@@ -60,8 +60,9 @@ pub fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
 
     let result = run_command(command, &ctx.project_root, timeout_secs)?;
 
-    let title = if command.len() > 60 {
-        format!("$ {}...", &command[..57])
+    let title = if command.chars().count() > 60 {
+        let truncated: String = command.chars().take(57).collect();
+        format!("$ {truncated}...")
     } else {
         format!("$ {command}")
     };
