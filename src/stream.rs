@@ -12,7 +12,8 @@ use async_openai::{
     config::OpenAIConfig,
     types::chat::{
         ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
-        ChatCompletionRequestAssistantMessage, ChatCompletionRequestMessage,
+        ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
+        ChatCompletionRequestMessage,
         ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
         ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
         ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
@@ -155,6 +156,35 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         // Reset counter for the next iteration
         current_iteration_tool_count = 0;
 
+        // Estimate payload size for diagnostics
+        let payload_chars: usize = messages.iter().map(|m| {
+            match m {
+                ChatCompletionRequestMessage::System(s) => match &s.content {
+                    ChatCompletionRequestSystemMessageContent::Text(t) => t.len(),
+                    _ => 0,
+                },
+                ChatCompletionRequestMessage::User(u) => match &u.content {
+                    ChatCompletionRequestUserMessageContent::Text(t) => t.len(),
+                    _ => 0,
+                },
+                ChatCompletionRequestMessage::Assistant(a) => match &a.content {
+                    Some(ChatCompletionRequestAssistantMessageContent::Text(t)) => t.len(),
+                    _ => 0,
+                },
+                ChatCompletionRequestMessage::Tool(t) => match &t.content {
+                    ChatCompletionRequestToolMessageContent::Text(t) => t.len(),
+                    _ => 0,
+                },
+                _ => 0,
+            }
+        }).sum();
+        tracing::info!(
+            message_count = messages.len(),
+            payload_chars,
+            estimated_tokens = payload_chars / 4,
+            "sending request to LLM"
+        );
+
         let mut request = CreateChatCompletionRequest {
             model: model.clone(),
             messages: messages.clone(),
@@ -173,9 +203,16 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         }
 
         // Open the stream
+        let stream_start = std::time::Instant::now();
         let mut stream: ChatCompletionResponseStream =
             match client.chat().create_stream(request).await {
-                Ok(s) => s,
+                Ok(s) => {
+                    tracing::info!(
+                        elapsed_ms = stream_start.elapsed().as_millis() as u64,
+                        "stream connection opened"
+                    );
+                    s
+                }
                 Err(e) => {
                     tracing::error!(error = %e, "failed to start stream");
                     let _ = event_tx.send(AppEvent::LlmError {
@@ -189,6 +226,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         let mut pending_tool_calls: HashMap<u32, PendingToolCall> = HashMap::new();
         let mut finish_reason: Option<FinishReason> = None;
         let mut assistant_content = String::new();
+        let mut first_token_logged = false;
 
         // Process chunks — use select! to check cancellation while streaming
         loop {
@@ -205,6 +243,14 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                         // Stream ended
                         break;
                     };
+
+                    if !first_token_logged {
+                        first_token_logged = true;
+                        tracing::info!(
+                            ttft_ms = stream_start.elapsed().as_millis() as u64,
+                            "first token received"
+                        );
+                    }
 
                     match result {
                         Ok(response) => {
