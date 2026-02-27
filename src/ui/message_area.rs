@@ -224,6 +224,185 @@ pub fn render_messages(
     frame.render_widget(paragraph, area);
 }
 
+/// Render structured message blocks into the given area.
+pub fn render_message_blocks(
+    frame: &mut Frame,
+    area: Rect,
+    messages: &[MessageBlock],
+    state: &mut MessageAreaState,
+    theme: &Theme,
+    is_loading: bool,
+) {
+    let mut lines: Vec<Line> = Vec::new();
+
+    for msg in messages {
+        match msg {
+            MessageBlock::User { text } => {
+                for text_line in text.lines() {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            "> ",
+                            Style::default()
+                                .fg(theme.user_msg)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            text_line.to_string(),
+                            Style::default().fg(theme.user_msg),
+                        ),
+                    ]));
+                }
+            }
+
+            MessageBlock::Assistant {
+                thinking,
+                text,
+                tool_groups,
+            } => {
+                // Thinking block (collapsed by default)
+                if let Some(t) = thinking {
+                    if t.expanded {
+                        lines.push(Line::from(Span::styled(
+                            format!("\u{25bc} Thinking ({} tokens)", t.token_count),
+                            Style::default()
+                                .fg(theme.reasoning)
+                                .add_modifier(Modifier::ITALIC),
+                        )));
+                        for content_line in t.content.lines() {
+                            lines.push(Line::from(Span::styled(
+                                format!("  {content_line}"),
+                                Style::default().fg(theme.reasoning),
+                            )));
+                        }
+                    } else {
+                        lines.push(Line::from(Span::styled(
+                            format!("\u{25b6} Thinking ({} tokens)", t.token_count),
+                            Style::default()
+                                .fg(theme.reasoning)
+                                .add_modifier(Modifier::ITALIC),
+                        )));
+                    }
+                }
+
+                // Tool groups
+                for group in tool_groups {
+                    for call in &group.calls {
+                        let status_indicator = match (&group.status, &call.result_summary) {
+                            (_, Some(_)) if call.expanded => "\u{25bc}",
+                            (_, Some(_)) => "\u{25b6}",
+                            _ => "\u{2819}",
+                        };
+
+                        let result_part = match &call.result_summary {
+                            Some(summary) => format!(" \u{2192} {summary}"),
+                            None => match &group.status {
+                                ToolGroupStatus::Preparing => " preparing...".to_string(),
+                                ToolGroupStatus::Running { .. } => " running...".to_string(),
+                                ToolGroupStatus::Complete => String::new(),
+                            },
+                        };
+
+                        let color = if call.is_error {
+                            theme.error
+                        } else {
+                            theme.tool_call
+                        };
+
+                        lines.push(Line::from(Span::styled(
+                            format!(
+                                "{status_indicator} \u{26a1} {}({}){}",
+                                call.tool_name, call.args_summary, result_part
+                            ),
+                            Style::default().fg(color),
+                        )));
+
+                        // Expanded output
+                        if call.expanded {
+                            if let Some(output) = &call.full_output {
+                                for output_line in output.lines() {
+                                    lines.push(Line::from(Span::styled(
+                                        format!("  {output_line}"),
+                                        Style::default().fg(theme.dim),
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Response text
+                if text.is_empty() && is_loading {
+                    lines.push(Line::from(Span::styled(
+                        "...",
+                        Style::default()
+                            .fg(theme.dim)
+                            .add_modifier(Modifier::DIM),
+                    )));
+                } else {
+                    for text_line in text.lines() {
+                        lines.push(Line::from(Span::styled(
+                            text_line.to_string(),
+                            Style::default().fg(theme.assistant_msg),
+                        )));
+                    }
+                }
+            }
+
+            MessageBlock::System { text } => {
+                for text_line in text.lines() {
+                    lines.push(Line::from(Span::styled(
+                        text_line.to_string(),
+                        Style::default()
+                            .fg(theme.dim)
+                            .add_modifier(Modifier::ITALIC),
+                    )));
+                }
+            }
+
+            MessageBlock::Error { text } => {
+                for text_line in text.lines() {
+                    lines.push(Line::from(Span::styled(
+                        text_line.to_string(),
+                        Style::default().fg(theme.error),
+                    )));
+                }
+            }
+        }
+
+        // Blank line between messages
+        lines.push(Line::from(""));
+    }
+
+    // Compute content height with wrapping
+    let available_width = area.width.max(1) as usize;
+    let content_height_u32: u32 = lines
+        .iter()
+        .map(|line| {
+            let line_width: usize = line.width();
+            if line_width == 0 {
+                1u32
+            } else {
+                ((line_width + available_width - 1) / available_width) as u32
+            }
+        })
+        .sum();
+    let content_height = content_height_u32.min(u16::MAX as u32) as u16;
+    let visible_height = area.height.saturating_sub(2);
+
+    state.update_dimensions(content_height, visible_height);
+
+    let block = Block::default()
+        .borders(Borders::NONE)
+        .style(Style::default().fg(theme.fg));
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((state.scroll_offset, 0));
+
+    frame.render_widget(paragraph, area);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
