@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
+use serde_json::Value;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -25,12 +26,13 @@ use crate::session::SessionManager;
 use crate::storage::Storage;
 use crate::stream::{self, StreamRequest};
 use crate::context::cache::ToolResultCache;
-use crate::tool::{ToolContext, ToolRegistry};
+use crate::tool::{ToolContext, ToolName, ToolRegistry};
 use crate::ui;
 use crate::ui::input::InputState;
-use crate::ui::message_area::{DisplayMessage, DisplayRole, MessageAreaState};
+use crate::ui::message_area::MessageAreaState;
+use crate::ui::message_block::MessageBlock;
 use crate::ui::sidebar::SidebarState;
-use crate::ui::status_line::StatusLineState;
+use crate::ui::status_line::{Activity, StatusLineState};
 use crate::ui::theme::Theme;
 
 /// System prompt for conversation compaction/summarization.
@@ -46,6 +48,57 @@ struct PendingPermission {
     #[allow(dead_code)]
     summary: String,
     response_tx: tokio::sync::oneshot::Sender<PermissionReply>,
+}
+
+/// Extract a compact argument summary for display in tool call lines.
+fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
+    match tool_name {
+        ToolName::Read | ToolName::List => args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        ToolName::Grep | ToolName::Glob => args
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        ToolName::Edit | ToolName::Write | ToolName::Patch => args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        ToolName::Bash => {
+            let cmd = args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if cmd.chars().count() > 40 {
+                let truncated: String = cmd.chars().take(37).collect();
+                format!("{truncated}...")
+            } else {
+                cmd.to_string()
+            }
+        }
+        ToolName::Question => args
+            .get("text")
+            .and_then(|v| v.as_str())
+            .map(|s| {
+                if s.chars().count() > 30 {
+                    let truncated: String = s.chars().take(27).collect();
+                    format!("{truncated}...")
+                } else {
+                    s.to_string()
+                }
+            })
+            .unwrap_or_default(),
+        ToolName::Todo => String::new(),
+        ToolName::Webfetch => args
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    }
 }
 
 pub struct App {
@@ -73,7 +126,7 @@ pub struct App {
 
     // UI state
     pub input: InputState,
-    pub messages: Vec<DisplayMessage>,
+    pub messages: Vec<MessageBlock>,
     pub message_area_state: MessageAreaState,
     pub sidebar_state: SidebarState,
     pub theme: Theme,
@@ -138,14 +191,16 @@ impl App {
         // Build startup messages
         let mut messages = Vec::new();
         if config.providers.is_empty() {
-            messages.push(DisplayMessage {
-                role: DisplayRole::Assistant,
+            messages.push(MessageBlock::Assistant {
+                thinking: None,
                 text: "No providers configured. Create a steve.json or steve.jsonc config file to get started.".to_string(),
+                tool_groups: vec![],
             });
         } else if let Some(err) = provider_error {
-            messages.push(DisplayMessage {
-                role: DisplayRole::Assistant,
+            messages.push(MessageBlock::Assistant {
+                thinking: None,
                 text: format!("Provider setup failed: {err}"),
+                tool_groups: vec![],
             });
         }
 
@@ -232,15 +287,21 @@ impl App {
                     .count();
 
                 for msg in &loaded_messages {
-                    let display_role = match msg.role {
-                        Role::User => DisplayRole::User,
-                        Role::Assistant => DisplayRole::Assistant,
+                    match msg.role {
+                        Role::User => {
+                            self.messages.push(MessageBlock::User {
+                                text: msg.text_content(),
+                            });
+                        }
+                        Role::Assistant => {
+                            self.messages.push(MessageBlock::Assistant {
+                                thinking: None,
+                                text: msg.text_content(),
+                                tool_groups: vec![],
+                            });
+                        }
                         Role::System => continue, // Don't display system messages
-                    };
-                    self.messages.push(DisplayMessage {
-                        role: display_role,
-                        text: msg.text_content(),
-                    });
+                    }
                 }
 
                 self.stored_messages = loaded_messages;
@@ -268,16 +329,16 @@ impl App {
                 _ => {}
             },
             AppEvent::Input(Event::Resize(_, _)) => {}
-            AppEvent::Tick => {}
+            AppEvent::Tick => {
+                self.status_line_state.tick();
+            }
 
             // -- Streaming events --
             AppEvent::LlmDelta { text } => {
                 if self.streaming_active {
                     // Append to the display message
                     if let Some(last) = self.messages.last_mut() {
-                        if last.role == DisplayRole::Assistant {
-                            last.text.push_str(&text);
-                        }
+                        last.append_text(&text);
                     }
                     // Also append to the in-progress Message for persistence
                     if let Some(msg) = &mut self.streaming_message {
@@ -287,45 +348,39 @@ impl App {
                 }
             }
 
-            // -- Tool events --
-            AppEvent::LlmToolCallStreaming { count, tool_name } => {
-                // Update the last streaming indicator or add a new one
-                let text = if count == 1 {
-                    format!("Preparing: {tool_name}...")
-                } else {
-                    format!("Preparing {count} tool calls: {tool_name}...")
-                };
-
-                // Replace the previous streaming indicator if present
-                if let Some(last) = self.messages.last_mut() {
-                    if last.role == DisplayRole::System
-                        && last.text.starts_with("Preparing")
-                    {
-                        last.text = text;
-                    } else {
-                        self.messages.push(DisplayMessage {
-                            role: DisplayRole::System,
-                            text,
-                        });
+            AppEvent::LlmReasoning { text } => {
+                if self.streaming_active {
+                    if let Some(last) = self.messages.last_mut() {
+                        last.append_thinking(&text);
                     }
-                } else {
-                    self.messages.push(DisplayMessage {
-                        role: DisplayRole::System,
-                        text,
-                    });
+                    self.message_area_state.scroll_to_bottom();
                 }
+            }
+
+            // -- Tool events --
+            AppEvent::LlmToolCallStreaming { count: _, tool_name } => {
+                if let Some(last) = self.messages.last_mut() {
+                    last.ensure_preparing_tool_group();
+                }
+                self.status_line_state.activity = Activity::RunningTool {
+                    tool_name,
+                    args_summary: String::new(),
+                };
                 self.message_area_state.scroll_to_bottom();
             }
             AppEvent::LlmToolCall {
                 call_id: _,
                 tool_name,
-                arguments: _,
+                arguments,
             } => {
-                // Display the tool call in the message area
-                self.messages.push(DisplayMessage {
-                    role: DisplayRole::Tool,
-                    text: format!("⚡ {tool_name}"),
-                });
+                let args_summary = extract_args_summary(tool_name, &arguments);
+                if let Some(last) = self.messages.last_mut() {
+                    last.add_tool_call(tool_name, args_summary.clone());
+                }
+                self.status_line_state.activity = Activity::RunningTool {
+                    tool_name,
+                    args_summary,
+                };
                 self.message_area_state.scroll_to_bottom();
             }
             AppEvent::ToolResult {
@@ -333,31 +388,24 @@ impl App {
                 tool_name,
                 output,
             } => {
-                // Display a summary of the tool result
-                let preview = if output.output.len() > 200 {
-                    format!("{}...", &output.output[..197])
+                // UTF-8 safe truncation for summary
+                let summary = if output.output.chars().count() > 80 {
+                    let truncated: String = output.output.chars().take(77).collect();
+                    format!("{truncated}...")
                 } else {
                     output.output.clone()
                 };
-                let role = if output.is_error {
-                    DisplayRole::Error
-                } else {
-                    DisplayRole::ToolResult
-                };
-                self.messages.push(DisplayMessage {
-                    role,
-                    text: format!("[{tool_name}] {preview}"),
-                });
 
-                // Update sidebar (e.g. todo tool may have changed)
+                if let Some(last) = self.messages.last_mut() {
+                    last.complete_tool_call(
+                        tool_name,
+                        summary,
+                        output.output.clone(),
+                        output.is_error,
+                    );
+                }
+
                 self.update_sidebar();
-
-                // The stream task will loop back to the LLM with the result,
-                // so push a new empty assistant message for the next response.
-                self.messages.push(DisplayMessage {
-                    role: DisplayRole::Assistant,
-                    text: String::new(),
-                });
                 self.message_area_state.scroll_to_bottom();
             }
 
@@ -365,10 +413,11 @@ impl App {
                 self.is_loading = false;
                 self.streaming_active = false;
                 self.stream_cancel = None;
+                self.status_line_state.activity = Activity::Idle;
 
                 // Remove trailing empty assistant message if present
                 if let Some(last) = self.messages.last() {
-                    if last.role == DisplayRole::Assistant && last.text.is_empty() {
+                    if last.is_empty_assistant() {
                         self.messages.pop();
                     }
                 }
@@ -412,21 +461,18 @@ impl App {
                 self.streaming_active = false;
                 self.stream_cancel = None;
                 self.streaming_message = None;
-                self.messages.push(DisplayMessage {
-                    role: DisplayRole::Error,
-                    text: error,
-                });
+                self.messages.push(MessageBlock::Error { text: error });
+                self.status_line_state.activity = Activity::Idle;
                 self.message_area_state.scroll_to_bottom();
             }
             AppEvent::PermissionRequest(req) => {
                 // Show permission prompt to user
-                self.messages.push(DisplayMessage {
-                    role: DisplayRole::Permission,
-                    text: format!(
-                        "{} — {}\n  (y)es / (n)o / (a)lways allow",
-                        req.tool_name, req.arguments_summary
-                    ),
-                });
+                let summary = format!(
+                    "\u{26a0} {}: {} \u{2014} Allow? (y)es / (n)o / (a)lways",
+                    req.tool_name, req.arguments_summary
+                );
+                self.messages.push(MessageBlock::System { text: summary });
+                self.status_line_state.activity = Activity::WaitingForPermission;
                 self.message_area_state.scroll_to_bottom();
                 self.pending_permission = Some(PendingPermission {
                     tool_name: req.tool_name,
@@ -464,13 +510,13 @@ impl App {
 
                 // 5. Replace display messages with a system notice + the summary
                 self.messages.clear();
-                self.messages.push(DisplayMessage {
-                    role: DisplayRole::System,
-                    text: "Conversation compacted.".to_string(),
+                self.messages.push(MessageBlock::System {
+                    text: "Conversation compacted.".into(),
                 });
-                self.messages.push(DisplayMessage {
-                    role: DisplayRole::Assistant,
+                self.messages.push(MessageBlock::Assistant {
+                    thinking: None,
                     text: summary,
+                    tool_groups: vec![],
                 });
                 self.message_area_state.scroll_to_bottom();
                 self.update_sidebar();
@@ -480,10 +526,8 @@ impl App {
             AppEvent::CompactError { error } => {
                 self.is_loading = false;
                 self.auto_compact_failed = true;
-                self.messages.push(DisplayMessage {
-                    role: DisplayRole::Error,
-                    text: error,
-                });
+                self.messages.push(MessageBlock::Error { text: error });
+                self.status_line_state.activity = Activity::Idle;
                 self.message_area_state.scroll_to_bottom();
                 tracing::error!("compaction failed, auto-compact disabled for this session");
             }
@@ -499,10 +543,10 @@ impl App {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     if let Some(perm) = self.pending_permission.take() {
                         let _ = perm.response_tx.send(PermissionReply::AllowOnce);
-                        self.messages.push(DisplayMessage {
-                            role: DisplayRole::System,
-                            text: format!("✓ allowed: {}", perm.tool_name),
+                        self.messages.push(MessageBlock::System {
+                            text: format!("\u{2713} allowed: {}", perm.tool_name),
                         });
+                        self.status_line_state.activity = Activity::Thinking;
                         self.message_area_state.scroll_to_bottom();
                     }
                     return Ok(());
@@ -510,10 +554,10 @@ impl App {
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     if let Some(perm) = self.pending_permission.take() {
                         let _ = perm.response_tx.send(PermissionReply::Deny);
-                        self.messages.push(DisplayMessage {
-                            role: DisplayRole::System,
-                            text: format!("✗ denied: {}", perm.tool_name),
+                        self.messages.push(MessageBlock::System {
+                            text: format!("\u{2717} denied: {}", perm.tool_name),
                         });
+                        self.status_line_state.activity = Activity::Thinking;
                         self.message_area_state.scroll_to_bottom();
                     }
                     return Ok(());
@@ -521,10 +565,10 @@ impl App {
                 KeyCode::Char('a') | KeyCode::Char('A') => {
                     if let Some(perm) = self.pending_permission.take() {
                         let _ = perm.response_tx.send(PermissionReply::AllowAlways);
-                        self.messages.push(DisplayMessage {
-                            role: DisplayRole::System,
-                            text: format!("✓ always allow: {}", perm.tool_name),
+                        self.messages.push(MessageBlock::System {
+                            text: format!("\u{2713} always allow: {}", perm.tool_name),
                         });
+                        self.status_line_state.activity = Activity::Thinking;
                         self.message_area_state.scroll_to_bottom();
                     }
                     return Ok(());
@@ -590,14 +634,14 @@ impl App {
 
         // Remove trailing empty assistant message
         if let Some(last) = self.messages.last() {
-            if last.role == DisplayRole::Assistant && last.text.is_empty() {
+            if last.is_empty_assistant() {
                 self.messages.pop();
             }
         }
-        self.messages.push(DisplayMessage {
-            role: DisplayRole::System,
+        self.messages.push(MessageBlock::System {
             text: "cancelled".to_string(),
         });
+        self.status_line_state.activity = Activity::Idle;
         self.message_area_state.scroll_to_bottom();
     }
 
@@ -622,24 +666,19 @@ impl App {
         self.stored_messages.push(user_msg);
 
         // Add user message to display
-        self.messages.push(DisplayMessage {
-            role: DisplayRole::User,
-            text: text.clone(),
-        });
+        self.messages.push(MessageBlock::User { text: text.clone() });
         self.message_area_state.scroll_to_bottom();
 
         // Try to send to LLM
         let Some(registry) = &self.provider_registry else {
-            self.messages.push(DisplayMessage {
-                role: DisplayRole::Error,
+            self.messages.push(MessageBlock::Error {
                 text: "No provider configured. Add providers to steve.json.".to_string(),
             });
             return Ok(());
         };
 
         let Some(model_ref) = &self.current_model else {
-            self.messages.push(DisplayMessage {
-                role: DisplayRole::Error,
+            self.messages.push(MessageBlock::Error {
                 text: "No model selected. Set 'model' in steve.json.".to_string(),
             });
             return Ok(());
@@ -648,8 +687,7 @@ impl App {
         let resolved = match registry.resolve_model(model_ref) {
             Ok(r) => r,
             Err(e) => {
-                self.messages.push(DisplayMessage {
-                    role: DisplayRole::Error,
+                self.messages.push(MessageBlock::Error {
                     text: format!("{e}"),
                 });
                 return Ok(());
@@ -659,8 +697,7 @@ impl App {
         let client = match registry.client(&resolved.provider_id) {
             Ok(c) => c,
             Err(e) => {
-                self.messages.push(DisplayMessage {
-                    role: DisplayRole::Error,
+                self.messages.push(MessageBlock::Error {
                     text: format!("{e}"),
                 });
                 return Ok(());
@@ -672,14 +709,17 @@ impl App {
         self.streaming_message = Some(assistant_msg);
 
         // Push an empty assistant message to the display
-        self.messages.push(DisplayMessage {
-            role: DisplayRole::Assistant,
+        self.messages.push(MessageBlock::Assistant {
+            thinking: None,
             text: String::new(),
+            tool_groups: vec![],
         });
 
         let system_prompt = self.build_system_prompt();
         self.is_loading = true;
         self.streaming_active = true;
+        self.status_line_state.activity = Activity::Thinking;
+        self.status_line_state.context_window = resolved.config.context_window as u64;
 
         // Create a cancellation token for this stream
         let cancel_token = CancellationToken::new();
@@ -743,8 +783,10 @@ impl App {
         let first_user_msg = self
             .messages
             .iter()
-            .find(|m| m.role == DisplayRole::User)
-            .map(|m| m.text.clone());
+            .find_map(|m| match m {
+                MessageBlock::User { text } => Some(text.clone()),
+                _ => None,
+            });
 
         if let Some(text) = first_user_msg {
             let title = if text.len() > 60 {
@@ -827,6 +869,14 @@ impl App {
                 done: t.done,
             })
             .collect();
+
+        // Sync status line state
+        if let Some(model) = &self.current_model {
+            self.status_line_state.model_name = model.clone();
+        }
+        if let Some(session) = &self.current_session {
+            self.status_line_state.total_tokens = session.token_usage.total_tokens;
+        }
     }
 
     /// Sync the permission engine rules with the current agent mode.
@@ -937,10 +987,7 @@ impl App {
         let command = match Command::parse(text) {
             Ok(cmd) => cmd,
             Err(msg) => {
-                self.messages.push(DisplayMessage {
-                    role: DisplayRole::Error,
-                    text: msg,
-                });
+                self.messages.push(MessageBlock::Error { text: msg });
                 return Ok(());
             }
         };
@@ -964,8 +1011,7 @@ impl App {
                     ToolResultCache::new(self.project.root.clone());
                 self.ensure_session();
                 self.message_area_state.scroll_to_bottom();
-                self.messages.push(DisplayMessage {
-                    role: DisplayRole::System,
+                self.messages.push(MessageBlock::System {
                     text: "New session started.".to_string(),
                 });
                 self.update_sidebar();
@@ -976,8 +1022,7 @@ impl App {
                     let mut session = session.clone();
                     let _ = mgr.rename_session(&mut session, &title);
                     self.current_session = Some(session);
-                    self.messages.push(DisplayMessage {
-                        role: DisplayRole::System,
+                    self.messages.push(MessageBlock::System {
                         text: format!("Session renamed to: {title}"),
                     });
                     self.update_sidebar();
@@ -988,22 +1033,19 @@ impl App {
                     match registry.resolve_model(&model_ref) {
                         Ok(_) => {
                             self.current_model = Some(model_ref.to_string());
-                            self.messages.push(DisplayMessage {
-                                role: DisplayRole::System,
+                            self.messages.push(MessageBlock::System {
                                 text: format!("Switched to model: {model_ref}"),
                             });
                             self.update_sidebar();
                         }
                         Err(e) => {
-                            self.messages.push(DisplayMessage {
-                                role: DisplayRole::Error,
+                            self.messages.push(MessageBlock::Error {
                                 text: format!("{e}"),
                             });
                         }
                     }
                 } else {
-                    self.messages.push(DisplayMessage {
-                        role: DisplayRole::Error,
+                    self.messages.push(MessageBlock::Error {
                         text: "No providers configured.".to_string(),
                     });
                 }
@@ -1012,8 +1054,7 @@ impl App {
                 if let Some(registry) = &self.provider_registry {
                     let models = registry.list_models();
                     if models.is_empty() {
-                        self.messages.push(DisplayMessage {
-                            role: DisplayRole::System,
+                        self.messages.push(MessageBlock::System {
                             text: "No models configured.".to_string(),
                         });
                     } else {
@@ -1024,19 +1065,17 @@ impl App {
                                     .current_model
                                     .as_ref()
                                     .is_some_and(|c| c == &m.display_ref());
-                                let marker = if current { " ●" } else { "" };
-                                format!("  {} — {}{}", m.display_ref(), m.config.name, marker)
+                                let marker = if current { " \u{25cf}" } else { "" };
+                                format!("  {} \u{2014} {}{}", m.display_ref(), m.config.name, marker)
                             })
                             .collect::<Vec<_>>()
                             .join("\n");
-                        self.messages.push(DisplayMessage {
-                            role: DisplayRole::System,
+                        self.messages.push(MessageBlock::System {
                             text: format!("Models (use /model <ref> to switch):\n{list}"),
                         });
                     }
                 } else {
-                    self.messages.push(DisplayMessage {
-                        role: DisplayRole::Error,
+                    self.messages.push(MessageBlock::Error {
                         text: "No providers configured.".to_string(),
                     });
                 }
@@ -1044,8 +1083,7 @@ impl App {
             Command::Init => {
                 let agents_path = self.project.root.join("AGENTS.md");
                 if agents_path.exists() {
-                    self.messages.push(DisplayMessage {
-                        role: DisplayRole::System,
+                    self.messages.push(MessageBlock::System {
                         text: format!("AGENTS.md already exists at {}", agents_path.display()),
                     });
                 } else {
@@ -1053,14 +1091,12 @@ impl App {
                     match std::fs::write(&agents_path, default_content) {
                         Ok(_) => {
                             self.agents_md = Some(default_content.to_string());
-                            self.messages.push(DisplayMessage {
-                                role: DisplayRole::System,
+                            self.messages.push(MessageBlock::System {
                                 text: format!("Created AGENTS.md at {}", agents_path.display()),
                             });
                         }
                         Err(e) => {
-                            self.messages.push(DisplayMessage {
-                                role: DisplayRole::Error,
+                            self.messages.push(MessageBlock::Error {
                                 text: format!("Failed to create AGENTS.md: {e}"),
                             });
                         }
@@ -1070,8 +1106,7 @@ impl App {
             Command::Compact => {
                 // Guard: must have a session with messages
                 if self.current_session.is_none() || self.stored_messages.is_empty() {
-                    self.messages.push(DisplayMessage {
-                        role: DisplayRole::System,
+                    self.messages.push(MessageBlock::System {
                         text: "Nothing to compact.".to_string(),
                     });
                     return Ok(());
@@ -1079,8 +1114,7 @@ impl App {
 
                 // Guard: must not already be streaming/loading
                 if self.is_loading || self.streaming_active {
-                    self.messages.push(DisplayMessage {
-                        role: DisplayRole::Error,
+                    self.messages.push(MessageBlock::Error {
                         text: "Cannot compact while streaming.".to_string(),
                     });
                     return Ok(());
@@ -1090,8 +1124,7 @@ impl App {
                 let model_ref = match self.compact_model_ref() {
                     Some(r) => r,
                     None => {
-                        self.messages.push(DisplayMessage {
-                            role: DisplayRole::Error,
+                        self.messages.push(MessageBlock::Error {
                             text: "No model available for compaction.".to_string(),
                         });
                         return Ok(());
@@ -1099,8 +1132,7 @@ impl App {
                 };
 
                 let Some(registry) = &self.provider_registry else {
-                    self.messages.push(DisplayMessage {
-                        role: DisplayRole::Error,
+                    self.messages.push(MessageBlock::Error {
                         text: "No provider configured.".to_string(),
                     });
                     return Ok(());
@@ -1109,8 +1141,7 @@ impl App {
                 let resolved = match registry.resolve_model(&model_ref) {
                     Ok(r) => r,
                     Err(e) => {
-                        self.messages.push(DisplayMessage {
-                            role: DisplayRole::Error,
+                        self.messages.push(MessageBlock::Error {
                             text: format!("Failed to resolve compact model: {e}"),
                         });
                         return Ok(());
@@ -1120,8 +1151,7 @@ impl App {
                 let client = match registry.client(&resolved.provider_id) {
                     Ok(c) => c.clone(),
                     Err(e) => {
-                        self.messages.push(DisplayMessage {
-                            role: DisplayRole::Error,
+                        self.messages.push(MessageBlock::Error {
                             text: format!("{e}"),
                         });
                         return Ok(());
@@ -1130,12 +1160,12 @@ impl App {
 
                 // Show feedback
                 let msg_count = self.stored_messages.len();
-                self.messages.push(DisplayMessage {
-                    role: DisplayRole::System,
+                self.messages.push(MessageBlock::System {
                     text: format!("Compacting {msg_count} messages..."),
                 });
                 self.message_area_state.scroll_to_bottom();
                 self.is_loading = true;
+                self.status_line_state.activity = Activity::Compacting;
 
                 // Build the transcript to summarize
                 let transcript = self.build_compact_prompt();
@@ -1167,13 +1197,147 @@ impl App {
                 });
             }
             Command::Help => {
-                self.messages.push(DisplayMessage {
-                    role: DisplayRole::System,
-                    text: "Commands:\n  /new        — Start a new session\n  /rename <t> — Rename current session\n  /models     — List available models\n  /model <r>  — Switch to a model\n  /compact    — Compact conversation into a summary\n  /init       — Create AGENTS.md in project root\n  /help       — Show this help\n  /exit       — Quit\n\nKeys:\n  Tab         — Toggle Build/Plan mode\n  Ctrl+C      — Cancel stream / quit\n  Mouse wheel — Scroll messages".to_string(),
+                self.messages.push(MessageBlock::System {
+                    text: "Commands:\n  /new        \u{2014} Start a new session\n  /rename <t> \u{2014} Rename current session\n  /models     \u{2014} List available models\n  /model <r>  \u{2014} Switch to a model\n  /compact    \u{2014} Compact conversation into a summary\n  /init       \u{2014} Create AGENTS.md in project root\n  /help       \u{2014} Show this help\n  /exit       \u{2014} Quit\n\nKeys:\n  Tab         \u{2014} Toggle Build/Plan mode\n  Ctrl+C      \u{2014} Cancel stream / quit\n  Mouse wheel \u{2014} Scroll messages".to_string(),
                 });
             }
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn extract_args_summary_read_path() {
+        let args = json!({"path": "src/main.rs"});
+        assert_eq!(extract_args_summary(ToolName::Read, &args), "src/main.rs");
+    }
+
+    #[test]
+    fn extract_args_summary_list_path() {
+        let args = json!({"path": "/tmp/dir"});
+        assert_eq!(extract_args_summary(ToolName::List, &args), "/tmp/dir");
+    }
+
+    #[test]
+    fn extract_args_summary_grep_pattern() {
+        let args = json!({"pattern": "fn main"});
+        assert_eq!(extract_args_summary(ToolName::Grep, &args), "fn main");
+    }
+
+    #[test]
+    fn extract_args_summary_glob_pattern() {
+        let args = json!({"pattern": "**/*.rs"});
+        assert_eq!(extract_args_summary(ToolName::Glob, &args), "**/*.rs");
+    }
+
+    #[test]
+    fn extract_args_summary_edit_path() {
+        let args = json!({"path": "src/lib.rs", "old_string": "x", "new_string": "y"});
+        assert_eq!(extract_args_summary(ToolName::Edit, &args), "src/lib.rs");
+    }
+
+    #[test]
+    fn extract_args_summary_write_path() {
+        let args = json!({"path": "new_file.txt", "content": "hello"});
+        assert_eq!(extract_args_summary(ToolName::Write, &args), "new_file.txt");
+    }
+
+    #[test]
+    fn extract_args_summary_patch_path() {
+        let args = json!({"path": "src/app.rs", "diff": "..."});
+        assert_eq!(extract_args_summary(ToolName::Patch, &args), "src/app.rs");
+    }
+
+    #[test]
+    fn extract_args_summary_bash_short_command() {
+        let args = json!({"command": "ls -la"});
+        assert_eq!(extract_args_summary(ToolName::Bash, &args), "ls -la");
+    }
+
+    #[test]
+    fn extract_args_summary_bash_long_command_truncates() {
+        let long_cmd = "a".repeat(50);
+        let args = json!({"command": long_cmd});
+        let result = extract_args_summary(ToolName::Bash, &args);
+        assert_eq!(result.chars().count(), 40); // 37 + "..."
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn extract_args_summary_bash_exactly_40_chars() {
+        let cmd = "a".repeat(40);
+        let args = json!({"command": cmd});
+        let result = extract_args_summary(ToolName::Bash, &args);
+        assert_eq!(result.chars().count(), 40);
+        assert!(!result.ends_with("..."));
+    }
+
+    #[test]
+    fn extract_args_summary_question_short() {
+        let args = json!({"text": "What is this?"});
+        assert_eq!(extract_args_summary(ToolName::Question, &args), "What is this?");
+    }
+
+    #[test]
+    fn extract_args_summary_question_long_truncates() {
+        let long_text = "a".repeat(40);
+        let args = json!({"text": long_text});
+        let result = extract_args_summary(ToolName::Question, &args);
+        assert_eq!(result.chars().count(), 30); // 27 + "..."
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn extract_args_summary_todo_always_empty() {
+        let args = json!({"action": "add", "text": "something"});
+        assert_eq!(extract_args_summary(ToolName::Todo, &args), "");
+    }
+
+    #[test]
+    fn extract_args_summary_webfetch_url() {
+        let args = json!({"url": "https://example.com"});
+        assert_eq!(extract_args_summary(ToolName::Webfetch, &args), "https://example.com");
+    }
+
+    #[test]
+    fn extract_args_summary_missing_field_returns_empty() {
+        let args = json!({});
+        assert_eq!(extract_args_summary(ToolName::Read, &args), "");
+        assert_eq!(extract_args_summary(ToolName::Grep, &args), "");
+        assert_eq!(extract_args_summary(ToolName::Edit, &args), "");
+        assert_eq!(extract_args_summary(ToolName::Bash, &args), "");
+        assert_eq!(extract_args_summary(ToolName::Question, &args), "");
+        assert_eq!(extract_args_summary(ToolName::Webfetch, &args), "");
+    }
+
+    #[test]
+    fn extract_args_summary_all_variants_covered() {
+        // Ensure every ToolName variant is handled (exhaustive match).
+        // This test will fail to compile if a new variant is added without
+        // updating extract_args_summary.
+        let args = json!({});
+        let all_tools = [
+            ToolName::Read,
+            ToolName::Grep,
+            ToolName::Glob,
+            ToolName::List,
+            ToolName::Edit,
+            ToolName::Write,
+            ToolName::Patch,
+            ToolName::Bash,
+            ToolName::Question,
+            ToolName::Todo,
+            ToolName::Webfetch,
+        ];
+        for tool in all_tools {
+            // Just ensure it doesn't panic
+            let _ = extract_args_summary(tool, &args);
+        }
     }
 }

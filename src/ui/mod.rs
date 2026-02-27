@@ -18,7 +18,7 @@ use ratatui::{Frame, Terminal, backend::CrosstermBackend};
 
 use crate::app::App;
 use layout::compute_layout;
-use message_area::render_messages;
+use message_area::render_message_blocks;
 use input::render_input;
 use sidebar::render_sidebar;
 use status_line::render_status_line;
@@ -50,7 +50,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let show_sidebar = area.width >= 120;
     let layout = compute_layout(area, show_sidebar);
 
-    render_messages(
+    render_message_blocks(
         frame,
         layout.message_area,
         &app.messages,
