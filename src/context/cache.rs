@@ -19,9 +19,10 @@ struct CachedResult {
     first_call_id: String,
 }
 
-/// Cache for tool results within a single streaming session.
+/// Cache for tool results within a session.
 ///
-/// Session-scoped: created fresh for each `spawn_stream` call.
+/// Session-scoped: lives in `App` behind `Arc<Mutex>`, shared across all
+/// `spawn_stream` calls within a session. Reset on `/new`.
 /// Automatically invalidated when write operations touch cached file paths.
 pub struct ToolResultCache {
     /// Map from cache key to cached result.
@@ -170,11 +171,12 @@ impl ToolResultCache {
                     .get("path")
                     .and_then(|v| v.as_str())
                     .unwrap_or(".");
+                let normalized = self.normalize_path(path);
                 let include = args
                     .get("include")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                Some(format!("grep:{}:{}:{}", pattern, path, include))
+                Some(format!("grep:{}:{}:{}", pattern, normalized.display(), include))
             }
             "glob" => {
                 let pattern = args.get("pattern")?.as_str()?;
@@ -182,7 +184,8 @@ impl ToolResultCache {
                     .get("path")
                     .and_then(|v| v.as_str())
                     .unwrap_or(".");
-                Some(format!("glob:{}:{}", pattern, path))
+                let normalized = self.normalize_path(path);
+                Some(format!("glob:{}:{}", pattern, normalized.display()))
             }
             "list" => {
                 let path = args

@@ -97,6 +97,9 @@ pub struct App {
     /// Cancellation token for the current stream task.
     stream_cancel: Option<CancellationToken>,
 
+    /// Whether auto-compact has failed in this session (suppresses retries).
+    auto_compact_failed: bool,
+
     // Runtime
     event_tx: mpsc::UnboundedSender<AppEvent>,
     event_rx: mpsc::UnboundedReceiver<AppEvent>,
@@ -167,6 +170,7 @@ impl App {
             exchange_count: 0,
             pending_permission: None,
             stream_cancel: None,
+            auto_compact_failed: false,
             event_tx,
             event_rx,
             should_quit: false,
@@ -471,12 +475,13 @@ impl App {
             }
             AppEvent::CompactError { error } => {
                 self.is_loading = false;
+                self.auto_compact_failed = true;
                 self.messages.push(DisplayMessage {
                     role: DisplayRole::Error,
                     text: error,
                 });
                 self.message_area_state.scroll_to_bottom();
-                tracing::error!("compaction failed");
+                tracing::error!("compaction failed, auto-compact disabled for this session");
             }
             _ => {}
         }
@@ -891,6 +896,10 @@ impl App {
             return false;
         }
 
+        if self.auto_compact_failed {
+            return false;
+        }
+
         // Need at least a few messages to make compaction worthwhile
         if self.stored_messages.len() < 4 {
             return false;
@@ -934,6 +943,7 @@ impl App {
                 self.streaming_active = false;
                 self.is_loading = false;
                 self.exchange_count = 0;
+                self.auto_compact_failed = false;
                 self.current_session = None;
                 // Reset tool result cache for the new session
                 *self.tool_cache.lock().unwrap() =
