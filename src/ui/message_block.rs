@@ -1,7 +1,7 @@
 //! Structured message blocks for the TUI message area.
 //!
-//! Replaces flat `DisplayMessage { role, text }` with rich types that support
-//! grouped tool calls, collapsible thinking sections, and expandable results.
+//! Rich structured message types that support grouped tool calls,
+//! collapsible thinking sections, and expandable results.
 
 use crate::tool::ToolName;
 
