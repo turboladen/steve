@@ -45,6 +45,7 @@ pub struct StreamRequest {
     pub tool_registry: Option<std::sync::Arc<ToolRegistry>>,
     pub tool_context: Option<ToolContext>,
     pub permission_engine: Option<std::sync::Arc<tokio::sync::Mutex<PermissionEngine>>>,
+    pub tool_cache: std::sync::Arc<std::sync::Mutex<ToolResultCache>>,
     pub cancel_token: CancellationToken,
 }
 
@@ -77,6 +78,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         tool_registry,
         tool_context,
         permission_engine,
+        tool_cache,
         cancel_token,
     } = req;
 
@@ -126,12 +128,8 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
     let mut total_usage = StreamUsage::default();
     let mut current_iteration_tool_count: usize = 0;
 
-    // Tool result cache — avoids re-executing identical read operations
-    let project_root = tool_context
-        .as_ref()
-        .map(|tc| tc.project_root.clone())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let mut tool_cache = ToolResultCache::new(project_root);
+    // Tool result cache — shared across stream tasks within a session.
+    // Avoids re-executing identical read operations across messages.
 
     // Tool call loop — keep going until the LLM produces a response with no tool calls
     loop {
@@ -392,7 +390,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         let mut tasks_to_spawn: Vec<ParallelTask> = Vec::new();
 
         for tc in &auto_allowed {
-            if let Some(cached) = tool_cache.get(&tc.function_name, &tc.args) {
+            if let Some(cached) = tool_cache.lock().unwrap().get(&tc.function_name, &tc.args) {
                 tracing::debug!(tool = %tc.function_name, "using cached result (parallel)");
                 parallel_results.insert(tc.id.clone(), cached);
             } else {
@@ -450,7 +448,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 };
 
                 // Cache the result
-                tool_cache.put(&func_name, &args, &call_id, &output);
+                tool_cache.lock().unwrap().put(&func_name, &args, &call_id, &output);
 
                 parallel_results.insert(call_id, output);
             }
@@ -608,7 +606,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
                     tracing::info!(tool = %tc.function_name, "executing tool");
 
-                    let output = if let Some(cached) = tool_cache.get(&tc.function_name, &tc.args) {
+                    let output = if let Some(cached) = tool_cache.lock().unwrap().get(&tc.function_name, &tc.args) {
                         cached
                     } else {
                         let result = match registry.execute(&tc.function_name, tc.args.clone(), ctx.clone()) {
@@ -623,12 +621,13 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                             }
                         };
 
-                        tool_cache.put(&tc.function_name, &tc.args, &tc.id, &result);
+                        let mut cache = tool_cache.lock().unwrap();
+                        cache.put(&tc.function_name, &tc.args, &tc.id, &result);
 
                         // Invalidate cache entries when write operations modify files
                         if matches!(tc.function_name.as_str(), "edit" | "write" | "patch") {
                             if let Some(path) = tc.args.get("file_path").and_then(|v| v.as_str()) {
-                                tool_cache.invalidate_path(path);
+                                cache.invalidate_path(path);
                             }
                         }
 
@@ -660,7 +659,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
                     tracing::info!(tool = %tc.function_name, "executing allowed tool (sequential)");
 
-                    let output = if let Some(cached) = tool_cache.get(&tc.function_name, &tc.args) {
+                    let output = if let Some(cached) = tool_cache.lock().unwrap().get(&tc.function_name, &tc.args) {
                         cached
                     } else {
                         let result = match registry.execute(&tc.function_name, tc.args.clone(), ctx.clone()) {
@@ -675,12 +674,13 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                             }
                         };
 
-                        tool_cache.put(&tc.function_name, &tc.args, &tc.id, &result);
+                        let mut cache = tool_cache.lock().unwrap();
+                        cache.put(&tc.function_name, &tc.args, &tc.id, &result);
 
                         // Invalidate cache entries when write operations modify files
                         if matches!(tc.function_name.as_str(), "edit" | "write" | "patch") {
                             if let Some(path) = tc.args.get("file_path").and_then(|v| v.as_str()) {
-                                tool_cache.invalidate_path(path);
+                                cache.invalidate_path(path);
                             }
                         }
 

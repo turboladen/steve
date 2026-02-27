@@ -24,6 +24,7 @@ use crate::session::types::SessionInfo;
 use crate::session::SessionManager;
 use crate::storage::Storage;
 use crate::stream::{self, StreamRequest};
+use crate::context::cache::ToolResultCache;
 use crate::tool::{ToolContext, ToolRegistry};
 use crate::ui;
 use crate::ui::input::InputState;
@@ -65,6 +66,9 @@ pub struct App {
 
     /// Permission engine (shared with stream tasks via Arc<Mutex>).
     permission_engine: Arc<tokio::sync::Mutex<PermissionEngine>>,
+
+    /// Tool result cache (shared across stream tasks within a session).
+    tool_cache: Arc<std::sync::Mutex<ToolResultCache>>,
 
     // UI state
     pub input: InputState,
@@ -121,6 +125,11 @@ impl App {
             PermissionEngine::new(crate::permission::build_mode_rules()),
         ));
 
+        // Build tool result cache (session-scoped, shared across stream tasks)
+        let tool_cache = Arc::new(std::sync::Mutex::new(
+            ToolResultCache::new(project.root.clone()),
+        ));
+
         // Build startup messages
         let mut messages = Vec::new();
         if config.providers.is_empty() {
@@ -145,6 +154,7 @@ impl App {
             current_session: None,
             tool_registry,
             permission_engine,
+            tool_cache,
             stored_messages: Vec::new(),
             input: InputState::default(),
             messages,
@@ -655,6 +665,7 @@ impl App {
                 project_root: self.project.root.clone(),
             }),
             permission_engine: Some(self.permission_engine.clone()),
+            tool_cache: self.tool_cache.clone(),
             cancel_token,
         });
 
@@ -896,6 +907,9 @@ impl App {
                 self.is_loading = false;
                 self.exchange_count = 0;
                 self.current_session = None;
+                // Reset tool result cache for the new session
+                *self.tool_cache.lock().unwrap() =
+                    ToolResultCache::new(self.project.root.clone());
                 self.ensure_session();
                 self.message_area_state.scroll_to_bottom();
                 self.messages.push(DisplayMessage {
