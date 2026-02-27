@@ -156,8 +156,21 @@ pub fn render_messages(
         lines.push(Line::from(""));
     }
 
-    // Calculate scroll for auto-scroll behavior
-    let content_height = lines.len() as u16;
+    // Calculate scroll for auto-scroll behavior.
+    // We must account for line wrapping: each line may occupy multiple rows
+    // when the Paragraph widget wraps it to fit the available width.
+    let available_width = area.width.max(1) as usize;
+    let content_height: u16 = lines
+        .iter()
+        .map(|line| {
+            let line_width: usize = line.width();
+            if line_width == 0 {
+                1 // blank lines still take one row
+            } else {
+                ((line_width + available_width - 1) / available_width) as u16
+            }
+        })
+        .sum();
     let visible_height = area.height.saturating_sub(2); // account for block borders
     if state.auto_scroll && content_height > visible_height {
         state.scroll_offset = content_height.saturating_sub(visible_height);

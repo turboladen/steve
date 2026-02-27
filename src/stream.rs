@@ -16,8 +16,7 @@ use async_openai::{
         ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
         ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
         ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
-        ChatCompletionResponseStream, ChatCompletionStreamOptions,
-        ChatCompletionTool, ChatCompletionTools,
+        ChatCompletionResponseStream, ChatCompletionTool, ChatCompletionTools,
         CreateChatCompletionRequest, FunctionCall, FunctionObject, FinishReason,
     },
     Client,
@@ -139,10 +138,6 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             model: model.clone(),
             messages: messages.clone(),
             stream: Some(true),
-            stream_options: Some(ChatCompletionStreamOptions {
-                include_usage: Some(true),
-                include_obfuscation: None,
-            }),
             ..Default::default()
         };
 
