@@ -368,6 +368,40 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         let mut sorted_indices: Vec<u32> = pending_tool_calls.keys().cloned().collect();
         sorted_indices.sort();
 
+        // Filter out truncated tool calls (common when finish_reason=Length).
+        // The last tool call's JSON arguments are often cut off mid-stream.
+        let pre_filter_count = sorted_indices.len();
+        sorted_indices.retain(|idx| {
+            let tc = &pending_tool_calls[idx];
+            match serde_json::from_str::<Value>(&tc.arguments) {
+                Ok(_) => true,
+                Err(e) => {
+                    tracing::warn!(
+                        tool = %tc.function_name,
+                        call_id = %tc.id,
+                        error = %e,
+                        "dropping tool call with truncated/invalid JSON arguments"
+                    );
+                    false
+                }
+            }
+        });
+        if sorted_indices.len() < pre_filter_count {
+            tracing::info!(
+                dropped = pre_filter_count - sorted_indices.len(),
+                remaining = sorted_indices.len(),
+                "filtered out truncated tool calls"
+            );
+        }
+
+        if sorted_indices.is_empty() {
+            tracing::info!("all tool calls were truncated — finishing stream");
+            let _ = event_tx.send(AppEvent::LlmFinish {
+                usage: Some(total_usage),
+            });
+            return Ok(());
+        }
+
         tracing::info!(count = sorted_indices.len(), "executing tool calls");
 
         // Build the assistant message with tool calls for the conversation history
