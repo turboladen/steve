@@ -3,7 +3,7 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
@@ -124,64 +124,85 @@ pub fn render_status_line(
     theme: &Theme,
     mode: AgentMode,
 ) {
-    let mut left_spans: Vec<Span> = Vec::new();
+    let mut spans: Vec<Span> = Vec::new();
 
-    // Spinner + activity text
+    // Left side: mode | model | tokens/context (pct%)
+    let mode_color = match mode {
+        AgentMode::Build => theme.mode_build,
+        AgentMode::Plan => theme.mode_plan,
+    };
+    spans.push(Span::styled(
+        format!(" {} ", mode.display_name()),
+        Style::default().fg(theme.bg).bg(mode_color).add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::raw(" "));
+
+    if !state.model_name.is_empty() {
+        spans.push(Span::styled(
+            state.model_name.clone(),
+            Style::default().fg(theme.fg),
+        ));
+    }
+
+    if state.context_window > 0 {
+        let pct = state.context_usage_pct();
+        let token_color = if pct >= 80 {
+            theme.error
+        } else if pct >= 50 {
+            theme.warning
+        } else {
+            theme.dim
+        };
+        spans.push(Span::styled(
+            " \u{2502} ",
+            Style::default().fg(theme.border),
+        ));
+        spans.push(Span::styled(
+            format!(
+                "{}/{} ({}%)",
+                format_tokens(state.total_tokens),
+                format_tokens(state.context_window),
+                pct,
+            ),
+            Style::default().fg(token_color),
+        ));
+    } else if state.total_tokens > 0 {
+        spans.push(Span::styled(
+            " \u{2502} ",
+            Style::default().fg(theme.border),
+        ));
+        spans.push(Span::styled(
+            format_tokens(state.total_tokens),
+            Style::default().fg(theme.dim),
+        ));
+    }
+
+    // Right side: spinner + activity text
+    let mut right_spans: Vec<Span> = Vec::new();
     if let Some(spinner) = state.spinner_char() {
-        left_spans.push(Span::styled(
+        right_spans.push(Span::styled(
             format!("{spinner} "),
             Style::default().fg(theme.accent),
         ));
     }
     let activity = state.activity_text();
     if !activity.is_empty() {
-        left_spans.push(Span::styled(
+        right_spans.push(Span::styled(
             activity,
             Style::default().fg(theme.accent),
         ));
     }
 
-    // Right side: model | tokens/context (pct%) | mode
-    let mut right_parts: Vec<String> = Vec::new();
-
-    if !state.model_name.is_empty() {
-        right_parts.push(state.model_name.clone());
-    }
-
-    if state.context_window > 0 {
-        let pct = state.context_usage_pct();
-        right_parts.push(format!(
-            "{}/{} ({}%)",
-            format_tokens(state.total_tokens),
-            format_tokens(state.context_window),
-            pct,
-        ));
-    } else if state.total_tokens > 0 {
-        right_parts.push(format_tokens(state.total_tokens));
-    }
-
-    right_parts.push(mode.display_name().to_string());
-
-    let right_text = right_parts.join(" \u{2502} ");
-    let pct = state.context_usage_pct();
-    let right_color = if pct >= 80 {
-        theme.error
-    } else if pct >= 50 {
-        theme.warning
-    } else {
-        theme.dim
-    };
-
-    // Calculate padding
-    let left_width: usize = left_spans.iter().map(|s| s.width()).sum();
-    let right_width = right_text.chars().count();
+    // Calculate padding between left and right
+    let left_width: usize = spans.iter().map(|s| s.width()).sum();
+    let right_width: usize = right_spans.iter().map(|s| s.width()).sum();
     let available = area.width as usize;
     let padding = available.saturating_sub(left_width + right_width);
 
-    left_spans.push(Span::raw(" ".repeat(padding)));
-    left_spans.push(Span::styled(right_text, Style::default().fg(right_color)));
+    spans.push(Span::raw(" ".repeat(padding)));
+    spans.extend(right_spans);
 
-    let line = Line::from(left_spans);
+    let line = Line::from(spans);
     let block = Block::default().borders(Borders::NONE);
     let paragraph = Paragraph::new(line).block(block);
     frame.render_widget(paragraph, area);
