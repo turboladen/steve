@@ -255,7 +255,13 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                     match result {
                         Ok(response) => {
                             // Check for usage in the final chunk
-                            if let Some(u) = response.usage {
+                            if let Some(u) = &response.usage {
+                                tracing::info!(
+                                    prompt = u.prompt_tokens,
+                                    completion = u.completion_tokens,
+                                    total = u.total_tokens,
+                                    "usage data received in stream chunk"
+                                );
                                 total_usage.prompt_tokens += u.prompt_tokens;
                                 total_usage.completion_tokens += u.completion_tokens;
                                 total_usage.total_tokens += u.total_tokens;
@@ -337,6 +343,12 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 finish_reason = ?finish_reason,
                 pending_tool_calls = pending_tool_calls.len(),
                 "stream finished (no tool calls)"
+            );
+            tracing::info!(
+                prompt = total_usage.prompt_tokens,
+                completion = total_usage.completion_tokens,
+                total = total_usage.total_tokens,
+                "final usage totals"
             );
             let _ = event_tx.send(AppEvent::LlmFinish {
                 usage: Some(total_usage),
