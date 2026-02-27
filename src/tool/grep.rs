@@ -7,12 +7,12 @@ use grep::searcher::sinks::UTF8;
 use grep::searcher::Searcher;
 use ignore::WalkBuilder;
 
-use super::{ToolContext, ToolDef, ToolEntry, ToolOutput};
+use super::{ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput};
 
 pub fn tool() -> ToolEntry {
     ToolEntry {
         def: ToolDef {
-            name: "grep".to_string(),
+            name: ToolName::Grep,
             description: "Search for a regex pattern across files in the project. Returns matching lines with file paths and line numbers.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",

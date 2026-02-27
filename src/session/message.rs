@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::tool::ToolName;
+
 /// Role of a message participant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -43,7 +45,7 @@ pub enum MessagePart {
     #[serde(rename = "tool_call")]
     ToolCall {
         call_id: String,
-        tool_name: String,
+        tool_name: ToolName,
         input: serde_json::Value,
         state: ToolCallState,
     },
@@ -52,7 +54,7 @@ pub enum MessagePart {
     #[serde(rename = "tool_result")]
     ToolResult {
         call_id: String,
-        tool_name: String,
+        tool_name: ToolName,
         output: String,
         title: String,
         is_error: bool,
@@ -161,7 +163,7 @@ mod tests {
         let mut msg = Message::assistant("s", "before");
         msg.parts.push(MessagePart::ToolCall {
             call_id: "c1".into(),
-            tool_name: "read".into(),
+            tool_name: ToolName::Read,
             input: serde_json::json!({}),
             state: ToolCallState::Completed,
         });

@@ -22,6 +22,18 @@ The project uses Rust edition 2024.
 cargo test              # Run all tests
 ```
 
+### Testing Policy
+
+Every change that introduces new types, trait impls, or behavior must include unit tests. Specifically:
+
+- **New enums**: `FromStr`/`Display` round-trip for all variants, serde round-trip, rejection of invalid input
+- **Match arms**: Prefer explicit variant lists over `_ =>` wildcards — exhaustive matching is a primary safety mechanism
+- **Helper methods** (e.g., `is_write_tool()`): Exhaustive assertions covering every variant, not just spot checks
+- **Parse functions**: Valid inputs, invalid inputs, edge cases (empty string, extra whitespace)
+- **Refactors**: Existing tests passing is necessary but not sufficient — new logic paths need dedicated tests
+
+Run `cargo test` after every change. Aim for tests that break if someone adds a new variant without updating all the relevant match arms.
+
 Logs are written to `{data_dir}/logs/steve.log` (daily rolling via `tracing-appender`). Data dir is resolved via `directories::ProjectDirs` — on macOS: `~/Library/Application Support/steve/`, on Linux: `~/.local/share/steve/`.
 
 ## Configuration

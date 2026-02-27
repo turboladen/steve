@@ -4,12 +4,12 @@ use serde_json::Value;
 
 use ignore::WalkBuilder;
 
-use super::{ToolContext, ToolDef, ToolEntry, ToolOutput};
+use super::{ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput};
 
 pub fn tool() -> ToolEntry {
     ToolEntry {
         def: ToolDef {
-            name: "list".to_string(),
+            name: ToolName::List,
             description: "List files and directories at a given path. Respects .gitignore. Shows file types (file/dir) and sizes.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",

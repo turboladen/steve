@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::tool::ToolOutput;
+use crate::tool::{ToolName, ToolOutput};
 
 /// Cached result from a tool execution.
 #[derive(Clone)]
@@ -49,13 +49,13 @@ impl ToolResultCache {
     }
 
     /// Try to get a cached result. Returns the compact reference string if cached.
-    pub fn get(&mut self, tool_name: &str, args: &Value) -> Option<ToolOutput> {
+    pub fn get(&mut self, tool_name: ToolName, args: &Value) -> Option<ToolOutput> {
         let key = self.cache_key(tool_name, args)?;
 
         if let Some(cached) = self.entries.get(&key) {
             self.hits += 1;
             tracing::info!(
-                tool = tool_name,
+                tool = %tool_name,
                 key = %key,
                 hits = self.hits,
                 "cache hit"
@@ -78,7 +78,7 @@ impl ToolResultCache {
     /// Store a tool result in the cache.
     pub fn put(
         &mut self,
-        tool_name: &str,
+        tool_name: ToolName,
         args: &Value,
         tool_call_id: &str,
         output: &ToolOutput,
@@ -149,9 +149,9 @@ impl ToolResultCache {
 
     /// Build a cache key for a tool invocation.
     /// Returns None for tools that should not be cached (bash, write tools).
-    fn cache_key(&self, tool_name: &str, args: &Value) -> Option<String> {
+    fn cache_key(&self, tool_name: ToolName, args: &Value) -> Option<String> {
         match tool_name {
-            "read" => {
+            ToolName::Read => {
                 let path = args.get("path")?.as_str()?;
                 let normalized = self.normalize_path(path);
                 let offset = args
@@ -165,7 +165,7 @@ impl ToolResultCache {
                     .unwrap_or_else(|| "all".to_string());
                 Some(format!("read:{}:{}:{}", normalized.display(), offset, limit))
             }
-            "grep" => {
+            ToolName::Grep => {
                 let pattern = args.get("pattern")?.as_str()?;
                 let path = args
                     .get("path")
@@ -178,7 +178,7 @@ impl ToolResultCache {
                     .unwrap_or("");
                 Some(format!("grep:{}:{}:{}", pattern, normalized.display(), include))
             }
-            "glob" => {
+            ToolName::Glob => {
                 let pattern = args.get("pattern")?.as_str()?;
                 let path = args
                     .get("path")
@@ -187,7 +187,7 @@ impl ToolResultCache {
                 let normalized = self.normalize_path(path);
                 Some(format!("glob:{}:{}", pattern, normalized.display()))
             }
-            "list" => {
+            ToolName::List => {
                 let path = args
                     .get("path")
                     .and_then(|v| v.as_str())
@@ -200,22 +200,21 @@ impl ToolResultCache {
                 Some(format!("list:{}:{}", normalized.display(), depth))
             }
             // Don't cache tools with side effects
-            "bash" | "edit" | "write" | "patch" | "question" | "todo" | "webfetch" => None,
-            _ => None,
+            ToolName::Bash | ToolName::Edit | ToolName::Write | ToolName::Patch
+            | ToolName::Question | ToolName::Todo | ToolName::Webfetch => None,
         }
     }
 
     /// Extract the primary file path referenced by a tool invocation.
-    fn extract_path(&self, tool_name: &str, args: &Value) -> Option<PathBuf> {
+    fn extract_path(&self, tool_name: ToolName, args: &Value) -> Option<PathBuf> {
         match tool_name {
-            "read" | "list" => {
+            ToolName::Read | ToolName::List => {
                 let path = args.get("path")?.as_str()?;
                 Some(self.normalize_path(path))
             }
-            // grep and glob operate on directories, so we don't track them
-            // for path-based invalidation (they're invalidated when any file
-            // in their scope changes, which is too broad to be useful).
-            _ => None,
+            ToolName::Grep | ToolName::Glob | ToolName::Edit | ToolName::Write
+            | ToolName::Patch | ToolName::Bash | ToolName::Question | ToolName::Todo
+            | ToolName::Webfetch => None,
         }
     }
 
@@ -245,6 +244,7 @@ impl ToolResultCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool::ToolName;
     use serde_json::json;
 
     fn test_cache() -> ToolResultCache {
@@ -265,13 +265,13 @@ mod tests {
         let args = json!({"path": "src/main.rs"});
 
         // Miss
-        assert!(cache.get("read", &args).is_none());
+        assert!(cache.get(ToolName::Read, &args).is_none());
 
         // Put
-        cache.put("read", &args, "call_1", &test_output("file content"));
+        cache.put(ToolName::Read, &args, "call_1", &test_output("file content"));
 
         // Hit
-        let result = cache.get("read", &args);
+        let result = cache.get(ToolName::Read, &args);
         assert!(result.is_some());
         assert!(result.unwrap().output.contains("Cached"));
     }
@@ -281,12 +281,12 @@ mod tests {
         let mut cache = test_cache();
         let args = json!({"path": "src/main.rs"});
 
-        cache.put("read", &args, "call_1", &test_output("content"));
-        assert!(cache.get("read", &args).is_some());
+        cache.put(ToolName::Read, &args, "call_1", &test_output("content"));
+        assert!(cache.get(ToolName::Read, &args).is_some());
 
         // Invalidate
         cache.invalidate_path("src/main.rs");
-        assert!(cache.get("read", &args).is_none());
+        assert!(cache.get(ToolName::Read, &args).is_none());
     }
 
     #[test]
@@ -295,9 +295,9 @@ mod tests {
         let args = json!({"command": "ls"});
 
         // bash should not be cacheable
-        assert!(cache.get("bash", &args).is_none());
-        cache.put("bash", &args, "call_1", &test_output("output"));
-        assert!(cache.get("bash", &args).is_none());
+        assert!(cache.get(ToolName::Bash, &args).is_none());
+        cache.put(ToolName::Bash, &args, "call_1", &test_output("output"));
+        assert!(cache.get(ToolName::Bash, &args).is_none());
     }
 
     #[test]
@@ -306,18 +306,18 @@ mod tests {
 
         // Cache a grep result
         let grep_args = json!({"pattern": "fn main", "path": "src/"});
-        cache.put("grep", &grep_args, "call_1", &test_output("src/main.rs:1: fn main()"));
-        assert!(cache.get("grep", &grep_args).is_some());
+        cache.put(ToolName::Grep, &grep_args, "call_1", &test_output("src/main.rs:1: fn main()"));
+        assert!(cache.get(ToolName::Grep, &grep_args).is_some());
 
         // Cache a glob result
         let glob_args = json!({"pattern": "**/*.rs"});
-        cache.put("glob", &glob_args, "call_2", &test_output("src/main.rs\nsrc/lib.rs"));
-        assert!(cache.get("glob", &glob_args).is_some());
+        cache.put(ToolName::Glob, &glob_args, "call_2", &test_output("src/main.rs\nsrc/lib.rs"));
+        assert!(cache.get(ToolName::Glob, &glob_args).is_some());
 
         // Editing any file should invalidate grep and glob entries
         cache.invalidate_path("src/other.rs");
-        assert!(cache.get("grep", &grep_args).is_none());
-        assert!(cache.get("glob", &glob_args).is_none());
+        assert!(cache.get(ToolName::Grep, &grep_args).is_none());
+        assert!(cache.get(ToolName::Glob, &glob_args).is_none());
     }
 
     #[test]
@@ -331,7 +331,7 @@ mod tests {
             is_error: true,
         };
 
-        cache.put("read", &args, "call_1", &error_output);
-        assert!(cache.get("read", &args).is_none());
+        cache.put(ToolName::Read, &args, "call_1", &error_output);
+        assert!(cache.get(ToolName::Read, &args).is_none());
     }
 }

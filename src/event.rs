@@ -2,7 +2,7 @@ use crossterm::event::Event;
 use serde_json::Value;
 
 use crate::permission::types::PermissionRequest;
-use crate::tool::ToolOutput;
+use crate::tool::{ToolName, ToolOutput};
 
 #[derive(Debug)]
 pub enum AppEvent {
@@ -19,18 +19,18 @@ pub enum AppEvent {
     LlmToolCallStreaming {
         /// Number of tool calls seen so far in this response.
         count: usize,
-        tool_name: String,
+        tool_name: ToolName,
     },
     /// A tool call has been assembled from the stream and is ready to execute.
     LlmToolCall {
         call_id: String,
-        tool_name: String,
+        tool_name: ToolName,
         arguments: Value,
     },
     /// A tool call has finished executing.
     ToolResult {
         call_id: String,
-        tool_name: String,
+        tool_name: ToolName,
         output: ToolOutput,
     },
     /// The LLM stream has finished (no more tool calls). Contains token usage if available.

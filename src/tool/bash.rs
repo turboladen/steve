@@ -6,14 +6,14 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use super::{ToolContext, ToolDef, ToolEntry, ToolOutput};
+use super::{ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput};
 
 pub fn tool() -> ToolEntry {
     let def_json = definition();
     let func = def_json.get("function").unwrap();
     ToolEntry {
         def: ToolDef {
-            name: "bash".to_string(),
+            name: ToolName::Bash,
             description: func.get("description").unwrap().as_str().unwrap().to_string(),
             parameters: func.get("parameters").cloned().unwrap(),
         },

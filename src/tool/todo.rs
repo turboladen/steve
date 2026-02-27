@@ -3,14 +3,14 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use super::{ToolContext, ToolDef, ToolEntry, ToolOutput};
+use super::{ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput};
 
 pub fn tool() -> ToolEntry {
     let def_json = definition();
     let func = def_json.get("function").unwrap();
     ToolEntry {
         def: ToolDef {
-            name: "todo".to_string(),
+            name: ToolName::Todo,
             description: func.get("description").unwrap().as_str().unwrap().to_string(),
             parameters: func.get("parameters").cloned().unwrap(),
         },
@@ -59,21 +59,87 @@ pub struct TodoItem {
     pub done: bool,
 }
 
+/// Actions available for the todo tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TodoAction {
+    Add,
+    Complete,
+    Remove,
+    List,
+    Clear,
+}
+
+impl std::str::FromStr for TodoAction {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "add" => Ok(TodoAction::Add),
+            "complete" => Ok(TodoAction::Complete),
+            "remove" => Ok(TodoAction::Remove),
+            "list" => Ok(TodoAction::List),
+            "clear" => Ok(TodoAction::Clear),
+            _ => Err(format!(
+                "Unknown action: {s}. Use add, complete, remove, list, or clear."
+            )),
+        }
+    }
+}
+
 /// Get a snapshot of the current todos.
 pub fn get_todos() -> Vec<TodoItem> {
     TODOS.lock().unwrap().clone()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn todo_action_from_str_valid() {
+        assert_eq!("add".parse::<TodoAction>().unwrap(), TodoAction::Add);
+        assert_eq!("complete".parse::<TodoAction>().unwrap(), TodoAction::Complete);
+        assert_eq!("remove".parse::<TodoAction>().unwrap(), TodoAction::Remove);
+        assert_eq!("list".parse::<TodoAction>().unwrap(), TodoAction::List);
+        assert_eq!("clear".parse::<TodoAction>().unwrap(), TodoAction::Clear);
+    }
+
+    #[test]
+    fn todo_action_from_str_invalid() {
+        assert!("unknown".parse::<TodoAction>().is_err());
+        assert!("ADD".parse::<TodoAction>().is_err()); // case-sensitive
+        assert!("".parse::<TodoAction>().is_err());
+    }
+
+    #[test]
+    fn todo_action_error_message_is_helpful() {
+        let err = "bogus".parse::<TodoAction>().unwrap_err();
+        assert!(err.contains("bogus"), "error should include the bad input");
+        assert!(err.contains("add"), "error should list valid actions");
+    }
+}
+
 fn execute(args: Value, _ctx: ToolContext) -> Result<ToolOutput> {
-    let action = args
+    let action_str = args
         .get("action")
         .and_then(|v| v.as_str())
         .context("missing 'action' parameter")?;
 
+    let action = match action_str.parse::<TodoAction>() {
+        Ok(a) => a,
+        Err(msg) => {
+            return Ok(ToolOutput {
+                title: "Todo".to_string(),
+                output: msg,
+                is_error: true,
+            });
+        }
+    };
+
     let mut todos = TODOS.lock().unwrap();
 
     match action {
-        "add" => {
+        TodoAction::Add => {
             let text = args
                 .get("text")
                 .and_then(|v| v.as_str())
@@ -88,7 +154,7 @@ fn execute(args: Value, _ctx: ToolContext) -> Result<ToolOutput> {
                 is_error: false,
             })
         }
-        "complete" => {
+        TodoAction::Complete => {
             let index = args
                 .get("index")
                 .and_then(|v| v.as_u64())
@@ -108,7 +174,7 @@ fn execute(args: Value, _ctx: ToolContext) -> Result<ToolOutput> {
                 })
             }
         }
-        "remove" => {
+        TodoAction::Remove => {
             let index = args
                 .get("index")
                 .and_then(|v| v.as_u64())
@@ -128,7 +194,7 @@ fn execute(args: Value, _ctx: ToolContext) -> Result<ToolOutput> {
                 })
             }
         }
-        "list" => {
+        TodoAction::List => {
             if todos.is_empty() {
                 Ok(ToolOutput {
                     title: "Todo: list".to_string(),
@@ -152,7 +218,7 @@ fn execute(args: Value, _ctx: ToolContext) -> Result<ToolOutput> {
                 })
             }
         }
-        "clear" => {
+        TodoAction::Clear => {
             let count = todos.len();
             todos.clear();
             Ok(ToolOutput {
@@ -161,10 +227,5 @@ fn execute(args: Value, _ctx: ToolContext) -> Result<ToolOutput> {
                 is_error: false,
             })
         }
-        _ => Ok(ToolOutput {
-            title: "Todo".to_string(),
-            output: format!("Unknown action: {action}. Use add, complete, remove, list, or clear."),
-            is_error: true,
-        }),
     }
 }

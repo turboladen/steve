@@ -4,12 +4,12 @@ use serde_json::Value;
 
 use ignore::WalkBuilder;
 
-use super::{ToolContext, ToolDef, ToolEntry, ToolOutput};
+use super::{ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput};
 
 pub fn tool() -> ToolEntry {
     ToolEntry {
         def: ToolDef {
-            name: "glob".to_string(),
+            name: ToolName::Glob,
             description: "Find files matching a glob pattern in the project. Returns relative paths. Respects .gitignore.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",

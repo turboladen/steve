@@ -2,12 +2,12 @@
 
 use serde_json::Value;
 
-use super::{ToolContext, ToolDef, ToolEntry, ToolOutput};
+use super::{ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput};
 
 pub fn tool() -> ToolEntry {
     ToolEntry {
         def: ToolDef {
-            name: "read".to_string(),
+            name: ToolName::Read,
             description: "Read the contents of a file. Optionally specify a line range.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",

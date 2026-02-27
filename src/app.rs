@@ -41,7 +41,7 @@ Preserve specific technical details, file paths, and code patterns.";
 
 /// A permission prompt waiting for user input.
 struct PendingPermission {
-    tool_name: String,
+    tool_name: crate::tool::ToolName,
     #[allow(dead_code)]
     summary: String,
     response_tx: tokio::sync::oneshot::Sender<PermissionReply>,
@@ -928,14 +928,24 @@ impl App {
     }
 
     async fn handle_command(&mut self, text: &str) -> Result<()> {
-        let parts: Vec<&str> = text.splitn(2, ' ').collect();
-        let cmd = parts[0];
+        use crate::command::Command;
 
-        match cmd {
-            "/exit" => {
+        let command = match Command::parse(text) {
+            Ok(cmd) => cmd,
+            Err(msg) => {
+                self.messages.push(DisplayMessage {
+                    role: DisplayRole::Error,
+                    text: msg,
+                });
+                return Ok(());
+            }
+        };
+
+        match command {
+            Command::Exit => {
                 self.should_quit = true;
             }
-            "/new" => {
+            Command::New => {
                 // Create a fresh session
                 self.messages.clear();
                 self.stored_messages.clear();
@@ -956,54 +966,46 @@ impl App {
                 });
                 self.update_sidebar();
             }
-            "/rename" => {
-                if let Some(title) = parts.get(1) {
-                    if let Some(session) = &self.current_session {
-                        let mgr = SessionManager::new(&self.storage, &self.project.id);
-                        let mut session = session.clone();
-                        let _ = mgr.rename_session(&mut session, title.trim());
-                        self.current_session = Some(session);
-                        self.messages.push(DisplayMessage {
-                            role: DisplayRole::System,
-                            text: format!("Session renamed to: {}", title.trim()),
-                        });
-                        self.update_sidebar();
+            Command::Rename(title) => {
+                if let Some(session) = &self.current_session {
+                    let mgr = SessionManager::new(&self.storage, &self.project.id);
+                    let mut session = session.clone();
+                    let _ = mgr.rename_session(&mut session, &title);
+                    self.current_session = Some(session);
+                    self.messages.push(DisplayMessage {
+                        role: DisplayRole::System,
+                        text: format!("Session renamed to: {title}"),
+                    });
+                    self.update_sidebar();
+                }
+            }
+            Command::Model(model_ref) => {
+                if let Some(registry) = &self.provider_registry {
+                    match registry.resolve_model(&model_ref) {
+                        Ok(_) => {
+                            self.current_model = Some(model_ref.to_string());
+                            self.messages.push(DisplayMessage {
+                                role: DisplayRole::System,
+                                text: format!("Switched to model: {model_ref}"),
+                            });
+                            self.update_sidebar();
+                        }
+                        Err(e) => {
+                            self.messages.push(DisplayMessage {
+                                role: DisplayRole::Error,
+                                text: format!("{e}"),
+                            });
+                        }
                     }
                 } else {
                     self.messages.push(DisplayMessage {
-                        role: DisplayRole::System,
-                        text: "Usage: /rename <title>".to_string(),
+                        role: DisplayRole::Error,
+                        text: "No providers configured.".to_string(),
                     });
                 }
             }
-            "/models" | "/model" => {
-                if let Some(model_ref) = parts.get(1).map(|s| s.trim()) {
-                    // Switch to a specific model
-                    if let Some(registry) = &self.provider_registry {
-                        match registry.resolve_model(model_ref) {
-                            Ok(_) => {
-                                self.current_model = Some(model_ref.to_string());
-                                self.messages.push(DisplayMessage {
-                                    role: DisplayRole::System,
-                                    text: format!("Switched to model: {model_ref}"),
-                                });
-                                self.update_sidebar();
-                            }
-                            Err(e) => {
-                                self.messages.push(DisplayMessage {
-                                    role: DisplayRole::Error,
-                                    text: format!("{e}"),
-                                });
-                            }
-                        }
-                    } else {
-                        self.messages.push(DisplayMessage {
-                            role: DisplayRole::Error,
-                            text: "No providers configured.".to_string(),
-                        });
-                    }
-                } else if let Some(registry) = &self.provider_registry {
-                    // List available models
+            Command::Models => {
+                if let Some(registry) = &self.provider_registry {
                     let models = registry.list_models();
                     if models.is_empty() {
                         self.messages.push(DisplayMessage {
@@ -1035,8 +1037,7 @@ impl App {
                     });
                 }
             }
-            "/init" => {
-                // Create a default AGENTS.md in the project root
+            Command::Init => {
                 let agents_path = self.project.root.join("AGENTS.md");
                 if agents_path.exists() {
                     self.messages.push(DisplayMessage {
@@ -1062,7 +1063,7 @@ impl App {
                     }
                 }
             }
-            "/compact" => {
+            Command::Compact => {
                 // Guard: must have a session with messages
                 if self.current_session.is_none() || self.stored_messages.is_empty() {
                     self.messages.push(DisplayMessage {
@@ -1161,16 +1162,10 @@ impl App {
                     }
                 });
             }
-            "/help" => {
+            Command::Help => {
                 self.messages.push(DisplayMessage {
                     role: DisplayRole::System,
                     text: "Commands:\n  /new        — Start a new session\n  /rename <t> — Rename current session\n  /models     — List available models\n  /model <r>  — Switch to a model\n  /compact    — Compact conversation into a summary\n  /init       — Create AGENTS.md in project root\n  /help       — Show this help\n  /exit       — Quit\n\nKeys:\n  Tab         — Toggle Build/Plan mode\n  Ctrl+C      — Cancel stream / quit\n  Mouse wheel — Scroll messages".to_string(),
-                });
-            }
-            _ => {
-                self.messages.push(DisplayMessage {
-                    role: DisplayRole::Error,
-                    text: format!("Unknown command: {cmd}. Type /help for available commands."),
                 });
             }
         }

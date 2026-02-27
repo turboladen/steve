@@ -11,6 +11,8 @@ use async_openai::types::chat::{
     ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
 };
 
+use crate::tool::ToolName;
+
 /// Compress tool results that the LLM has already seen.
 ///
 /// `messages` is the full conversation being built for the next API call.
@@ -60,12 +62,10 @@ pub fn compress_old_tool_results(
             }
 
             let tool_call_id = tool_msg.tool_call_id.clone();
-            let tool_name = tool_name_map
-                .get(&tool_call_id)
-                .map(|s| s.as_str())
-                .unwrap_or("unknown");
-
-            let compressed = compress_tool_output(tool_name, &content);
+            let compressed = match tool_name_map.get(&tool_call_id) {
+                Some(&name) => compress_tool_output(name, &content),
+                None => compress_generic(&content),
+            };
 
             saved_chars += content.len().saturating_sub(compressed.len());
             compressed_count += 1;
@@ -107,39 +107,36 @@ fn extract_text(msg: &ChatCompletionRequestToolMessage) -> String {
 }
 
 /// Build a mapping from tool_call_id to tool_name by scanning assistant messages.
-fn build_tool_name_map(messages: &[ChatCompletionRequestMessage]) -> HashMap<String, String> {
+fn build_tool_name_map(messages: &[ChatCompletionRequestMessage]) -> HashMap<String, ToolName> {
     let mut map = HashMap::new();
-
     for msg in messages {
         if let ChatCompletionRequestMessage::Assistant(assistant) = msg {
             if let Some(tool_calls) = &assistant.tool_calls {
                 for tc in tool_calls {
                     if let ChatCompletionMessageToolCalls::Function(func_call) = tc {
-                        map.insert(
-                            func_call.id.clone(),
-                            func_call.function.name.clone(),
-                        );
+                        if let Ok(name) = func_call.function.name.parse::<ToolName>() {
+                            map.insert(func_call.id.clone(), name);
+                        }
                     }
                 }
             }
         }
     }
-
     map
 }
 
 /// Compress a tool output into a compact summary based on the tool type.
-fn compress_tool_output(tool_name: &str, content: &str) -> String {
+fn compress_tool_output(tool_name: ToolName, content: &str) -> String {
     match tool_name {
-        "read" => compress_read(content),
-        "grep" => compress_grep(content),
-        "glob" => compress_glob(content),
-        "list" => compress_list(content),
-        "bash" => compress_bash(content),
-        "edit" => compress_edit(content),
-        "write" => compress_write(content),
-        "patch" => compress_patch(content),
-        _ => compress_generic(content),
+        ToolName::Read => compress_read(content),
+        ToolName::Grep => compress_grep(content),
+        ToolName::Glob => compress_glob(content),
+        ToolName::List => compress_list(content),
+        ToolName::Bash => compress_bash(content),
+        ToolName::Edit => compress_edit(content),
+        ToolName::Write => compress_write(content),
+        ToolName::Patch => compress_patch(content),
+        ToolName::Question | ToolName::Todo | ToolName::Webfetch => compress_generic(content),
     }
 }
 
