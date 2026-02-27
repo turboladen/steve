@@ -83,9 +83,11 @@ Example `steve.json`:
 
 | Key | Action |
 |-----|--------|
-| Tab | Toggle Build/Plan mode |
-| Ctrl+C | Cancel current stream (first press) / quit (second press) |
 | Enter | Send message |
+| Shift+Enter | Insert newline |
+| Tab | Cycle autocomplete / toggle Build–Plan mode |
+| Ctrl+C | Cancel stream (first press) / quit (second press) |
+| Ctrl+B | Toggle sidebar (auto → hide → show → auto) |
 | Mouse wheel | Scroll messages |
 
 ## Architecture
@@ -158,7 +160,9 @@ Messages are stored one-per-file under `messages/{session_id}/{message_id}.json`
 
 Built with ratatui 0.29 + crossterm 0.28 + tui-textarea 0.7 (version-pinned for compatibility). Sidebar appears at terminal width >= 120. The TUI owns stdout, so all logging goes to a file via `tracing-appender`.
 
-Messages render with role-based styling via `DisplayRole` enum: `User`, `Assistant`, `Tool`, `ToolResult`, `Error`, `System`, `Permission` — each mapped to distinct theme colors in `message_area.rs`.
+Messages render as `MessageBlock` variants: `User`, `Assistant` (with thinking/tool_groups), `System`, `Error`, `Permission`. Styled per-variant in `message_area.rs`. Permission prompts render as bold yellow blocks with highlighted key letters.
+
+The input area is a 2-line starship-style prompt: context line (`[Mode] ~/path tokens/ctx (%)`) above a `> ` chevron input. No status bar — activity spinner displays inline in the message area via `activity: Option<(char, String)>` parameter. `render_input` takes an `InputContext` struct. Sidebar visibility uses `sidebar_override: Option<bool>` (None=auto, Some=forced).
 
 Auto-scroll calculates content height using wrapped line widths (not `lines.len()`) since `Paragraph` uses `Wrap { trim: false }`. This is critical — using unwrapped line count causes scroll to undershoot on long messages, hiding new content below the visible area. The height sum uses `u32` internally, capped at `u16::MAX` to prevent overflow on very long conversations.
 
@@ -175,6 +179,8 @@ Auto-scroll calculates content height using wrapped line widths (not `lines.len(
 - **html2text v0.14** `from_read()` returns `Result<String, Error>`, not `String`
 - **tracing** outputs to file appender, never stdout (TUI owns stdout)
 - **No `unreachable!()` in stream tasks** — panics in the stream tokio task crash silently. Use graceful error handling with `tracing::error!` instead
+- **No `dirs` crate** — use `std::env::var("HOME")` for home directory detection, or `directories::ProjectDirs` for app data paths
+- **`Storage::new(project_id: &str)`** returns `Result<Self>` — takes a project ID string (not a path). For tests: `Storage::new("test-name").expect("test storage")`
 - `AGENTS.md` in the project root is optional — if present, it's loaded at startup and injected as part of the system prompt. Create one with `/init`
 
 ## Provider Compatibility
