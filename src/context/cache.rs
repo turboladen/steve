@@ -53,7 +53,7 @@ impl ToolResultCache {
 
         if let Some(cached) = self.entries.get(&key) {
             self.hits += 1;
-            tracing::debug!(
+            tracing::info!(
                 tool = tool_name,
                 key = %key,
                 hits = self.hits,
@@ -138,7 +138,7 @@ impl ToolResultCache {
         }
 
         if invalidated > 0 {
-            tracing::debug!(
+            tracing::info!(
                 path = %normalized.display(),
                 invalidated,
                 "cache entries invalidated"

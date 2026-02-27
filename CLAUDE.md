@@ -22,7 +22,7 @@ The project uses Rust edition 2024.
 cargo test              # Run all tests
 ```
 
-Logs are written to `~/.local/share/steve/logs/steve.log` (daily rolling via `tracing-appender`).
+Logs are written to `{data_dir}/logs/steve.log` (daily rolling via `tracing-appender`). Data dir is resolved via `directories::ProjectDirs` — on macOS: `~/Library/Application Support/steve/`, on Linux: `~/.local/share/steve/`.
 
 ## Configuration
 
@@ -135,7 +135,7 @@ Available tools: `read`, `grep`, `glob`, `list`, `edit`, `write`, `patch`, `bash
 
 ### Storage (`storage/mod.rs`)
 
-Flat JSON files under `~/.local/share/steve/storage/{project_id}/`. Key paths map to filesystem paths: `["sessions", "abc123"]` → `sessions/abc123.json`. Uses `fs2` file locking (shared for reads, exclusive for writes) and atomic writes via tmp+rename.
+Flat JSON files under `{data_dir}/storage/{project_id}/` (see Data Locations for platform paths). Key paths map to filesystem paths: `["sessions", "abc123"]` → `sessions/abc123.json`. Uses `fs2` file locking (shared for reads, exclusive for writes) and atomic writes via tmp+rename.
 
 Project ID is derived from the git root commit hash (deterministic across clones). Falls back to a hash of CWD for non-git directories.
 
@@ -163,5 +163,6 @@ Auto-scroll calculates content height using wrapped line widths (not `lines.len(
 
 ## Data Locations
 
-- **Storage**: `~/.local/share/steve/storage/{project_id}/` — sessions, messages, project metadata
-- **Logs**: `~/.local/share/steve/logs/steve.log` — daily rolling tracing output
+- **Data dir**: macOS `~/Library/Application Support/steve/`, Linux `~/.local/share/steve/` (via `directories::ProjectDirs`)
+- **Storage**: `{data_dir}/storage/{project_id}/` — sessions, messages, project metadata
+- **Logs**: `{data_dir}/logs/steve.log` — daily rolling tracing output

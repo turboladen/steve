@@ -80,7 +80,7 @@ pub fn compress_old_tool_results(
     }
 
     if compressed_count > 0 {
-        tracing::debug!(
+        tracing::info!(
             compressed = compressed_count,
             saved_chars = saved_chars,
             "compressed old tool results"
