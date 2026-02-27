@@ -65,7 +65,7 @@ fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
             .unwrap_or("")
             .to_string(),
         ToolName::Edit | ToolName::Write | ToolName::Patch => args
-            .get("path")
+            .get("file_path")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
@@ -419,10 +419,10 @@ impl App {
                 self.status_line_state.activity = Activity::Idle;
 
                 // Remove trailing empty assistant message if present
-                if let Some(last) = self.messages.last() {
-                    if last.is_empty_assistant() {
-                        self.messages.pop();
-                    }
+                if let Some(last) = self.messages.last()
+                    && last.is_empty_assistant()
+                {
+                    self.messages.pop();
                 }
 
                 // Save the completed assistant message to storage
@@ -666,10 +666,10 @@ impl App {
         self.streaming_message = None;
 
         // Remove trailing empty assistant message
-        if let Some(last) = self.messages.last() {
-            if last.is_empty_assistant() {
-                self.messages.pop();
-            }
+        if let Some(last) = self.messages.last()
+            && last.is_empty_assistant()
+        {
+            self.messages.pop();
         }
         self.messages.push(MessageBlock::System {
             text: "cancelled".to_string(),
@@ -1272,19 +1272,19 @@ mod tests {
 
     #[test]
     fn extract_args_summary_edit_path() {
-        let args = json!({"path": "src/lib.rs", "old_string": "x", "new_string": "y"});
+        let args = json!({"file_path": "src/lib.rs", "old_string": "x", "new_string": "y"});
         assert_eq!(extract_args_summary(ToolName::Edit, &args), "src/lib.rs");
     }
 
     #[test]
     fn extract_args_summary_write_path() {
-        let args = json!({"path": "new_file.txt", "content": "hello"});
+        let args = json!({"file_path": "new_file.txt", "content": "hello"});
         assert_eq!(extract_args_summary(ToolName::Write, &args), "new_file.txt");
     }
 
     #[test]
     fn extract_args_summary_patch_path() {
-        let args = json!({"path": "src/app.rs", "diff": "..."});
+        let args = json!({"file_path": "src/app.rs", "diff": "..."});
         assert_eq!(extract_args_summary(ToolName::Patch, &args), "src/app.rs");
     }
 

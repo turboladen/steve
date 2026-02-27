@@ -174,7 +174,7 @@ pub fn render_status_line(
 
     // Calculate padding
     let left_width: usize = left_spans.iter().map(|s| s.width()).sum();
-    let right_width = right_text.len();
+    let right_width = right_text.chars().count();
     let available = area.width as usize;
     let padding = available.saturating_sub(left_width + right_width);
 
