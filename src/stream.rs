@@ -325,16 +325,31 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             }
         }
 
-        // Stream ended — check if we have tool calls to execute
-        if pending_tool_calls.is_empty()
-            || !matches!(finish_reason, Some(FinishReason::ToolCalls))
-        {
-            // No tool calls — we're done
-            tracing::info!("stream finished (no tool calls)");
+        // Stream ended — check if we have tool calls to execute.
+        // Some providers don't set finish_reason=tool_calls reliably,
+        // so we check for accumulated tool call fragments regardless.
+        let has_valid_tool_calls = pending_tool_calls
+            .values()
+            .any(|tc| !tc.id.is_empty() && !tc.function_name.is_empty());
+
+        if pending_tool_calls.is_empty() || !has_valid_tool_calls {
+            tracing::info!(
+                finish_reason = ?finish_reason,
+                pending_tool_calls = pending_tool_calls.len(),
+                "stream finished (no tool calls)"
+            );
             let _ = event_tx.send(AppEvent::LlmFinish {
                 usage: Some(total_usage),
             });
             return Ok(());
+        }
+
+        if !matches!(finish_reason, Some(FinishReason::ToolCalls)) {
+            tracing::warn!(
+                finish_reason = ?finish_reason,
+                tool_call_count = pending_tool_calls.len(),
+                "finish_reason is not ToolCalls but tool calls were streamed — executing anyway"
+            );
         }
 
         // We have tool calls — execute them and loop
@@ -427,13 +442,23 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
         // Partition: auto-allowed read-only tools can run in parallel.
         // Write tools (edit, write, patch) always go to sequential phase for
-        // cache invalidation, even if they have AllowAlways permission.
+        // cache invalidation and permission prompts.
         let is_write_tool = |name: &str| matches!(name, "edit" | "write" | "patch");
         let (auto_allowed, needs_interaction): (Vec<_>, Vec<_>) = prepared
             .into_iter()
             .partition(|tc| {
                 matches!(tc.action, PermissionAction::Allow) && !is_write_tool(&tc.function_name)
             });
+
+        // Log partition results for diagnostics
+        if !needs_interaction.is_empty() {
+            let tool_names: Vec<&str> = needs_interaction.iter().map(|tc| tc.function_name.as_str()).collect();
+            tracing::info!(
+                count = needs_interaction.len(),
+                tools = ?tool_names,
+                "tools requiring sequential/permission handling"
+            );
+        }
 
         // ── Phase 2: Execute auto-allowed tools in parallel ──
         // These are read-only tools that don't need user permission.
