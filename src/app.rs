@@ -598,6 +598,13 @@ impl App {
                 // Update permission rules for the new mode
                 self.sync_permission_mode();
             }
+            (KeyCode::Enter, KeyModifiers::SHIFT) => {
+                // Shift+Enter: insert newline in textarea (forward as plain Enter)
+                self.input.textarea.input(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                ));
+            }
             (KeyCode::Enter, KeyModifiers::NONE) => {
                 if !self.is_loading {
                     let text = self.input.take_text();
