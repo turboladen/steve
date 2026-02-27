@@ -30,6 +30,7 @@ use crate::ui;
 use crate::ui::input::InputState;
 use crate::ui::message_area::{DisplayMessage, DisplayRole, MessageAreaState};
 use crate::ui::sidebar::SidebarState;
+use crate::ui::status_line::StatusLineState;
 use crate::ui::theme::Theme;
 
 /// System prompt for conversation compaction/summarization.
@@ -76,6 +77,7 @@ pub struct App {
     pub message_area_state: MessageAreaState,
     pub sidebar_state: SidebarState,
     pub theme: Theme,
+    pub status_line_state: StatusLineState,
     pub is_loading: bool,
 
     /// Stored messages for the current session (for building conversation history).
@@ -164,6 +166,7 @@ impl App {
             message_area_state: MessageAreaState::default(),
             sidebar_state: SidebarState::default(),
             theme: Theme::default(),
+            status_line_state: StatusLineState::default(),
             is_loading: false,
             streaming_active: false,
             streaming_message: None,

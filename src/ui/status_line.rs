@@ -1,6 +1,17 @@
 //! Status line state and rendering for the TUI footer.
 
+use ratatui::{
+    Frame,
+    layout::Rect,
+    style::Style,
+    text::{Line, Span},
+    widgets::{Block, Borders, Paragraph},
+};
+
 use crate::tool::ToolName;
+
+use super::input::AgentMode;
+use super::theme::Theme;
 
 /// Braille spinner frames, cycled on each 100ms tick.
 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
@@ -92,6 +103,88 @@ impl StatusLineState {
             ((self.total_tokens as f64 / self.context_window as f64) * 100.0).min(100.0) as u8
         }
     }
+}
+
+/// Format a token count with K/M suffixes.
+fn format_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+/// Render the status line into the given 1-row area.
+pub fn render_status_line(
+    frame: &mut Frame,
+    area: Rect,
+    state: &StatusLineState,
+    theme: &Theme,
+    mode: AgentMode,
+) {
+    let mut left_spans: Vec<Span> = Vec::new();
+
+    // Spinner + activity text
+    if let Some(spinner) = state.spinner_char() {
+        left_spans.push(Span::styled(
+            format!("{spinner} "),
+            Style::default().fg(theme.accent),
+        ));
+    }
+    let activity = state.activity_text();
+    if !activity.is_empty() {
+        left_spans.push(Span::styled(
+            activity,
+            Style::default().fg(theme.accent),
+        ));
+    }
+
+    // Right side: model | tokens/context (pct%) | mode
+    let mut right_parts: Vec<String> = Vec::new();
+
+    if !state.model_name.is_empty() {
+        right_parts.push(state.model_name.clone());
+    }
+
+    if state.context_window > 0 {
+        let pct = state.context_usage_pct();
+        right_parts.push(format!(
+            "{}/{} ({}%)",
+            format_tokens(state.total_tokens),
+            format_tokens(state.context_window),
+            pct,
+        ));
+    } else if state.total_tokens > 0 {
+        right_parts.push(format_tokens(state.total_tokens));
+    }
+
+    right_parts.push(mode.display_name().to_string());
+
+    let right_text = right_parts.join(" \u{2502} ");
+    let pct = state.context_usage_pct();
+    let right_color = if pct >= 80 {
+        theme.error
+    } else if pct >= 50 {
+        theme.warning
+    } else {
+        theme.dim
+    };
+
+    // Calculate padding
+    let left_width: usize = left_spans.iter().map(|s| s.width()).sum();
+    let right_width = right_text.len();
+    let available = area.width as usize;
+    let padding = available.saturating_sub(left_width + right_width);
+
+    left_spans.push(Span::raw(" ".repeat(padding)));
+    left_spans.push(Span::styled(right_text, Style::default().fg(right_color)));
+
+    let line = Line::from(left_spans);
+    let block = Block::default().borders(Borders::NONE);
+    let paragraph = Paragraph::new(line).block(block);
+    frame.render_widget(paragraph, area);
 }
 
 #[cfg(test)]
@@ -217,5 +310,27 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(state.context_usage_pct(), 100);
+    }
+
+    #[test]
+    fn format_tokens_small() {
+        assert_eq!(format_tokens(0), "0");
+        assert_eq!(format_tokens(1), "1");
+        assert_eq!(format_tokens(999), "999");
+    }
+
+    #[test]
+    fn format_tokens_thousands() {
+        assert_eq!(format_tokens(1_000), "1.0k");
+        assert_eq!(format_tokens(12_800), "12.8k");
+        assert_eq!(format_tokens(128_000), "128.0k");
+        assert_eq!(format_tokens(999_999), "1000.0k");
+    }
+
+    #[test]
+    fn format_tokens_millions() {
+        assert_eq!(format_tokens(1_000_000), "1.0M");
+        assert_eq!(format_tokens(2_500_000), "2.5M");
+        assert_eq!(format_tokens(10_000_000), "10.0M");
     }
 }

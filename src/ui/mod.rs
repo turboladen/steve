@@ -21,6 +21,7 @@ use layout::compute_layout;
 use message_area::render_messages;
 use input::render_input;
 use sidebar::render_sidebar;
+use status_line::render_status_line;
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -74,6 +75,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         &app.theme,
     );
 
-    // Status line rendering will be wired up in Task 6
-    let _ = layout.status_line;
+    render_status_line(
+        frame,
+        layout.status_line,
+        &app.status_line_state,
+        &app.theme,
+        app.input.mode,
+    );
 }
