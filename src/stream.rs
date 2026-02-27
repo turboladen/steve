@@ -12,11 +12,13 @@ use async_openai::{
     config::OpenAIConfig,
     types::chat::{
         ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
-        ChatCompletionRequestAssistantMessage, ChatCompletionRequestMessage,
+        ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
+        ChatCompletionRequestMessage,
         ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
         ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
         ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
-        ChatCompletionResponseStream, ChatCompletionTool, ChatCompletionTools,
+        ChatCompletionResponseStream, ChatCompletionStreamOptions,
+        ChatCompletionTool, ChatCompletionTools,
         CreateChatCompletionRequest, FunctionCall, FunctionObject, FinishReason,
     },
     Client,
@@ -26,6 +28,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::context::cache::ToolResultCache;
 use crate::event::{AppEvent, StreamUsage};
 use crate::permission::PermissionEngine;
 use crate::permission::types::{PermissionAction, PermissionReply, PermissionRequest};
@@ -43,6 +46,7 @@ pub struct StreamRequest {
     pub tool_registry: Option<std::sync::Arc<ToolRegistry>>,
     pub tool_context: Option<ToolContext>,
     pub permission_engine: Option<std::sync::Arc<tokio::sync::Mutex<PermissionEngine>>>,
+    pub tool_cache: std::sync::Arc<std::sync::Mutex<ToolResultCache>>,
     pub cancel_token: CancellationToken,
 }
 
@@ -75,6 +79,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         tool_registry,
         tool_context,
         permission_engine,
+        tool_cache,
         cancel_token,
     } = req;
 
@@ -122,6 +127,10 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
     });
 
     let mut total_usage = StreamUsage::default();
+    let mut current_iteration_tool_count: usize = 0;
+
+    // Tool result cache — shared across stream tasks within a session.
+    // Avoids re-executing identical read operations across messages.
 
     // Tool call loop — keep going until the LLM produces a response with no tool calls
     loop {
@@ -134,10 +143,56 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             return Ok(());
         }
 
+        // Compress old tool results from prior iterations to reduce token usage.
+        // Only tool results from the current iteration (which the LLM hasn't seen yet)
+        // are kept uncompressed.
+        if current_iteration_tool_count > 0 || messages.iter().any(|m| matches!(m, ChatCompletionRequestMessage::Tool(_))) {
+            crate::context::compressor::compress_old_tool_results(
+                &mut messages,
+                current_iteration_tool_count,
+            );
+        }
+
+        // Reset counter for the next iteration
+        current_iteration_tool_count = 0;
+
+        // Estimate payload size for diagnostics
+        let payload_chars: usize = messages.iter().map(|m| {
+            match m {
+                ChatCompletionRequestMessage::System(s) => match &s.content {
+                    ChatCompletionRequestSystemMessageContent::Text(t) => t.len(),
+                    _ => 0,
+                },
+                ChatCompletionRequestMessage::User(u) => match &u.content {
+                    ChatCompletionRequestUserMessageContent::Text(t) => t.len(),
+                    _ => 0,
+                },
+                ChatCompletionRequestMessage::Assistant(a) => match &a.content {
+                    Some(ChatCompletionRequestAssistantMessageContent::Text(t)) => t.len(),
+                    _ => 0,
+                },
+                ChatCompletionRequestMessage::Tool(t) => match &t.content {
+                    ChatCompletionRequestToolMessageContent::Text(t) => t.len(),
+                    _ => 0,
+                },
+                _ => 0,
+            }
+        }).sum();
+        tracing::info!(
+            message_count = messages.len(),
+            payload_chars,
+            estimated_tokens = payload_chars / 4,
+            "sending request to LLM"
+        );
+
         let mut request = CreateChatCompletionRequest {
             model: model.clone(),
             messages: messages.clone(),
             stream: Some(true),
+            stream_options: Some(ChatCompletionStreamOptions {
+                include_usage: Some(true),
+                include_obfuscation: None,
+            }),
             ..Default::default()
         };
 
@@ -148,9 +203,16 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         }
 
         // Open the stream
+        let stream_start = std::time::Instant::now();
         let mut stream: ChatCompletionResponseStream =
             match client.chat().create_stream(request).await {
-                Ok(s) => s,
+                Ok(s) => {
+                    tracing::info!(
+                        elapsed_ms = stream_start.elapsed().as_millis() as u64,
+                        "stream connection opened"
+                    );
+                    s
+                }
                 Err(e) => {
                     tracing::error!(error = %e, "failed to start stream");
                     let _ = event_tx.send(AppEvent::LlmError {
@@ -164,6 +226,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         let mut pending_tool_calls: HashMap<u32, PendingToolCall> = HashMap::new();
         let mut finish_reason: Option<FinishReason> = None;
         let mut assistant_content = String::new();
+        let mut first_token_logged = false;
 
         // Process chunks — use select! to check cancellation while streaming
         loop {
@@ -181,10 +244,24 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                         break;
                     };
 
+                    if !first_token_logged {
+                        first_token_logged = true;
+                        tracing::info!(
+                            ttft_ms = stream_start.elapsed().as_millis() as u64,
+                            "first token received"
+                        );
+                    }
+
                     match result {
                         Ok(response) => {
                             // Check for usage in the final chunk
-                            if let Some(u) = response.usage {
+                            if let Some(u) = &response.usage {
+                                tracing::info!(
+                                    prompt = u.prompt_tokens,
+                                    completion = u.completion_tokens,
+                                    total = u.total_tokens,
+                                    "usage data received in stream chunk"
+                                );
                                 total_usage.prompt_tokens += u.prompt_tokens;
                                 total_usage.completion_tokens += u.completion_tokens;
                                 total_usage.total_tokens += u.total_tokens;
@@ -221,6 +298,19 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                                             }
                                         }
                                     }
+
+                                    // Notify UI when new tool calls appear
+                                    // (done outside the entry borrow to satisfy the borrow checker)
+                                    for tc in tool_calls {
+                                        if tc.function.as_ref().and_then(|f| f.name.as_ref()).is_some() {
+                                            if let Some(entry) = pending_tool_calls.get(&tc.index) {
+                                                let _ = event_tx.send(AppEvent::LlmToolCallStreaming {
+                                                    count: pending_tool_calls.len(),
+                                                    tool_name: entry.function_name.clone(),
+                                                });
+                                            }
+                                        }
+                                    }
                                 }
 
                                 // Track finish reason
@@ -241,16 +331,37 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             }
         }
 
-        // Stream ended — check if we have tool calls to execute
-        if pending_tool_calls.is_empty()
-            || !matches!(finish_reason, Some(FinishReason::ToolCalls))
-        {
-            // No tool calls — we're done
-            tracing::info!("stream finished (no tool calls)");
+        // Stream ended — check if we have tool calls to execute.
+        // Some providers don't set finish_reason=tool_calls reliably,
+        // so we check for accumulated tool call fragments regardless.
+        let has_valid_tool_calls = pending_tool_calls
+            .values()
+            .any(|tc| !tc.id.is_empty() && !tc.function_name.is_empty());
+
+        if pending_tool_calls.is_empty() || !has_valid_tool_calls {
+            tracing::info!(
+                finish_reason = ?finish_reason,
+                pending_tool_calls = pending_tool_calls.len(),
+                "stream finished (no tool calls)"
+            );
+            tracing::info!(
+                prompt = total_usage.prompt_tokens,
+                completion = total_usage.completion_tokens,
+                total = total_usage.total_tokens,
+                "final usage totals"
+            );
             let _ = event_tx.send(AppEvent::LlmFinish {
                 usage: Some(total_usage),
             });
             return Ok(());
+        }
+
+        if !matches!(finish_reason, Some(FinishReason::ToolCalls)) {
+            tracing::warn!(
+                finish_reason = ?finish_reason,
+                tool_call_count = pending_tool_calls.len(),
+                "finish_reason is not ToolCalls but tool calls were streamed — executing anyway"
+            );
         }
 
         // We have tool calls — execute them and loop
@@ -268,6 +379,40 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         // Sort tool calls by index for deterministic ordering
         let mut sorted_indices: Vec<u32> = pending_tool_calls.keys().cloned().collect();
         sorted_indices.sort();
+
+        // Filter out truncated tool calls (common when finish_reason=Length).
+        // The last tool call's JSON arguments are often cut off mid-stream.
+        let pre_filter_count = sorted_indices.len();
+        sorted_indices.retain(|idx| {
+            let tc = &pending_tool_calls[idx];
+            match serde_json::from_str::<Value>(&tc.arguments) {
+                Ok(_) => true,
+                Err(e) => {
+                    tracing::warn!(
+                        tool = %tc.function_name,
+                        call_id = %tc.id,
+                        error = %e,
+                        "dropping tool call with truncated/invalid JSON arguments"
+                    );
+                    false
+                }
+            }
+        });
+        if sorted_indices.len() < pre_filter_count {
+            tracing::info!(
+                dropped = pre_filter_count - sorted_indices.len(),
+                remaining = sorted_indices.len(),
+                "filtered out truncated tool calls"
+            );
+        }
+
+        if sorted_indices.is_empty() {
+            tracing::info!("all tool calls were truncated — finishing stream");
+            let _ = event_tx.send(AppEvent::LlmFinish {
+                usage: Some(total_usage),
+            });
+            return Ok(());
+        }
 
         tracing::info!(count = sorted_indices.len(), "executing tool calls");
 
@@ -307,9 +452,186 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             },
         ));
 
-        // Execute each tool call and add results
+        // ── Phase 1: Pre-check permissions and partition tool calls ──
+        // Check permissions for all tool calls up front, then partition into
+        // auto-allowed (can run in parallel) vs needs-interaction (sequential).
+
+        struct PreparedToolCall {
+            idx: u32,
+            id: String,
+            function_name: String,
+            args: Value,
+            action: PermissionAction,
+        }
+
+        let mut prepared: Vec<PreparedToolCall> = Vec::new();
+
         for idx in &sorted_indices {
-            // Check for cancellation between tool calls
+            let tc = &pending_tool_calls[idx];
+            let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
+
+            let action = if let Some(ref engine) = permission_engine {
+                let engine = engine.lock().await;
+                engine.check(&tc.function_name, None)
+            } else {
+                PermissionAction::Allow
+            };
+
+            prepared.push(PreparedToolCall {
+                idx: *idx,
+                id: tc.id.clone(),
+                function_name: tc.function_name.clone(),
+                args,
+                action,
+            });
+        }
+
+        // Partition: auto-allowed read-only tools can run in parallel.
+        // Write tools (edit, write, patch) always go to sequential phase for
+        // cache invalidation and permission prompts.
+        let is_write_tool = |name: &str| matches!(name, "edit" | "write" | "patch");
+        let (auto_allowed, needs_interaction): (Vec<_>, Vec<_>) = prepared
+            .into_iter()
+            .partition(|tc| {
+                matches!(tc.action, PermissionAction::Allow) && !is_write_tool(&tc.function_name)
+            });
+
+        // Log partition results for diagnostics
+        if !needs_interaction.is_empty() {
+            let tool_names: Vec<&str> = needs_interaction.iter().map(|tc| tc.function_name.as_str()).collect();
+            tracing::info!(
+                count = needs_interaction.len(),
+                tools = ?tool_names,
+                "tools requiring sequential/permission handling"
+            );
+        }
+
+        // ── Phase 2: Execute auto-allowed tools in parallel ──
+        // These are read-only tools that don't need user permission.
+
+        // First, check cache for each. Only spawn tasks for cache misses.
+        struct ParallelTask {
+            id: String,
+            function_name: String,
+            args: Value,
+        }
+
+        let mut parallel_results: HashMap<String, crate::tool::ToolOutput> = HashMap::new();
+        let mut tasks_to_spawn: Vec<ParallelTask> = Vec::new();
+
+        for tc in &auto_allowed {
+            if let Some(cached) = tool_cache.lock().unwrap().get(&tc.function_name, &tc.args) {
+                tracing::debug!(tool = %tc.function_name, "using cached result (parallel)");
+                parallel_results.insert(tc.id.clone(), cached);
+            } else {
+                tasks_to_spawn.push(ParallelTask {
+                    id: tc.id.clone(),
+                    function_name: tc.function_name.clone(),
+                    args: tc.args.clone(),
+                });
+            }
+        }
+
+        if !tasks_to_spawn.is_empty() {
+            tracing::info!(
+                count = tasks_to_spawn.len(),
+                cached = auto_allowed.len() - tasks_to_spawn.len(),
+                "executing auto-allowed tools in parallel"
+            );
+
+            // Spawn all cache-miss tools in parallel via spawn_blocking
+            let handles: Vec<(String, String, Value, tokio::task::JoinHandle<anyhow::Result<crate::tool::ToolOutput>>)> =
+                tasks_to_spawn
+                    .into_iter()
+                    .map(|task| {
+                        let reg = registry.clone();
+                        let c = ctx.clone();
+                        let name = task.function_name.clone();
+                        let a = task.args.clone();
+                        let handle = tokio::task::spawn_blocking(move || {
+                            reg.execute(&name, a, c)
+                        });
+                        (task.id, task.function_name, task.args, handle)
+                    })
+                    .collect();
+
+            // Collect results
+            for (call_id, func_name, args, handle) in handles {
+                let output = match handle.await {
+                    Ok(Ok(output)) => output,
+                    Ok(Err(e)) => {
+                        tracing::error!(tool = %func_name, error = %e, "tool execution failed");
+                        crate::tool::ToolOutput {
+                            title: func_name.clone(),
+                            output: format!("Error: {e}"),
+                            is_error: true,
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(tool = %func_name, error = %e, "task join failed");
+                        crate::tool::ToolOutput {
+                            title: func_name.clone(),
+                            output: format!("Error: task panicked: {e}"),
+                            is_error: true,
+                        }
+                    }
+                };
+
+                // Cache the result
+                tool_cache.lock().unwrap().put(&func_name, &args, &call_id, &output);
+
+                parallel_results.insert(call_id, output);
+            }
+        }
+
+        // Emit events and add results for auto-allowed tools (in original order)
+        for tc in &auto_allowed {
+            if cancel_token.is_cancelled() {
+                tracing::info!("stream cancelled during tool result processing");
+                let _ = event_tx.send(AppEvent::LlmFinish {
+                    usage: Some(total_usage),
+                });
+                return Ok(());
+            }
+
+            let _ = event_tx.send(AppEvent::LlmToolCall {
+                call_id: tc.id.clone(),
+                tool_name: tc.function_name.clone(),
+                arguments: tc.args.clone(),
+            });
+
+            let output = parallel_results.remove(&tc.id).unwrap_or_else(|| {
+                tracing::error!(
+                    tool = %tc.function_name,
+                    call_id = %tc.id,
+                    "missing parallel result — inserting error to preserve conversation structure"
+                );
+                crate::tool::ToolOutput {
+                    title: tc.function_name.clone(),
+                    output: "Error: tool execution result was lost".to_string(),
+                    is_error: true,
+                }
+            });
+
+            let _ = event_tx.send(AppEvent::ToolResult {
+                call_id: tc.id.clone(),
+                tool_name: tc.function_name.clone(),
+                output: output.clone(),
+            });
+
+            messages.push(ChatCompletionRequestMessage::Tool(
+                ChatCompletionRequestToolMessage {
+                    content: ChatCompletionRequestToolMessageContent::Text(output.output),
+                    tool_call_id: tc.id.clone(),
+                },
+            ));
+            current_iteration_tool_count += 1;
+        }
+
+        // ── Phase 3: Execute permission-required tools sequentially ──
+        // These need user interaction (Ask) or are denied by policy.
+
+        for tc in &needs_interaction {
             if cancel_token.is_cancelled() {
                 tracing::info!("stream cancelled during tool execution");
                 let _ = event_tx.send(AppEvent::LlmFinish {
@@ -318,30 +640,13 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 return Ok(());
             }
 
-            let tc = &pending_tool_calls[idx];
-
-            // Parse arguments
-            let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
-
-            // Check permissions
-            let action = if let Some(ref engine) = permission_engine {
-                let engine = engine.lock().await;
-                engine.check(&tc.function_name, None)
-            } else {
-                PermissionAction::Allow
-            };
-
-            match action {
-                PermissionAction::Allow => {
-                    // Allowed — proceed directly
-                }
+            match tc.action {
                 PermissionAction::Deny => {
                     tracing::info!(tool = %tc.function_name, "tool call denied by policy");
-                    // Denied — report as tool error
                     let _ = event_tx.send(AppEvent::LlmToolCall {
                         call_id: tc.id.clone(),
                         tool_name: tc.function_name.clone(),
-                        arguments: args.clone(),
+                        arguments: tc.args.clone(),
                     });
 
                     let output = crate::tool::ToolOutput {
@@ -362,14 +667,11 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                             tool_call_id: tc.id.clone(),
                         },
                     ));
-                    continue;
+                    current_iteration_tool_count += 1;
                 }
                 PermissionAction::Ask => {
-                    // Need to ask the user — send a request and await their reply
                     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
-                    // Build a summary of what the tool wants to do
-                    let summary = build_permission_summary(&tc.function_name, &args);
+                    let summary = build_permission_summary(&tc.function_name, &tc.args);
 
                     let _ = event_tx.send(AppEvent::PermissionRequest(PermissionRequest {
                         call_id: tc.id.clone(),
@@ -378,7 +680,6 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                         response_tx,
                     }));
 
-                    // Wait for user response (also check cancellation)
                     tokio::select! {
                         _ = cancel_token.cancelled() => {
                             tracing::info!("stream cancelled while waiting for permission");
@@ -419,50 +720,118 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                                             tool_call_id: tc.id.clone(),
                                         },
                                     ));
+                                    current_iteration_tool_count += 1;
                                     continue;
                                 }
                             }
                         }
                     }
+
+                    // Permission granted — execute the tool
+                    let _ = event_tx.send(AppEvent::LlmToolCall {
+                        call_id: tc.id.clone(),
+                        tool_name: tc.function_name.clone(),
+                        arguments: tc.args.clone(),
+                    });
+
+                    tracing::info!(tool = %tc.function_name, "executing tool");
+
+                    let output = if let Some(cached) = tool_cache.lock().unwrap().get(&tc.function_name, &tc.args) {
+                        cached
+                    } else {
+                        let result = match registry.execute(&tc.function_name, tc.args.clone(), ctx.clone()) {
+                            Ok(output) => output,
+                            Err(e) => {
+                                tracing::error!(tool = %tc.function_name, error = %e, "tool execution failed");
+                                crate::tool::ToolOutput {
+                                    title: tc.function_name.clone(),
+                                    output: format!("Error: {e}"),
+                                    is_error: true,
+                                }
+                            }
+                        };
+
+                        let mut cache = tool_cache.lock().unwrap();
+                        cache.put(&tc.function_name, &tc.args, &tc.id, &result);
+
+                        // Invalidate cache entries when write operations modify files
+                        if matches!(tc.function_name.as_str(), "edit" | "write" | "patch") {
+                            if let Some(path) = tc.args.get("file_path").and_then(|v| v.as_str()) {
+                                cache.invalidate_path(path);
+                            }
+                        }
+
+                        result
+                    };
+
+                    let _ = event_tx.send(AppEvent::ToolResult {
+                        call_id: tc.id.clone(),
+                        tool_name: tc.function_name.clone(),
+                        output: output.clone(),
+                    });
+
+                    messages.push(ChatCompletionRequestMessage::Tool(
+                        ChatCompletionRequestToolMessage {
+                            content: ChatCompletionRequestToolMessageContent::Text(output.output),
+                            tool_call_id: tc.id.clone(),
+                        },
+                    ));
+                    current_iteration_tool_count += 1;
+                }
+                PermissionAction::Allow => {
+                    // Normally handled in Phase 2, but write tools with AllowAlways
+                    // are routed here for cache invalidation. Execute normally.
+                    let _ = event_tx.send(AppEvent::LlmToolCall {
+                        call_id: tc.id.clone(),
+                        tool_name: tc.function_name.clone(),
+                        arguments: tc.args.clone(),
+                    });
+
+                    tracing::info!(tool = %tc.function_name, "executing allowed tool (sequential)");
+
+                    let output = if let Some(cached) = tool_cache.lock().unwrap().get(&tc.function_name, &tc.args) {
+                        cached
+                    } else {
+                        let result = match registry.execute(&tc.function_name, tc.args.clone(), ctx.clone()) {
+                            Ok(output) => output,
+                            Err(e) => {
+                                tracing::error!(tool = %tc.function_name, error = %e, "tool execution failed");
+                                crate::tool::ToolOutput {
+                                    title: tc.function_name.clone(),
+                                    output: format!("Error: {e}"),
+                                    is_error: true,
+                                }
+                            }
+                        };
+
+                        let mut cache = tool_cache.lock().unwrap();
+                        cache.put(&tc.function_name, &tc.args, &tc.id, &result);
+
+                        // Invalidate cache entries when write operations modify files
+                        if matches!(tc.function_name.as_str(), "edit" | "write" | "patch") {
+                            if let Some(path) = tc.args.get("file_path").and_then(|v| v.as_str()) {
+                                cache.invalidate_path(path);
+                            }
+                        }
+
+                        result
+                    };
+
+                    let _ = event_tx.send(AppEvent::ToolResult {
+                        call_id: tc.id.clone(),
+                        tool_name: tc.function_name.clone(),
+                        output: output.clone(),
+                    });
+
+                    messages.push(ChatCompletionRequestMessage::Tool(
+                        ChatCompletionRequestToolMessage {
+                            content: ChatCompletionRequestToolMessageContent::Text(output.output),
+                            tool_call_id: tc.id.clone(),
+                        },
+                    ));
+                    current_iteration_tool_count += 1;
                 }
             }
-
-            // Notify UI about the tool call
-            let _ = event_tx.send(AppEvent::LlmToolCall {
-                call_id: tc.id.clone(),
-                tool_name: tc.function_name.clone(),
-                arguments: args.clone(),
-            });
-
-            tracing::info!(tool = %tc.function_name, "executing tool");
-
-            // Execute the tool
-            let output = match registry.execute(&tc.function_name, args, ctx.clone()) {
-                Ok(output) => output,
-                Err(e) => {
-                    tracing::error!(tool = %tc.function_name, error = %e, "tool execution failed");
-                    crate::tool::ToolOutput {
-                        title: tc.function_name.clone(),
-                        output: format!("Error: {e}"),
-                        is_error: true,
-                    }
-                }
-            };
-
-            // Notify UI about the tool result
-            let _ = event_tx.send(AppEvent::ToolResult {
-                call_id: tc.id.clone(),
-                tool_name: tc.function_name.clone(),
-                output: output.clone(),
-            });
-
-            // Add tool result to conversation for next LLM call
-            messages.push(ChatCompletionRequestMessage::Tool(
-                ChatCompletionRequestToolMessage {
-                    content: ChatCompletionRequestToolMessageContent::Text(output.output),
-                    tool_call_id: tc.id.clone(),
-                },
-            ));
         }
 
         // Loop back to send the messages (with tool results) to the LLM again

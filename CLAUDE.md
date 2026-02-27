@@ -16,9 +16,13 @@ cargo check            # Type-check without building
 RUST_LOG=steve=debug cargo run  # Override log level (default: steve=info)
 ```
 
-There are no tests yet. The project uses Rust edition 2024.
+The project uses Rust edition 2024.
 
-Logs are written to `~/.local/share/steve/logs/steve.log` (daily rolling via `tracing-appender`).
+```bash
+cargo test              # Run all tests
+```
+
+Logs are written to `{data_dir}/logs/steve.log` (daily rolling via `tracing-appender`). Data dir is resolved via `directories::ProjectDirs` — on macOS: `~/Library/Application Support/steve/`, on Linux: `~/.local/share/steve/`.
 
 ## Configuration
 
@@ -26,10 +30,14 @@ Steve reads `steve.json` or `steve.jsonc` from the project root. Config is alway
 
 Model references use `"provider_id/model_id"` format throughout (config, commands, internal types).
 
+Optional top-level fields: `small_model` (used for compaction/summarization, falls back to `model`), `auto_compact` (default `true` — auto-compacts at 80% context window usage).
+
 Example `steve.json`:
 ```jsonc
 {
   "model": "openai/gpt-4o",
+  // "small_model": "openai/gpt-4o-mini",  // optional: used for /compact
+  // "auto_compact": true,                  // optional: default true
   "providers": {
     "openai": {
       "base_url": "https://api.openai.com/v1",
@@ -55,6 +63,7 @@ Example `steve.json`:
 | `/rename <title>` | Rename current session |
 | `/models` | List available models |
 | `/model <ref>` | Switch to a model (e.g., `/model openai/gpt-4o`) |
+| `/compact` | Compact conversation into a summary (frees context window) |
 | `/init` | Create AGENTS.md in project root |
 | `/help` | Show help |
 | `/exit` | Quit |
@@ -83,7 +92,7 @@ The main loop in `app.rs` uses `tokio::select!` across these sources, then re-re
 
 ### LLM Stream + Tool Call Loop (`stream.rs`)
 
-A spawned tokio task opens an SSE stream via async-openai, processes chunks (sending `AppEvent::LlmDelta` to the UI), and accumulates tool call fragments. When the stream finishes with `FinishReason::ToolCalls`, it executes each tool (with permission checks), appends results as `ChatCompletionRequestToolMessage`s, and loops back to the LLM. This continues until the LLM produces a response with no tool calls.
+A spawned tokio task opens an SSE stream via async-openai, processes chunks (sending `AppEvent::LlmDelta` to the UI), and accumulates tool call fragments. When the stream finishes, it checks for valid tool call data (non-empty `id` and `function_name`) regardless of `finish_reason` — some providers (e.g., Fuel iX/litellm) don't reliably set `FinishReason::ToolCalls`. Tool calls with invalid/truncated JSON arguments (common when `finish_reason=Length`) are filtered out before execution. Valid tool calls are executed (with permission checks), results appended as `ChatCompletionRequestToolMessage`s, and the loop continues until no valid tool calls remain.
 
 Cancellation uses `tokio_util::sync::CancellationToken` with `select!` — the token is checked before each LLM call, during chunk processing, and between tool executions.
 
@@ -98,6 +107,26 @@ When a tool needs user permission, the stream task sends a `PermissionRequest` c
 
 Tab toggles between modes. Mode rules live in `permission/mod.rs` as `build_mode_rules()` / `plan_mode_rules()`.
 
+### Compaction (`/compact`)
+
+Summarizes the conversation into a single message to reclaim context window space. Uses a non-streaming `LlmClient::simple_chat()` call in a background tokio task, communicating results back via `AppEvent::CompactFinish` / `AppEvent::CompactError`. Uses `small_model` if configured, otherwise falls back to the main model. On completion, old messages are deleted from storage and replaced with a single assistant message containing the summary. Auto-compact triggers after `LlmFinish` when `session.token_usage.total_tokens >= context_window * 0.80` (controlled by `auto_compact` config). If compaction fails (`CompactError`), `auto_compact_failed` is set to suppress retries for the rest of the session (reset on `/new`). Manual `/compact` still works.
+
+### Context Management (`context/`)
+
+Reduces LLM API token usage via two subsystems in `src/context/`:
+- **Compressor** (`compressor.rs`): Before each LLM API call in the tool loop, replaces already-seen tool results with compact heuristic summaries (e.g., `"[Previously read: src/main.rs, 150 lines, Rust]"`). Preserves `tool_call_id` for valid conversation structure.
+- **Cache** (`cache.rs`): Session-scoped `ToolResultCache` lives in `App` behind `Arc<std::sync::Mutex<ToolResultCache>>`, passed to the stream task via `StreamRequest`. Maps `(tool_name, canonical_args)` → cached output. All tool cache keys normalize paths via `normalize_path()` (resolves relative paths against project root) for consistent matching. On cache hit, returns a compact reference instead of re-executing. Invalidated when write ops modify files — grep/glob entries are wholesale-invalidated since they can't be tracked by individual path. Reset on `/new` session.
+
+**Critical invariant**: Write tools (`edit`, `write`, `patch`) must never run in the parallel execution phase — they must go through the sequential phase for proper cache invalidation, even if they have `AllowAlways` permission.
+
+### Parallel Tool Execution (`stream.rs`)
+
+The tool call loop partitions pending tool calls into two phases:
+1. **Phase 2 (parallel)**: Read-only tools with `Allow` permission run via `spawn_blocking`. Write tools are excluded even with `AllowAlways`.
+2. **Phase 3 (sequential)**: Permission-required tools (Ask/Deny) and write tools. Handles permission handshake and cache invalidation.
+
+Every `tool_call_id` in an assistant message **must** have a corresponding tool result message — missing one causes an API error. The parallel phase uses `unwrap_or_else` with an error fallback to guarantee this.
+
 ### Tool System (`tool/mod.rs`)
 
 Tools are registered in `ToolRegistry` as `ToolEntry` structs containing a `ToolDef` (name, description, JSON schema) and a handler closure `Fn(Value, ToolContext) -> Result<ToolOutput>`. Tools are synchronous (not async) — they run inside the stream task's spawned tokio task.
@@ -106,7 +135,7 @@ Available tools: `read`, `grep`, `glob`, `list`, `edit`, `write`, `patch`, `bash
 
 ### Storage (`storage/mod.rs`)
 
-Flat JSON files under `~/.local/share/steve/storage/{project_id}/`. Key paths map to filesystem paths: `["sessions", "abc123"]` → `sessions/abc123.json`. Uses `fs2` file locking (shared for reads, exclusive for writes) and atomic writes via tmp+rename.
+Flat JSON files under `{data_dir}/storage/{project_id}/` (see Data Locations for platform paths). Key paths map to filesystem paths: `["sessions", "abc123"]` → `sessions/abc123.json`. Uses `fs2` file locking (shared for reads, exclusive for writes) and atomic writes via tmp+rename.
 
 Project ID is derived from the git root commit hash (deterministic across clones). Falls back to a hash of CWD for non-git directories.
 
@@ -118,17 +147,29 @@ Built with ratatui 0.29 + crossterm 0.28 + tui-textarea 0.7 (version-pinned for 
 
 Messages render with role-based styling via `DisplayRole` enum: `User`, `Assistant`, `Tool`, `ToolResult`, `Error`, `System`, `Permission` — each mapped to distinct theme colors in `message_area.rs`.
 
+Auto-scroll calculates content height using wrapped line widths (not `lines.len()`) since `Paragraph` uses `Wrap { trim: false }`. This is critical — using unwrapped line count causes scroll to undershoot on long messages, hiding new content below the visible area. The height sum uses `u32` internally, capped at `u16::MAX` to prevent overflow on very long conversations.
+
 ## Key Dependency Notes
 
 - **tui-textarea 0.7** requires ratatui 0.29 and crossterm 0.28 — do not upgrade independently
 - **async-openai 0.32** requires `features = ["chat-completion"]`; types live under `async_openai::types::chat::`, not `async_openai::types::`
-- **async-openai 0.32 tool types**: `ChatCompletionTools` (plural enum with `Function` variant), `ChatCompletionMessageToolCalls` (plural enum with `Function` variant). `ChatCompletionRequestAssistantMessage` requires `audio: None` and `function_call: None` fields
+- **async-openai 0.32 tool types**: `ChatCompletionTools` (plural enum with `Function` variant), `ChatCompletionMessageToolCalls` (plural enum with `Function` variant). `ChatCompletionRequestAssistantMessage` requires `audio: None` and `function_call: None` fields. `ChatCompletionStreamOptions` has `include_usage` and `include_obfuscation` fields
+- **stream_options is required**: `CreateChatCompletionRequest` must include `stream_options: Some(ChatCompletionStreamOptions { include_usage: Some(true), .. })` — without it, token usage is never reported and auto-compact cannot trigger
 - **jsonc-parser** requires `features = ["serde"]` for `parse_to_serde_value`
 - **html2text v0.14** `from_read()` returns `Result<String, Error>`, not `String`
 - **tracing** outputs to file appender, never stdout (TUI owns stdout)
+- **No `unreachable!()` in stream tasks** — panics in the stream tokio task crash silently. Use graceful error handling with `tracing::error!` instead
 - `AGENTS.md` in the project root is optional — if present, it's loaded at startup and injected as part of the system prompt. Create one with `/init`
+
+## Provider Compatibility
+
+Steve targets any OpenAI-compatible API. Known quirks with non-OpenAI providers (e.g., Fuel iX/litellm):
+- **`finish_reason`**: May not be `ToolCalls` even when tool calls are streamed — detect tool calls by checking for valid data, not finish reason
+- **`finish_reason=Length`**: Truncates the last tool call's JSON arguments mid-stream — validate JSON with `serde_json::from_str` before execution, drop invalid entries
+- **`stream_options`**: `include_usage: Some(true)` works with Fuel iX; without it, token usage is never reported
 
 ## Data Locations
 
-- **Storage**: `~/.local/share/steve/storage/{project_id}/` — sessions, messages, project metadata
-- **Logs**: `~/.local/share/steve/logs/steve.log` — daily rolling tracing output
+- **Data dir**: macOS `~/Library/Application Support/steve/`, Linux `~/.local/share/steve/` (via `directories::ProjectDirs`)
+- **Storage**: `{data_dir}/storage/{project_id}/` — sessions, messages, project metadata
+- **Logs**: `{data_dir}/logs/steve.log.YYYY-MM-DD` — daily rolling tracing output (date-suffixed by `tracing-appender`)

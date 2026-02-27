@@ -2,6 +2,7 @@
 
 mod app;
 mod config;
+mod context;
 mod event;
 mod permission;
 mod project;

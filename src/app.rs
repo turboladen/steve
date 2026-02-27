@@ -24,12 +24,20 @@ use crate::session::types::SessionInfo;
 use crate::session::SessionManager;
 use crate::storage::Storage;
 use crate::stream::{self, StreamRequest};
+use crate::context::cache::ToolResultCache;
 use crate::tool::{ToolContext, ToolRegistry};
 use crate::ui;
 use crate::ui::input::InputState;
 use crate::ui::message_area::{DisplayMessage, DisplayRole, MessageAreaState};
 use crate::ui::sidebar::SidebarState;
 use crate::ui::theme::Theme;
+
+/// System prompt for conversation compaction/summarization.
+const COMPACT_SYSTEM_PROMPT: &str = "Provide a detailed but concise summary of the conversation below. \
+Focus on information that would be helpful for continuing the conversation, including: \
+what was done, what is currently being worked on, which files are being modified, \
+decisions that were made, and what the next steps are. \
+Preserve specific technical details, file paths, and code patterns.";
 
 /// A permission prompt waiting for user input.
 struct PendingPermission {
@@ -59,6 +67,9 @@ pub struct App {
     /// Permission engine (shared with stream tasks via Arc<Mutex>).
     permission_engine: Arc<tokio::sync::Mutex<PermissionEngine>>,
 
+    /// Tool result cache (shared across stream tasks within a session).
+    tool_cache: Arc<std::sync::Mutex<ToolResultCache>>,
+
     // UI state
     pub input: InputState,
     pub messages: Vec<DisplayMessage>,
@@ -85,6 +96,9 @@ pub struct App {
 
     /// Cancellation token for the current stream task.
     stream_cancel: Option<CancellationToken>,
+
+    /// Whether auto-compact has failed in this session (suppresses retries).
+    auto_compact_failed: bool,
 
     // Runtime
     event_tx: mpsc::UnboundedSender<AppEvent>,
@@ -114,6 +128,11 @@ impl App {
             PermissionEngine::new(crate::permission::build_mode_rules()),
         ));
 
+        // Build tool result cache (session-scoped, shared across stream tasks)
+        let tool_cache = Arc::new(std::sync::Mutex::new(
+            ToolResultCache::new(project.root.clone()),
+        ));
+
         // Build startup messages
         let mut messages = Vec::new();
         if config.providers.is_empty() {
@@ -138,6 +157,7 @@ impl App {
             current_session: None,
             tool_registry,
             permission_engine,
+            tool_cache,
             stored_messages: Vec::new(),
             input: InputState::default(),
             messages,
@@ -150,6 +170,7 @@ impl App {
             exchange_count: 0,
             pending_permission: None,
             stream_cancel: None,
+            auto_compact_failed: false,
             event_tx,
             event_rx,
             should_quit: false,
@@ -263,6 +284,34 @@ impl App {
             }
 
             // -- Tool events --
+            AppEvent::LlmToolCallStreaming { count, tool_name } => {
+                // Update the last streaming indicator or add a new one
+                let text = if count == 1 {
+                    format!("Preparing: {tool_name}...")
+                } else {
+                    format!("Preparing {count} tool calls: {tool_name}...")
+                };
+
+                // Replace the previous streaming indicator if present
+                if let Some(last) = self.messages.last_mut() {
+                    if last.role == DisplayRole::System
+                        && last.text.starts_with("Preparing")
+                    {
+                        last.text = text;
+                    } else {
+                        self.messages.push(DisplayMessage {
+                            role: DisplayRole::System,
+                            text,
+                        });
+                    }
+                } else {
+                    self.messages.push(DisplayMessage {
+                        role: DisplayRole::System,
+                        text,
+                    });
+                }
+                self.message_area_state.scroll_to_bottom();
+            }
             AppEvent::LlmToolCall {
                 call_id: _,
                 tool_name,
@@ -346,6 +395,12 @@ impl App {
                     }
 
                     self.update_sidebar();
+
+                    // Check if auto-compact should trigger
+                    if self.should_auto_compact() {
+                        tracing::info!("auto-compact threshold reached, triggering compaction");
+                        let _ = self.handle_command("/compact").await;
+                    }
                 }
             }
             AppEvent::LlmError { error } => {
@@ -374,6 +429,59 @@ impl App {
                     summary: req.arguments_summary,
                     response_tx: req.response_tx,
                 });
+            }
+            AppEvent::CompactFinish { summary } => {
+                self.is_loading = false;
+
+                let session_id = self
+                    .current_session
+                    .as_ref()
+                    .map(|s| s.id.clone())
+                    .unwrap_or_default();
+
+                let mgr = SessionManager::new(&self.storage, &self.project.id);
+
+                // 1. Delete all old messages from storage
+                if let Err(e) = mgr.delete_messages(&session_id) {
+                    tracing::error!(error = %e, "failed to delete old messages during compact");
+                }
+
+                // 2. Create and save a summary assistant message
+                let summary_msg = Message::assistant(&session_id, &summary);
+                let _ = mgr.save_message(&summary_msg);
+
+                // 3. Reset token usage on the session
+                if let Some(session) = &mut self.current_session {
+                    let _ = mgr.reset_usage(session);
+                }
+
+                // 4. Replace in-memory stored_messages
+                self.stored_messages = vec![summary_msg];
+
+                // 5. Replace display messages with a system notice + the summary
+                self.messages.clear();
+                self.messages.push(DisplayMessage {
+                    role: DisplayRole::System,
+                    text: "Conversation compacted.".to_string(),
+                });
+                self.messages.push(DisplayMessage {
+                    role: DisplayRole::Assistant,
+                    text: summary,
+                });
+                self.message_area_state.scroll_to_bottom();
+                self.update_sidebar();
+
+                tracing::info!("conversation compacted successfully");
+            }
+            AppEvent::CompactError { error } => {
+                self.is_loading = false;
+                self.auto_compact_failed = true;
+                self.messages.push(DisplayMessage {
+                    role: DisplayRole::Error,
+                    text: error,
+                });
+                self.message_area_state.scroll_to_bottom();
+                tracing::error!("compaction failed, auto-compact disabled for this session");
             }
             _ => {}
         }
@@ -590,6 +698,7 @@ impl App {
                 project_root: self.project.root.clone(),
             }),
             permission_engine: Some(self.permission_engine.clone()),
+            tool_cache: self.tool_cache.clone(),
             cancel_token,
         });
 
@@ -754,6 +863,70 @@ impl App {
         Some(parts.join("\n"))
     }
 
+    /// Determine which model ref to use for compaction/summarization.
+    /// Prefers small_model if configured, falls back to current_model.
+    fn compact_model_ref(&self) -> Option<String> {
+        self.config
+            .small_model
+            .clone()
+            .or_else(|| self.current_model.clone())
+    }
+
+    /// Build a transcript of stored messages for the summarizer.
+    fn build_compact_prompt(&self) -> String {
+        let mut transcript = String::new();
+        for msg in &self.stored_messages {
+            let role_label = match msg.role {
+                Role::User => "User",
+                Role::Assistant => "Assistant",
+                Role::System => "System",
+            };
+            let text = msg.text_content();
+            if !text.is_empty() {
+                transcript.push_str(&format!("[{role_label}]: {text}\n\n"));
+            }
+        }
+        transcript
+    }
+
+    /// Check if the session is approaching the context window limit and
+    /// auto-compact should be triggered.
+    fn should_auto_compact(&self) -> bool {
+        if !self.config.auto_compact {
+            return false;
+        }
+
+        if self.auto_compact_failed {
+            return false;
+        }
+
+        // Need at least a few messages to make compaction worthwhile
+        if self.stored_messages.len() < 4 {
+            return false;
+        }
+
+        let Some(session) = &self.current_session else {
+            return false;
+        };
+
+        let Some(model_ref) = &self.current_model else {
+            return false;
+        };
+
+        let Some(registry) = &self.provider_registry else {
+            return false;
+        };
+
+        let Ok(resolved) = registry.resolve_model(model_ref) else {
+            return false;
+        };
+
+        let context_window = resolved.config.context_window as u64;
+        let threshold = (context_window as f64 * 0.80) as u64;
+
+        session.token_usage.total_tokens >= threshold
+    }
+
     async fn handle_command(&mut self, text: &str) -> Result<()> {
         let parts: Vec<&str> = text.splitn(2, ' ').collect();
         let cmd = parts[0];
@@ -770,7 +943,11 @@ impl App {
                 self.streaming_active = false;
                 self.is_loading = false;
                 self.exchange_count = 0;
+                self.auto_compact_failed = false;
                 self.current_session = None;
+                // Reset tool result cache for the new session
+                *self.tool_cache.lock().unwrap() =
+                    ToolResultCache::new(self.project.root.clone());
                 self.ensure_session();
                 self.message_area_state.scroll_to_bottom();
                 self.messages.push(DisplayMessage {
@@ -885,10 +1062,109 @@ impl App {
                     }
                 }
             }
+            "/compact" => {
+                // Guard: must have a session with messages
+                if self.current_session.is_none() || self.stored_messages.is_empty() {
+                    self.messages.push(DisplayMessage {
+                        role: DisplayRole::System,
+                        text: "Nothing to compact.".to_string(),
+                    });
+                    return Ok(());
+                }
+
+                // Guard: must not already be streaming/loading
+                if self.is_loading || self.streaming_active {
+                    self.messages.push(DisplayMessage {
+                        role: DisplayRole::Error,
+                        text: "Cannot compact while streaming.".to_string(),
+                    });
+                    return Ok(());
+                }
+
+                // Resolve the model for summarization
+                let model_ref = match self.compact_model_ref() {
+                    Some(r) => r,
+                    None => {
+                        self.messages.push(DisplayMessage {
+                            role: DisplayRole::Error,
+                            text: "No model available for compaction.".to_string(),
+                        });
+                        return Ok(());
+                    }
+                };
+
+                let Some(registry) = &self.provider_registry else {
+                    self.messages.push(DisplayMessage {
+                        role: DisplayRole::Error,
+                        text: "No provider configured.".to_string(),
+                    });
+                    return Ok(());
+                };
+
+                let resolved = match registry.resolve_model(&model_ref) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        self.messages.push(DisplayMessage {
+                            role: DisplayRole::Error,
+                            text: format!("Failed to resolve compact model: {e}"),
+                        });
+                        return Ok(());
+                    }
+                };
+
+                let client = match registry.client(&resolved.provider_id) {
+                    Ok(c) => c.clone(),
+                    Err(e) => {
+                        self.messages.push(DisplayMessage {
+                            role: DisplayRole::Error,
+                            text: format!("{e}"),
+                        });
+                        return Ok(());
+                    }
+                };
+
+                // Show feedback
+                let msg_count = self.stored_messages.len();
+                self.messages.push(DisplayMessage {
+                    role: DisplayRole::System,
+                    text: format!("Compacting {msg_count} messages..."),
+                });
+                self.message_area_state.scroll_to_bottom();
+                self.is_loading = true;
+
+                // Build the transcript to summarize
+                let transcript = self.build_compact_prompt();
+                let api_model_id = resolved.api_model_id().to_string();
+                let event_tx = self.event_tx.clone();
+
+                tracing::info!(
+                    model = %api_model_id,
+                    messages = msg_count,
+                    transcript_len = transcript.len(),
+                    "starting conversation compaction"
+                );
+
+                // Spawn background summarization task
+                tokio::spawn(async move {
+                    match client
+                        .simple_chat(&api_model_id, Some(COMPACT_SYSTEM_PROMPT), &transcript)
+                        .await
+                    {
+                        Ok(summary) => {
+                            let _ = event_tx.send(AppEvent::CompactFinish { summary });
+                        }
+                        Err(e) => {
+                            let _ = event_tx.send(AppEvent::CompactError {
+                                error: format!("Compaction failed: {e}"),
+                            });
+                        }
+                    }
+                });
+            }
             "/help" => {
                 self.messages.push(DisplayMessage {
                     role: DisplayRole::System,
-                    text: "Commands:\n  /new        — Start a new session\n  /rename <t> — Rename current session\n  /models     — List available models\n  /model <r>  — Switch to a model\n  /init       — Create AGENTS.md in project root\n  /help       — Show this help\n  /exit       — Quit\n\nKeys:\n  Tab         — Toggle Build/Plan mode\n  Ctrl+C      — Cancel stream / quit\n  Mouse wheel — Scroll messages".to_string(),
+                    text: "Commands:\n  /new        — Start a new session\n  /rename <t> — Rename current session\n  /models     — List available models\n  /model <r>  — Switch to a model\n  /compact    — Compact conversation into a summary\n  /init       — Create AGENTS.md in project root\n  /help       — Show this help\n  /exit       — Quit\n\nKeys:\n  Tab         — Toggle Build/Plan mode\n  Ctrl+C      — Cancel stream / quit\n  Mouse wheel — Scroll messages".to_string(),
                 });
             }
             _ => {

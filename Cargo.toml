@@ -46,3 +46,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6"
 fs2 = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
