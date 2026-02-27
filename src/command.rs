@@ -13,6 +13,15 @@ pub enum Command {
     Help,
 }
 
+/// Metadata for a known slash command, used for autocomplete.
+#[derive(Debug, Clone)]
+pub struct CommandInfo {
+    /// The command string (e.g., "/exit").
+    pub name: &'static str,
+    /// Short description shown in autocomplete popup.
+    pub description: &'static str,
+}
+
 impl Command {
     /// Parse a slash-command string (e.g. "/model openai/gpt-4o") into a `Command`.
     ///
@@ -45,6 +54,28 @@ impl Command {
             "/help" => Ok(Command::Help),
             _ => Err(format!("Unknown command: {cmd}. Type /help for available commands.")),
         }
+    }
+
+    /// Returns metadata for all known commands, in display order.
+    pub fn all_commands() -> Vec<CommandInfo> {
+        vec![
+            CommandInfo { name: "/new", description: "Start a new session" },
+            CommandInfo { name: "/rename", description: "Rename current session" },
+            CommandInfo { name: "/model", description: "Switch model" },
+            CommandInfo { name: "/models", description: "List available models" },
+            CommandInfo { name: "/compact", description: "Compact conversation" },
+            CommandInfo { name: "/init", description: "Create AGENTS.md" },
+            CommandInfo { name: "/help", description: "Show help" },
+            CommandInfo { name: "/exit", description: "Quit" },
+        ]
+    }
+
+    /// Returns commands matching the given prefix (case-sensitive).
+    pub fn matching_commands(prefix: &str) -> Vec<CommandInfo> {
+        Self::all_commands()
+            .into_iter()
+            .filter(|c| c.name.starts_with(prefix))
+            .collect()
     }
 }
 
@@ -94,5 +125,41 @@ mod tests {
     #[test]
     fn parse_unknown_command() {
         assert!(Command::parse("/unknown").is_err());
+    }
+
+    #[test]
+    fn all_commands_returns_all_entries() {
+        let cmds = Command::all_commands();
+        let names: Vec<&str> = cmds.iter().map(|c| c.name).collect();
+        assert!(names.contains(&"/exit"));
+        assert!(names.contains(&"/new"));
+        assert!(names.contains(&"/rename"));
+        assert!(names.contains(&"/models"));
+        assert!(names.contains(&"/model"));
+        assert!(names.contains(&"/init"));
+        assert!(names.contains(&"/compact"));
+        assert!(names.contains(&"/help"));
+        assert_eq!(cmds.len(), 8);
+    }
+
+    #[test]
+    fn filter_commands_by_prefix() {
+        let matches = Command::matching_commands("/m");
+        let names: Vec<&str> = matches.iter().map(|c| c.name).collect();
+        assert!(names.contains(&"/models"));
+        assert!(names.contains(&"/model"));
+        assert!(!names.contains(&"/exit"));
+    }
+
+    #[test]
+    fn filter_commands_slash_only() {
+        let matches = Command::matching_commands("/");
+        assert_eq!(matches.len(), 8);
+    }
+
+    #[test]
+    fn filter_commands_no_match() {
+        let matches = Command::matching_commands("/zzz");
+        assert!(matches.is_empty());
     }
 }
