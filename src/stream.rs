@@ -16,7 +16,8 @@ use async_openai::{
         ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
         ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
         ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
-        ChatCompletionResponseStream, ChatCompletionTool, ChatCompletionTools,
+        ChatCompletionResponseStream, ChatCompletionStreamOptions,
+        ChatCompletionTool, ChatCompletionTools,
         CreateChatCompletionRequest, FunctionCall, FunctionObject, FinishReason,
     },
     Client,
@@ -160,6 +161,10 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             model: model.clone(),
             messages: messages.clone(),
             stream: Some(true),
+            stream_options: Some(ChatCompletionStreamOptions {
+                include_usage: Some(true),
+                include_obfuscation: None,
+            }),
             ..Default::default()
         };
 
@@ -363,10 +368,15 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             });
         }
 
-        // Partition: auto-allowed tools can run in parallel
+        // Partition: auto-allowed read-only tools can run in parallel.
+        // Write tools (edit, write, patch) always go to sequential phase for
+        // cache invalidation, even if they have AllowAlways permission.
+        let is_write_tool = |name: &str| matches!(name, "edit" | "write" | "patch");
         let (auto_allowed, needs_interaction): (Vec<_>, Vec<_>) = prepared
             .into_iter()
-            .partition(|tc| matches!(tc.action, PermissionAction::Allow));
+            .partition(|tc| {
+                matches!(tc.action, PermissionAction::Allow) && !is_write_tool(&tc.function_name)
+            });
 
         // ── Phase 2: Execute auto-allowed tools in parallel ──
         // These are read-only tools that don't need user permission.
@@ -462,21 +472,32 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 arguments: tc.args.clone(),
             });
 
-            if let Some(output) = parallel_results.remove(&tc.id) {
-                let _ = event_tx.send(AppEvent::ToolResult {
-                    call_id: tc.id.clone(),
-                    tool_name: tc.function_name.clone(),
-                    output: output.clone(),
-                });
+            let output = parallel_results.remove(&tc.id).unwrap_or_else(|| {
+                tracing::error!(
+                    tool = %tc.function_name,
+                    call_id = %tc.id,
+                    "missing parallel result — inserting error to preserve conversation structure"
+                );
+                crate::tool::ToolOutput {
+                    title: tc.function_name.clone(),
+                    output: "Error: tool execution result was lost".to_string(),
+                    is_error: true,
+                }
+            });
 
-                messages.push(ChatCompletionRequestMessage::Tool(
-                    ChatCompletionRequestToolMessage {
-                        content: ChatCompletionRequestToolMessageContent::Text(output.output),
-                        tool_call_id: tc.id.clone(),
-                    },
-                ));
-                current_iteration_tool_count += 1;
-            }
+            let _ = event_tx.send(AppEvent::ToolResult {
+                call_id: tc.id.clone(),
+                tool_name: tc.function_name.clone(),
+                output: output.clone(),
+            });
+
+            messages.push(ChatCompletionRequestMessage::Tool(
+                ChatCompletionRequestToolMessage {
+                    content: ChatCompletionRequestToolMessageContent::Text(output.output),
+                    tool_call_id: tc.id.clone(),
+                },
+            ));
+            current_iteration_tool_count += 1;
         }
 
         // ── Phase 3: Execute permission-required tools sequentially ──
@@ -629,8 +650,56 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                     current_iteration_tool_count += 1;
                 }
                 PermissionAction::Allow => {
-                    // Should not happen (partitioned above), but handle gracefully
-                    unreachable!("auto-allowed tools should have been handled in parallel phase");
+                    // Normally handled in Phase 2, but write tools with AllowAlways
+                    // are routed here for cache invalidation. Execute normally.
+                    let _ = event_tx.send(AppEvent::LlmToolCall {
+                        call_id: tc.id.clone(),
+                        tool_name: tc.function_name.clone(),
+                        arguments: tc.args.clone(),
+                    });
+
+                    tracing::info!(tool = %tc.function_name, "executing allowed tool (sequential)");
+
+                    let output = if let Some(cached) = tool_cache.get(&tc.function_name, &tc.args) {
+                        cached
+                    } else {
+                        let result = match registry.execute(&tc.function_name, tc.args.clone(), ctx.clone()) {
+                            Ok(output) => output,
+                            Err(e) => {
+                                tracing::error!(tool = %tc.function_name, error = %e, "tool execution failed");
+                                crate::tool::ToolOutput {
+                                    title: tc.function_name.clone(),
+                                    output: format!("Error: {e}"),
+                                    is_error: true,
+                                }
+                            }
+                        };
+
+                        tool_cache.put(&tc.function_name, &tc.args, &tc.id, &result);
+
+                        // Invalidate cache entries when write operations modify files
+                        if matches!(tc.function_name.as_str(), "edit" | "write" | "patch") {
+                            if let Some(path) = tc.args.get("file_path").and_then(|v| v.as_str()) {
+                                tool_cache.invalidate_path(path);
+                            }
+                        }
+
+                        result
+                    };
+
+                    let _ = event_tx.send(AppEvent::ToolResult {
+                        call_id: tc.id.clone(),
+                        tool_name: tc.function_name.clone(),
+                        output: output.clone(),
+                    });
+
+                    messages.push(ChatCompletionRequestMessage::Tool(
+                        ChatCompletionRequestToolMessage {
+                            content: ChatCompletionRequestToolMessageContent::Text(output.output),
+                            tool_call_id: tc.id.clone(),
+                        },
+                    ));
+                    current_iteration_tool_count += 1;
                 }
             }
         }

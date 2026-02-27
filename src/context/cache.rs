@@ -109,18 +109,38 @@ impl ToolResultCache {
     }
 
     /// Invalidate all cache entries that reference the given file path.
+    /// Also invalidates all grep and glob entries since they may have matched
+    /// content in the modified file.
     /// Call this after edit/write/patch operations.
     pub fn invalidate_path(&mut self, path: &str) {
         let normalized = self.normalize_path(path);
+        let mut invalidated = 0;
 
+        // Invalidate exact path matches (read, list)
         if let Some(keys) = self.path_index.remove(&normalized) {
-            let count = keys.len();
+            invalidated += keys.len();
             for key in keys {
                 self.entries.remove(&key);
             }
+        }
+
+        // Invalidate all grep and glob entries — they may reference the
+        // modified file and we can't cheaply determine which ones do.
+        let grep_glob_keys: Vec<String> = self
+            .entries
+            .keys()
+            .filter(|k| k.starts_with("grep:") || k.starts_with("glob:"))
+            .cloned()
+            .collect();
+        invalidated += grep_glob_keys.len();
+        for key in grep_glob_keys {
+            self.entries.remove(&key);
+        }
+
+        if invalidated > 0 {
             tracing::debug!(
                 path = %normalized.display(),
-                invalidated = count,
+                invalidated,
                 "cache entries invalidated"
             );
         }
@@ -275,6 +295,26 @@ mod tests {
         assert!(cache.get("bash", &args).is_none());
         cache.put("bash", &args, "call_1", &test_output("output"));
         assert!(cache.get("bash", &args).is_none());
+    }
+
+    #[test]
+    fn test_grep_glob_invalidated_on_file_edit() {
+        let mut cache = test_cache();
+
+        // Cache a grep result
+        let grep_args = json!({"pattern": "fn main", "path": "src/"});
+        cache.put("grep", &grep_args, "call_1", &test_output("src/main.rs:1: fn main()"));
+        assert!(cache.get("grep", &grep_args).is_some());
+
+        // Cache a glob result
+        let glob_args = json!({"pattern": "**/*.rs"});
+        cache.put("glob", &glob_args, "call_2", &test_output("src/main.rs\nsrc/lib.rs"));
+        assert!(cache.get("glob", &glob_args).is_some());
+
+        // Editing any file should invalidate grep and glob entries
+        cache.invalidate_path("src/other.rs");
+        assert!(cache.get("grep", &grep_args).is_none());
+        assert!(cache.get("glob", &glob_args).is_none());
     }
 
     #[test]

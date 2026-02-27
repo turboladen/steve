@@ -16,7 +16,11 @@ cargo check            # Type-check without building
 RUST_LOG=steve=debug cargo run  # Override log level (default: steve=info)
 ```
 
-There are no tests yet. The project uses Rust edition 2024.
+The project uses Rust edition 2024.
+
+```bash
+cargo test              # Run all tests
+```
 
 Logs are written to `~/.local/share/steve/logs/steve.log` (daily rolling via `tracing-appender`).
 
@@ -107,6 +111,22 @@ Tab toggles between modes. Mode rules live in `permission/mod.rs` as `build_mode
 
 Summarizes the conversation into a single message to reclaim context window space. Uses a non-streaming `LlmClient::simple_chat()` call in a background tokio task, communicating results back via `AppEvent::CompactFinish` / `AppEvent::CompactError`. Uses `small_model` if configured, otherwise falls back to the main model. On completion, old messages are deleted from storage and replaced with a single assistant message containing the summary. Auto-compact triggers after `LlmFinish` when `session.token_usage.total_tokens >= context_window * 0.80` (controlled by `auto_compact` config).
 
+### Context Management (`context/`)
+
+Reduces LLM API token usage via two subsystems in `src/context/`:
+- **Compressor** (`compressor.rs`): Before each LLM API call in the tool loop, replaces already-seen tool results with compact heuristic summaries (e.g., `"[Previously read: src/main.rs, 150 lines, Rust]"`). Preserves `tool_call_id` for valid conversation structure.
+- **Cache** (`cache.rs`): Session-scoped `ToolResultCache` maps `(tool_name, canonical_args)` → cached output. On cache hit, returns a compact reference instead of re-executing. Invalidated when write ops modify files — grep/glob entries are wholesale-invalidated since they can't be tracked by individual path.
+
+**Critical invariant**: Write tools (`edit`, `write`, `patch`) must never run in the parallel execution phase — they must go through the sequential phase for proper cache invalidation, even if they have `AllowAlways` permission.
+
+### Parallel Tool Execution (`stream.rs`)
+
+The tool call loop partitions pending tool calls into two phases:
+1. **Phase 2 (parallel)**: Read-only tools with `Allow` permission run via `spawn_blocking`. Write tools are excluded even with `AllowAlways`.
+2. **Phase 3 (sequential)**: Permission-required tools (Ask/Deny) and write tools. Handles permission handshake and cache invalidation.
+
+Every `tool_call_id` in an assistant message **must** have a corresponding tool result message — missing one causes an API error. The parallel phase uses `unwrap_or_else` with an error fallback to guarantee this.
+
 ### Tool System (`tool/mod.rs`)
 
 Tools are registered in `ToolRegistry` as `ToolEntry` structs containing a `ToolDef` (name, description, JSON schema) and a handler closure `Fn(Value, ToolContext) -> Result<ToolOutput>`. Tools are synchronous (not async) — they run inside the stream task's spawned tokio task.
@@ -133,10 +153,12 @@ Auto-scroll calculates content height using wrapped line widths (not `lines.len(
 
 - **tui-textarea 0.7** requires ratatui 0.29 and crossterm 0.28 — do not upgrade independently
 - **async-openai 0.32** requires `features = ["chat-completion"]`; types live under `async_openai::types::chat::`, not `async_openai::types::`
-- **async-openai 0.32 tool types**: `ChatCompletionTools` (plural enum with `Function` variant), `ChatCompletionMessageToolCalls` (plural enum with `Function` variant). `ChatCompletionRequestAssistantMessage` requires `audio: None` and `function_call: None` fields
+- **async-openai 0.32 tool types**: `ChatCompletionTools` (plural enum with `Function` variant), `ChatCompletionMessageToolCalls` (plural enum with `Function` variant). `ChatCompletionRequestAssistantMessage` requires `audio: None` and `function_call: None` fields. `ChatCompletionStreamOptions` has `include_usage` and `include_obfuscation` fields
+- **stream_options is required**: `CreateChatCompletionRequest` must include `stream_options: Some(ChatCompletionStreamOptions { include_usage: Some(true), .. })` — without it, token usage is never reported and auto-compact cannot trigger
 - **jsonc-parser** requires `features = ["serde"]` for `parse_to_serde_value`
 - **html2text v0.14** `from_read()` returns `Result<String, Error>`, not `String`
 - **tracing** outputs to file appender, never stdout (TUI owns stdout)
+- **No `unreachable!()` in stream tasks** — panics in the stream tokio task crash silently. Use graceful error handling with `tracing::error!` instead
 - `AGENTS.md` in the project root is optional — if present, it's loaded at startup and injected as part of the system prompt. Create one with `/init`
 
 ## Data Locations
