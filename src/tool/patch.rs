@@ -109,7 +109,7 @@ fn apply_unified_diff(original: &str, patch: &str) -> Result<String> {
             i += 1;
             let mut hunk_old_consumed = 0;
 
-            while i < patch_lines.len() && hunk_old_consumed < old_count {
+            while i < patch_lines.len() {
                 let hunk_line = patch_lines[i];
 
                 if hunk_line.starts_with("@@") {
@@ -133,6 +133,16 @@ fn apply_unified_diff(original: &str, patch: &str) -> Result<String> {
                 }
 
                 i += 1;
+
+                // Once all old lines are consumed, continue only for
+                // trailing '+' lines that belong to this hunk.
+                if hunk_old_consumed >= old_count {
+                    while i < patch_lines.len() && patch_lines[i].starts_with('+') {
+                        additions.push(&patch_lines[i][1..]);
+                        i += 1;
+                    }
+                    break;
+                }
             }
 
             // Apply this hunk
@@ -276,6 +286,33 @@ mod tests {
         let patch = "--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n-hello\n+goodbye\n world\n";
         let result = apply_unified_diff(original, patch).unwrap();
         assert_eq!(result, "goodbye\nworld");
+    }
+
+    #[test]
+    fn apply_replacement_without_trailing_context() {
+        // Regression: +lines after all old lines consumed must not be dropped
+        let original = "aaa\nbbb\nccc\n";
+        let patch = "--- a/f\n+++ b/f\n@@ -2,1 +2,1 @@\n-bbb\n+xxx\n";
+        let result = apply_unified_diff(original, patch).unwrap();
+        assert_eq!(result, "aaa\nxxx\nccc\n");
+    }
+
+    #[test]
+    fn apply_replacement_growing_without_context() {
+        // Regression: replacing 1 line with 2 lines, no surrounding context
+        let original = "aaa\nbbb\nccc\n";
+        let patch = "--- a/f\n+++ b/f\n@@ -2,1 +2,2 @@\n-bbb\n+xxx\n+yyy\n";
+        let result = apply_unified_diff(original, patch).unwrap();
+        assert_eq!(result, "aaa\nxxx\nyyy\nccc\n");
+    }
+
+    #[test]
+    fn apply_append_at_end() {
+        // Pure addition at the end of file (old_count covers only the context line)
+        let original = "aaa\nbbb\n";
+        let patch = "--- a/f\n+++ b/f\n@@ -2,1 +2,2 @@\n bbb\n+ccc\n";
+        let result = apply_unified_diff(original, patch).unwrap();
+        assert_eq!(result, "aaa\nbbb\nccc\n");
     }
 
     #[test]
