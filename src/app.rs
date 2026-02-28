@@ -820,6 +820,11 @@ impl App {
             permission_engine: Some(self.permission_engine.clone()),
             tool_cache: self.tool_cache.clone(),
             cancel_token,
+            context_window: if self.status_line_state.context_window > 0 {
+                Some(self.status_line_state.context_window)
+            } else {
+                None
+            },
         });
 
         Ok(())

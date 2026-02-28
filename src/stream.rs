@@ -48,6 +48,8 @@ pub struct StreamRequest {
     pub permission_engine: Option<std::sync::Arc<tokio::sync::Mutex<PermissionEngine>>>,
     pub tool_cache: std::sync::Arc<std::sync::Mutex<ToolResultCache>>,
     pub cancel_token: CancellationToken,
+    /// Context window size for the current model (used for pre-call pruning).
+    pub context_window: Option<u64>,
 }
 
 /// Spawn a tokio task that streams the LLM response and sends events.
@@ -81,6 +83,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         permission_engine,
         tool_cache,
         cancel_token,
+        context_window,
     } = req;
 
     tracing::info!(model = %model, "starting LLM stream");
@@ -131,6 +134,20 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
     // Tool result cache — shared across stream tasks within a session.
     // Avoids re-executing identical read operations across messages.
+
+    // Pre-call pruning: if conversation is large relative to context window, prune aggressively
+    if let Some(ctx_window) = context_window {
+        let estimated_chars: usize = messages.iter().map(|m| estimate_message_chars(m)).sum();
+        let estimated_tokens = estimated_chars / 4;
+        if ctx_window > 0 && estimated_tokens as u64 > ctx_window * 60 / 100 {
+            tracing::info!(
+                estimated_tokens,
+                context_window = ctx_window,
+                "pre-call aggressive pruning triggered"
+            );
+            crate::context::compressor::aggressive_prune(&mut messages, 0);
+        }
+    }
 
     // Tool call loop — keep going until the LLM produces a response with no tool calls
     loop {
@@ -913,5 +930,46 @@ fn build_permission_summary(tool_name: ToolName, args: &Value) -> String {
         | ToolName::Question | ToolName::Todo | ToolName::Webfetch => {
             format!("{tool_name}: {}", serde_json::to_string(args).unwrap_or_default())
         }
+    }
+}
+
+/// Estimate the character count of a message for token approximation.
+fn estimate_message_chars(msg: &ChatCompletionRequestMessage) -> usize {
+    match msg {
+        ChatCompletionRequestMessage::System(s) => match &s.content {
+            ChatCompletionRequestSystemMessageContent::Text(t) => t.len(),
+            _ => 0,
+        },
+        ChatCompletionRequestMessage::User(u) => match &u.content {
+            ChatCompletionRequestUserMessageContent::Text(t) => t.len(),
+            _ => 0,
+        },
+        ChatCompletionRequestMessage::Assistant(a) => {
+            let content_len = match &a.content {
+                Some(ChatCompletionRequestAssistantMessageContent::Text(t)) => t.len(),
+                _ => 0,
+            };
+            let tool_calls_len = a
+                .tool_calls
+                .as_ref()
+                .map(|tcs| {
+                    tcs.iter()
+                        .map(|tc| {
+                            if let ChatCompletionMessageToolCalls::Function(f) = tc {
+                                f.function.name.len() + f.function.arguments.len()
+                            } else {
+                                0
+                            }
+                        })
+                        .sum::<usize>()
+                })
+                .unwrap_or(0);
+            content_len + tool_calls_len
+        }
+        ChatCompletionRequestMessage::Tool(t) => match &t.content {
+            ChatCompletionRequestToolMessageContent::Text(t) => t.len(),
+            _ => 0,
+        },
+        _ => 0,
     }
 }

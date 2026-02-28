@@ -125,6 +125,16 @@ fn build_tool_name_map(messages: &[ChatCompletionRequestMessage]) -> HashMap<Str
     map
 }
 
+/// Aggressively prune conversation to reclaim context space.
+/// Replaces ALL tool results with compressed summaries (unlike `compress_old_tool_results`
+/// which keeps recent ones intact). Used when approaching context limits.
+pub fn aggressive_prune(
+    messages: &mut Vec<ChatCompletionRequestMessage>,
+    keep_recent: usize,
+) {
+    compress_old_tool_results(messages, keep_recent);
+}
+
 /// Compress a tool output into a compact summary based on the tool type.
 fn compress_tool_output(tool_name: ToolName, content: &str) -> String {
     match tool_name {
@@ -477,6 +487,9 @@ fn extract_go_def(line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_openai::types::chat::{
+        ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
+    };
 
     #[test]
     fn test_compress_read() {
@@ -545,5 +558,109 @@ mod tests {
         // Short content should not be compressed (checked in compress_old_tool_results)
         let content = "OK";
         assert!(content.len() < 200);
+    }
+
+    /// Helper to build a tool result message.
+    fn make_tool_result(call_id: &str, content: &str) -> ChatCompletionRequestMessage {
+        ChatCompletionRequestMessage::Tool(ChatCompletionRequestToolMessage {
+            content: ChatCompletionRequestToolMessageContent::Text(content.to_string()),
+            tool_call_id: call_id.to_string(),
+        })
+    }
+
+    /// Helper to build an assistant message with tool calls.
+    fn make_assistant_with_tool_calls(call_ids_and_names: &[(&str, &str)]) -> ChatCompletionRequestMessage {
+        let tool_calls: Vec<ChatCompletionMessageToolCalls> = call_ids_and_names
+            .iter()
+            .map(|(id, name)| {
+                ChatCompletionMessageToolCalls::Function(
+                    async_openai::types::chat::ChatCompletionMessageToolCall {
+                        id: id.to_string(),
+                        function: async_openai::types::chat::FunctionCall {
+                            name: name.to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                    },
+                )
+            })
+            .collect();
+
+        #[allow(deprecated)]
+        ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
+            content: Some(ChatCompletionRequestAssistantMessageContent::Text(
+                "I'll read those files.".to_string(),
+            )),
+            name: None,
+            audio: None,
+            tool_calls: Some(tool_calls),
+            function_call: None,
+            refusal: None,
+        })
+    }
+
+    #[test]
+    fn test_aggressive_prune_compresses_all_tool_results() {
+        // Build a conversation: user → assistant+tool_calls → tool results
+        let long_content: String = (1..=100).map(|i| format!("{:>4} | line {i}\n", i)).collect();
+        assert!(long_content.len() > 200); // must exceed skip threshold
+
+        let mut messages = vec![
+            ChatCompletionRequestMessage::User(
+                async_openai::types::chat::ChatCompletionRequestUserMessage {
+                    content: async_openai::types::chat::ChatCompletionRequestUserMessageContent::Text(
+                        "Read files".to_string(),
+                    ),
+                    name: None,
+                },
+            ),
+            make_assistant_with_tool_calls(&[("call1", "read"), ("call2", "read")]),
+            make_tool_result("call1", &long_content),
+            make_tool_result("call2", &long_content),
+        ];
+
+        let original_len = messages.len();
+        aggressive_prune(&mut messages, 0);
+
+        // Same number of messages (structure preserved)
+        assert_eq!(messages.len(), original_len);
+
+        // All tool results should be compressed (short)
+        for msg in &messages {
+            if let ChatCompletionRequestMessage::Tool(t) = msg {
+                let text = extract_text(t);
+                assert!(
+                    text.len() < 200,
+                    "tool result should be compressed, got {} chars",
+                    text.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_aggressive_prune_preserves_tool_call_ids() {
+        let long_content: String = (1..=100).map(|i| format!("{:>4} | line {i}\n", i)).collect();
+
+        let mut messages = vec![
+            make_assistant_with_tool_calls(&[("call_a", "read"), ("call_b", "grep")]),
+            make_tool_result("call_a", &long_content),
+            make_tool_result("call_b", &long_content),
+        ];
+
+        aggressive_prune(&mut messages, 0);
+
+        // Verify tool_call_ids are preserved
+        let tool_ids: Vec<String> = messages
+            .iter()
+            .filter_map(|m| {
+                if let ChatCompletionRequestMessage::Tool(t) = m {
+                    Some(t.tool_call_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert_eq!(tool_ids, vec!["call_a", "call_b"]);
     }
 }
