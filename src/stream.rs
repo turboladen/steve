@@ -221,25 +221,64 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             }
         }
 
-        // Open the stream
+        // Open the stream with retry for transient errors
+        const MAX_RETRIES: u32 = 3;
         let stream_start = std::time::Instant::now();
-        let mut stream: ChatCompletionResponseStream =
-            match client.chat().create_stream(request).await {
+        let mut stream_result: Option<ChatCompletionResponseStream> = None;
+        for attempt in 1..=MAX_RETRIES {
+            match client.chat().create_stream(request.clone()).await {
                 Ok(s) => {
+                    if attempt > 1 {
+                        tracing::info!(attempt, "stream connection succeeded after retry");
+                    }
                     tracing::info!(
                         elapsed_ms = stream_start.elapsed().as_millis() as u64,
                         "stream connection opened"
                     );
-                    s
+                    stream_result = Some(s);
+                    break;
                 }
                 Err(e) => {
-                    tracing::error!(error = %e, "failed to start stream");
+                    if attempt < MAX_RETRIES && is_transient_error(&e) {
+                        let delay = std::time::Duration::from_secs(1 << (attempt - 1)); // 1s, 2s
+                        tracing::warn!(
+                            error = %e,
+                            attempt,
+                            max_attempts = MAX_RETRIES,
+                            delay_secs = delay.as_secs(),
+                            "transient error, retrying stream creation"
+                        );
+                        let _ = event_tx.send(AppEvent::LlmRetry {
+                            attempt,
+                            max_attempts: MAX_RETRIES,
+                            error: e.to_string(),
+                        });
+                        tokio::time::sleep(delay).await;
+                        if cancel_token.is_cancelled() {
+                            let _ = event_tx.send(AppEvent::LlmFinish {
+                                usage: Some(total_usage),
+                            });
+                            return Ok(());
+                        }
+                        continue;
+                    }
+                    // Non-transient or max retries exceeded
+                    tracing::error!(error = %e, attempt, "stream creation failed");
                     let _ = event_tx.send(AppEvent::LlmError {
-                        error: format!("failed to start stream: {e}"),
+                        error: format!("API error: {e}"),
                     });
                     return Err(());
                 }
-            };
+            }
+        }
+        let Some(mut stream) = stream_result else {
+            // Should not happen — loop always breaks or returns — but handle gracefully
+            tracing::error!("stream_result was None after retry loop (should be unreachable)");
+            let _ = event_tx.send(AppEvent::LlmError {
+                error: "internal error: stream creation produced no result".to_string(),
+            });
+            return Err(());
+        };
 
         // Accumulate tool call fragments
         let mut pending_tool_calls: HashMap<u32, PendingToolCall> = HashMap::new();
@@ -947,6 +986,33 @@ fn build_permission_summary(tool_name: ToolName, args: &Value) -> String {
     }
 }
 
+/// Classify whether an OpenAI API error is transient (worth retrying).
+///
+/// Transient errors include network timeouts, connection failures, rate limits,
+/// and server overload responses. Non-transient errors (auth failures, invalid
+/// arguments, deserialization errors) are not retried.
+fn is_transient_error(err: &async_openai::error::OpenAIError) -> bool {
+    use async_openai::error::OpenAIError;
+    match err {
+        OpenAIError::Reqwest(e) => {
+            // Network-level failures: timeout, connection refused, DNS, etc.
+            e.is_timeout() || e.is_connect() || e.is_request()
+        }
+        OpenAIError::ApiError(api_err) => {
+            // Rate limit or server overload from the API
+            matches!(api_err.code.as_deref(), Some("rate_limit_exceeded"))
+                || api_err.message.contains("overloaded")
+                || api_err.message.contains("temporarily unavailable")
+        }
+        OpenAIError::StreamError(_) => {
+            // SSE stream failures are often transient (connection drops)
+            true
+        }
+        // JSONDeserialize, FileSaveError, FileReadError, InvalidArgument — not transient
+        _ => false,
+    }
+}
+
 /// Estimate the character count of a message for token approximation.
 fn estimate_message_chars(msg: &ChatCompletionRequestMessage) -> usize {
     match msg {
@@ -985,5 +1051,67 @@ fn estimate_message_chars(msg: &ChatCompletionRequestMessage) -> usize {
             _ => 0,
         },
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_openai::error::{ApiError, OpenAIError};
+
+    /// Helper to build an ApiError with a given message and optional code.
+    fn make_api_error(message: &str, code: Option<&str>) -> OpenAIError {
+        OpenAIError::ApiError(ApiError {
+            message: message.to_string(),
+            r#type: None,
+            param: None,
+            code: code.map(String::from),
+        })
+    }
+
+    #[test]
+    fn transient_rate_limit() {
+        let err = make_api_error("Rate limit exceeded", Some("rate_limit_exceeded"));
+        assert!(is_transient_error(&err), "rate_limit_exceeded should be transient");
+    }
+
+    #[test]
+    fn transient_overloaded() {
+        let err = make_api_error("The server is overloaded, please try again later", None);
+        assert!(is_transient_error(&err), "overloaded message should be transient");
+    }
+
+    #[test]
+    fn transient_temporarily_unavailable() {
+        let err = make_api_error("Service is temporarily unavailable", None);
+        assert!(is_transient_error(&err), "temporarily unavailable message should be transient");
+    }
+
+    #[test]
+    fn not_transient_auth_error() {
+        let err = make_api_error("Invalid API key provided", Some("invalid_api_key"));
+        assert!(!is_transient_error(&err), "invalid_api_key should not be transient");
+    }
+
+    #[test]
+    fn not_transient_invalid_argument() {
+        let err = OpenAIError::InvalidArgument("bad argument".to_string());
+        assert!(!is_transient_error(&err), "InvalidArgument should not be transient");
+    }
+
+    #[test]
+    fn not_transient_json_deserialize() {
+        let json_err = serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err();
+        let err = OpenAIError::JSONDeserialize(json_err, "invalid json".to_string());
+        assert!(!is_transient_error(&err), "JSONDeserialize should not be transient");
+    }
+
+    #[test]
+    fn not_transient_generic_api_error() {
+        let err = make_api_error("Something went wrong", Some("server_error"));
+        assert!(
+            !is_transient_error(&err),
+            "generic server_error without overloaded/unavailable message should not be transient"
+        );
     }
 }

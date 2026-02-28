@@ -565,6 +565,14 @@ impl App {
                 // to avoid intermediate disk writes. Only update display-side fields.
                 self.check_context_warning();
             }
+            AppEvent::LlmRetry { attempt, max_attempts, error } => {
+                self.messages.push(MessageBlock::System {
+                    text: format!(
+                        "Connection error: {error}\nRetrying ({attempt}/{max_attempts})..."
+                    ),
+                });
+                self.message_area_state.scroll_to_bottom();
+            }
             AppEvent::LlmError { error } => {
                 self.is_loading = false;
                 self.streaming_active = false;

@@ -40,6 +40,8 @@ pub enum AppEvent {
     /// Intermediate token usage update during a tool call loop.
     /// Sent after each API response so the UI can show incremental token counts.
     LlmUsageUpdate { usage: StreamUsage },
+    /// LLM connection is being retried after a transient error.
+    LlmRetry { attempt: u32, max_attempts: u32, error: String },
     /// LLM error (stream failure or API error).
     LlmError { error: String },
 
