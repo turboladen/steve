@@ -363,21 +363,15 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                                 // Tool call fragments
                                 if let Some(tool_calls) = &choice.delta.tool_calls {
                                     for tc in tool_calls {
-                                        let entry = pending_tool_calls
-                                            .entry(tc.index)
-                                            .or_insert_with(PendingToolCall::default);
-
-                                        if let Some(id) = &tc.id {
-                                            entry.id = id.clone();
-                                        }
-                                        if let Some(func) = &tc.function {
-                                            if let Some(name) = &func.name {
-                                                entry.function_name = name.clone();
-                                            }
-                                            if let Some(args) = &func.arguments {
-                                                entry.arguments.push_str(args);
-                                            }
-                                        }
+                                        let func_name = tc.function.as_ref().and_then(|f| f.name.as_deref());
+                                        let func_args = tc.function.as_ref().and_then(|f| f.arguments.as_deref());
+                                        accumulate_tool_call(
+                                            &mut pending_tool_calls,
+                                            tc.index,
+                                            tc.id.as_deref(),
+                                            func_name,
+                                            func_args,
+                                        );
                                     }
 
                                     // Notify UI when new tool calls appear
@@ -476,17 +470,15 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         let pre_filter_count = sorted_indices.len();
         sorted_indices.retain(|idx| {
             let tc = &pending_tool_calls[idx];
-            match serde_json::from_str::<Value>(&tc.arguments) {
-                Ok(_) => true,
-                Err(e) => {
-                    tracing::warn!(
-                        tool = %tc.function_name,
-                        call_id = %tc.id,
-                        error = %e,
-                        "dropping tool call with truncated/invalid JSON arguments"
-                    );
-                    false
-                }
+            if has_valid_json(tc) {
+                true
+            } else {
+                tracing::warn!(
+                    tool = %tc.function_name,
+                    call_id = %tc.id,
+                    "dropping tool call with invalid/truncated data"
+                );
+                false
             }
         });
         if sorted_indices.len() < pre_filter_count {
@@ -1018,6 +1010,41 @@ fn is_transient_error(err: &async_openai::error::OpenAIError) -> bool {
     }
 }
 
+/// Accumulate a tool call fragment from a stream chunk delta.
+/// Updates the pending_tool_calls map with the fragment data.
+/// Returns true if this fragment introduces a new tool call (has a function name).
+fn accumulate_tool_call(
+    pending: &mut HashMap<u32, PendingToolCall>,
+    index: u32,
+    id: Option<&str>,
+    name: Option<&str>,
+    arguments: Option<&str>,
+) -> bool {
+    let entry = pending.entry(index).or_insert_with(PendingToolCall::default);
+
+    if let Some(id) = id {
+        entry.id = id.to_string();
+    }
+    if let Some(name) = name {
+        entry.function_name = name.to_string();
+    }
+    if let Some(args) = arguments {
+        entry.arguments.push_str(args);
+    }
+
+    // A new tool call is signaled when a function name is provided
+    name.is_some()
+}
+
+/// Check if a pending tool call has valid, parseable JSON arguments
+/// and required fields (non-empty id and function_name).
+fn has_valid_json(tc: &PendingToolCall) -> bool {
+    !tc.arguments.is_empty()
+        && !tc.id.is_empty()
+        && !tc.function_name.is_empty()
+        && serde_json::from_str::<Value>(&tc.arguments).is_ok()
+}
+
 /// Estimate the character count of a message for token approximation.
 fn estimate_message_chars(msg: &ChatCompletionRequestMessage) -> usize {
     match msg {
@@ -1125,5 +1152,94 @@ mod tests {
         let stream_err = StreamError::EventStream("connection reset".to_string());
         let err = OpenAIError::StreamError(Box::new(stream_err));
         assert!(is_transient_error(&err), "StreamError should be transient");
+    }
+
+    // -- accumulate_tool_call tests --
+
+    #[test]
+    fn accumulate_new_tool_call() {
+        let mut pending = HashMap::new();
+        let is_new = accumulate_tool_call(
+            &mut pending, 0,
+            Some("call_123"), Some("read"), Some("{\"path\":")
+        );
+        assert!(is_new);
+        assert_eq!(pending.len(), 1);
+        let tc = &pending[&0];
+        assert_eq!(tc.id, "call_123");
+        assert_eq!(tc.function_name, "read");
+        assert_eq!(tc.arguments, "{\"path\":");
+    }
+
+    #[test]
+    fn accumulate_appends_arguments() {
+        let mut pending = HashMap::new();
+        accumulate_tool_call(&mut pending, 0, Some("call_123"), Some("read"), Some("{\"path\":"));
+        let is_new = accumulate_tool_call(&mut pending, 0, None, None, Some("\"src/main.rs\"}"));
+        assert!(!is_new); // No new name, just appending
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[&0].arguments, "{\"path\":\"src/main.rs\"}");
+    }
+
+    #[test]
+    fn accumulate_multiple_indices() {
+        let mut pending = HashMap::new();
+        accumulate_tool_call(&mut pending, 0, Some("call_1"), Some("read"), Some("{}"));
+        accumulate_tool_call(&mut pending, 1, Some("call_2"), Some("grep"), Some("{}"));
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[&0].function_name, "read");
+        assert_eq!(pending[&1].function_name, "grep");
+    }
+
+    // -- has_valid_json tests --
+
+    #[test]
+    fn valid_json_complete_call() {
+        let tc = PendingToolCall {
+            id: "call_123".to_string(),
+            function_name: "read".to_string(),
+            arguments: r#"{"path":"src/main.rs"}"#.to_string(),
+        };
+        assert!(has_valid_json(&tc));
+    }
+
+    #[test]
+    fn invalid_json_truncated_arguments() {
+        let tc = PendingToolCall {
+            id: "call_123".to_string(),
+            function_name: "read".to_string(),
+            arguments: r#"{"path":"src/main"#.to_string(), // truncated
+        };
+        assert!(!has_valid_json(&tc));
+    }
+
+    #[test]
+    fn invalid_json_empty_id() {
+        let tc = PendingToolCall {
+            id: String::new(),
+            function_name: "read".to_string(),
+            arguments: "{}".to_string(),
+        };
+        assert!(!has_valid_json(&tc));
+    }
+
+    #[test]
+    fn invalid_json_empty_function_name() {
+        let tc = PendingToolCall {
+            id: "call_123".to_string(),
+            function_name: String::new(),
+            arguments: "{}".to_string(),
+        };
+        assert!(!has_valid_json(&tc));
+    }
+
+    #[test]
+    fn invalid_json_empty_arguments() {
+        let tc = PendingToolCall {
+            id: "call_123".to_string(),
+            function_name: "read".to_string(),
+            arguments: String::new(),
+        };
+        assert!(!has_valid_json(&tc));
     }
 }
