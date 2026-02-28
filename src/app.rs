@@ -166,6 +166,9 @@ pub struct App {
     /// Active permission prompt awaiting user response.
     pending_permission: Option<PendingPermission>,
 
+    /// Active session browser list (populated by /sessions, cleared on selection or dismiss).
+    session_browse_list: Option<Vec<SessionInfo>>,
+
     /// Cancellation token for the current stream task.
     stream_cancel: Option<CancellationToken>,
 
@@ -254,6 +257,7 @@ impl App {
             streaming_message: None,
             exchange_count: 0,
             pending_permission: None,
+            session_browse_list: None,
             stream_cancel: None,
             auto_compact_failed: false,
             context_warned: false,
@@ -347,6 +351,53 @@ impl App {
         }
 
         self.update_sidebar();
+    }
+
+    /// Switch to a different session (used by session browser).
+    async fn switch_to_session(&mut self, session: SessionInfo) -> Result<()> {
+        let mgr = SessionManager::new(&self.storage, &self.project.id);
+
+        // Clear current state
+        self.messages.clear();
+        self.stored_messages.clear();
+        self.streaming_message = None;
+        self.streaming_active = false;
+        self.is_loading = false;
+        self.auto_compact_failed = false;
+        self.context_warned = false;
+        self.last_prompt_tokens = 0;
+        *self.tool_cache.lock().unwrap() = ToolResultCache::new(self.project.root.clone());
+
+        // Load messages
+        if let Ok(loaded_messages) = mgr.load_messages(&session.id) {
+            self.exchange_count = loaded_messages.iter()
+                .filter(|m| m.role == Role::User).count();
+            for msg in &loaded_messages {
+                match msg.role {
+                    Role::User => self.messages.push(MessageBlock::User { text: msg.text_content() }),
+                    Role::Assistant => self.messages.push(MessageBlock::Assistant {
+                        thinking: None, text: msg.text_content(), tool_groups: vec![],
+                    }),
+                    Role::System => continue,
+                }
+            }
+            self.stored_messages = loaded_messages;
+        }
+
+        // Update tracking
+        let mut meta = mgr.load_project_meta();
+        meta.last_session_id = Some(session.id.clone());
+        meta.last_model = Some(session.model_ref.clone());
+        let _ = mgr.save_project_meta(&meta);
+
+        self.current_model = Some(session.model_ref.clone());
+        self.current_session = Some(session.clone());
+        self.messages.push(MessageBlock::System {
+            text: format!("Switched to: {}", session.title),
+        });
+        self.message_area_state.scroll_to_bottom();
+        self.update_sidebar();
+        Ok(())
     }
 
     async fn handle_event(&mut self, event: AppEvent) -> Result<()> {
@@ -745,6 +796,25 @@ impl App {
     }
 
     async fn handle_input(&mut self, text: String) -> Result<()> {
+        // Handle session browser selection
+        if let Some(ref browse_list) = self.session_browse_list {
+            if let Ok(n) = text.parse::<usize>() {
+                if n >= 1 && n <= browse_list.len() {
+                    let selected = browse_list[n - 1].clone();
+                    self.session_browse_list = None;
+                    return self.switch_to_session(selected).await;
+                } else {
+                    self.messages.push(MessageBlock::Error {
+                        text: format!("Enter 1-{}.", browse_list.len()),
+                    });
+                    self.message_area_state.scroll_to_bottom();
+                    return Ok(());
+                }
+            }
+            // Non-numeric input dismisses browser
+            self.session_browse_list = None;
+        }
+
         if text.starts_with('/') {
             return self.handle_command(&text).await;
         }
@@ -1185,6 +1255,7 @@ impl App {
                 self.context_warned = false;
                 self.last_prompt_tokens = 0;
                 self.current_session = None;
+                self.session_browse_list = None;
                 // Reset tool result cache for the new session
                 *self.tool_cache.lock().unwrap() =
                     ToolResultCache::new(self.project.root.clone());
@@ -1279,6 +1350,38 @@ impl App {
                                 text: format!("Failed to create AGENTS.md: {e}"),
                             });
                         }
+                    }
+                }
+            }
+            Command::Sessions => {
+                let mgr = SessionManager::new(&self.storage, &self.project.id);
+                match mgr.list_sessions() {
+                    Ok(sessions) if sessions.is_empty() => {
+                        self.messages.push(MessageBlock::System {
+                            text: "No sessions found.".to_string(),
+                        });
+                    }
+                    Ok(sessions) => {
+                        let display_sessions: Vec<_> = sessions.into_iter().take(20).collect();
+                        let mut list = String::from("Sessions (enter number to switch):\n");
+                        for (i, s) in display_sessions.iter().enumerate() {
+                            let current_marker = self.current_session.as_ref()
+                                .is_some_and(|c| c.id == s.id);
+                            let marker = if current_marker { " *" } else { "" };
+                            let date = s.updated_at.format("%m/%d %H:%M");
+                            list.push_str(&format!(
+                                "  {:>2}. {} \u{2014} {}{}\n",
+                                i + 1, date, s.title, marker
+                            ));
+                        }
+                        self.messages.push(MessageBlock::System { text: list });
+                        self.session_browse_list = Some(display_sessions);
+                        self.message_area_state.scroll_to_bottom();
+                    }
+                    Err(e) => {
+                        self.messages.push(MessageBlock::Error {
+                            text: format!("Failed to list sessions: {e}"),
+                        });
                     }
                 }
             }

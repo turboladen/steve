@@ -10,6 +10,7 @@ pub enum Command {
     Model(String),
     Init,
     Compact,
+    Sessions,
     Help,
 }
 
@@ -51,6 +52,7 @@ impl Command {
             },
             "/init" => Ok(Command::Init),
             "/compact" => Ok(Command::Compact),
+            "/sessions" => Ok(Command::Sessions),
             "/help" => Ok(Command::Help),
             _ => Err(format!("Unknown command: {cmd}. Type /help for available commands.")),
         }
@@ -64,6 +66,7 @@ impl Command {
             CommandInfo { name: "/model", description: "Switch model" },
             CommandInfo { name: "/models", description: "List available models" },
             CommandInfo { name: "/compact", description: "Compact conversation" },
+            CommandInfo { name: "/sessions", description: "Browse sessions" },
             CommandInfo { name: "/init", description: "Create AGENTS.md" },
             CommandInfo { name: "/help", description: "Show help" },
             CommandInfo { name: "/exit", description: "Quit" },
@@ -123,6 +126,11 @@ mod tests {
     }
 
     #[test]
+    fn parse_sessions_command() {
+        assert_eq!(Command::parse("/sessions").unwrap(), Command::Sessions);
+    }
+
+    #[test]
     fn parse_unknown_command() {
         assert!(Command::parse("/unknown").is_err());
     }
@@ -138,8 +146,9 @@ mod tests {
         assert!(names.contains(&"/model"));
         assert!(names.contains(&"/init"));
         assert!(names.contains(&"/compact"));
+        assert!(names.contains(&"/sessions"));
         assert!(names.contains(&"/help"));
-        assert_eq!(cmds.len(), 8);
+        assert_eq!(cmds.len(), 9);
     }
 
     #[test]
@@ -154,7 +163,7 @@ mod tests {
     #[test]
     fn filter_commands_slash_only() {
         let matches = Command::matching_commands("/");
-        assert_eq!(matches.len(), 8);
+        assert_eq!(matches.len(), 9);
     }
 
     #[test]
