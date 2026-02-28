@@ -136,6 +136,14 @@ Reduces LLM API token usage via two subsystems in `src/context/`:
 
 The compressor also runs an aggressive pruning pass (compressing ALL tool results including current iteration) when estimated token usage exceeds 60% of the context window. The `read` tool enforces a 2000-line default cap (`max_lines` parameter), `bash` uses head+tail truncation at 20KB, and `grep` truncates individual match lines to 200 chars. A 60% context warning is shown to the user before auto-compact triggers at 80%.
 
+### Token Pipeline
+
+Two token metrics — do not confuse them:
+- **`last_prompt_tokens`** (per-call): API's reported `prompt_tokens` from the most recent call. Represents actual context window pressure. Used by input bar display and `check_context_warning()` (60% threshold).
+- **`total_tokens`** (cumulative): Sum across all API calls in the session. Used by sidebar and `should_auto_compact()` (80% threshold). Note: `should_auto_compact` using cumulative tokens is known tech debt — should use `last_prompt_tokens` for consistency.
+
+`LlmUsageUpdate` events send per-call values during tool loops for live UI updates. `LlmFinish` sends accumulated `total_usage` for storage. The `LlmFinish` handler must NOT overwrite `last_prompt_tokens` — the last `LlmUsageUpdate` already set the correct value.
+
 ### Parallel Tool Execution (`stream.rs`)
 
 The tool call loop partitions pending tool calls into two phases:
@@ -164,7 +172,9 @@ Built with ratatui 0.29 + crossterm 0.28 + tui-textarea 0.7 (version-pinned for 
 
 Messages render as `MessageBlock` variants: `User`, `Assistant` (with thinking/tool_groups), `System`, `Error`, `Permission`. Styled per-variant in `message_area.rs`. Permission prompts render as bold yellow blocks with highlighted key letters.
 
-The input area is a 2-line starship-style prompt: context line (`[Mode] ~/path tokens/ctx (%)`) above a `> ` chevron input. No status bar — activity spinner displays inline in the message area via `activity: Option<(char, String)>` parameter. `render_input` takes an `InputContext` struct. Sidebar visibility uses `sidebar_override: Option<bool>` (None=auto, Some=forced).
+The input area has a top border (`Borders::TOP`, `INPUT_HEIGHT = 5`: 1 border + 1 context + 3 textarea), then a starship-style prompt: context line (`[Mode] ~/path prompt_tokens/ctx (%)`) showing context pressure (per-call `last_prompt_tokens`, not cumulative). The sidebar shows cumulative cost (`in: X  out: Y  total: Z`). `render_input` takes an `InputContext` with `last_prompt_tokens` and `context_window`. The border uses `block.inner(area)` to get the inner rect — child widgets layout inside that, not the textarea's own block. No status bar — activity spinner displays inline in the message area. Sidebar visibility uses `sidebar_override: Option<bool>` (None=auto, Some=forced).
+
+**Scroll direction**: Terminal emulators on macOS already apply natural scrolling. Map `ScrollDown` → `scroll_down()` and `ScrollUp` → `scroll_up()` directly — do NOT invert them at the application level.
 
 Auto-scroll calculates content height using wrapped line widths (not `lines.len()`) since `Paragraph` uses `Wrap { trim: false }`. This is critical — using unwrapped line count causes scroll to undershoot on long messages, hiding new content below the visible area. The height sum uses `u32` internally, capped at `u16::MAX` to prevent overflow on very long conversations.
 
