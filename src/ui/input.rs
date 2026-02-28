@@ -38,7 +38,7 @@ impl AgentMode {
 /// Context information displayed above the input textarea.
 pub struct InputContext {
     pub working_dir: String,
-    pub total_tokens: u64,
+    pub last_prompt_tokens: u64,
     pub context_window: u64,
 }
 
@@ -143,7 +143,7 @@ pub fn render_input(
         let pct = if context.context_window == 0 {
             0u8
         } else {
-            ((context.total_tokens as f64 / context.context_window as f64) * 100.0).min(100.0) as u8
+            ((context.last_prompt_tokens as f64 / context.context_window as f64) * 100.0).min(100.0) as u8
         };
         let token_color = if pct >= 80 {
             theme.error
@@ -155,15 +155,15 @@ pub fn render_input(
         right_spans.push(Span::styled(
             format!(
                 "{}/{} ({}%)",
-                format_tokens(context.total_tokens),
+                format_tokens(context.last_prompt_tokens),
                 format_tokens(context.context_window),
                 pct,
             ),
             Style::default().fg(token_color),
         ));
-    } else if context.total_tokens > 0 {
+    } else if context.last_prompt_tokens > 0 {
         right_spans.push(Span::styled(
-            format_tokens(context.total_tokens),
+            format_tokens(context.last_prompt_tokens),
             Style::default().fg(theme.dim),
         ));
     }

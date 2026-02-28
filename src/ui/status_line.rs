@@ -31,10 +31,12 @@ pub struct StatusLineState {
     pub spinner_frame: usize,
     /// Model reference string (e.g., "gpt-4o").
     pub model_name: String,
-    /// Total tokens used in this session.
+    /// Total tokens used in this session (cumulative).
     pub total_tokens: u64,
     /// Context window size for the current model.
     pub context_window: u64,
+    /// Last-reported prompt tokens from the API (current context window usage).
+    pub last_prompt_tokens: u64,
 }
 
 impl Default for StatusLineState {
@@ -45,6 +47,7 @@ impl Default for StatusLineState {
             model_name: String::new(),
             total_tokens: 0,
             context_window: 0,
+            last_prompt_tokens: 0,
         }
     }
 }
@@ -84,12 +87,12 @@ impl StatusLineState {
         }
     }
 
-    /// Context window usage as a percentage (0–100).
+    /// Context window usage as a percentage (0–100), based on last prompt tokens.
     pub fn context_usage_pct(&self) -> u8 {
         if self.context_window == 0 {
             0
         } else {
-            ((self.total_tokens as f64 / self.context_window as f64) * 100.0).min(100.0) as u8
+            ((self.last_prompt_tokens as f64 / self.context_window as f64) * 100.0).min(100.0) as u8
         }
     }
 }
@@ -207,7 +210,7 @@ mod tests {
     #[test]
     fn context_usage_pct_calculation() {
         let state = StatusLineState {
-            total_tokens: 12800,
+            last_prompt_tokens: 12800,
             context_window: 128000,
             ..Default::default()
         };
@@ -223,11 +226,33 @@ mod tests {
     #[test]
     fn context_usage_pct_capped_at_100() {
         let state = StatusLineState {
-            total_tokens: 200000,
+            last_prompt_tokens: 200000,
             context_window: 128000,
             ..Default::default()
         };
         assert_eq!(state.context_usage_pct(), 100);
+    }
+
+    #[test]
+    fn context_usage_pct_uses_last_prompt_tokens() {
+        let state = StatusLineState {
+            total_tokens: 500_000,      // cumulative — should NOT be used for pct
+            context_window: 128_000,
+            last_prompt_tokens: 80_000,  // this is what matters — 62.5%
+            ..Default::default()
+        };
+        assert_eq!(state.context_usage_pct(), 62); // truncated from 62.5
+    }
+
+    #[test]
+    fn context_usage_pct_zero_last_prompt() {
+        let state = StatusLineState {
+            total_tokens: 100_000,
+            context_window: 128_000,
+            last_prompt_tokens: 0,
+            ..Default::default()
+        };
+        assert_eq!(state.context_usage_pct(), 0);
     }
 
     #[test]

@@ -175,6 +175,9 @@ pub struct App {
     /// Whether the 60% context warning has been shown this session.
     pub context_warned: bool,
 
+    /// Last prompt_tokens reported by the API (current context window usage).
+    pub last_prompt_tokens: u64,
+
     /// User override for sidebar visibility: None = auto, Some(true) = show, Some(false) = hide.
     pub sidebar_override: Option<bool>,
 
@@ -254,6 +257,7 @@ impl App {
             stream_cancel: None,
             auto_compact_failed: false,
             context_warned: false,
+            last_prompt_tokens: 0,
             sidebar_override: None,
             event_tx,
             event_rx,
@@ -464,6 +468,7 @@ impl App {
                     if let (Some(u), Some(session)) =
                         (usage, &mut self.current_session)
                     {
+                        self.last_prompt_tokens = u.prompt_tokens as u64;
                         let _ = mgr.add_usage(
                             session,
                             u.prompt_tokens,
@@ -553,8 +558,9 @@ impl App {
                     tool_groups: vec![],
                 });
                 self.message_area_state.scroll_to_bottom();
-                // Reset context warning so it can fire again if usage climbs post-compact
+                // Reset context warning and prompt tokens since conversation is fresh
                 self.context_warned = false;
+                self.last_prompt_tokens = 0;
                 self.update_sidebar();
 
                 tracing::info!("conversation compacted successfully");
@@ -965,6 +971,7 @@ impl App {
         if let Some(session) = &self.current_session {
             self.status_line_state.total_tokens = session.token_usage.total_tokens;
         }
+        self.status_line_state.last_prompt_tokens = self.last_prompt_tokens;
     }
 
     /// Sync the permission engine rules with the current agent mode.
@@ -1071,19 +1078,19 @@ impl App {
             return;
         }
         let context_window = self.status_line_state.context_window;
-        let total_tokens = self.status_line_state.total_tokens;
+        let prompt_tokens = self.status_line_state.last_prompt_tokens;
         if context_window == 0 {
             return;
         }
         let threshold = (context_window as f64 * 0.60) as u64;
-        if total_tokens >= threshold {
+        if prompt_tokens >= threshold {
             self.context_warned = true;
             let pct = self.status_line_state.context_usage_pct();
             self.messages.push(MessageBlock::System {
                 text: format!(
                     "Context window {}% full ({}/{}). Consider /compact to free space.",
                     pct,
-                    crate::ui::status_line::format_tokens(total_tokens),
+                    crate::ui::status_line::format_tokens(prompt_tokens),
                     crate::ui::status_line::format_tokens(context_window),
                 ),
             });
@@ -1152,6 +1159,7 @@ impl App {
                 self.exchange_count = 0;
                 self.auto_compact_failed = false;
                 self.context_warned = false;
+                self.last_prompt_tokens = 0;
                 self.current_session = None;
                 // Reset tool result cache for the new session
                 *self.tool_cache.lock().unwrap() =
@@ -1532,7 +1540,8 @@ mod tests {
         let mut app = make_test_app();
         app.context_warned = false;
         app.status_line_state.context_window = 128_000;
-        app.status_line_state.total_tokens = 80_000; // ~62%
+        app.last_prompt_tokens = 80_000; // ~62%
+        app.status_line_state.last_prompt_tokens = 80_000;
         app.check_context_warning();
         assert!(app.context_warned);
         assert!(app.messages.iter().any(|m| {
@@ -1545,7 +1554,8 @@ mod tests {
         let mut app = make_test_app();
         app.context_warned = false;
         app.status_line_state.context_window = 128_000;
-        app.status_line_state.total_tokens = 80_000;
+        app.last_prompt_tokens = 80_000;
+        app.status_line_state.last_prompt_tokens = 80_000;
         app.check_context_warning();
         let msg_count = app.messages.len();
         app.check_context_warning(); // second call
@@ -1556,7 +1566,8 @@ mod tests {
     fn check_context_warning_does_not_fire_below_threshold() {
         let mut app = make_test_app();
         app.status_line_state.context_window = 128_000;
-        app.status_line_state.total_tokens = 50_000; // ~39%
+        app.last_prompt_tokens = 50_000; // ~39%
+        app.status_line_state.last_prompt_tokens = 50_000;
         app.check_context_warning();
         assert!(!app.context_warned);
     }

@@ -85,7 +85,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     let context = InputContext {
         working_dir: abbreviate_path(&app.project.root),
-        total_tokens: app.status_line_state.total_tokens,
+        last_prompt_tokens: app.status_line_state.last_prompt_tokens,
         context_window: app.status_line_state.context_window,
     };
 
