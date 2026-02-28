@@ -470,12 +470,13 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         let pre_filter_count = sorted_indices.len();
         sorted_indices.retain(|idx| {
             let tc = &pending_tool_calls[idx];
-            if has_valid_json(tc) {
+            if is_valid_tool_call(tc) {
                 true
             } else {
                 tracing::warn!(
                     tool = %tc.function_name,
                     call_id = %tc.id,
+                    args_len = tc.arguments.len(),
                     "dropping tool call with invalid/truncated data"
                 );
                 false
@@ -1036,9 +1037,9 @@ fn accumulate_tool_call(
     name.is_some()
 }
 
-/// Check if a pending tool call has valid, parseable JSON arguments
-/// and required fields (non-empty id and function_name).
-fn has_valid_json(tc: &PendingToolCall) -> bool {
+/// Check if a pending tool call is valid: non-empty id, function_name,
+/// and parseable JSON arguments.
+fn is_valid_tool_call(tc: &PendingToolCall) -> bool {
     !tc.arguments.is_empty()
         && !tc.id.is_empty()
         && !tc.function_name.is_empty()
@@ -1191,55 +1192,55 @@ mod tests {
         assert_eq!(pending[&1].function_name, "grep");
     }
 
-    // -- has_valid_json tests --
+    // -- is_valid_tool_call tests --
 
     #[test]
-    fn valid_json_complete_call() {
+    fn valid_tool_call_complete() {
         let tc = PendingToolCall {
             id: "call_123".to_string(),
             function_name: "read".to_string(),
             arguments: r#"{"path":"src/main.rs"}"#.to_string(),
         };
-        assert!(has_valid_json(&tc));
+        assert!(is_valid_tool_call(&tc));
     }
 
     #[test]
-    fn invalid_json_truncated_arguments() {
+    fn invalid_tool_call_truncated_arguments() {
         let tc = PendingToolCall {
             id: "call_123".to_string(),
             function_name: "read".to_string(),
             arguments: r#"{"path":"src/main"#.to_string(), // truncated
         };
-        assert!(!has_valid_json(&tc));
+        assert!(!is_valid_tool_call(&tc));
     }
 
     #[test]
-    fn invalid_json_empty_id() {
+    fn invalid_tool_call_empty_id() {
         let tc = PendingToolCall {
             id: String::new(),
             function_name: "read".to_string(),
             arguments: "{}".to_string(),
         };
-        assert!(!has_valid_json(&tc));
+        assert!(!is_valid_tool_call(&tc));
     }
 
     #[test]
-    fn invalid_json_empty_function_name() {
+    fn invalid_tool_call_empty_function_name() {
         let tc = PendingToolCall {
             id: "call_123".to_string(),
             function_name: String::new(),
             arguments: "{}".to_string(),
         };
-        assert!(!has_valid_json(&tc));
+        assert!(!is_valid_tool_call(&tc));
     }
 
     #[test]
-    fn invalid_json_empty_arguments() {
+    fn invalid_tool_call_empty_arguments() {
         let tc = PendingToolCall {
             id: "call_123".to_string(),
             function_name: "read".to_string(),
             arguments: String::new(),
         };
-        assert!(!has_valid_json(&tc));
+        assert!(!is_valid_tool_call(&tc));
     }
 }
