@@ -166,6 +166,9 @@ pub struct App {
     /// Whether auto-compact has failed in this session (suppresses retries).
     auto_compact_failed: bool,
 
+    /// Whether the 60% context warning has been shown this session.
+    pub context_warned: bool,
+
     /// User override for sidebar visibility: None = auto, Some(true) = show, Some(false) = hide.
     pub sidebar_override: Option<bool>,
 
@@ -244,6 +247,7 @@ impl App {
             pending_permission: None,
             stream_cancel: None,
             auto_compact_failed: false,
+            context_warned: false,
             sidebar_override: None,
             event_tx,
             event_rx,
@@ -471,6 +475,9 @@ impl App {
                     }
 
                     self.update_sidebar();
+
+                    // Check context usage and warn if approaching limits
+                    self.check_context_warning();
 
                     // Check if auto-compact should trigger
                     if self.should_auto_compact() {
@@ -1015,6 +1022,31 @@ impl App {
 
     /// Check if the session is approaching the context window limit and
     /// auto-compact should be triggered.
+    fn check_context_warning(&mut self) {
+        if self.context_warned {
+            return;
+        }
+        let context_window = self.status_line_state.context_window;
+        let total_tokens = self.status_line_state.total_tokens;
+        if context_window == 0 {
+            return;
+        }
+        let threshold = (context_window as f64 * 0.60) as u64;
+        if total_tokens >= threshold {
+            self.context_warned = true;
+            let pct = self.status_line_state.context_usage_pct();
+            self.messages.push(MessageBlock::System {
+                text: format!(
+                    "Context window {}% full ({}/{}). Consider /compact to free space.",
+                    pct,
+                    crate::ui::status_line::format_tokens(total_tokens),
+                    crate::ui::status_line::format_tokens(context_window),
+                ),
+            });
+            self.message_area_state.scroll_to_bottom();
+        }
+    }
+
     fn should_auto_compact(&self) -> bool {
         if !self.config.auto_compact {
             return false;
@@ -1075,6 +1107,7 @@ impl App {
                 self.is_loading = false;
                 self.exchange_count = 0;
                 self.auto_compact_failed = false;
+                self.context_warned = false;
                 self.current_session = None;
                 // Reset tool result cache for the new session
                 *self.tool_cache.lock().unwrap() =
@@ -1446,6 +1479,40 @@ mod tests {
         // Force hide regardless of width
         assert!(!app.should_show_sidebar(120));
         assert!(!app.should_show_sidebar(200));
+    }
+
+    #[test]
+    fn check_context_warning_fires_at_60_pct() {
+        let mut app = make_test_app();
+        app.context_warned = false;
+        app.status_line_state.context_window = 128_000;
+        app.status_line_state.total_tokens = 80_000; // ~62%
+        app.check_context_warning();
+        assert!(app.context_warned);
+        assert!(app.messages.iter().any(|m| {
+            matches!(m, MessageBlock::System { text } if text.contains("Context window"))
+        }));
+    }
+
+    #[test]
+    fn check_context_warning_only_fires_once() {
+        let mut app = make_test_app();
+        app.context_warned = false;
+        app.status_line_state.context_window = 128_000;
+        app.status_line_state.total_tokens = 80_000;
+        app.check_context_warning();
+        let msg_count = app.messages.len();
+        app.check_context_warning(); // second call
+        assert_eq!(app.messages.len(), msg_count); // no new message
+    }
+
+    #[test]
+    fn check_context_warning_does_not_fire_below_threshold() {
+        let mut app = make_test_app();
+        app.status_line_state.context_window = 128_000;
+        app.status_line_state.total_tokens = 50_000; // ~39%
+        app.check_context_warning();
+        assert!(!app.context_warned);
     }
 
     /// Create a minimal App for testing (without real storage/config).
