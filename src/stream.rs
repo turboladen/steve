@@ -414,6 +414,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
         let ctx = tool_context.clone().unwrap_or_else(|| ToolContext {
             project_root: std::path::PathBuf::from("."),
+            storage_dir: None,
         });
 
         // Sort tool calls by index for deterministic ordering
@@ -927,7 +928,7 @@ fn build_permission_summary(tool_name: ToolName, args: &Value) -> String {
             format!("Patch file: {file}")
         }
         ToolName::Read | ToolName::Grep | ToolName::Glob | ToolName::List
-        | ToolName::Question | ToolName::Todo | ToolName::Webfetch => {
+        | ToolName::Question | ToolName::Todo | ToolName::Webfetch | ToolName::Memory => {
             format!("{tool_name}: {}", serde_json::to_string(args).unwrap_or_default())
         }
     }

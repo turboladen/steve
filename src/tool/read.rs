@@ -131,6 +131,7 @@ mod tests {
     fn test_ctx(dir: &std::path::Path) -> ToolContext {
         ToolContext {
             project_root: dir.to_path_buf(),
+            storage_dir: None,
         }
     }
 

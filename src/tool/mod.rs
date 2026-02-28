@@ -3,6 +3,7 @@ pub mod edit;
 pub mod glob;
 pub mod grep;
 pub mod list;
+pub mod memory;
 pub mod patch;
 pub mod question;
 pub mod read;
@@ -35,6 +36,7 @@ pub enum ToolName {
     Question,
     Todo,
     Webfetch,
+    Memory,
 }
 
 impl ToolName {
@@ -63,6 +65,11 @@ impl ToolName {
             ToolName::Read | ToolName::Grep | ToolName::Glob | ToolName::List
         )
     }
+
+    /// Whether this is the memory tool.
+    pub fn is_memory(self) -> bool {
+        matches!(self, ToolName::Memory)
+    }
 }
 
 impl AsRef<str> for ToolName {
@@ -87,6 +94,8 @@ pub struct ToolOutput {
 pub struct ToolContext {
     /// The project root directory.
     pub project_root: PathBuf,
+    /// The storage directory for this project (for memory tool).
+    pub storage_dir: Option<PathBuf>,
 }
 
 /// Definition of a tool (for sending to the LLM as a function schema).
@@ -133,6 +142,7 @@ impl ToolRegistry {
         registry.register(question::tool());
         registry.register(todo::tool());
         registry.register(webfetch::tool());
+        registry.register(memory::tool());
 
         let _ = project_root; // Will be used by tools that need it
 
@@ -202,6 +212,7 @@ mod tests {
             ToolName::Question,
             ToolName::Todo,
             ToolName::Webfetch,
+            ToolName::Memory,
         ];
         for name in all {
             let s = name.as_str();
@@ -247,6 +258,7 @@ mod tests {
             ToolName::Question,
             ToolName::Todo,
             ToolName::Webfetch,
+            ToolName::Memory,
         ];
         for t in write_tools {
             assert!(t.is_write_tool(), "{t} should be a write tool");
@@ -267,6 +279,7 @@ mod tests {
             ToolName::Question,
             ToolName::Todo,
             ToolName::Webfetch,
+            ToolName::Memory,
         ];
         for t in read_only {
             assert!(t.is_read_only(), "{t} should be read-only");
@@ -287,6 +300,7 @@ mod tests {
             ToolName::Question,
             ToolName::Todo,
             ToolName::Webfetch,
+            ToolName::Memory,
         ];
         for t in cacheable {
             assert!(t.is_cacheable(), "{t} should be cacheable");
@@ -312,6 +326,7 @@ mod tests {
             ToolName::Question,
             ToolName::Todo,
             ToolName::Webfetch,
+            ToolName::Memory,
         ];
         for t in all {
             assert!(

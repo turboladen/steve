@@ -121,6 +121,7 @@ mod tests {
     fn test_ctx(dir: &tempfile::TempDir) -> ToolContext {
         ToolContext {
             project_root: dir.path().to_path_buf(),
+            storage_dir: None,
         }
     }
 

@@ -227,7 +227,7 @@ mod tests {
             "command": "sleep 60",
             "timeout": 1
         });
-        let ctx = ToolContext { project_root: Path::new("/tmp").to_path_buf() };
+        let ctx = ToolContext { project_root: Path::new("/tmp").to_path_buf(), storage_dir: None };
         let err = execute(args, ctx).unwrap_err();
         assert!(err.to_string().contains("timed out"));
     }

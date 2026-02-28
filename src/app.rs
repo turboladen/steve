@@ -50,7 +50,8 @@ const TOOL_GUIDANCE: &str = "\n\n## Tool Usage Guidelines\n\n\
 - **Be context-efficient**: Each tool result consumes context window space. Prefer targeted searches over broad reads.\n\
 - **Glob for discovery**: Use `glob` to find files by pattern before reading them.\n\
 - **Batch related reads**: If you need multiple files, request them in a single response to enable parallel execution.\n\
-- **Avoid re-reading**: Files you've already read are cached. The system will tell you if content is unchanged.";
+- **Avoid re-reading**: Files you've already read are cached. The system will tell you if content is unchanged.\n\
+- **Record discoveries**: Use the `memory` tool to save important project context (architecture, patterns, key files) that persists across sessions.";
 
 /// A permission prompt waiting for user input.
 struct PendingPermission {
@@ -105,6 +106,11 @@ fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
         ToolName::Todo => String::new(),
         ToolName::Webfetch => args
             .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        ToolName::Memory => args
+            .get("action")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
@@ -816,6 +822,7 @@ impl App {
             tool_registry: Some(self.tool_registry.clone()),
             tool_context: Some(ToolContext {
                 project_root: self.project.root.clone(),
+                storage_dir: Some(self.storage.base_dir().clone()),
             }),
             permission_engine: Some(self.permission_engine.clone()),
             tool_cache: self.tool_cache.clone(),
@@ -989,6 +996,26 @@ impl App {
         ));
 
         parts.push(TOOL_GUIDANCE.to_string());
+
+        // Load project memory if it exists
+        let memory_path = self.storage.base_dir().join("memory.md");
+        if let Ok(memory) = std::fs::read_to_string(&memory_path) {
+            if !memory.trim().is_empty() {
+                let truncated = if memory.len() > 2000 {
+                    let mut end = 2000;
+                    while end > 0 && !memory.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!(
+                        "{}...\n(use memory tool to read full content)",
+                        &memory[..end]
+                    )
+                } else {
+                    memory
+                };
+                parts.push(format!("\n## Project Memory\n\n{truncated}"));
+            }
+        }
 
         if let Some(agents_md) = &self.agents_md {
             parts.push(format!("\n---\n\n{agents_md}"));
@@ -1424,6 +1451,7 @@ mod tests {
         assert_eq!(extract_args_summary(ToolName::Bash, &args), "");
         assert_eq!(extract_args_summary(ToolName::Question, &args), "");
         assert_eq!(extract_args_summary(ToolName::Webfetch, &args), "");
+        assert_eq!(extract_args_summary(ToolName::Memory, &args), "");
     }
 
     #[test]
@@ -1444,6 +1472,7 @@ mod tests {
             ToolName::Question,
             ToolName::Todo,
             ToolName::Webfetch,
+            ToolName::Memory,
         ];
         for tool in all_tools {
             // Just ensure it doesn't panic

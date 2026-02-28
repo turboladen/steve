@@ -209,9 +209,9 @@ impl ToolResultCache {
                     .unwrap_or(1);
                 Some(format!("list:{}:{}", normalized.display(), depth))
             }
-            // Don't cache tools with side effects
+            // Don't cache tools with side effects or dynamic content
             ToolName::Bash | ToolName::Edit | ToolName::Write | ToolName::Patch
-            | ToolName::Question | ToolName::Todo | ToolName::Webfetch => None,
+            | ToolName::Question | ToolName::Todo | ToolName::Webfetch | ToolName::Memory => None,
         }
     }
 
@@ -224,7 +224,7 @@ impl ToolResultCache {
             }
             ToolName::Grep | ToolName::Glob | ToolName::Edit | ToolName::Write
             | ToolName::Patch | ToolName::Bash | ToolName::Question | ToolName::Todo
-            | ToolName::Webfetch => None,
+            | ToolName::Webfetch | ToolName::Memory => None,
         }
     }
 
