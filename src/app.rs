@@ -1124,9 +1124,9 @@ impl App {
             return false;
         }
 
-        let Some(session) = &self.current_session else {
+        if self.current_session.is_none() {
             return false;
-        };
+        }
 
         let Some(model_ref) = &self.current_model else {
             return false;
@@ -1143,7 +1143,7 @@ impl App {
         let context_window = resolved.config.context_window as u64;
         let threshold = (context_window as f64 * 0.80) as u64;
 
-        session.token_usage.total_tokens >= threshold
+        self.last_prompt_tokens >= threshold
     }
 
     async fn handle_command(&mut self, text: &str) -> Result<()> {

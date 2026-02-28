@@ -40,6 +40,7 @@ pub struct InputContext {
     pub working_dir: String,
     pub last_prompt_tokens: u64,
     pub context_window: u64,
+    pub context_usage_pct: u8,
 }
 
 /// State for the input area.
@@ -140,11 +141,7 @@ pub fn render_input(
 
     let mut right_spans: Vec<Span> = Vec::new();
     if context.context_window > 0 {
-        let pct = if context.context_window == 0 {
-            0u8
-        } else {
-            ((context.last_prompt_tokens as f64 / context.context_window as f64) * 100.0).min(100.0) as u8
-        };
+        let pct = context.context_usage_pct;
         let token_color = if pct >= 80 {
             theme.error
         } else if pct >= 50 {
