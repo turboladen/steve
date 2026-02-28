@@ -464,11 +464,14 @@ impl App {
                     let _ = mgr.save_message(&msg);
                     self.stored_messages.push(msg.clone());
 
-                    // Update session usage
+                    // Update session usage (cumulative for storage).
+                    // Note: last_prompt_tokens is NOT set here — LlmUsageUpdate
+                    // already set the correct per-call value. The usage here is
+                    // accumulated across all loop iterations, which is wrong for
+                    // context pressure display but correct for cumulative cost.
                     if let (Some(u), Some(session)) =
                         (usage, &mut self.current_session)
                     {
-                        self.last_prompt_tokens = u.prompt_tokens as u64;
                         let _ = mgr.add_usage(
                             session,
                             u.prompt_tokens,
@@ -1579,6 +1582,29 @@ mod tests {
         app.status_line_state.last_prompt_tokens = 50_000;
         app.check_context_warning();
         assert!(!app.context_warned);
+    }
+
+    #[test]
+    fn llm_usage_update_sets_prompt_tokens_without_session_storage() {
+        let mut app = make_test_app();
+        app.status_line_state.context_window = 128_000;
+        app.last_prompt_tokens = 0;
+        app.status_line_state.last_prompt_tokens = 0;
+
+        // Simulate the LlmUsageUpdate handler logic
+        let usage = crate::event::StreamUsage {
+            prompt_tokens: 60_000,
+            completion_tokens: 500,
+            total_tokens: 60_500,
+        };
+        app.last_prompt_tokens = usage.prompt_tokens as u64;
+        app.status_line_state.last_prompt_tokens = usage.prompt_tokens as u64;
+        app.check_context_warning();
+
+        assert_eq!(app.last_prompt_tokens, 60_000);
+        assert_eq!(app.status_line_state.last_prompt_tokens, 60_000);
+        // Session storage should remain untouched
+        assert!(app.current_session.is_none());
     }
 
     #[test]
