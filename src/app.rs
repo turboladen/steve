@@ -496,6 +496,15 @@ impl App {
                     }
                 }
             }
+            AppEvent::LlmUsageUpdate { usage } => {
+                // Update token counters mid-loop without saving to storage.
+                // usage.prompt_tokens is the current call's prompt tokens (context pressure).
+                self.last_prompt_tokens = usage.prompt_tokens as u64;
+                self.status_line_state.last_prompt_tokens = usage.prompt_tokens as u64;
+                // Don't update session.token_usage here — that happens on LlmFinish
+                // to avoid intermediate disk writes. Only update display-side fields.
+                self.check_context_warning();
+            }
             AppEvent::LlmError { error } => {
                 self.is_loading = false;
                 self.streaming_active = false;

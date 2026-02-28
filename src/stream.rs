@@ -284,6 +284,15 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                                 total_usage.prompt_tokens += u.prompt_tokens;
                                 total_usage.completion_tokens += u.completion_tokens;
                                 total_usage.total_tokens += u.total_tokens;
+
+                                // Send current-call usage to UI for live token counter updates
+                                let _ = event_tx.send(AppEvent::LlmUsageUpdate {
+                                    usage: StreamUsage {
+                                        prompt_tokens: u.prompt_tokens,
+                                        completion_tokens: u.completion_tokens,
+                                        total_tokens: u.total_tokens,
+                                    },
+                                });
                             }
 
                             // Process each choice's delta

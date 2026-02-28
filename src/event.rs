@@ -37,6 +37,9 @@ pub enum AppEvent {
     },
     /// The LLM stream has finished (no more tool calls). Contains token usage if available.
     LlmFinish { usage: Option<StreamUsage> },
+    /// Intermediate token usage update during a tool call loop.
+    /// Sent after each API response so the UI can show incremental token counts.
+    LlmUsageUpdate { usage: StreamUsage },
     /// LLM error (stream failure or API error).
     LlmError { error: String },
 
