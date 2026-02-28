@@ -349,9 +349,8 @@ impl App {
         match event {
             AppEvent::Input(Event::Key(key)) => self.handle_key(key).await?,
             AppEvent::Input(Event::Mouse(mouse)) => match mouse.kind {
-                // macOS natural scrolling: ScrollDown = swipe up = see older content
-                MouseEventKind::ScrollDown => self.message_area_state.scroll_up(3),
-                MouseEventKind::ScrollUp => self.message_area_state.scroll_down(3),
+                MouseEventKind::ScrollDown => self.message_area_state.scroll_down(3),
+                MouseEventKind::ScrollUp => self.message_area_state.scroll_up(3),
                 _ => {}
             },
             AppEvent::Input(Event::Paste(text)) => {
@@ -1560,6 +1559,20 @@ mod tests {
         app.status_line_state.total_tokens = 50_000; // ~39%
         app.check_context_warning();
         assert!(!app.context_warned);
+    }
+
+    #[test]
+    fn scroll_down_event_scrolls_down() {
+        let mut state = crate::ui::message_area::MessageAreaState::default();
+        state.update_dimensions(500, 100);
+        state.scroll_to_bottom();
+        state.scroll_up(10);
+        let after_up = state.scroll_offset;
+        state.scroll_down(3);
+        assert!(
+            state.scroll_offset > after_up,
+            "scroll_down should increase offset"
+        );
     }
 
     /// Create a minimal App for testing (without real storage/config).
