@@ -96,7 +96,8 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
         .get("max_lines")
         .and_then(|v| v.as_u64())
         .map(|n| n as usize)
-        .unwrap_or(default_max_lines);
+        .unwrap_or(default_max_lines)
+        .max(1);
 
     let total_available = end - start;
     let actual_end = std::cmp::min(end, start + max_lines);
@@ -165,6 +166,46 @@ mod tests {
         assert!(result.output.contains(" 100 |"));
         assert!(!result.output.contains(" 101 |"));
         assert!(result.output.contains("(showing 100 of 500 lines"));
+    }
+
+    #[test]
+    fn read_offset_limit_max_lines_interaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("big.rs");
+        let content: String = (1..=1000).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&file, &content).unwrap();
+
+        // offset=100, limit=200 means read lines 100-299
+        // max_lines=50 caps to lines 100-149
+        let args = serde_json::json!({
+            "path": file.to_str().unwrap(),
+            "offset": 100,
+            "limit": 200,
+            "max_lines": 50
+        });
+        let ctx = test_ctx(dir.path());
+        let result = execute(args, ctx).unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.output.contains(" 100 |"));
+        assert!(result.output.contains(" 149 |"));
+        assert!(!result.output.contains(" 150 |"));
+        assert!(result.output.contains("(showing 50 of 200 lines"));
+    }
+
+    #[test]
+    fn read_max_lines_zero_clamps_to_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("small.rs");
+        std::fs::write(&file, "line one\nline two\n").unwrap();
+
+        let args = serde_json::json!({"path": file.to_str().unwrap(), "max_lines": 0});
+        let ctx = test_ctx(dir.path());
+        let result = execute(args, ctx).unwrap();
+
+        assert!(!result.is_error);
+        // Should show at least 1 line due to clamping
+        assert!(result.output.contains("   1 |"));
     }
 
     #[test]

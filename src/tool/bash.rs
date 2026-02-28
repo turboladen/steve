@@ -134,12 +134,29 @@ fn run_command(command: &str, cwd: &Path, timeout_secs: u64) -> Result<CommandRe
     let max_len = 20_000;
     if result.len() > max_len {
         let total_len = result.len();
-        // Find newline boundaries to avoid splitting lines/UTF-8
-        let head_end = result[..15_000].rfind('\n').unwrap_or(15_000);
-        let tail_start = result[total_len.saturating_sub(4_000)..]
+        // Find safe char boundaries first to avoid panicking on multi-byte UTF-8
+        let safe_head_boundary = {
+            let mut end = 15_000.min(total_len);
+            while end > 0 && !result.is_char_boundary(end) {
+                end -= 1;
+            }
+            end
+        };
+        let safe_tail_boundary = {
+            let mut start = total_len.saturating_sub(4_000);
+            while start < total_len && !result.is_char_boundary(start) {
+                start += 1;
+            }
+            start
+        };
+        // Find newline boundaries within the safe ranges
+        let head_end = result[..safe_head_boundary]
+            .rfind('\n')
+            .unwrap_or(safe_head_boundary);
+        let tail_start = result[safe_tail_boundary..]
             .find('\n')
-            .map(|i| total_len.saturating_sub(4_000) + i + 1)
-            .unwrap_or(total_len.saturating_sub(4_000));
+            .map(|i| safe_tail_boundary + i + 1)
+            .unwrap_or(safe_tail_boundary);
         let head = &result[..head_end];
         let tail = &result[tail_start..];
         result = format!(
@@ -191,12 +208,17 @@ mod tests {
     fn run_command_long_output_head_tail() {
         // Generate output > 20k bytes
         let result = run_command("seq 1 10000", Path::new("/tmp"), 30).unwrap();
-        // Should have head content
-        assert!(result.output.contains("1\n"));
-        // Should have tail content
+        // Should have head content (first line)
+        assert!(result.output.starts_with("1\n"));
+        // Should have tail content (last value)
         assert!(result.output.contains("10000"));
         // Should have omission marker
         assert!(result.output.contains("middle omitted"));
+        // Middle content should actually be omitted
+        assert!(
+            !result.output.contains("\n5000\n"),
+            "middle should be omitted"
+        );
     }
 
     #[test]

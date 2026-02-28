@@ -144,7 +144,11 @@ fn compress_tool_output(tool_name: ToolName, content: &str) -> String {
 /// Input format: "   4 | line content\n" with line numbers
 fn compress_read(content: &str) -> String {
     let lines: Vec<&str> = content.lines().collect();
-    let line_count = lines.len();
+    // Exclude truncation footer lines from the count (e.g., "... (showing N of M lines ...)")
+    let line_count = lines
+        .iter()
+        .filter(|l| !l.starts_with("... ("))
+        .count();
 
     // Try to extract the file path from the numbered-line format.
     // We can detect the language from the content patterns.

@@ -548,6 +548,8 @@ impl App {
                     tool_groups: vec![],
                 });
                 self.message_area_state.scroll_to_bottom();
+                // Reset context warning so it can fire again if usage climbs post-compact
+                self.context_warned = false;
                 self.update_sidebar();
 
                 tracing::info!("conversation compacted successfully");

@@ -163,7 +163,17 @@ impl ToolResultCache {
                     .and_then(|v| v.as_u64())
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "all".to_string());
-                Some(format!("read:{}:{}:{}", normalized.display(), offset, limit))
+                let max_lines = args
+                    .get("max_lines")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(2000);
+                Some(format!(
+                    "read:{}:{}:{}:{}",
+                    normalized.display(),
+                    offset,
+                    limit,
+                    max_lines
+                ))
             }
             ToolName::Grep => {
                 let pattern = args.get("pattern")?.as_str()?;
