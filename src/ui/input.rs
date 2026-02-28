@@ -98,6 +98,13 @@ pub fn render_input(
     theme: &Theme,
     context: &InputContext,
 ) {
+    // Top border for visual separation from message area
+    let border_block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(theme.border));
+    let inner_area = border_block.inner(area);
+    frame.render_widget(border_block, area);
+
     // Split vertically: 1 row for context line, rest for textarea
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -105,7 +112,7 @@ pub fn render_input(
             Constraint::Length(1), // context line
             Constraint::Min(1),   // textarea with chevron
         ])
-        .split(area);
+        .split(inner_area);
 
     let context_area = vertical[0];
     let textarea_area = vertical[1];

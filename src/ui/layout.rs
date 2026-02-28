@@ -9,14 +9,14 @@ pub struct AppLayout {
 
 const SIDEBAR_WIDTH: u16 = 40;
 const SIDEBAR_MIN_TERMINAL_WIDTH: u16 = 120;
-/// Input height: 1 context line + 3 textarea rows = 4.
-const INPUT_HEIGHT: u16 = 4;
+/// Input height: 1 border + 1 context line + 3 textarea rows = 5.
+const INPUT_HEIGHT: u16 = 5;
 
 /// Compute the layout given the full terminal area.
 ///
 /// Layout order (top to bottom):
 /// - Message area (fills remaining space)
-/// - Input area (4 rows: 1 context line + 3 textarea)
+/// - Input area (5 rows: 1 border + 1 context line + 3 textarea)
 ///
 /// Sidebar (if shown) sits to the right of messages + input.
 pub fn compute_layout(area: Rect, show_sidebar: bool) -> AppLayout {
@@ -79,12 +79,12 @@ mod tests {
     fn layout_without_sidebar() {
         let layout = compute_layout(rect(80, 24), false);
         assert!(layout.sidebar.is_none());
-        // Input at bottom, 4 rows (1 context + 3 textarea)
+        // Input at bottom, 5 rows (1 border + 1 context + 3 textarea)
         assert_eq!(layout.input_area.height, INPUT_HEIGHT);
-        assert_eq!(layout.input_area.y, 20); // 24 - 4(input)
+        assert_eq!(layout.input_area.y, 19); // 24 - 5(input)
         // Messages fill the rest
         assert_eq!(layout.message_area.y, 0);
-        assert_eq!(layout.message_area.height, 20);
+        assert_eq!(layout.message_area.height, 19);
     }
 
     #[test]
@@ -106,7 +106,7 @@ mod tests {
     #[test]
     fn layout_input_height_includes_context_line() {
         let layout = compute_layout(rect(80, 24), false);
-        // 4 rows: 1 for context line + 3 for textarea
-        assert_eq!(layout.input_area.height, 4);
+        // 5 rows: 1 border + 1 context line + 3 textarea
+        assert_eq!(layout.input_area.height, 5);
     }
 }
