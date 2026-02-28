@@ -92,7 +92,7 @@ Example `steve.json`:
 
 ## Architecture
 
-Single binary crate (33 source files), no workspace. All modules share core types.
+Single binary crate (~40 source files), no workspace. All modules share core types.
 
 ### Event-Driven Architecture
 
@@ -132,7 +132,9 @@ Reduces LLM API token usage via two subsystems in `src/context/`:
 - **Compressor** (`compressor.rs`): Before each LLM API call in the tool loop, replaces already-seen tool results with compact heuristic summaries (e.g., `"[Previously read: src/main.rs, 150 lines, Rust]"`). Preserves `tool_call_id` for valid conversation structure.
 - **Cache** (`cache.rs`): Session-scoped `ToolResultCache` lives in `App` behind `Arc<std::sync::Mutex<ToolResultCache>>`, passed to the stream task via `StreamRequest`. Maps `(tool_name, canonical_args)` → cached output. All tool cache keys normalize paths via `normalize_path()` (resolves relative paths against project root) for consistent matching. On cache hit, returns a compact reference instead of re-executing. Invalidated when write ops modify files — grep/glob entries are wholesale-invalidated since they can't be tracked by individual path. Reset on `/new` session.
 
-**Critical invariant**: Write tools (`edit`, `write`, `patch`) must never run in the parallel execution phase — they must go through the sequential phase for proper cache invalidation, even if they have `AllowAlways` permission.
+**Critical invariant**: Write tools (`edit`, `write`, `patch`) and the `memory` tool (which writes to disk) must never run in the parallel execution phase — they must go through the sequential phase for proper cache invalidation, even if they have `AllowAlways` permission.
+
+The compressor also runs an aggressive pruning pass (compressing ALL tool results including current iteration) when estimated token usage exceeds 60% of the context window. The `read` tool enforces a 2000-line default cap (`max_lines` parameter), `bash` uses head+tail truncation at 20KB, and `grep` truncates individual match lines to 200 chars. A 60% context warning is shown to the user before auto-compact triggers at 80%.
 
 ### Parallel Tool Execution (`stream.rs`)
 
@@ -146,7 +148,7 @@ Every `tool_call_id` in an assistant message **must** have a corresponding tool 
 
 Tools are registered in `ToolRegistry` as `ToolEntry` structs containing a `ToolDef` (name, description, JSON schema) and a handler closure `Fn(Value, ToolContext) -> Result<ToolOutput>`. Tools are synchronous (not async) — they run inside the stream task's spawned tokio task.
 
-Available tools: `read`, `grep`, `glob`, `list`, `edit`, `write`, `patch`, `bash`, `question`, `todo`, `webfetch`.
+Available tools: `read`, `grep`, `glob`, `list`, `edit`, `write`, `patch`, `bash`, `question`, `todo`, `webfetch`, `memory`.
 
 ### Storage (`storage/mod.rs`)
 
@@ -182,6 +184,8 @@ Auto-scroll calculates content height using wrapped line widths (not `lines.len(
 - **No `dirs` crate** — use `std::env::var("HOME")` for home directory detection, or `directories::ProjectDirs` for app data paths
 - **`Storage::new(project_id: &str)`** returns `Result<Self>` — takes a project ID string (not a path). For tests: `Storage::new("test-name").expect("test storage")`
 - `AGENTS.md` in the project root is optional — if present, it's loaded at startup and injected as part of the system prompt. Create one with `/init`
+- **File locking (Rust 2024)**: `std::fs::File` has native `lock()` (exclusive), `lock_shared()`, `unlock()` methods. `fs2::FileExt` still provides `lock_exclusive()` (no native equivalent with that name) but `lock_shared`/`unlock` shadow the trait — importing `fs2::FileExt` triggers unused-import warnings for those
+- **`ToolContext` fields**: `project_root: PathBuf` and `storage_dir: Option<PathBuf>`. In tests, use `storage_dir: None` unless testing the memory tool
 
 ## Provider Compatibility
 
