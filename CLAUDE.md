@@ -124,7 +124,7 @@ Tab toggles between modes. Mode rules live in `permission/mod.rs` as `build_mode
 
 ### Compaction (`/compact`)
 
-Summarizes the conversation into a single message to reclaim context window space. Uses a non-streaming `LlmClient::simple_chat()` call in a background tokio task, communicating results back via `AppEvent::CompactFinish` / `AppEvent::CompactError`. Uses `small_model` if configured, otherwise falls back to the main model. On completion, old messages are deleted from storage and replaced with a single assistant message containing the summary. Auto-compact triggers after `LlmFinish` when `session.token_usage.total_tokens >= context_window * 0.80` (controlled by `auto_compact` config). If compaction fails (`CompactError`), `auto_compact_failed` is set to suppress retries for the rest of the session (reset on `/new`). Manual `/compact` still works.
+Summarizes the conversation into a single message to reclaim context window space. Uses a non-streaming `LlmClient::simple_chat()` call in a background tokio task, communicating results back via `AppEvent::CompactFinish` / `AppEvent::CompactError`. Uses `small_model` if configured, otherwise falls back to the main model. On completion, old messages are deleted from storage and replaced with a single assistant message containing the summary. Auto-compact triggers after `LlmFinish` when `last_prompt_tokens >= context_window * 0.80` (controlled by `auto_compact` config). If compaction fails (`CompactError`), `auto_compact_failed` is set to suppress retries for the rest of the session (reset on `/new`). Manual `/compact` still works.
 
 ### Context Management (`context/`)
 
@@ -140,7 +140,7 @@ The compressor also runs an aggressive pruning pass (compressing ALL tool result
 
 Two token metrics — do not confuse them:
 - **`last_prompt_tokens`** (per-call): API's reported `prompt_tokens` from the most recent call. Represents actual context window pressure. Used by input bar display and `check_context_warning()` (60% threshold).
-- **`total_tokens`** (cumulative): Sum across all API calls in the session. Used by sidebar and `should_auto_compact()` (80% threshold). Note: `should_auto_compact` using cumulative tokens is known tech debt — should use `last_prompt_tokens` for consistency.
+- **`total_tokens`** (cumulative): Sum across all API calls in the session. Used by sidebar cost display. Both `should_auto_compact()` (80%) and `check_context_warning()` (60%) use `last_prompt_tokens`.
 
 `LlmUsageUpdate` events send per-call values during tool loops for live UI updates. `LlmFinish` sends accumulated `total_usage` for storage. The `LlmFinish` handler must NOT overwrite `last_prompt_tokens` — the last `LlmUsageUpdate` already set the correct value.
 
