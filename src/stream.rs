@@ -135,20 +135,6 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
     // Tool result cache — shared across stream tasks within a session.
     // Avoids re-executing identical read operations across messages.
 
-    // Pre-call pruning: if conversation is large relative to context window, prune aggressively
-    if let Some(ctx_window) = context_window {
-        let estimated_chars: usize = messages.iter().map(|m| estimate_message_chars(m)).sum();
-        let estimated_tokens = estimated_chars / 4;
-        if ctx_window > 0 && estimated_tokens as u64 > ctx_window * 60 / 100 {
-            tracing::info!(
-                estimated_tokens,
-                context_window = ctx_window,
-                "pre-call aggressive pruning triggered"
-            );
-            crate::context::compressor::aggressive_prune(&mut messages, 0);
-        }
-    }
-
     // Tool call loop — keep going until the LLM produces a response with no tool calls
     loop {
         // Check for cancellation before each LLM call
@@ -168,6 +154,22 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 &mut messages,
                 current_iteration_tool_count,
             );
+        }
+
+        // Aggressive pruning: if conversation is still large after normal compression,
+        // compress ALL tool results (including current iteration) to stay under budget.
+        // Uses keep_recent=0 so even the latest tool results get compressed.
+        if let Some(ctx_window) = context_window {
+            let estimated_chars: usize = messages.iter().map(|m| estimate_message_chars(m)).sum();
+            let estimated_tokens = estimated_chars / 4;
+            if ctx_window > 0 && estimated_tokens as u64 > ctx_window * 60 / 100 {
+                tracing::info!(
+                    estimated_tokens,
+                    context_window = ctx_window,
+                    "aggressive pruning triggered — compressing all tool results"
+                );
+                crate::context::compressor::compress_old_tool_results(&mut messages, 0);
+            }
         }
 
         // Reset counter for the next iteration
@@ -546,12 +548,14 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         }
 
         // Partition: auto-allowed read-only tools can run in parallel.
-        // Write tools (edit, write, patch) always go to sequential phase for
-        // cache invalidation and permission prompts.
+        // Write tools (edit, write, patch) and memory tool (append action) always
+        // go to sequential phase for cache invalidation and permission prompts.
         let (auto_allowed, needs_interaction): (Vec<_>, Vec<_>) = prepared
             .into_iter()
             .partition(|tc| {
-                matches!(tc.action, PermissionAction::Allow) && !tc.tool_name.is_write_tool()
+                matches!(tc.action, PermissionAction::Allow)
+                    && !tc.tool_name.is_write_tool()
+                    && !tc.tool_name.is_memory()
             });
 
         // Log partition results for diagnostics

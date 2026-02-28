@@ -55,7 +55,17 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
 
     match action {
         "read" => {
-            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            let content = match std::fs::File::open(&path) {
+                Ok(file) => {
+                    use std::io::Read;
+                    let _ = file.lock_shared();
+                    let mut buf = String::new();
+                    (&file).read_to_string(&mut buf).unwrap_or_default();
+                    let _ = file.unlock();
+                    buf
+                }
+                Err(_) => String::new(),
+            };
             if content.is_empty() {
                 Ok(ToolOutput {
                     title: "memory read".to_string(),
@@ -86,13 +96,15 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            // Append with separator
+            // Append with exclusive lock for safe concurrent access
             use std::io::Write;
-            let mut file = std::fs::OpenOptions::new()
+            let file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&path)?;
-            writeln!(file, "\n{content}")?;
+            file.lock()?;
+            write!(&file, "\n{content}\n")?;
+            let _ = file.unlock();
             Ok(ToolOutput {
                 title: "memory append".to_string(),
                 output: "Memory updated.".to_string(),

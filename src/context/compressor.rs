@@ -125,15 +125,6 @@ fn build_tool_name_map(messages: &[ChatCompletionRequestMessage]) -> HashMap<Str
     map
 }
 
-/// Aggressively prune conversation to reclaim context space.
-/// Replaces ALL tool results with compressed summaries (unlike `compress_old_tool_results`
-/// which keeps recent ones intact). Used when approaching context limits.
-pub fn aggressive_prune(
-    messages: &mut Vec<ChatCompletionRequestMessage>,
-    keep_recent: usize,
-) {
-    compress_old_tool_results(messages, keep_recent);
-}
 
 /// Compress a tool output into a compact summary based on the tool type.
 fn compress_tool_output(tool_name: ToolName, content: &str) -> String {
@@ -601,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn test_aggressive_prune_compresses_all_tool_results() {
+    fn test_compress_all_tool_results_with_zero_keep() {
         // Build a conversation: user → assistant+tool_calls → tool results
         let long_content: String = (1..=100).map(|i| format!("{:>4} | line {i}\n", i)).collect();
         assert!(long_content.len() > 200); // must exceed skip threshold
@@ -621,7 +612,7 @@ mod tests {
         ];
 
         let original_len = messages.len();
-        aggressive_prune(&mut messages, 0);
+        compress_old_tool_results(&mut messages, 0);
 
         // Same number of messages (structure preserved)
         assert_eq!(messages.len(), original_len);
@@ -640,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn test_aggressive_prune_preserves_tool_call_ids() {
+    fn test_compress_all_preserves_tool_call_ids() {
         let long_content: String = (1..=100).map(|i| format!("{:>4} | line {i}\n", i)).collect();
 
         let mut messages = vec![
@@ -649,7 +640,7 @@ mod tests {
             make_tool_result("call_b", &long_content),
         ];
 
-        aggressive_prune(&mut messages, 0);
+        compress_old_tool_results(&mut messages, 0);
 
         // Verify tool_call_ids are preserved
         let tool_ids: Vec<String> = messages

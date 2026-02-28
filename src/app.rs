@@ -997,9 +997,9 @@ impl App {
 
         parts.push(TOOL_GUIDANCE.to_string());
 
-        // Load project memory if it exists
+        // Load project memory if it exists (with shared lock for safe concurrent access)
         let memory_path = self.storage.base_dir().join("memory.md");
-        if let Ok(memory) = std::fs::read_to_string(&memory_path) {
+        if let Ok(memory) = Self::read_memory_file(&memory_path) {
             if !memory.trim().is_empty() {
                 let truncated = if memory.len() > 2000 {
                     let mut end = 2000;
@@ -1026,6 +1026,17 @@ impl App {
         }
 
         Some(parts.join("\n"))
+    }
+
+    /// Read the memory file with a shared lock for safe concurrent access.
+    fn read_memory_file(path: &std::path::Path) -> Result<String, std::io::Error> {
+        use std::io::Read;
+        let file = std::fs::File::open(path)?;
+        file.lock_shared()?;
+        let mut content = String::new();
+        (&file).read_to_string(&mut content)?;
+        let _ = file.unlock();
+        Ok(content)
     }
 
     /// Determine which model ref to use for compaction/summarization.
