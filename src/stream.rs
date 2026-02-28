@@ -1021,7 +1021,7 @@ fn accumulate_tool_call(
     name: Option<&str>,
     arguments: Option<&str>,
 ) -> bool {
-    let entry = pending.entry(index).or_insert_with(PendingToolCall::default);
+    let entry = pending.entry(index).or_default();
 
     if let Some(id) = id {
         entry.id = id.to_string();

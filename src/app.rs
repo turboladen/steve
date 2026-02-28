@@ -372,6 +372,7 @@ impl App {
         self.context_warned = false;
         self.last_prompt_tokens = 0;
         self.exchange_count = 0;
+        self.pending_permission = None;
         *self.tool_cache.lock().unwrap() = ToolResultCache::new(self.project.root.clone());
 
         // Load messages
