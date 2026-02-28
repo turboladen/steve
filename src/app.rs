@@ -357,6 +357,11 @@ impl App {
     async fn switch_to_session(&mut self, session: SessionInfo) -> Result<()> {
         let mgr = SessionManager::new(&self.storage, &self.project.id);
 
+        // Cancel any active stream
+        if let Some(token) = self.stream_cancel.take() {
+            token.cancel();
+        }
+
         // Clear current state
         self.messages.clear();
         self.stored_messages.clear();
@@ -366,6 +371,7 @@ impl App {
         self.auto_compact_failed = false;
         self.context_warned = false;
         self.last_prompt_tokens = 0;
+        self.exchange_count = 0;
         *self.tool_cache.lock().unwrap() = ToolResultCache::new(self.project.root.clone());
 
         // Load messages
@@ -1354,6 +1360,12 @@ impl App {
                 }
             }
             Command::Sessions => {
+                if self.is_loading || self.streaming_active {
+                    self.messages.push(MessageBlock::Error {
+                        text: "Cannot browse sessions while streaming.".to_string(),
+                    });
+                    return Ok(());
+                }
                 let mgr = SessionManager::new(&self.storage, &self.project.id);
                 match mgr.list_sessions() {
                     Ok(sessions) if sessions.is_empty() => {
@@ -1480,7 +1492,7 @@ impl App {
             }
             Command::Help => {
                 self.messages.push(MessageBlock::System {
-                    text: "Commands:\n  /new        \u{2014} Start a new session\n  /rename <t> \u{2014} Rename current session\n  /models     \u{2014} List available models\n  /model <r>  \u{2014} Switch to a model\n  /compact    \u{2014} Compact conversation into a summary\n  /init       \u{2014} Create AGENTS.md in project root\n  /help       \u{2014} Show this help\n  /exit       \u{2014} Quit\n\nKeys:\n  Enter       \u{2014} Send message\n  Shift+Enter \u{2014} Insert newline\n  Tab         \u{2014} Cycle autocomplete / toggle Build\u{2013}Plan mode\n  Ctrl+C      \u{2014} Cancel stream / quit\n  Ctrl+B      \u{2014} Toggle sidebar\n  Mouse wheel \u{2014} Scroll messages\n\nTips:\n  Shift+click/drag \u{2014} Select text for copy (terminal feature)".to_string(),
+                    text: "Commands:\n  /new        \u{2014} Start a new session\n  /rename <t> \u{2014} Rename current session\n  /models     \u{2014} List available models\n  /model <r>  \u{2014} Switch to a model\n  /compact    \u{2014} Compact conversation into a summary\n  /sessions   \u{2014} Browse sessions\n  /init       \u{2014} Create AGENTS.md in project root\n  /help       \u{2014} Show this help\n  /exit       \u{2014} Quit\n\nKeys:\n  Enter       \u{2014} Send message\n  Shift+Enter \u{2014} Insert newline\n  Tab         \u{2014} Cycle autocomplete / toggle Build\u{2013}Plan mode\n  Ctrl+C      \u{2014} Cancel stream / quit\n  Ctrl+B      \u{2014} Toggle sidebar\n  Mouse wheel \u{2014} Scroll messages\n\nTips:\n  Shift+click/drag \u{2014} Select text for copy (terminal feature)".to_string(),
                 });
             }
         }
