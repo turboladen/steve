@@ -995,8 +995,9 @@ fn is_transient_error(err: &async_openai::error::OpenAIError) -> bool {
     use async_openai::error::OpenAIError;
     match err {
         OpenAIError::Reqwest(e) => {
-            // Network-level failures: timeout, connection refused, DNS, etc.
+            // Network-level failures: timeout, connection refused, DNS, 5xx, etc.
             e.is_timeout() || e.is_connect() || e.is_request()
+                || e.status().is_some_and(|s| s.is_server_error())
         }
         OpenAIError::ApiError(api_err) => {
             // Rate limit or server overload from the API
@@ -1008,8 +1009,12 @@ fn is_transient_error(err: &async_openai::error::OpenAIError) -> bool {
             // SSE stream failures are often transient (connection drops)
             true
         }
-        // JSONDeserialize, FileSaveError, FileReadError, InvalidArgument — not transient
-        _ => false,
+        // Explicit non-transient variants — exhaustive match ensures new variants
+        // are reviewed for transient-ness when async-openai adds them.
+        OpenAIError::JSONDeserialize(_, _) => false,
+        OpenAIError::FileSaveError(_) => false,
+        OpenAIError::FileReadError(_) => false,
+        OpenAIError::InvalidArgument(_) => false,
     }
 }
 
@@ -1057,7 +1062,7 @@ fn estimate_message_chars(msg: &ChatCompletionRequestMessage) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_openai::error::{ApiError, OpenAIError};
+    use async_openai::error::{ApiError, OpenAIError, StreamError};
 
     /// Helper to build an ApiError with a given message and optional code.
     fn make_api_error(message: &str, code: Option<&str>) -> OpenAIError {
@@ -1113,5 +1118,12 @@ mod tests {
             !is_transient_error(&err),
             "generic server_error without overloaded/unavailable message should not be transient"
         );
+    }
+
+    #[test]
+    fn transient_stream_error() {
+        let stream_err = StreamError::EventStream("connection reset".to_string());
+        let err = OpenAIError::StreamError(Box::new(stream_err));
+        assert!(is_transient_error(&err), "StreamError should be transient");
     }
 }
