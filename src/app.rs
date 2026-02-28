@@ -966,6 +966,18 @@ impl App {
         if let Some(model) = &self.current_model {
             self.sidebar_state.model_name = model.clone();
         }
+        // Calculate session cost if model has pricing
+        self.sidebar_state.session_cost = None;
+        if let (Some(model_ref), Some(registry), Some(session)) =
+            (&self.current_model, &self.provider_registry, &self.current_session)
+        {
+            if let Ok(resolved) = registry.resolve_model(model_ref) {
+                self.sidebar_state.session_cost = resolved.session_cost(
+                    session.token_usage.prompt_tokens,
+                    session.token_usage.completion_tokens,
+                );
+            }
+        }
         // Sync todos from the todo tool
         let tool_todos = crate::tool::todo::get_todos();
         self.sidebar_state.todos = tool_todos

@@ -27,6 +27,15 @@ impl ResolvedModel {
     pub fn display_ref(&self) -> String {
         format!("{}/{}", self.provider_id, self.model_id)
     }
+
+    /// Session cost based on token usage and model pricing.
+    /// Returns None if model has no pricing configured.
+    pub fn session_cost(&self, prompt_tokens: u64, completion_tokens: u64) -> Option<f64> {
+        let cost = self.config.cost.as_ref()?;
+        let input_cost = prompt_tokens as f64 * cost.input_per_million / 1_000_000.0;
+        let output_cost = completion_tokens as f64 * cost.output_per_million / 1_000_000.0;
+        Some(input_cost + output_cost)
+    }
 }
 
 /// Registry of configured providers and their models.
@@ -121,5 +130,51 @@ impl ProviderRegistry {
     /// Check if the registry has any providers configured.
     pub fn is_empty(&self) -> bool {
         self.providers.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::types::{ModelCapabilities, ModelCost, ModelConfig, ProviderConfig};
+
+    fn make_test_resolved_model() -> ResolvedModel {
+        ResolvedModel {
+            provider_id: "test".to_string(),
+            model_id: "test-model".to_string(),
+            config: ModelConfig {
+                id: "test-model".to_string(),
+                name: "Test Model".to_string(),
+                context_window: 128_000,
+                max_output_tokens: None,
+                cost: None,
+                capabilities: ModelCapabilities {
+                    tool_call: true,
+                    reasoning: false,
+                },
+            },
+            provider_config: ProviderConfig {
+                base_url: "https://api.test.com/v1".to_string(),
+                api_key_env: "TEST_API_KEY".to_string(),
+                models: HashMap::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn session_cost_calculation() {
+        let mut model = make_test_resolved_model();
+        model.config.cost = Some(ModelCost {
+            input_per_million: 0.50,
+            output_per_million: 2.00,
+        });
+        let cost = model.session_cost(1_000_000, 500_000).unwrap();
+        assert!((cost - 1.50).abs() < 0.001); // 0.50 + 1.00
+    }
+
+    #[test]
+    fn session_cost_none_without_pricing() {
+        let model = make_test_resolved_model();
+        assert!(model.session_cost(1_000_000, 500_000).is_none());
     }
 }

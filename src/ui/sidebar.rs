@@ -16,6 +16,7 @@ pub struct SidebarState {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    pub session_cost: Option<f64>,
     pub todos: Vec<TodoItem>,
 }
 
@@ -34,6 +35,7 @@ impl Default for SidebarState {
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
+            session_cost: None,
             todos: Vec::new(),
         }
     }
@@ -99,6 +101,12 @@ pub fn render_sidebar(
         format!(" total: {}", format_tokens(state.total_tokens)),
         Style::default().fg(theme.dim),
     )));
+    if let Some(cost) = state.session_cost {
+        lines.push(Line::from(Span::styled(
+            format!(" cost: ${:.4}", cost),
+            Style::default().fg(theme.dim),
+        )));
+    }
     lines.push(Line::from(""));
 
     // Todos
