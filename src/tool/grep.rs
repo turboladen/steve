@@ -125,11 +125,22 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
                     .strip_prefix(&ctx.project_root)
                     .unwrap_or(file_path);
 
+                let trimmed = line.trim_end();
+                let display_line = if trimmed.len() > 200 {
+                    // Truncate at char boundary before 197 to leave room for "..."
+                    let mut end = 197;
+                    while end > 0 && !trimmed.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}...", &trimmed[..end])
+                } else {
+                    trimmed.to_string()
+                };
                 results.push(format!(
                     "{}:{}: {}",
                     relative.display(),
                     line_num,
-                    line.trim_end()
+                    display_line
                 ));
                 Ok(true)
             }),
@@ -158,4 +169,49 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
         output,
         is_error: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_ctx(dir: &std::path::Path) -> ToolContext {
+        ToolContext {
+            project_root: dir.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn grep_truncates_long_match_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("long.txt");
+        // Create a file with a very long line (300+ chars)
+        let long_line = format!("MATCH{}", "x".repeat(300));
+        std::fs::write(&file, &long_line).unwrap();
+
+        let args = serde_json::json!({"pattern": "MATCH", "path": file.to_str().unwrap()});
+        let ctx = test_ctx(dir.path());
+        let result = execute(args, ctx).unwrap();
+
+        assert!(!result.is_error);
+        // The match line should be truncated with "..."
+        assert!(result.output.contains("..."));
+        // Should not contain the full 300 x's
+        assert!(result.output.len() < 300);
+    }
+
+    #[test]
+    fn grep_short_lines_not_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("short.txt");
+        std::fs::write(&file, "hello world\n").unwrap();
+
+        let args = serde_json::json!({"pattern": "hello", "path": file.to_str().unwrap()});
+        let ctx = test_ctx(dir.path());
+        let result = execute(args, ctx).unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.output.contains("hello world"));
+        assert!(!result.output.contains("..."));
+    }
 }

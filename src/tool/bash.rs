@@ -130,11 +130,21 @@ fn run_command(command: &str, cwd: &Path, timeout_secs: u64) -> Result<CommandRe
         result = format!("(exit code: {})", status.code().unwrap_or(-1));
     }
 
-    // Truncate very long output
-    let max_len = 50_000;
+    // Truncate very long output — keep head + tail for useful context
+    let max_len = 20_000;
     if result.len() > max_len {
-        result.truncate(max_len);
-        result.push_str("\n\n... (output truncated)");
+        let total_len = result.len();
+        // Find newline boundaries to avoid splitting lines/UTF-8
+        let head_end = result[..15_000].rfind('\n').unwrap_or(15_000);
+        let tail_start = result[total_len.saturating_sub(4_000)..]
+            .find('\n')
+            .map(|i| total_len.saturating_sub(4_000) + i + 1)
+            .unwrap_or(total_len.saturating_sub(4_000));
+        let head = &result[..head_end];
+        let tail = &result[tail_start..];
+        result = format!(
+            "{head}\n\n... (middle omitted — showing first/last of {total_len} bytes) ...\n\n{tail}"
+        );
     }
 
     Ok(CommandResult {
@@ -175,6 +185,18 @@ mod tests {
             err.to_string().contains("timed out"),
             "expected timeout error, got: {err}"
         );
+    }
+
+    #[test]
+    fn run_command_long_output_head_tail() {
+        // Generate output > 20k bytes
+        let result = run_command("seq 1 10000", Path::new("/tmp"), 30).unwrap();
+        // Should have head content
+        assert!(result.output.contains("1\n"));
+        // Should have tail content
+        assert!(result.output.contains("10000"));
+        // Should have omission marker
+        assert!(result.output.contains("middle omitted"));
     }
 
     #[test]

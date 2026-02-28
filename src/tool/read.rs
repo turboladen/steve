@@ -23,6 +23,10 @@ pub fn tool() -> ToolEntry {
                     "limit": {
                         "type": "integer",
                         "description": "Number of lines to read. Defaults to all."
+                    },
+                    "max_lines": {
+                        "type": "integer",
+                        "description": "Maximum number of lines to return (default: 2000). Use with offset for large files."
                     }
                 },
                 "required": ["path"]
@@ -86,16 +90,30 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
         });
     }
 
+    // Apply max_lines cap to prevent oversized tool results
+    let default_max_lines: usize = 2000;
+    let max_lines = args
+        .get("max_lines")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(default_max_lines);
+
+    let total_available = end - start;
+    let actual_end = std::cmp::min(end, start + max_lines);
+    let was_line_truncated = actual_end < end;
+
     let mut output = String::new();
-    for (i, line) in lines[start..end].iter().enumerate() {
+    for (i, line) in lines[start..actual_end].iter().enumerate() {
         let line_num = start + i + 1;
         output.push_str(&format!("{:>4} | {}\n", line_num, line));
     }
 
-    // Truncate very long outputs
-    if output.len() > 50_000 {
-        output.truncate(50_000);
-        output.push_str("\n... (truncated)");
+    if was_line_truncated {
+        output.push_str(&format!(
+            "\n... (showing {} of {} lines — use offset/limit to read specific ranges)",
+            actual_end - start,
+            total_available
+        ));
     }
 
     Ok(ToolOutput {
@@ -103,4 +121,63 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
         output,
         is_error: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_ctx(dir: &std::path::Path) -> ToolContext {
+        ToolContext {
+            project_root: dir.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn read_truncates_at_max_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("big.rs");
+        let content: String = (1..=3000).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&file, &content).unwrap();
+
+        let args = serde_json::json!({"path": file.to_str().unwrap()});
+        let ctx = test_ctx(dir.path());
+        let result = execute(args, ctx).unwrap();
+
+        assert!(!result.is_error);
+        // Default max is 2000 lines — output should contain line 2000 but not 2001
+        assert!(result.output.contains("2000 |"));
+        assert!(!result.output.contains("2001 |"));
+        assert!(result.output.contains("(showing 2000 of 3000 lines"));
+    }
+
+    #[test]
+    fn read_respects_max_lines_param() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("big.rs");
+        let content: String = (1..=500).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&file, &content).unwrap();
+
+        let args = serde_json::json!({"path": file.to_str().unwrap(), "max_lines": 100});
+        let ctx = test_ctx(dir.path());
+        let result = execute(args, ctx).unwrap();
+
+        assert!(result.output.contains(" 100 |"));
+        assert!(!result.output.contains(" 101 |"));
+        assert!(result.output.contains("(showing 100 of 500 lines"));
+    }
+
+    #[test]
+    fn read_small_file_not_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("small.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+
+        let args = serde_json::json!({"path": file.to_str().unwrap()});
+        let ctx = test_ctx(dir.path());
+        let result = execute(args, ctx).unwrap();
+
+        assert!(!result.output.contains("showing"));
+        assert!(!result.output.contains("truncated"));
+    }
 }
