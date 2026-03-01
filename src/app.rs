@@ -1182,9 +1182,6 @@ impl App {
             self.status_line_state.total_tokens = session.token_usage.total_tokens;
         }
         self.status_line_state.last_prompt_tokens = self.last_prompt_tokens;
-        // Sync context pressure to sidebar
-        self.sidebar_state.last_prompt_tokens = self.last_prompt_tokens;
-        self.sidebar_state.context_window = self.status_line_state.context_window;
     }
 
     /// Find the most recently completed tool call with the given name in the last

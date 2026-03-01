@@ -33,10 +33,6 @@ pub struct SidebarState {
     pub todos: Vec<TodoItem>,
     /// Accumulated file changes from write tools this session.
     pub changes: Vec<FileChange>,
-    /// Last-reported prompt tokens (per-call context pressure).
-    pub last_prompt_tokens: u64,
-    /// Context window size for the current model.
-    pub context_window: u64,
 }
 
 /// A todo item displayed in the sidebar.
@@ -57,8 +53,6 @@ impl Default for SidebarState {
             session_cost: None,
             todos: Vec::new(),
             changes: Vec::new(),
-            last_prompt_tokens: 0,
-            context_window: 0,
         }
     }
 }
@@ -170,7 +164,7 @@ pub fn render_sidebar(
         lines.push(Line::from(""));
     }
 
-    // -- Session section (compact) --
+    // -- Session section --
     lines.push(Line::from(Span::styled(
         "Session",
         Style::default()
@@ -186,23 +180,22 @@ pub fn render_sidebar(
         format!("  {model}"),
         Style::default().fg(theme.fg),
     )));
-    // Context pressure: Ctx: 23.4k/128k (18%)
-    if state.context_window > 0 {
-        let pct = ((state.last_prompt_tokens as f64 / state.context_window as f64) * 100.0)
-            .min(100.0) as u8;
-        lines.push(Line::from(Span::styled(
-            format!(
-                "  Ctx: {}/{} ({}%)",
-                format_tokens(state.last_prompt_tokens),
-                format_tokens(state.context_window),
-                pct,
-            ),
-            Style::default().fg(theme.dim),
-        )));
-    }
+    // Cumulative token usage (complementary to input bar's per-call context pressure)
+    lines.push(Line::from(Span::styled(
+        format!(
+            "  in: {}  out: {}",
+            format_tokens(state.prompt_tokens),
+            format_tokens(state.completion_tokens),
+        ),
+        Style::default().fg(theme.dim),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("  total: {}", format_tokens(state.total_tokens)),
+        Style::default().fg(theme.dim),
+    )));
     if let Some(cost) = state.session_cost {
         lines.push(Line::from(Span::styled(
-            format!("  Cost: ${:.2}", cost),
+            format!("  cost: ${:.4}", cost),
             Style::default().fg(theme.dim),
         )));
     }
@@ -399,8 +392,6 @@ mod tests {
     fn sidebar_state_default_has_empty_changes() {
         let state = SidebarState::default();
         assert!(state.changes.is_empty());
-        assert_eq!(state.last_prompt_tokens, 0);
-        assert_eq!(state.context_window, 0);
     }
 }
 
