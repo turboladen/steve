@@ -31,8 +31,8 @@ use crate::ui;
 use crate::ui::autocomplete::AutocompleteState;
 use crate::ui::input::InputState;
 use crate::ui::message_area::MessageAreaState;
-use crate::ui::message_block::{AssistantPart, DiffContent, DiffLine, MessageBlock};
-use crate::ui::sidebar::SidebarState;
+use crate::ui::message_block::{AssistantPart, DiffContent, DiffLine, MessageBlock, ToolCall};
+use crate::ui::sidebar::{SidebarState, count_diff_lines};
 use crate::ui::status_line::{Activity, StatusLineState};
 use crate::ui::theme::Theme;
 
@@ -570,6 +570,19 @@ impl App {
                         output.output.clone(),
                         output.is_error,
                     );
+                }
+
+                // Record changeset on successful write tool completion
+                if tool_name.is_write_tool() && !output.is_error {
+                    if let Some(call) = self.find_last_completed_call(tool_name) {
+                        if let Some(diff) = &call.diff_content {
+                            let (additions, removals) = count_diff_lines(diff);
+                            let display_path = self.strip_project_root(&call.args_summary);
+                            self.sidebar_state.record_file_change(
+                                display_path, additions, removals,
+                            );
+                        }
+                    }
                 }
 
                 self.update_sidebar();
@@ -1169,6 +1182,48 @@ impl App {
             self.status_line_state.total_tokens = session.token_usage.total_tokens;
         }
         self.status_line_state.last_prompt_tokens = self.last_prompt_tokens;
+        // Sync context pressure to sidebar
+        self.sidebar_state.last_prompt_tokens = self.last_prompt_tokens;
+        self.sidebar_state.context_window = self.status_line_state.context_window;
+    }
+
+    /// Find the most recently completed tool call with the given name in the last
+    /// assistant message's tool groups. Returns a reference to the `ToolCall`.
+    fn find_last_completed_call(&self, tool_name: ToolName) -> Option<&ToolCall> {
+        let last = self.messages.iter().rev().find(|m| m.is_assistant())?;
+        if let MessageBlock::Assistant { parts, .. } = last {
+            for part in parts.iter().rev() {
+                if let AssistantPart::ToolGroup(group) = part {
+                    // Find the last call with this tool name that has a result
+                    for call in group.calls.iter().rev() {
+                        if call.tool_name == tool_name && call.result_summary.is_some() {
+                            return Some(call);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Strip the project root prefix from an absolute path, returning a relative path.
+    /// Returns the input unchanged if it doesn't start with the project root.
+    /// Only strips at path boundaries (e.g., `/foo/bar` won't match `/foo/bar-baz`).
+    fn strip_project_root(&self, path: &str) -> String {
+        let root = self.project.root.to_string_lossy();
+        let root_str = root.as_ref();
+        if let Some(rest) = path.strip_prefix(root_str) {
+            if let Some(relative) = rest.strip_prefix('/') {
+                relative.to_string()
+            } else if rest.is_empty() {
+                String::new()
+            } else {
+                // Did not match at a path boundary (e.g., sibling directory)
+                path.to_string()
+            }
+        } else {
+            path.to_string()
+        }
     }
 
     /// Sync the permission engine rules with the current agent mode.
@@ -1362,6 +1417,8 @@ impl App {
                 // Reset tool result cache for the new session
                 *self.tool_cache.lock().unwrap() =
                     ToolResultCache::new(self.project.root.clone());
+                // Clear changeset tracking
+                self.sidebar_state.changes.clear();
                 self.ensure_session();
                 self.message_area_state.scroll_to_bottom();
                 self.messages.push(MessageBlock::System {
@@ -2029,6 +2086,43 @@ mod tests {
         assert!(
             state.scroll_offset > after_up,
             "scroll_down should increase offset"
+        );
+    }
+
+    // -- strip_project_root tests --
+
+    #[test]
+    fn strip_project_root_absolute_path() {
+        let app = make_test_app();
+        assert_eq!(app.strip_project_root("/tmp/test/src/main.rs"), "src/main.rs");
+    }
+
+    #[test]
+    fn strip_project_root_relative_path() {
+        let app = make_test_app();
+        assert_eq!(app.strip_project_root("src/main.rs"), "src/main.rs");
+    }
+
+    #[test]
+    fn strip_project_root_no_match() {
+        let app = make_test_app();
+        assert_eq!(app.strip_project_root("/other/path/file.rs"), "/other/path/file.rs");
+    }
+
+    #[test]
+    fn strip_project_root_exact_root() {
+        let app = make_test_app();
+        // Edge case: path is exactly the root with trailing slash
+        assert_eq!(app.strip_project_root("/tmp/test/"), "");
+    }
+
+    #[test]
+    fn strip_project_root_sibling_directory() {
+        let app = make_test_app();
+        // Should NOT strip prefix from sibling directory (not a path boundary)
+        assert_eq!(
+            app.strip_project_root("/tmp/test-backup/file.rs"),
+            "/tmp/test-backup/file.rs"
         );
     }
 
