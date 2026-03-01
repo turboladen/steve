@@ -165,6 +165,8 @@ Tools are registered in `ToolRegistry` as `ToolEntry` structs containing a `Tool
 
 Available tools: `read`, `grep`, `glob`, `list`, `edit`, `write`, `patch`, `bash`, `question`, `todo`, `webfetch`, `memory`.
 
+`TOOL_GUIDANCE` in `app.rs` appends two sections to the system prompt: `## Task Planning` (mandatory todo usage for multi-step tasks — must stay prominent/first) and `## Tool Usage Guidelines` (context-efficiency tips).
+
 ### Storage (`storage/mod.rs`)
 
 Flat JSON files under `{data_dir}/storage/{project_id}/` (see Data Locations for platform paths). Key paths map to filesystem paths: `["sessions", "abc123"]` → `sessions/abc123.json`. Uses `fs2` file locking (shared for reads, exclusive for writes) and atomic writes via tmp+rename.
