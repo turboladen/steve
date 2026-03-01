@@ -147,6 +147,8 @@ Two token metrics — do not confuse them:
 
 `LlmUsageUpdate` events send per-call values during tool loops for live UI updates. `LlmFinish` sends accumulated `total_usage` for storage. The `LlmFinish` handler must NOT overwrite `last_prompt_tokens` — the last `LlmUsageUpdate` already set the correct value.
 
+**Sidebar token display** uses a two-tier approach: `LlmUsageUpdate` accumulates (`+=`) into `sidebar_state.{prompt,completion,total}_tokens` for live feedback during tool loops. `sync_sidebar_tokens()` reconciles with authoritative `session.token_usage` at discrete sync points: `LlmFinish` (after `add_usage`), `/new`, `switch_to_session`, `resume_or_new_session`, `CompactFinish`. `update_sidebar()` does NOT sync tokens — it reads stale session data during tool loops.
+
 ### Parallel Tool Execution (`stream.rs`)
 
 The tool call loop partitions pending tool calls into two phases:
