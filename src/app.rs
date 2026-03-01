@@ -52,7 +52,7 @@ const TOOL_GUIDANCE: &str = "\n\n## Tool Usage Guidelines\n\n\
 - **Batch related reads**: If you need multiple files, request them in a single response to enable parallel execution.\n\
 - **Avoid re-reading**: Files you've already read are cached. The system will tell you if content is unchanged.\n\
 - **Record discoveries**: Use the `memory` tool to save important project context (architecture, patterns, key files) that persists across sessions.\n\
-- **Track multi-step work**: For tasks with 3+ steps, use the `todo` tool to create a checklist. Mark items complete as you finish them — the user sees your progress in the sidebar.";
+- **Track multi-step work**: For tasks with 3+ steps, use the `todo` tool to plan your steps upfront. Work through items one at a time — finish and mark complete before starting the next. This keeps you focused and shows the user your progress in the sidebar.";
 
 /// A permission prompt waiting for user input.
 struct PendingPermission {
