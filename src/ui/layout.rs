@@ -5,6 +5,8 @@ pub struct AppLayout {
     pub message_area: Rect,
     pub input_area: Rect,
     pub sidebar: Option<Rect>,
+    /// 1-column gap between content and sidebar (visual separator without border chars).
+    pub sidebar_separator: Option<Rect>,
 }
 
 const SIDEBAR_WIDTH: u16 = 40;
@@ -23,17 +25,20 @@ pub fn compute_layout(area: Rect, show_sidebar: bool) -> AppLayout {
     let sidebar_visible = show_sidebar && area.width >= SIDEBAR_MIN_TERMINAL_WIDTH;
 
     if sidebar_visible {
-        // Split horizontally: content | sidebar
+        // Split horizontally: content | 1-col gap | sidebar
+        // The gap prevents the sidebar border character from appearing in copied text.
         let horizontal = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
                 Constraint::Min(40),
+                Constraint::Length(1),          // visual separator (empty column)
                 Constraint::Length(SIDEBAR_WIDTH),
             ])
             .split(area);
 
         let content_area = horizontal[0];
-        let sidebar = horizontal[1];
+        // horizontal[1] is the gap — nothing renders there
+        let sidebar = horizontal[2];
 
         // Split content vertically: messages | input
         let vertical = Layout::default()
@@ -48,6 +53,7 @@ pub fn compute_layout(area: Rect, show_sidebar: bool) -> AppLayout {
             message_area: vertical[0],
             input_area: vertical[1],
             sidebar: Some(sidebar),
+            sidebar_separator: Some(horizontal[1]),
         }
     } else {
         // No sidebar: just messages | input
@@ -63,6 +69,7 @@ pub fn compute_layout(area: Rect, show_sidebar: bool) -> AppLayout {
             message_area: vertical[0],
             input_area: vertical[1],
             sidebar: None,
+            sidebar_separator: None,
         }
     }
 }
@@ -93,14 +100,18 @@ mod tests {
         assert!(layout.sidebar.is_some());
         let sidebar = layout.sidebar.unwrap();
         assert_eq!(sidebar.width, SIDEBAR_WIDTH);
-        // Message area width = 120 - 40 = 80
-        assert_eq!(layout.message_area.width, 80);
+        // Message area width = 120 - 1(sep) - 40(sidebar) = 79
+        assert_eq!(layout.message_area.width, 79);
+        // Separator is 1 column between content and sidebar
+        assert!(layout.sidebar_separator.is_some());
+        assert_eq!(layout.sidebar_separator.unwrap().width, 1);
     }
 
     #[test]
     fn layout_sidebar_not_shown_below_threshold() {
         let layout = compute_layout(rect(119, 24), true);
         assert!(layout.sidebar.is_none());
+        assert!(layout.sidebar_separator.is_none());
     }
 
     #[test]

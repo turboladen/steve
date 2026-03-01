@@ -15,7 +15,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     event::{EnableMouseCapture, DisableMouseCapture, EnableBracketedPaste, DisableBracketedPaste},
 };
-use ratatui::{Frame, Terminal, backend::CrosstermBackend};
+use ratatui::{Frame, Terminal, backend::CrosstermBackend, style::Style, widgets::Block};
 
 use crate::app::App;
 use layout::compute_layout;
@@ -73,6 +73,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         &app.theme,
         activity,
     );
+
+    if let Some(sep_area) = layout.sidebar_separator {
+        // Render a thin colored column as visual separator — copies as a space, not │
+        let sep = Block::default().style(Style::default().bg(app.theme.border));
+        frame.render_widget(sep, sep_area);
+    }
 
     if let Some(sidebar_area) = layout.sidebar {
         render_sidebar(

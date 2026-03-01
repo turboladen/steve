@@ -3,7 +3,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Paragraph, Wrap},
 };
 
 use crate::ui::message_block::{DiffContent, DiffLine};
@@ -223,9 +223,7 @@ pub fn render_sidebar(
         }
     }
 
-    let block = Block::default()
-        .borders(Borders::LEFT)
-        .border_style(Style::default().fg(theme.border));
+    let block = Block::default();
 
     let paragraph = Paragraph::new(lines)
         .block(block)
