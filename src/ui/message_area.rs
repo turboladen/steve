@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-use super::message_block::{MessageBlock, ToolGroupStatus};
+use super::message_block::{DiffContent, DiffLine, MessageBlock, ToolGroupStatus};
 use super::theme::Theme;
 
 /// State for the scrollable message area.
@@ -173,9 +173,11 @@ pub fn render_message_blocks(
                             Style::default().fg(color),
                         )));
 
-                        // Expanded output
+                        // Expanded output — diff content or raw output fallback
                         if call.expanded {
-                            if let Some(output) = &call.full_output {
+                            if let Some(diff) = &call.diff_content {
+                                render_diff_lines(&mut lines, diff, call.result_summary.as_deref(), theme);
+                            } else if let Some(output) = &call.full_output {
                                 for output_line in output.lines() {
                                     lines.push(Line::from(Span::styled(
                                         format!("  {output_line}"),
@@ -322,6 +324,58 @@ pub fn render_message_blocks(
     frame.render_widget(paragraph, area);
 }
 
+/// Render diff content into styled lines with box-drawing frame.
+fn render_diff_lines(
+    lines: &mut Vec<Line<'_>>,
+    diff: &DiffContent,
+    result_summary: Option<&str>,
+    theme: &Theme,
+) {
+    match diff {
+        DiffContent::EditDiff { lines: diff_lines }
+        | DiffContent::PatchDiff { lines: diff_lines } => {
+            // Top border
+            lines.push(Line::from(Span::styled(
+                "  \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+                Style::default().fg(theme.border),
+            )));
+
+            for diff_line in diff_lines {
+                let (prefix, text, color) = match diff_line {
+                    DiffLine::Removal(t) => ("-", t.as_str(), theme.error),
+                    DiffLine::Addition(t) => ("+", t.as_str(), theme.success),
+                    DiffLine::Context(t) => (" ", t.as_str(), theme.dim),
+                    DiffLine::HunkHeader(t) => ("", t.as_str(), theme.dim),
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("  \u{2502} ", Style::default().fg(theme.border)),
+                    Span::styled(
+                        format!("{prefix}{text}"),
+                        Style::default().fg(color),
+                    ),
+                ]));
+            }
+
+            // Bottom border
+            lines.push(Line::from(Span::styled(
+                "  \u{2514}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+                Style::default().fg(theme.border),
+            )));
+        }
+        DiffContent::WriteSummary { line_count } => {
+            // Determine if this is a create or overwrite from the result summary
+            let verb = match result_summary {
+                Some(s) if s.starts_with("Created") => "Created",
+                _ => "Overwrote",
+            };
+            lines.push(Line::from(Span::styled(
+                format!("  {verb} ({line_count} lines)"),
+                Style::default().fg(theme.dim),
+            )));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,5 +461,86 @@ mod tests {
         state.scroll_to_bottom();
         assert_eq!(state.scroll_offset, 80);
         assert!(state.auto_scroll);
+    }
+
+    // -- render_diff_lines tests --
+
+    use super::super::message_block::{DiffContent, DiffLine};
+    use super::super::theme::Theme;
+
+    #[test]
+    fn render_diff_lines_edit_diff_structure() {
+        let theme = Theme::default();
+        let diff = DiffContent::EditDiff {
+            lines: vec![
+                DiffLine::Removal("old".into()),
+                DiffLine::Addition("new".into()),
+            ],
+        };
+        let mut output: Vec<Line> = Vec::new();
+        render_diff_lines(&mut output, &diff, None, &theme);
+        // top border + 2 diff lines + bottom border = 4 lines
+        assert_eq!(output.len(), 4);
+    }
+
+    #[test]
+    fn render_diff_lines_patch_diff_structure() {
+        let theme = Theme::default();
+        let diff = DiffContent::PatchDiff {
+            lines: vec![
+                DiffLine::HunkHeader("@@ -1 +1 @@".into()),
+                DiffLine::Context("ctx".into()),
+                DiffLine::Removal("old".into()),
+                DiffLine::Addition("new".into()),
+            ],
+        };
+        let mut output: Vec<Line> = Vec::new();
+        render_diff_lines(&mut output, &diff, None, &theme);
+        // top border + 4 diff lines + bottom border = 6 lines
+        assert_eq!(output.len(), 6);
+    }
+
+    #[test]
+    fn render_diff_lines_write_summary_created_verb() {
+        let theme = Theme::default();
+        let diff = DiffContent::WriteSummary { line_count: 10 };
+        let mut output: Vec<Line> = Vec::new();
+        render_diff_lines(&mut output, &diff, Some("Created /tmp/foo (42 bytes)"), &theme);
+        assert_eq!(output.len(), 1);
+        let text = format!("{:?}", output[0]);
+        assert!(text.contains("Created"), "verb should be Created");
+        assert!(text.contains("10 lines"), "should show line count");
+    }
+
+    #[test]
+    fn render_diff_lines_write_summary_overwrote_verb() {
+        let theme = Theme::default();
+        let diff = DiffContent::WriteSummary { line_count: 5 };
+        let mut output: Vec<Line> = Vec::new();
+        render_diff_lines(&mut output, &diff, Some("Overwrote /tmp/foo (20 bytes)"), &theme);
+        assert_eq!(output.len(), 1);
+        let text = format!("{:?}", output[0]);
+        assert!(text.contains("Overwrote"), "verb should be Overwrote");
+    }
+
+    #[test]
+    fn render_diff_lines_write_summary_defaults_to_overwrote() {
+        let theme = Theme::default();
+        let diff = DiffContent::WriteSummary { line_count: 3 };
+        let mut output: Vec<Line> = Vec::new();
+        render_diff_lines(&mut output, &diff, None, &theme);
+        assert_eq!(output.len(), 1);
+        let text = format!("{:?}", output[0]);
+        assert!(text.contains("Overwrote"), "should default to Overwrote when no summary");
+    }
+
+    #[test]
+    fn render_diff_lines_empty_edit_diff() {
+        let theme = Theme::default();
+        let diff = DiffContent::EditDiff { lines: vec![] };
+        let mut output: Vec<Line> = Vec::new();
+        render_diff_lines(&mut output, &diff, None, &theme);
+        // top border + 0 diff lines + bottom border = 2 lines
+        assert_eq!(output.len(), 2);
     }
 }

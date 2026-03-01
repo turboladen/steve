@@ -31,7 +31,7 @@ use crate::ui;
 use crate::ui::autocomplete::AutocompleteState;
 use crate::ui::input::InputState;
 use crate::ui::message_area::MessageAreaState;
-use crate::ui::message_block::MessageBlock;
+use crate::ui::message_block::{DiffContent, DiffLine, MessageBlock};
 use crate::ui::sidebar::SidebarState;
 use crate::ui::status_line::{Activity, StatusLineState};
 use crate::ui::theme::Theme;
@@ -115,6 +115,79 @@ fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
             .unwrap_or("")
             .to_string(),
     }
+}
+
+/// Extract inline diff content from tool call arguments for UI rendering.
+/// Returns `None` for tools that don't produce diffs (read, grep, bash, etc.).
+fn extract_diff_content(tool_name: ToolName, args: &Value) -> Option<DiffContent> {
+    match tool_name {
+        ToolName::Edit => {
+            let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+            let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+            if old.is_empty() && new.is_empty() {
+                return None;
+            }
+            let mut lines = Vec::new();
+            for line in old.lines() {
+                lines.push(DiffLine::Removal(line.to_string()));
+            }
+            for line in new.lines() {
+                lines.push(DiffLine::Addition(line.to_string()));
+            }
+            Some(DiffContent::EditDiff { lines })
+        }
+        ToolName::Write => {
+            let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let line_count = if content.is_empty() {
+                0
+            } else {
+                content.lines().count()
+            };
+            Some(DiffContent::WriteSummary { line_count })
+        }
+        ToolName::Patch => {
+            let diff = args.get("diff").and_then(|v| v.as_str()).unwrap_or("");
+            if diff.is_empty() {
+                return None;
+            }
+            Some(DiffContent::PatchDiff {
+                lines: parse_unified_diff_lines(diff),
+            })
+        }
+        ToolName::Read
+        | ToolName::Grep
+        | ToolName::Glob
+        | ToolName::List
+        | ToolName::Bash
+        | ToolName::Question
+        | ToolName::Todo
+        | ToolName::Webfetch
+        | ToolName::Memory => None,
+    }
+}
+
+/// Parse a unified diff string into structured `DiffLine` entries.
+/// Skips `---`/`+++` file headers, keeps `@@` hunk headers.
+fn parse_unified_diff_lines(patch: &str) -> Vec<DiffLine> {
+    let mut lines = Vec::new();
+    for line in patch.lines() {
+        if line.starts_with("---") || line.starts_with("+++") {
+            // Skip file headers
+            continue;
+        } else if line.starts_with("@@") {
+            lines.push(DiffLine::HunkHeader(line.to_string()));
+        } else if let Some(rest) = line.strip_prefix('-') {
+            lines.push(DiffLine::Removal(rest.to_string()));
+        } else if let Some(rest) = line.strip_prefix('+') {
+            lines.push(DiffLine::Addition(rest.to_string()));
+        } else if let Some(rest) = line.strip_prefix(' ') {
+            lines.push(DiffLine::Context(rest.to_string()));
+        } else {
+            // Lines without a prefix (e.g., "No newline at end of file") → context
+            lines.push(DiffLine::Context(line.to_string()));
+        }
+    }
+    lines
 }
 
 pub struct App {
@@ -468,8 +541,9 @@ impl App {
                 arguments,
             } => {
                 let args_summary = extract_args_summary(tool_name, &arguments);
+                let diff_content = extract_diff_content(tool_name, &arguments);
                 if let Some(last) = self.messages.last_mut() {
-                    last.add_tool_call(tool_name, args_summary.clone());
+                    last.add_tool_call(tool_name, args_summary.clone(), diff_content);
                 }
                 self.status_line_state.activity = Activity::RunningTool {
                     tool_name,
@@ -1644,6 +1718,193 @@ mod tests {
             // Just ensure it doesn't panic
             let _ = extract_args_summary(tool, &args);
         }
+    }
+
+    // -- extract_diff_content tests --
+
+    #[test]
+    fn diff_content_edit_basic() {
+        let args = json!({
+            "file_path": "src/main.rs",
+            "old_string": "use std::collections::HashMap;",
+            "new_string": "use std::collections::BTreeMap;"
+        });
+        let result = extract_diff_content(ToolName::Edit, &args);
+        match result {
+            Some(DiffContent::EditDiff { lines }) => {
+                assert_eq!(lines.len(), 2);
+                assert_eq!(
+                    lines[0],
+                    DiffLine::Removal("use std::collections::HashMap;".into())
+                );
+                assert_eq!(
+                    lines[1],
+                    DiffLine::Addition("use std::collections::BTreeMap;".into())
+                );
+            }
+            other => panic!("expected EditDiff, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_content_edit_multiline() {
+        let args = json!({
+            "file_path": "f.rs",
+            "old_string": "line1\nline2",
+            "new_string": "new1\nnew2\nnew3"
+        });
+        match extract_diff_content(ToolName::Edit, &args) {
+            Some(DiffContent::EditDiff { lines }) => {
+                assert_eq!(lines.len(), 5);
+                assert_eq!(lines[0], DiffLine::Removal("line1".into()));
+                assert_eq!(lines[1], DiffLine::Removal("line2".into()));
+                assert_eq!(lines[2], DiffLine::Addition("new1".into()));
+                assert_eq!(lines[3], DiffLine::Addition("new2".into()));
+                assert_eq!(lines[4], DiffLine::Addition("new3".into()));
+            }
+            other => panic!("expected EditDiff, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_content_edit_empty_strings_returns_none() {
+        let args = json!({"file_path": "f.rs", "old_string": "", "new_string": ""});
+        assert!(extract_diff_content(ToolName::Edit, &args).is_none());
+    }
+
+    #[test]
+    fn diff_content_edit_missing_args_returns_none() {
+        let args = json!({"file_path": "f.rs"});
+        assert!(extract_diff_content(ToolName::Edit, &args).is_none());
+    }
+
+    #[test]
+    fn diff_content_write_basic() {
+        let args = json!({"file_path": "new.txt", "content": "line1\nline2\nline3"});
+        match extract_diff_content(ToolName::Write, &args) {
+            Some(DiffContent::WriteSummary { line_count }) => {
+                assert_eq!(line_count, 3);
+            }
+            other => panic!("expected WriteSummary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_content_write_empty_content() {
+        let args = json!({"file_path": "empty.txt", "content": ""});
+        match extract_diff_content(ToolName::Write, &args) {
+            Some(DiffContent::WriteSummary { line_count }) => {
+                assert_eq!(line_count, 0);
+            }
+            other => panic!("expected WriteSummary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_content_write_missing_content() {
+        let args = json!({"file_path": "f.txt"});
+        match extract_diff_content(ToolName::Write, &args) {
+            Some(DiffContent::WriteSummary { line_count }) => {
+                assert_eq!(line_count, 0);
+            }
+            other => panic!("expected WriteSummary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_content_patch_basic() {
+        let diff_str = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,3 @@\n context\n-old line\n+new line\n context2";
+        let args = json!({"file_path": "src/main.rs", "diff": diff_str});
+        match extract_diff_content(ToolName::Patch, &args) {
+            Some(DiffContent::PatchDiff { lines }) => {
+                assert_eq!(lines.len(), 5);
+                assert_eq!(lines[0], DiffLine::HunkHeader("@@ -1,3 +1,3 @@".into()));
+                assert_eq!(lines[1], DiffLine::Context("context".into()));
+                assert_eq!(lines[2], DiffLine::Removal("old line".into()));
+                assert_eq!(lines[3], DiffLine::Addition("new line".into()));
+                assert_eq!(lines[4], DiffLine::Context("context2".into()));
+            }
+            other => panic!("expected PatchDiff, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_content_patch_empty_returns_none() {
+        let args = json!({"file_path": "f.rs", "diff": ""});
+        assert!(extract_diff_content(ToolName::Patch, &args).is_none());
+    }
+
+    #[test]
+    fn diff_content_non_write_tools_return_none() {
+        let args = json!({"path": "src/main.rs"});
+        for tool in [
+            ToolName::Read,
+            ToolName::Grep,
+            ToolName::Glob,
+            ToolName::List,
+            ToolName::Bash,
+            ToolName::Question,
+            ToolName::Todo,
+            ToolName::Webfetch,
+            ToolName::Memory,
+        ] {
+            assert!(
+                extract_diff_content(tool, &args).is_none(),
+                "{tool} should return None"
+            );
+        }
+    }
+
+    #[test]
+    fn diff_content_all_variants_covered() {
+        let args = json!({});
+        let all_tools = [
+            ToolName::Read,
+            ToolName::Grep,
+            ToolName::Glob,
+            ToolName::List,
+            ToolName::Edit,
+            ToolName::Write,
+            ToolName::Patch,
+            ToolName::Bash,
+            ToolName::Question,
+            ToolName::Todo,
+            ToolName::Webfetch,
+            ToolName::Memory,
+        ];
+        for tool in all_tools {
+            let _ = extract_diff_content(tool, &args);
+        }
+    }
+
+    // -- parse_unified_diff_lines tests --
+
+    #[test]
+    fn parse_diff_skips_file_headers() {
+        let patch = "--- a/file.rs\n+++ b/file.rs\n@@ -1 +1 @@\n-old\n+new";
+        let lines = parse_unified_diff_lines(patch);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], DiffLine::HunkHeader("@@ -1 +1 @@".into()));
+        assert_eq!(lines[1], DiffLine::Removal("old".into()));
+        assert_eq!(lines[2], DiffLine::Addition("new".into()));
+    }
+
+    #[test]
+    fn parse_diff_context_lines() {
+        let patch = "@@ -1,3 +1,3 @@\n unchanged\n-removed\n+added\n still here";
+        let lines = parse_unified_diff_lines(patch);
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0], DiffLine::HunkHeader("@@ -1,3 +1,3 @@".into()));
+        assert_eq!(lines[1], DiffLine::Context("unchanged".into()));
+        assert_eq!(lines[2], DiffLine::Removal("removed".into()));
+        assert_eq!(lines[3], DiffLine::Addition("added".into()));
+        assert_eq!(lines[4], DiffLine::Context("still here".into()));
+    }
+
+    #[test]
+    fn parse_diff_empty_string() {
+        let lines = parse_unified_diff_lines("");
+        assert!(lines.is_empty());
     }
 
     #[test]

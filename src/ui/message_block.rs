@@ -5,6 +5,30 @@
 
 use crate::tool::ToolName;
 
+/// Diff content extracted from tool call arguments for inline rendering.
+#[derive(Debug, Clone)]
+pub enum DiffContent {
+    /// Edit tool: old_string lines as removals, new_string lines as additions.
+    EditDiff { lines: Vec<DiffLine> },
+    /// Write tool: just the line count of the written content.
+    WriteSummary { line_count: usize },
+    /// Patch tool: parsed unified diff with context lines.
+    PatchDiff { lines: Vec<DiffLine> },
+}
+
+/// A single line in a diff display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiffLine {
+    /// Removed line (red, "-" prefix).
+    Removal(String),
+    /// Added line (green, "+" prefix).
+    Addition(String),
+    /// Unchanged context line (dim, " " prefix).
+    Context(String),
+    /// Hunk header (dim, @@ line).
+    HunkHeader(String),
+}
+
 /// A structured message block in the conversation.
 #[derive(Debug, Clone)]
 pub enum MessageBlock {
@@ -65,6 +89,8 @@ pub struct ToolCall {
     pub full_output: Option<String>,
     /// Compact result summary shown when collapsed (e.g., "150 lines").
     pub result_summary: Option<String>,
+    /// Diff content extracted from tool arguments for inline rendering.
+    pub diff_content: Option<DiffContent>,
     /// Whether the tool call resulted in an error.
     pub is_error: bool,
     /// Whether this call's output is currently expanded in the UI.
@@ -119,8 +145,13 @@ impl MessageBlock {
     }
 
     /// Add a tool call to the last tool group, setting its status to `Running`.
-    /// No-op on non-Assistant blocks.
-    pub fn add_tool_call(&mut self, tool_name: ToolName, args_summary: String) {
+    /// Write tools auto-expand to show inline diffs. No-op on non-Assistant blocks.
+    pub fn add_tool_call(
+        &mut self,
+        tool_name: ToolName,
+        args_summary: String,
+        diff_content: Option<DiffContent>,
+    ) {
         if let MessageBlock::Assistant { tool_groups, .. } = self {
             if let Some(group) = tool_groups.last_mut() {
                 group.calls.push(ToolCall {
@@ -128,8 +159,9 @@ impl MessageBlock {
                     args_summary,
                     full_output: None,
                     result_summary: None,
+                    diff_content,
                     is_error: false,
-                    expanded: false,
+                    expanded: tool_name.is_write_tool(),
                 });
                 group.status = ToolGroupStatus::Running {
                     current_tool: tool_name,
@@ -240,6 +272,7 @@ mod tests {
             args_summary: "src/main.rs".into(),
             full_output: Some("fn main() {}".into()),
             result_summary: Some("1 line".into()),
+            diff_content: None,
             is_error: false,
             expanded: false,
         };
@@ -349,7 +382,7 @@ mod tests {
                 status: ToolGroupStatus::Preparing,
             }],
         };
-        block.add_tool_call(ToolName::Read, "src/main.rs".into());
+        block.add_tool_call(ToolName::Read, "src/main.rs".into(), None);
         match &block {
             MessageBlock::Assistant { tool_groups, .. } => {
                 assert_eq!(tool_groups.last().unwrap().calls.len(), 1);
@@ -358,6 +391,7 @@ mod tests {
                 assert_eq!(call.args_summary, "src/main.rs");
                 assert!(call.result_summary.is_none());
                 assert!(call.full_output.is_none());
+                assert!(!call.expanded, "read tool should not auto-expand");
             }
             _ => panic!("expected Assistant"),
         }
@@ -374,6 +408,7 @@ mod tests {
                     args_summary: "src/main.rs".into(),
                     full_output: None,
                     result_summary: None,
+                    diff_content: None,
                     is_error: false,
                     expanded: false,
                 }],
@@ -477,5 +512,98 @@ mod tests {
         };
         assert!(empty.is_empty_assistant());
         assert!(!non_empty.is_empty_assistant());
+    }
+
+    #[test]
+    fn write_tools_auto_expand() {
+        for tool in [ToolName::Edit, ToolName::Write, ToolName::Patch] {
+            let mut block = MessageBlock::Assistant {
+                thinking: None,
+                text: String::new(),
+                tool_groups: vec![ToolGroup {
+                    calls: vec![],
+                    status: ToolGroupStatus::Preparing,
+                }],
+            };
+            block.add_tool_call(tool, "file.rs".into(), None);
+            match &block {
+                MessageBlock::Assistant { tool_groups, .. } => {
+                    let call = &tool_groups.last().unwrap().calls[0];
+                    assert!(call.expanded, "{tool} should auto-expand");
+                }
+                _ => panic!("expected Assistant"),
+            }
+        }
+    }
+
+    #[test]
+    fn non_write_tools_stay_collapsed() {
+        for tool in [
+            ToolName::Read,
+            ToolName::Grep,
+            ToolName::Glob,
+            ToolName::List,
+            ToolName::Bash,
+            ToolName::Question,
+            ToolName::Todo,
+            ToolName::Webfetch,
+            ToolName::Memory,
+        ] {
+            let mut block = MessageBlock::Assistant {
+                thinking: None,
+                text: String::new(),
+                tool_groups: vec![ToolGroup {
+                    calls: vec![],
+                    status: ToolGroupStatus::Preparing,
+                }],
+            };
+            block.add_tool_call(tool, "pattern".into(), None);
+            match &block {
+                MessageBlock::Assistant { tool_groups, .. } => {
+                    let call = &tool_groups.last().unwrap().calls[0];
+                    assert!(!call.expanded, "{tool} should not auto-expand");
+                }
+                _ => panic!("expected Assistant"),
+            }
+        }
+    }
+
+    #[test]
+    fn diff_content_stored_in_tool_call() {
+        let mut block = MessageBlock::Assistant {
+            thinking: None,
+            text: String::new(),
+            tool_groups: vec![ToolGroup {
+                calls: vec![],
+                status: ToolGroupStatus::Preparing,
+            }],
+        };
+        let diff = DiffContent::EditDiff {
+            lines: vec![
+                DiffLine::Removal("old line".into()),
+                DiffLine::Addition("new line".into()),
+            ],
+        };
+        block.add_tool_call(ToolName::Edit, "src/main.rs".into(), Some(diff));
+        match &block {
+            MessageBlock::Assistant { tool_groups, .. } => {
+                let call = &tool_groups.last().unwrap().calls[0];
+                assert!(call.diff_content.is_some());
+                assert!(call.expanded);
+            }
+            _ => panic!("expected Assistant"),
+        }
+    }
+
+    #[test]
+    fn diff_line_equality() {
+        assert_eq!(
+            DiffLine::Removal("foo".into()),
+            DiffLine::Removal("foo".into())
+        );
+        assert_ne!(
+            DiffLine::Removal("foo".into()),
+            DiffLine::Addition("foo".into())
+        );
     }
 }
