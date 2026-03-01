@@ -70,6 +70,22 @@ impl ToolName {
     pub fn is_memory(self) -> bool {
         matches!(self, ToolName::Memory)
     }
+
+    /// Marker symbol for display: read=·, write=✎, execute=$, interactive=⚡
+    ///
+    /// `Webfetch` gets the read marker despite `is_read_only()` being false —
+    /// it's read-like from a UI perspective (fetches data, never writes) but
+    /// isn't in the read-only permission/caching group.
+    pub fn tool_marker(self) -> &'static str {
+        match self {
+            ToolName::Read | ToolName::Grep | ToolName::Glob
+            | ToolName::List | ToolName::Webfetch => "\u{00b7}",       // ·
+            ToolName::Edit | ToolName::Write | ToolName::Patch
+            | ToolName::Memory => "\u{270e}",                           // ✎
+            ToolName::Bash => "$",
+            ToolName::Question | ToolName::Todo => "\u{26a1}",          // ⚡
+        }
+    }
 }
 
 impl AsRef<str> for ToolName {
@@ -308,6 +324,85 @@ mod tests {
         for t in not_cacheable {
             assert!(!t.is_cacheable(), "{t} should not be cacheable");
         }
+    }
+
+    /// Every variant returns a non-empty marker, and each category maps
+    /// to the correct symbol.
+    #[test]
+    fn tool_marker_exhaustive() {
+        let all = [
+            ToolName::Read,
+            ToolName::Grep,
+            ToolName::Glob,
+            ToolName::List,
+            ToolName::Edit,
+            ToolName::Write,
+            ToolName::Patch,
+            ToolName::Bash,
+            ToolName::Question,
+            ToolName::Todo,
+            ToolName::Webfetch,
+            ToolName::Memory,
+        ];
+        for t in all {
+            assert!(!t.tool_marker().is_empty(), "{t} marker should be non-empty");
+        }
+
+        // Read tools get ·
+        for t in [ToolName::Read, ToolName::Grep, ToolName::Glob, ToolName::List, ToolName::Webfetch] {
+            assert_eq!(t.tool_marker(), "\u{00b7}", "{t} should have read marker ·");
+        }
+
+        // Write tools get ✎
+        for t in [ToolName::Edit, ToolName::Write, ToolName::Patch, ToolName::Memory] {
+            assert_eq!(t.tool_marker(), "\u{270e}", "{t} should have write marker ✎");
+        }
+
+        // Bash gets $
+        assert_eq!(ToolName::Bash.tool_marker(), "$");
+
+        // Interactive tools get ⚡
+        for t in [ToolName::Question, ToolName::Todo] {
+            assert_eq!(t.tool_marker(), "\u{26a1}", "{t} should have interactive marker ⚡");
+        }
+    }
+
+    /// Read-only tools get the read marker, write tools + memory get the
+    /// write marker, and remaining tools get execute/interactive markers.
+    /// Webfetch gets the read marker despite is_read_only() == false (UI-only divergence).
+    #[test]
+    fn tool_marker_categories_consistent() {
+        let all = [
+            ToolName::Read,
+            ToolName::Grep,
+            ToolName::Glob,
+            ToolName::List,
+            ToolName::Edit,
+            ToolName::Write,
+            ToolName::Patch,
+            ToolName::Bash,
+            ToolName::Question,
+            ToolName::Todo,
+            ToolName::Webfetch,
+            ToolName::Memory,
+        ];
+        for t in all {
+            if t.is_read_only() {
+                assert_eq!(t.tool_marker(), "\u{00b7}", "{t} is read-only but doesn't have read marker");
+            } else if t.is_write_tool() || t.is_memory() {
+                assert_eq!(t.tool_marker(), "\u{270e}", "{t} is write/memory but doesn't have write marker");
+            } else {
+                // Bash, Question, Todo, Webfetch — not covered by predicates
+                assert!(
+                    ["\u{00b7}", "$", "\u{26a1}"].contains(&t.tool_marker()),
+                    "{t} has unexpected marker '{}'", t.tool_marker()
+                );
+            }
+        }
+
+        // Webfetch specifically: read marker despite is_read_only() == false
+        assert_eq!(ToolName::Webfetch.tool_marker(), "\u{00b7}",
+            "Webfetch should have read marker (UI-only, not in is_read_only() group)");
     }
 
     /// Write tools and read-only tools must be disjoint sets, and together

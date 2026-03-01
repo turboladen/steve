@@ -8,6 +8,7 @@ use ratatui::{
 
 use super::message_block::{AssistantPart, DiffContent, DiffLine, MessageBlock, ToolGroupStatus};
 use super::theme::Theme;
+use crate::tool::ToolName;
 
 /// State for the scrollable message area.
 ///
@@ -166,17 +167,20 @@ pub fn render_message_blocks(
 
                                 let color = if call.is_error {
                                     theme.error
-                                } else if call.tool_name.is_write_tool()
-                                    || call.tool_name.is_memory()
-                                {
-                                    theme.tool_write
                                 } else {
-                                    theme.tool_read
+                                    match call.tool_name {
+                                        ToolName::Read | ToolName::Grep | ToolName::Glob
+                                        | ToolName::List | ToolName::Webfetch => theme.tool_read,
+                                        ToolName::Edit | ToolName::Write | ToolName::Patch
+                                        | ToolName::Memory => theme.tool_write,
+                                        ToolName::Bash | ToolName::Question | ToolName::Todo => theme.accent,
+                                    }
                                 };
 
                                 lines.push(Line::from(Span::styled(
                                     format!(
-                                        "{status_indicator} \u{26a1} {}({}){}",
+                                        "{status_indicator} {} {}({}){}",
+                                        call.tool_name.tool_marker(),
                                         call.tool_name, call.args_summary, result_part
                                     ),
                                     Style::default().fg(color),
