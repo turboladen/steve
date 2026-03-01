@@ -504,7 +504,7 @@ impl App {
             AppEvent::LlmDelta { text } => {
                 if self.streaming_active {
                     // Append to the display message
-                    if let Some(last) = self.messages.last_mut() {
+                    if let Some(last) = self.last_assistant_mut() {
                         last.append_text(&text);
                     }
                     // Also append to the in-progress Message for persistence
@@ -517,7 +517,7 @@ impl App {
 
             AppEvent::LlmReasoning { text } => {
                 if self.streaming_active {
-                    if let Some(last) = self.messages.last_mut() {
+                    if let Some(last) = self.last_assistant_mut() {
                         last.append_thinking(&text);
                     }
                     self.message_area_state.scroll_to_bottom();
@@ -526,7 +526,7 @@ impl App {
 
             // -- Tool events --
             AppEvent::LlmToolCallStreaming { count: _, tool_name } => {
-                if let Some(last) = self.messages.last_mut() {
+                if let Some(last) = self.last_assistant_mut() {
                     last.ensure_preparing_tool_group();
                 }
                 self.status_line_state.activity = Activity::RunningTool {
@@ -542,7 +542,7 @@ impl App {
             } => {
                 let args_summary = extract_args_summary(tool_name, &arguments);
                 let diff_content = extract_diff_content(tool_name, &arguments);
-                if let Some(last) = self.messages.last_mut() {
+                if let Some(last) = self.last_assistant_mut() {
                     last.add_tool_call(tool_name, args_summary.clone(), diff_content);
                 }
                 self.status_line_state.activity = Activity::RunningTool {
@@ -564,7 +564,7 @@ impl App {
                     output.output.clone()
                 };
 
-                if let Some(last) = self.messages.last_mut() {
+                if let Some(last) = self.last_assistant_mut() {
                     last.complete_tool_call(
                         tool_name,
                         summary,
@@ -843,6 +843,13 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Find the last Assistant block in messages.
+    /// Permission/System blocks can be interleaved during streaming, so
+    /// `messages.last_mut()` may not be the Assistant block we need.
+    fn last_assistant_mut(&mut self) -> Option<&mut MessageBlock> {
+        self.messages.iter_mut().rev().find(|m| m.is_assistant())
     }
 
     /// Cancel the current streaming task.

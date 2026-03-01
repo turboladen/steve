@@ -115,6 +115,8 @@ Cancellation uses `tokio_util::sync::CancellationToken` with `select!` — the t
 
 When a tool needs user permission, the stream task sends a `PermissionRequest` containing a `oneshot::Sender`, then awaits the `oneshot::Receiver`. The main event loop shows the prompt; when the user responds (y/n/a), it sends the reply through the stored sender. This suspends the stream task at exactly the right point without polling.
 
+**Critical**: Permission and System blocks are interleaved into `self.messages` during the stream. Streaming event handlers (`LlmDelta`, `LlmReasoning`, `LlmToolCallStreaming`, `LlmToolCall`, `ToolResult`) must use `last_assistant_mut()` to find the correct Assistant block — **not** `messages.last_mut()`, which may return a Permission or System block after a permission prompt.
+
 ### Agent Modes
 
 - **Build mode** (default): read tools auto-allowed, write/execute tools require permission (Ask)
