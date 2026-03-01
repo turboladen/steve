@@ -172,6 +172,8 @@ Built with ratatui 0.29 + crossterm 0.28 + tui-textarea 0.7 (version-pinned for 
 
 Messages render as `MessageBlock` variants: `User`, `Assistant` (with thinking/tool_groups), `System`, `Error`, `Permission`. Styled per-variant in `message_area.rs`. Permission prompts render as bold yellow blocks with highlighted key letters.
 
+**Warm Terminal palette** (`theme.rs`): Uses RGB colors for consistent appearance across terminals. `Theme` derives `Debug, PartialEq`. Tool calls use two colors: `tool_read` (muted warm gray) for read-only tools and `tool_write` (coral) for write tools + memory. The `memory` tool gets `tool_write` because it writes to disk (see critical invariant in Context Management). `reasoning` uses muted lavender to distinguish from `tool_read`.
+
 The input area has a top border (`Borders::TOP`, `INPUT_HEIGHT = 5`: 1 border + 1 context + 3 textarea), then a starship-style prompt: context line (`[Mode] ~/path prompt_tokens/ctx (%)`) showing context pressure (per-call `last_prompt_tokens`, not cumulative). The sidebar shows cumulative cost (`in: X  out: Y  total: Z`). `render_input` takes an `InputContext` with `last_prompt_tokens` and `context_window`. The border uses `block.inner(area)` to get the inner rect — child widgets layout inside that, not the textarea's own block. No status bar — activity spinner displays inline in the message area. Sidebar visibility uses `sidebar_override: Option<bool>` (None=auto, Some=forced).
 
 **Scroll direction**: Terminal emulators on macOS already apply natural scrolling. Map `ScrollDown` → `scroll_down()` and `ScrollUp` → `scroll_up()` directly — do NOT invert them at the application level.

@@ -157,8 +157,12 @@ pub fn render_message_blocks(
 
                         let color = if call.is_error {
                             theme.error
+                        } else if call.tool_name.is_write_tool()
+                            || call.tool_name.is_memory()
+                        {
+                            theme.tool_write
                         } else {
-                            theme.tool_call
+                            theme.tool_read
                         };
 
                         lines.push(Line::from(Span::styled(

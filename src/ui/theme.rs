@@ -1,6 +1,8 @@
 use ratatui::style::Color;
 
-/// Color palette for the TUI. Will be made terminal-adaptive in Phase 10.
+/// Color palette for the TUI — "Warm Terminal" identity.
+/// Amber/gold accent, warm grays, coral for write operations.
+#[derive(Debug, PartialEq)]
 pub struct Theme {
     pub fg: Color,
     pub bg: Color,
@@ -11,7 +13,8 @@ pub struct Theme {
     pub success: Color,
     pub user_msg: Color,
     pub assistant_msg: Color,
-    pub tool_call: Color,
+    pub tool_read: Color,
+    pub tool_write: Color,
     pub reasoning: Color,
     pub border: Color,
     pub mode_build: Color,
@@ -26,24 +29,62 @@ impl Default for Theme {
 }
 
 impl Theme {
-    /// Default dark theme. Fallback until terminal-adaptive detection is implemented.
+    /// Default dark theme with warm palette.
     pub fn dark() -> Self {
         Self {
             fg: Color::White,
             bg: Color::Reset,
-            accent: Color::Cyan,
-            dim: Color::DarkGray,
-            error: Color::Red,
-            warning: Color::Yellow,
-            success: Color::Green,
-            user_msg: Color::Blue,
-            assistant_msg: Color::White,
-            tool_call: Color::Magenta,
-            reasoning: Color::DarkGray,
-            border: Color::DarkGray,
-            mode_build: Color::Green,
-            mode_plan: Color::Cyan,
-            permission: Color::Yellow,
+            accent: Color::Rgb(255, 170, 51),       // Amber/Gold
+            dim: Color::Rgb(100, 95, 85),            // Warm gray
+            error: Color::Rgb(255, 85, 85),          // Warm red
+            warning: Color::Rgb(255, 200, 60),       // Warm yellow
+            success: Color::Rgb(80, 200, 120),       // Warm green
+            user_msg: Color::Rgb(230, 225, 215),     // Soft warm white
+            assistant_msg: Color::Rgb(220, 218, 210), // Warm off-white
+            tool_read: Color::Rgb(120, 115, 105),    // Muted warm gray
+            tool_write: Color::Rgb(255, 120, 80),    // Coral/Orange
+            reasoning: Color::Rgb(150, 140, 170),    // Muted lavender
+            border: Color::Rgb(88, 88, 88),          // Warm gray
+            mode_build: Color::Rgb(255, 170, 51),    // Amber
+            mode_plan: Color::Rgb(100, 149, 237),    // Cornflower blue
+            permission: Color::Rgb(255, 200, 60),    // Warm yellow
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_equals_dark() {
+        assert_eq!(Theme::default(), Theme::dark());
+    }
+
+    #[test]
+    fn accent_is_amber_rgb() {
+        let t = Theme::dark();
+        assert!(matches!(t.accent, Color::Rgb(255, 170, 51)));
+    }
+
+    #[test]
+    fn tool_read_differs_from_tool_write() {
+        let t = Theme::dark();
+        assert_ne!(t.tool_read, t.tool_write);
+    }
+
+    #[test]
+    fn reasoning_differs_from_tool_read() {
+        let t = Theme::dark();
+        assert_ne!(t.reasoning, t.tool_read);
+    }
+
+    #[test]
+    fn warm_gray_fields_are_rgb() {
+        let t = Theme::dark();
+        assert!(matches!(t.dim, Color::Rgb(..)));
+        assert!(matches!(t.reasoning, Color::Rgb(..)));
+        assert!(matches!(t.border, Color::Rgb(..)));
+        assert!(matches!(t.tool_read, Color::Rgb(..)));
     }
 }
