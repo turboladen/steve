@@ -363,7 +363,9 @@ impl App {
                         self.handle_event(event).await?;
                     }
                 }
-                _ = tick_interval.tick() => {}
+                _ = tick_interval.tick() => {
+                    self.handle_event(AppEvent::Tick).await?;
+                }
             }
 
             terminal.draw(|frame| ui::render(frame, self))?;
