@@ -123,7 +123,7 @@ When a tool needs user permission, the stream task sends a `PermissionRequest` c
 - **Build mode** (default): read tools auto-allowed, write/execute tools require permission (Ask)
 - **Plan mode**: read tools auto-allowed, write tools denied entirely (excluded from LLM tool list), bash requires permission
 
-Tab toggles between modes. Mode rules live in `permission/mod.rs` as `build_mode_rules()` / `plan_mode_rules()`.
+Tab toggles between modes. Mode rules live in `permission/mod.rs` as `build_mode_rules()` / `plan_mode_rules()`. Auto-allowed in both modes: read/grep/glob/list (read-only) + memory/todo/question (utility). Unmatched tools default to `Ask` — new tools must be added to the rules or they'll silently require permission prompts.
 
 ### Compaction (`/compact`)
 
