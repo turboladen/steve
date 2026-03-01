@@ -225,9 +225,7 @@ pub fn render_sidebar(
 
     let block = Block::default()
         .borders(Borders::LEFT)
-        .border_style(Style::default().fg(theme.border))
-        .title(" Info ")
-        .title_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD));
+        .border_style(Style::default().fg(theme.border));
 
     let paragraph = Paragraph::new(lines)
         .block(block)
