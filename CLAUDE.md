@@ -29,6 +29,7 @@ Every change that introduces new types, trait impls, or behavior must include un
 - **Strum-derived enums** (`ToolName`): `FromStr`/`Display` are auto-derived via strum. When adding new variants, just add to the enum — no manual match arms needed. Existing round-trip tests validate the derives.
 - **New enums**: `FromStr`/`Display` round-trip for all variants, serde round-trip, rejection of invalid input
 - **Match arms**: Prefer explicit variant lists over `_ =>` wildcards — exhaustive matching is a primary safety mechanism
+- **Exhaustive test loops**: When iterating all variants and branching on predicates, use `if/else if/else` (not independent `if` blocks) so every variant hits at least one assertion
 - **Helper methods** (e.g., `is_write_tool()`): Exhaustive assertions covering every variant, not just spot checks
 - **Parse functions**: Valid inputs, invalid inputs, edge cases (empty string, extra whitespace)
 - **Refactors**: Existing tests passing is necessary but not sufficient — new logic paths need dedicated tests
