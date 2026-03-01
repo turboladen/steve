@@ -550,4 +550,226 @@ mod tests {
         // top border + 0 diff lines + bottom border = 2 lines
         assert_eq!(output.len(), 2);
     }
+
+    // -- Buffer rendering tests --
+    //
+    // These test the actual render pipeline through ratatui's TestBackend,
+    // catching layout bugs that pure data-model tests miss.
+
+    use ratatui::layout::Rect;
+    use super::super::message_block::{ThinkingBlock, ToolCall, ToolGroup, ToolGroupStatus};
+
+    /// Helper: render message blocks into a buffer and return the buffer text as a single string.
+    fn render_messages_to_string(
+        width: u16,
+        height: u16,
+        messages: &[MessageBlock],
+        activity: Option<(char, String)>,
+    ) -> String {
+        let theme = Theme::default();
+        let mut state = MessageAreaState::default();
+        let buf = super::super::render_to_buffer(width, height, |frame| {
+            render_message_blocks(
+                frame,
+                Rect::new(0, 0, width, height),
+                messages,
+                &mut state,
+                &theme,
+                activity,
+            );
+        });
+        // Collect all cells into a string, row by row
+        let mut text = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                let cell = &buf[(x, y)];
+                text.push_str(cell.symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    #[test]
+    fn buffer_user_message_has_prefix() {
+        let messages = vec![MessageBlock::User {
+            text: "Hello world".to_string(),
+        }];
+        let text = render_messages_to_string(60, 10, &messages, None);
+        assert!(text.contains("> Hello world"), "user message should have '> ' prefix, got:\n{text}");
+    }
+
+    #[test]
+    fn buffer_assistant_text_rendered() {
+        let messages = vec![MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::Text("Response text here".to_string())],
+        }];
+        let text = render_messages_to_string(60, 10, &messages, None);
+        assert!(text.contains("Response text here"), "assistant text should appear, got:\n{text}");
+        // Should NOT have "> " prefix
+        assert!(!text.contains("> Response"), "assistant should not have user prefix");
+    }
+
+    #[test]
+    fn buffer_thinking_collapsed_shows_arrow_and_token_count() {
+        let messages = vec![MessageBlock::Assistant {
+            thinking: Some(ThinkingBlock {
+                token_count: 42,
+                content: "deep thoughts".to_string(),
+                expanded: false,
+            }),
+            parts: vec![],
+        }];
+        let text = render_messages_to_string(60, 10, &messages, None);
+        assert!(text.contains("\u{25b6}"), "collapsed thinking should show ▶");
+        assert!(text.contains("Thinking"), "should show 'Thinking'");
+        assert!(text.contains("42"), "should show token count");
+    }
+
+    #[test]
+    fn buffer_thinking_expanded_shows_content() {
+        let messages = vec![MessageBlock::Assistant {
+            thinking: Some(ThinkingBlock {
+                token_count: 10,
+                content: "my thoughts".to_string(),
+                expanded: true,
+            }),
+            parts: vec![],
+        }];
+        let text = render_messages_to_string(60, 10, &messages, None);
+        assert!(text.contains("\u{25bc}"), "expanded thinking should show ▼");
+        assert!(text.contains("my thoughts"), "expanded thinking should show content");
+    }
+
+    #[test]
+    fn buffer_tool_group_preparing_shows_spinner() {
+        let messages = vec![MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::ToolGroup(ToolGroup {
+                calls: vec![ToolCall {
+                    tool_name: ToolName::Read,
+                    args_summary: "src/main.rs".to_string(),
+                    full_output: None,
+                    result_summary: None,
+                    diff_content: None,
+                    is_error: false,
+                    expanded: false,
+                }],
+                status: ToolGroupStatus::Preparing,
+            })],
+        }];
+        let text = render_messages_to_string(80, 10, &messages, None);
+        assert!(text.contains("preparing..."), "preparing tool should show 'preparing...'");
+    }
+
+    #[test]
+    fn buffer_tool_group_complete_collapsed() {
+        let messages = vec![MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::ToolGroup(ToolGroup {
+                calls: vec![ToolCall {
+                    tool_name: ToolName::Read,
+                    args_summary: "src/main.rs".to_string(),
+                    full_output: Some("file content".to_string()),
+                    result_summary: Some("150 lines".to_string()),
+                    diff_content: None,
+                    is_error: false,
+                    expanded: false,
+                }],
+                status: ToolGroupStatus::Complete,
+            })],
+        }];
+        let text = render_messages_to_string(80, 10, &messages, None);
+        assert!(text.contains("\u{25b6}"), "collapsed complete should show ▶");
+        assert!(text.contains("read"), "should show tool name");
+        assert!(text.contains("src/main.rs"), "should show args");
+        assert!(text.contains("150 lines"), "should show result summary");
+    }
+
+    #[test]
+    fn buffer_tool_group_expanded_with_diff() {
+        let messages = vec![MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::ToolGroup(ToolGroup {
+                calls: vec![ToolCall {
+                    tool_name: ToolName::Edit,
+                    args_summary: "src/main.rs".to_string(),
+                    full_output: None,
+                    result_summary: Some("edited".to_string()),
+                    diff_content: Some(DiffContent::EditDiff {
+                        lines: vec![
+                            DiffLine::Removal("old line".into()),
+                            DiffLine::Addition("new line".into()),
+                        ],
+                    }),
+                    is_error: false,
+                    expanded: true,
+                }],
+                status: ToolGroupStatus::Complete,
+            })],
+        }];
+        let text = render_messages_to_string(80, 15, &messages, None);
+        // Box-drawing frame
+        assert!(text.contains("\u{250c}"), "should have top-left corner ┌");
+        assert!(text.contains("\u{2514}"), "should have bottom-left corner └");
+        assert!(text.contains("-old line"), "should show removal with -");
+        assert!(text.contains("+new line"), "should show addition with +");
+    }
+
+    #[test]
+    fn buffer_system_message_rendered() {
+        let messages = vec![MessageBlock::System {
+            text: "System notice".to_string(),
+        }];
+        let text = render_messages_to_string(60, 10, &messages, None);
+        assert!(text.contains("System notice"), "system message should appear");
+    }
+
+    #[test]
+    fn buffer_error_message_rendered() {
+        let messages = vec![MessageBlock::Error {
+            text: "Something broke".to_string(),
+        }];
+        let text = render_messages_to_string(60, 10, &messages, None);
+        assert!(text.contains("Something broke"), "error message should appear");
+    }
+
+    #[test]
+    fn buffer_permission_prompt_rendered() {
+        let messages = vec![MessageBlock::Permission {
+            tool_name: "bash".to_string(),
+            args_summary: "rm -rf".to_string(),
+        }];
+        let text = render_messages_to_string(60, 10, &messages, None);
+        assert!(text.contains("Allow"), "permission should show 'Allow'");
+        assert!(text.contains("bash"), "permission should show tool name");
+        assert!(text.contains("rm -rf"), "permission should show args");
+        assert!(text.contains("]es"), "should show [y]es option");
+        assert!(text.contains("]o"), "should show [n]o option");
+        assert!(text.contains("]lways"), "should show [a]lways option");
+    }
+
+    #[test]
+    fn buffer_activity_spinner_inline() {
+        let messages = vec![];
+        let text = render_messages_to_string(60, 10, &messages, Some(('⠋', "Thinking...".to_string())));
+        assert!(text.contains("Thinking..."), "activity text should appear");
+    }
+
+    #[test]
+    fn buffer_blank_line_between_messages() {
+        let messages = vec![
+            MessageBlock::User { text: "msg1".to_string() },
+            MessageBlock::User { text: "msg2".to_string() },
+        ];
+        let text = render_messages_to_string(60, 10, &messages, None);
+        // Find positions — msg2 should not immediately follow msg1
+        let pos1 = text.find("> msg1").expect("msg1 not found");
+        let pos2 = text.find("> msg2").expect("msg2 not found");
+        // There should be at least one blank line between them (newline + spaces + newline)
+        let between = &text[pos1..pos2];
+        let line_count = between.lines().count();
+        assert!(line_count >= 2, "should have blank line separation, got {line_count} lines between messages");
+    }
 }

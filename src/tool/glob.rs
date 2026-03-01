@@ -113,3 +113,92 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
         is_error: false,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn make_ctx(dir: &std::path::Path) -> ToolContext {
+        ToolContext {
+            project_root: dir.to_path_buf(),
+            storage_dir: None,
+        }
+    }
+
+    /// Initialize a minimal git repo so the `ignore` crate's walker works
+    /// without being confused by parent .gitignore files.
+    fn init_git(dir: &std::path::Path) {
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(dir)
+            .status()
+            .expect("git init failed");
+    }
+
+    #[test]
+    fn matches_rs_files() {
+        let dir = tempdir().unwrap();
+        init_git(dir.path());
+        fs::write(dir.path().join("test.rs"), "fn main() {}").unwrap();
+        fs::write(dir.path().join("test.txt"), "hello").unwrap();
+
+        let args = json!({ "pattern": "*.rs" });
+        let result = execute(args, make_ctx(dir.path())).unwrap();
+        assert!(!result.is_error);
+        assert!(result.output.contains("test.rs"), "output should contain test.rs: {}", result.output);
+        assert!(!result.output.contains("test.txt"), "output should not contain test.txt: {}", result.output);
+    }
+
+    #[test]
+    fn results_are_sorted() {
+        let dir = tempdir().unwrap();
+        init_git(dir.path());
+        fs::write(dir.path().join("c.rs"), "").unwrap();
+        fs::write(dir.path().join("a.rs"), "").unwrap();
+        fs::write(dir.path().join("b.rs"), "").unwrap();
+
+        let args = json!({ "pattern": "*.rs" });
+        let result = execute(args, make_ctx(dir.path())).unwrap();
+        assert!(!result.is_error);
+        let lines: Vec<&str> = result.output.lines().collect();
+        assert_eq!(lines, vec!["a.rs", "b.rs", "c.rs"]);
+    }
+
+    #[test]
+    fn invalid_pattern_returns_error() {
+        let dir = tempdir().unwrap();
+        let args = json!({ "pattern": "[invalid" });
+        let result = execute(args, make_ctx(dir.path())).unwrap();
+        assert!(result.is_error);
+        assert!(result.output.contains("invalid glob pattern"), "output: {}", result.output);
+    }
+
+    #[test]
+    fn no_matches_descriptive_message() {
+        let dir = tempdir().unwrap();
+        init_git(dir.path());
+
+        let args = json!({ "pattern": "*.xyz" });
+        let result = execute(args, make_ctx(dir.path())).unwrap();
+        assert!(!result.is_error);
+        assert!(result.output.contains("No files found"), "output: {}", result.output);
+    }
+
+    #[test]
+    fn path_parameter_scopes_search() {
+        let dir = tempdir().unwrap();
+        init_git(dir.path());
+        fs::create_dir_all(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("root.rs"), "").unwrap();
+        fs::write(dir.path().join("sub/nested.rs"), "").unwrap();
+
+        let args = json!({ "pattern": "*.rs", "path": "sub" });
+        let result = execute(args, make_ctx(dir.path())).unwrap();
+        assert!(!result.is_error);
+        assert!(result.output.contains("nested.rs"), "output should contain nested.rs: {}", result.output);
+        assert!(!result.output.contains("root.rs"), "output should not contain root.rs: {}", result.output);
+    }
+}

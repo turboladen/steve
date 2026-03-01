@@ -1032,7 +1032,7 @@ impl App {
 
         // Launch the streaming task with tool support
         stream::spawn_stream(StreamRequest {
-            client: client.inner().clone(),
+            stream_provider: std::sync::Arc::new(stream::OpenAIChatStream::new(client.inner().clone())),
             model: resolved.api_model_id().to_string(),
             system_prompt,
             history,
@@ -1685,7 +1685,7 @@ impl App {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
 
@@ -1973,7 +1973,17 @@ mod tests {
             ToolName::Memory,
         ];
         for tool in all_tools {
-            let _ = extract_diff_content(tool, &args);
+            let result = extract_diff_content(tool, &args);
+            // Write tools produce diff content; all others return None.
+            // Empty args produce None for write tools too, but the exhaustive
+            // match is the point — a new variant without a match arm won't compile.
+            if matches!(tool, ToolName::Edit | ToolName::Write | ToolName::Patch) {
+                // With empty args, write tools may return None (no old_string etc.)
+                // — the key assertion is that this doesn't panic.
+                let _ = result;
+            } else {
+                assert!(result.is_none(), "{tool} should return None for diff content");
+            }
         }
     }
 
@@ -2156,7 +2166,10 @@ mod tests {
     }
 
     /// Create a minimal App for testing (without real storage/config).
-    fn make_test_app() -> App {
+    /// Note: uses `Storage::new` which writes to the real app data dir. This is
+    /// acceptable because UI rendering tests don't perform storage writes. A
+    /// temp-dir approach would require returning `TempDir` to keep it alive.
+    pub(crate) fn make_test_app() -> App {
         use crate::config::types::Config;
         use crate::project::ProjectInfo;
         use crate::storage::Storage;

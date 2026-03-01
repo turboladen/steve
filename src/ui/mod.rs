@@ -48,6 +48,19 @@ pub fn restore_terminal(terminal: &mut Tui) -> Result<()> {
     Ok(())
 }
 
+/// Render a widget into a headless test buffer. Used by rendering tests.
+#[cfg(test)]
+pub(crate) fn render_to_buffer(
+    width: u16,
+    height: u16,
+    draw: impl FnOnce(&mut Frame),
+) -> ratatui::buffer::Buffer {
+    let backend = ratatui::backend::TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| draw(f)).unwrap();
+    terminal.backend().buffer().clone()
+}
+
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let show_sidebar = app.should_show_sidebar(area.width);
@@ -110,4 +123,69 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         &app.autocomplete_state,
         &app.theme,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: render the full app into a buffer and return text.
+    fn render_app_to_parts(width: u16, height: u16) -> (ratatui::buffer::Buffer, String) {
+        let mut app = crate::app::tests::make_test_app();
+        let buf = render_to_buffer(width, height, |frame| {
+            render(frame, &mut app);
+        });
+        let mut text = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                let cell = &buf[(x, y)];
+                text.push_str(cell.symbol());
+            }
+            text.push('\n');
+        }
+        (buf, text)
+    }
+
+    #[test]
+    fn layout_80x24_no_sidebar() {
+        let (_buf, text) = render_app_to_parts(80, 24);
+        // At 80 columns, sidebar should NOT be visible
+        assert!(!text.contains("Session"), "sidebar should not be visible at 80 cols");
+        // Input area should be present (the chevron ">")
+        assert!(text.contains(">"), "input chevron should be visible");
+    }
+
+    #[test]
+    fn layout_120x24_with_sidebar() {
+        let mut app = crate::app::tests::make_test_app();
+        app.sidebar_state.model_name = "gpt-4o".to_string();
+        let buf = render_to_buffer(120, 24, |frame| {
+            render(frame, &mut app);
+        });
+        let mut text = String::new();
+        for y in 0..24 {
+            for x in 0..120 {
+                let cell = &buf[(x, y)];
+                text.push_str(cell.symbol());
+            }
+            text.push('\n');
+        }
+        assert!(text.contains("Session"), "sidebar 'Session' header should be visible at 120 cols");
+        assert!(text.contains("gpt-4o"), "sidebar should show model name");
+    }
+
+    #[test]
+    fn layout_separator_column_has_border_bg() {
+        let mut app = crate::app::tests::make_test_app();
+        let buf = render_to_buffer(120, 24, |frame| {
+            render(frame, &mut app);
+        });
+        // The separator is 1 column wide, at x = 120 - 1(sep) - 40(sidebar) = 79
+        let sep_x = 79;
+        let cell = &buf[(sep_x, 0)];
+        assert_eq!(
+            cell.bg, app.theme.border,
+            "separator column should have theme.border background"
+        );
+    }
 }

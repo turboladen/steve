@@ -36,6 +36,12 @@ Every change that introduces new types, trait impls, or behavior must include un
 
 Run `cargo test` after every change. Aim for tests that break if someone adds a new variant without updating all the relevant match arms.
 
+**Test infrastructure**:
+- **UI rendering**: `render_to_buffer(width, height, draw_fn)` in `ui/mod.rs` (`#[cfg(test)]`) creates a headless ratatui `TestBackend` for buffer assertions. `make_test_app()` in `app.rs` constructs a minimal `App` for rendering tests
+- **Storage**: `Storage::with_base(path)` (`#[cfg(test)]`) bypasses `directories::ProjectDirs` for temp-dir-based tests
+- **Stream**: `MockChatStream` in `stream.rs` (`#[cfg(test)]`) provides canned SSE responses for integration tests. Use `with_test_manager(|mgr| { ... })` callback pattern for `SessionManager` tests (avoids `Box::leak` lifetime hacks)
+- **Assertions**: Never use trivially-true assertions like `!a.is_empty() || !b.is_empty()` — verify the specific behavior under test
+
 Logs are written to `{data_dir}/logs/steve.log` (daily rolling via `tracing-appender`). Data dir is resolved via `directories::ProjectDirs` — on macOS: `~/Library/Application Support/steve/`, on Linux: `~/.local/share/steve/`.
 
 ## Configuration
@@ -111,6 +117,8 @@ The main loop in `app.rs` uses `tokio::select!` across these sources, then re-re
 A spawned tokio task opens an SSE stream via async-openai, processes chunks (sending `AppEvent::LlmDelta` to the UI), and accumulates tool call fragments. When the stream finishes, it checks for valid tool call data (non-empty `id` and `function_name`) regardless of `finish_reason` — some providers (e.g., Fuel iX/litellm) don't reliably set `FinishReason::ToolCalls`. Tool calls with invalid/truncated JSON arguments (common when `finish_reason=Length`) are filtered out before execution. Valid tool calls are executed (with permission checks), results appended as `ChatCompletionRequestToolMessage`s, and the loop continues until no valid tool calls remain.
 
 Cancellation uses `tokio_util::sync::CancellationToken` with `select!` — the token is checked before each LLM call, during chunk processing, and between tool executions.
+
+The stream is decoupled from async-openai via the `ChatStreamProvider` trait (`#[async_trait]`). Production uses `OpenAIChatStream`; tests use `MockChatStream` which returns pre-built response chunks from a `VecDeque` (supports multi-call tool loop scenarios). Builder helpers: `text_delta()`, `tool_call_chunk()`, `finish_chunk()`.
 
 ### Permission Handshake
 
@@ -209,7 +217,8 @@ Auto-scroll calculates content height using wrapped line widths (not `lines.len(
 - **tracing** outputs to file appender, never stdout (TUI owns stdout)
 - **No `unreachable!()` in stream tasks** — panics in the stream tokio task crash silently. Use graceful error handling with `tracing::error!` instead
 - **No `dirs` crate** — use `std::env::var("HOME")` for home directory detection, or `directories::ProjectDirs` for app data paths
-- **`Storage::new(project_id: &str)`** returns `Result<Self>` — takes a project ID string (not a path). For tests: `Storage::new("test-name").expect("test storage")`
+- **async-trait 0.1** enables `#[async_trait]` for `ChatStreamProvider` trait in `stream.rs` (required for `async fn` in `dyn` trait objects)
+- **`Storage::new(project_id: &str)`** returns `Result<Self>` — takes a project ID string (not a path). For isolated tests: `Storage::with_base(tempdir().path().to_path_buf())`. For UI tests where no writes happen: `Storage::new("test-name").expect("test storage")`
 - `AGENTS.md` in the project root is optional — if present, it's loaded at startup and injected as part of the system prompt. Create one with `/init`
 - **File locking (Rust 2024)**: `std::fs::File` has native `lock()` (exclusive), `lock_shared()`, `unlock()` methods. `fs2::FileExt` still provides `lock_exclusive()` (no native equivalent with that name) but `lock_shared`/`unlock` shadow the trait — importing `fs2::FileExt` triggers unused-import warnings for those
 - **`ToolContext` fields**: `project_root: PathBuf` and `storage_dir: Option<PathBuf>`. In tests, use `storage_dir: None` unless testing the memory tool

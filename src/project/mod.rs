@@ -81,3 +81,90 @@ fn hash_path(path: &Path) -> u64 {
     path.hash(&mut hasher);
     hasher.finish()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::process::Command;
+
+    /// Helper: initialize a git repo with one empty commit in the given directory.
+    fn init_git_repo(dir: &Path) {
+        let run = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@test.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@test.com")
+                .env("GIT_CONFIG_GLOBAL", "")
+                .env("GIT_CONFIG_SYSTEM", "")
+                .output()
+                .expect("failed to run git");
+            assert!(
+                status.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&status.stderr)
+            );
+        };
+        run(&["init"]);
+        run(&["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "init"]);
+    }
+
+    #[test]
+    fn detect_finds_git_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+
+        let info = detect(tmp.path()).expect("detect should succeed in a git repo");
+
+        // Root should be the canonical tempdir path
+        assert_eq!(info.root, tmp.path().canonicalize().unwrap());
+        assert!(!info.id.is_empty(), "project id should be non-empty");
+    }
+
+    #[test]
+    fn detect_walks_up_from_subdirectory() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+
+        let sub = tmp.path().join("sub").join("dir");
+        fs::create_dir_all(&sub).unwrap();
+
+        let info = detect(&sub).expect("detect should find git root from subdirectory");
+
+        assert_eq!(info.root, tmp.path().canonicalize().unwrap());
+        assert!(!info.id.is_empty());
+    }
+
+    #[test]
+    fn detect_no_git_returns_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No git init — plain directory
+        let result = detect(tmp.path());
+        assert!(result.is_err(), "detect should fail when there is no .git");
+    }
+
+    #[test]
+    fn detect_or_cwd_returns_project_info() {
+        // detect_or_cwd always succeeds (falls back to CWD hash)
+        let info = detect_or_cwd();
+        assert!(!info.id.is_empty(), "project id should be non-empty");
+    }
+
+    #[test]
+    fn hash_path_same_input_matches() {
+        // Note: DefaultHasher is not guaranteed stable across Rust versions or
+        // processes. This test verifies intra-process consistency only. If
+        // cross-process determinism matters, switch to a stable hasher.
+        let path = Path::new("/some/test/path");
+        let h1 = hash_path(path);
+        let h2 = hash_path(path);
+        assert_eq!(h1, h2, "hash_path should return the same value for the same input");
+        // Different paths produce different hashes
+        let h3 = hash_path(Path::new("/other/path"));
+        assert_ne!(h1, h3, "different paths should produce different hashes");
+    }
+}

@@ -240,4 +240,135 @@ mod tests {
         assert_eq!(text, "hello world");
         assert_eq!(state.textarea.lines().join(""), "");
     }
+
+    // -- Buffer rendering tests --
+
+    use ratatui::layout::Rect;
+
+    /// Helper: render input area into a buffer and return the buffer + text string.
+    fn render_input_to_parts(
+        width: u16,
+        height: u16,
+        mode: AgentMode,
+        pct: u8,
+        last_prompt: u64,
+        ctx_window: u64,
+    ) -> (ratatui::buffer::Buffer, String) {
+        let theme = Theme::default();
+        let mut state = InputState::default();
+        state.mode = mode;
+        let context = InputContext {
+            working_dir: "~/projects/steve".to_string(),
+            last_prompt_tokens: last_prompt,
+            context_window: ctx_window,
+            context_usage_pct: pct,
+        };
+        let buf = super::super::render_to_buffer(width, height, |frame| {
+            render_input(
+                frame,
+                Rect::new(0, 0, width, height),
+                &mut state,
+                &theme,
+                &context,
+            );
+        });
+        let mut text = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                let cell = &buf[(x, y)];
+                text.push_str(cell.symbol());
+            }
+            text.push('\n');
+        }
+        (buf, text)
+    }
+
+    #[test]
+    fn buffer_build_mode_badge() {
+        let (buf, text) = render_input_to_parts(80, 5, AgentMode::Build, 10, 12800, 128000);
+        assert!(text.contains("Build"), "should show Build mode badge");
+        // Find the "B" of "Build" and check it has the mode_build background color
+        let theme = Theme::default();
+        for x in 0..80 {
+            let cell = &buf[(x, 1)]; // context line is row 1 (after border)
+            if cell.symbol() == "B" {
+                assert_eq!(cell.bg, theme.mode_build, "Build badge should have mode_build bg color");
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn buffer_plan_mode_badge() {
+        let (buf, text) = render_input_to_parts(80, 5, AgentMode::Plan, 10, 12800, 128000);
+        assert!(text.contains("Plan"), "should show Plan mode badge");
+        let theme = Theme::default();
+        for x in 0..80 {
+            let cell = &buf[(x, 1)];
+            if cell.symbol() == "P" {
+                assert_eq!(cell.bg, theme.mode_plan, "Plan badge should have mode_plan bg color");
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn buffer_context_pressure_green() {
+        let (buf, text) = render_input_to_parts(80, 5, AgentMode::Build, 30, 38400, 128000);
+        assert!(text.contains("30%"), "should show 30%");
+        let theme = Theme::default();
+        // Find the "3" of "30%" and check color is dim (green = low pressure)
+        for x in (0..80).rev() {
+            let cell = &buf[(x, 1)];
+            if cell.symbol() == "3" {
+                assert_eq!(cell.fg, theme.dim, "30% should use dim color (low pressure)");
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn buffer_context_pressure_yellow() {
+        let (buf, text) = render_input_to_parts(80, 5, AgentMode::Build, 60, 76800, 128000);
+        assert!(text.contains("60%"), "should show 60%");
+        let theme = Theme::default();
+        for x in (0..80).rev() {
+            let cell = &buf[(x, 1)];
+            if cell.symbol() == "6" {
+                assert_eq!(cell.fg, theme.warning, "60% should use warning color");
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn buffer_context_pressure_red() {
+        let (buf, text) = render_input_to_parts(80, 5, AgentMode::Build, 85, 108800, 128000);
+        assert!(text.contains("85%"), "should show 85%");
+        let theme = Theme::default();
+        for x in (0..80).rev() {
+            let cell = &buf[(x, 1)];
+            if cell.symbol() == "8" {
+                assert_eq!(cell.fg, theme.error, "85% should use error color (red)");
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn buffer_top_border_present() {
+        let (buf, _text) = render_input_to_parts(80, 5, AgentMode::Build, 0, 0, 0);
+        // Row 0 should have a horizontal border character (─ or similar)
+        // The top border is from Borders::TOP on the block
+        let mut has_border = false;
+        for x in 0..80 {
+            let cell = &buf[(x, 0)];
+            let sym = cell.symbol();
+            if sym == "─" || sym == "━" || sym == "-" {
+                has_border = true;
+                break;
+            }
+        }
+        assert!(has_border, "row 0 should contain a horizontal border character");
+    }
 }

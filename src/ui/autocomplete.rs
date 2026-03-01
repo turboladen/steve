@@ -196,4 +196,102 @@ mod tests {
         assert!(state.matches.is_empty());
         assert_eq!(state.selected, 0);
     }
+
+    // -- Buffer rendering tests --
+
+    use ratatui::layout::Rect;
+
+    /// Helper: render autocomplete popup and return buffer text.
+    fn render_autocomplete_to_string(
+        width: u16,
+        height: u16,
+        state: &AutocompleteState,
+        input_area: Rect,
+    ) -> String {
+        let theme = Theme::default();
+        let buf = super::super::render_to_buffer(width, height, |frame| {
+            render_autocomplete(frame, input_area, state, &theme);
+        });
+        let mut text = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                let cell = &buf[(x, y)];
+                text.push_str(cell.symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    #[test]
+    fn buffer_hidden_renders_nothing() {
+        let state = AutocompleteState::default();
+        let input_area = Rect::new(0, 20, 80, 5);
+        let text = render_autocomplete_to_string(80, 25, &state, input_area);
+        // All cells should be spaces (default empty buffer)
+        let non_space: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(non_space.is_empty(), "hidden autocomplete should render nothing, got: '{non_space}'");
+    }
+
+    #[test]
+    fn buffer_shows_filtered_matches() {
+        let mut state = AutocompleteState::default();
+        state.update("/e"); // Should match "/exit"
+        let input_area = Rect::new(0, 20, 80, 5);
+        let text = render_autocomplete_to_string(80, 25, &state, input_area);
+        assert!(text.contains("/exit"), "should show /exit match, got:\n{text}");
+    }
+
+    #[test]
+    fn buffer_highlights_selected_item() {
+        let mut state = AutocompleteState::default();
+        state.update("/m"); // Should match /model, /models
+        let selected = state.selected_command().unwrap_or("").to_string();
+        let input_area = Rect::new(0, 20, 80, 5);
+        let theme = Theme::default();
+        let buf = super::super::render_to_buffer(80, 25, |frame| {
+            render_autocomplete(frame, input_area, &state, &theme);
+        });
+        // The selected item should be rendered with accent color
+        // Find the first character of the selected command
+        let mut found_accent = false;
+        for y in 0..25 {
+            for x in 0..80 {
+                let cell = &buf[(x, y)];
+                if cell.symbol() == "/" && cell.fg == theme.accent {
+                    found_accent = true;
+                    break;
+                }
+            }
+            if found_accent { break; }
+        }
+        assert!(found_accent, "selected item '{}' should be rendered with accent color", selected);
+    }
+
+    #[test]
+    fn buffer_positioned_above_input() {
+        let mut state = AutocompleteState::default();
+        state.update("/m");
+        // Input at the bottom of a 30-row terminal
+        let input_area = Rect::new(0, 25, 80, 5);
+        let buf = super::super::render_to_buffer(80, 30, |frame| {
+            let theme = Theme::default();
+            render_autocomplete(frame, input_area, &state, &theme);
+        });
+        // The popup should be above the input area (y < 25)
+        // Check that there's content above the input area
+        let mut found_content_above = false;
+        for y in 0..25 {
+            for x in 0..80 {
+                let cell = &buf[(x, y)];
+                let sym = cell.symbol();
+                if sym != " " && !sym.is_empty() {
+                    found_content_above = true;
+                    break;
+                }
+            }
+            if found_content_above { break; }
+        }
+        assert!(found_content_above, "autocomplete popup should be positioned above the input area");
+    }
 }

@@ -389,5 +389,114 @@ mod tests {
         let state = SidebarState::default();
         assert!(state.changes.is_empty());
     }
+
+    // -- Buffer rendering tests --
+
+    use ratatui::layout::Rect;
+
+    /// Helper: render sidebar into a buffer and return the text as a single string.
+    fn render_sidebar_to_string(width: u16, height: u16, state: &SidebarState) -> String {
+        let theme = Theme::default();
+        let buf = super::super::render_to_buffer(width, height, |frame| {
+            render_sidebar(frame, Rect::new(0, 0, width, height), state, &theme);
+        });
+        let mut text = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                let cell = &buf[(x, y)];
+                text.push_str(cell.symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    #[test]
+    fn buffer_sidebar_session_section_shows_model() {
+        let state = SidebarState {
+            model_name: "gpt-4o".to_string(),
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(text.contains("Session"), "should show 'Session' header");
+        assert!(text.contains("gpt-4o"), "should show model name");
+    }
+
+    #[test]
+    fn buffer_sidebar_token_display() {
+        let state = SidebarState {
+            prompt_tokens: 12800,
+            completion_tokens: 3200,
+            total_tokens: 16000,
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(text.contains("in: 12.8k"), "should show formatted prompt tokens");
+        assert!(text.contains("out: 3.2k"), "should show formatted completion tokens");
+        assert!(text.contains("total: 16.0k"), "should show formatted total tokens");
+    }
+
+    #[test]
+    fn buffer_sidebar_cost_display() {
+        let state = SidebarState {
+            session_cost: Some(0.0512),
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(text.contains("cost: $0.0512"), "should show cost");
+    }
+
+    #[test]
+    fn buffer_sidebar_changes_section() {
+        let mut state = SidebarState::default();
+        state.record_file_change("src/main.rs".into(), 10, 3);
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(text.contains("Changes"), "should show 'Changes' header");
+        assert!(text.contains("src/main.rs"), "should show file path");
+        assert!(text.contains("+10"), "should show additions in green");
+        assert!(text.contains("-3"), "should show removals in red");
+    }
+
+    #[test]
+    fn buffer_sidebar_todos_section() {
+        let state = SidebarState {
+            todos: vec![
+                TodoItem { text: "Fix bug".to_string(), done: false },
+                TodoItem { text: "Write tests".to_string(), done: true },
+            ],
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(text.contains("Todos"), "should show 'Todos' header");
+        assert!(text.contains("○ Fix bug"), "pending todo should show ○");
+        assert!(text.contains("✓ Write tests"), "done todo should show ✓");
+    }
+
+    #[test]
+    fn buffer_sidebar_changes_renders_above_session() {
+        let mut state = SidebarState {
+            model_name: "gpt-4o".to_string(),
+            ..Default::default()
+        };
+        state.record_file_change("file.rs".into(), 1, 0);
+        let text = render_sidebar_to_string(40, 20, &state);
+        let changes_pos = text.find("Changes").expect("Changes header not found");
+        let session_pos = text.find("Session").expect("Session header not found");
+        assert!(changes_pos < session_pos, "Changes should render above Session");
+    }
+
+    #[test]
+    fn buffer_sidebar_no_changes_no_header() {
+        let state = SidebarState::default();
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(!text.contains("Changes"), "no changes = no 'Changes' header");
+    }
+
+    #[test]
+    fn buffer_sidebar_empty_model_shows_none() {
+        let state = SidebarState::default();
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(text.contains("(none)"), "empty model should show '(none)'");
+    }
 }
 

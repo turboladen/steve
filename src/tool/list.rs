@@ -139,3 +139,112 @@ fn format_size(bytes: u64) -> String {
         format!("({:.1}MB)", bytes as f64 / (1024.0 * 1024.0))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn make_ctx(dir: &std::path::Path) -> ToolContext {
+        ToolContext {
+            project_root: dir.to_path_buf(),
+            storage_dir: None,
+        }
+    }
+
+    /// Initialize a minimal git repo so the `ignore` crate's walker works
+    /// without being confused by parent .gitignore files.
+    fn init_git(dir: &std::path::Path) {
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(dir)
+            .status()
+            .expect("git init failed");
+    }
+
+    #[test]
+    fn shows_files_with_sizes() {
+        let dir = tempdir().unwrap();
+        init_git(dir.path());
+        fs::write(dir.path().join("small.txt"), "hi").unwrap();
+        fs::write(dir.path().join("bigger.txt"), "a".repeat(2048)).unwrap();
+
+        let args = json!({});
+        let result = execute(args, make_ctx(dir.path())).unwrap();
+        assert!(!result.is_error);
+        assert!(result.output.contains("small.txt"), "output should contain small.txt: {}", result.output);
+        assert!(result.output.contains("bigger.txt"), "output should contain bigger.txt: {}", result.output);
+        // small.txt is 2 bytes -> "(2B)", bigger.txt is 2048 bytes -> "(2.0KB)"
+        assert!(result.output.contains("(2B)"), "output should contain size (2B): {}", result.output);
+        assert!(result.output.contains("(2.0KB)"), "output should contain size (2.0KB): {}", result.output);
+    }
+
+    #[test]
+    fn nonexistent_path_returns_error() {
+        let dir = tempdir().unwrap();
+        let args = json!({ "path": "does_not_exist" });
+        let result = execute(args, make_ctx(dir.path())).unwrap();
+        assert!(result.is_error);
+        assert!(result.output.contains("not found"), "output: {}", result.output);
+    }
+
+    #[test]
+    fn empty_directory_shows_empty() {
+        let dir = tempdir().unwrap();
+        init_git(dir.path());
+        let sub = dir.path().join("empty_sub");
+        fs::create_dir_all(&sub).unwrap();
+
+        let args = json!({ "path": "empty_sub" });
+        let result = execute(args, make_ctx(dir.path())).unwrap();
+        assert!(!result.is_error);
+        assert!(result.output.contains("(empty)"), "output should indicate empty: {}", result.output);
+    }
+
+    #[test]
+    fn depth_limits_nesting() {
+        let dir = tempdir().unwrap();
+        init_git(dir.path());
+        fs::create_dir_all(dir.path().join("a/b/c")).unwrap();
+        fs::write(dir.path().join("root.txt"), "root").unwrap();
+        fs::write(dir.path().join("a/mid.txt"), "mid").unwrap();
+        fs::write(dir.path().join("a/b/deep.txt"), "deep").unwrap();
+        fs::write(dir.path().join("a/b/c/deeper.txt"), "deeper").unwrap();
+
+        // Increasing depth should reveal progressively deeper files.
+        // depth=1 shows immediate children + one level of nesting.
+        let args1 = json!({ "depth": 1 });
+        let result1 = execute(args1, make_ctx(dir.path())).unwrap();
+        assert!(!result1.is_error);
+        assert!(result1.output.contains("root.txt"), "depth=1 should show root.txt: {}", result1.output);
+        assert!(result1.output.contains("a/"), "depth=1 should show a/: {}", result1.output);
+        // deeper.txt at 3 levels should not appear
+        assert!(!result1.output.contains("deeper.txt"), "depth=1 should not show deeper.txt: {}", result1.output);
+
+        // With a smaller depth, fewer entries should be shown.
+        // depth=3 should reveal everything including deeper.txt.
+        let args3 = json!({ "depth": 3 });
+        let result3 = execute(args3, make_ctx(dir.path())).unwrap();
+        assert!(!result3.is_error);
+        assert!(result3.output.contains("deeper.txt"), "depth=3 should show deeper.txt: {}", result3.output);
+        assert!(result3.output.contains("root.txt"), "depth=3 should still show root.txt: {}", result3.output);
+
+        // Verify that a lower depth produces fewer output lines than a higher depth.
+        let lines1 = result1.output.lines().count();
+        let lines3 = result3.output.lines().count();
+        assert!(lines1 < lines3, "depth=1 ({lines1} lines) should have fewer entries than depth=3 ({lines3} lines)");
+    }
+
+    #[test]
+    fn format_size_helper() {
+        assert_eq!(format_size(500), "(500B)");
+        assert_eq!(format_size(0), "(0B)");
+        assert_eq!(format_size(1023), "(1023B)");
+        assert_eq!(format_size(1024), "(1.0KB)");
+        assert_eq!(format_size(1536), "(1.5KB)");
+        assert_eq!(format_size(1048576), "(1.0MB)");
+        assert_eq!(format_size(2621440), "(2.5MB)");
+    }
+}

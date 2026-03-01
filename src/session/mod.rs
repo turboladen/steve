@@ -170,3 +170,161 @@ impl<'a> SessionManager<'a> {
         self.save_session(session)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tempfile::tempdir;
+
+    use super::message::Message;
+    use crate::storage::Storage;
+
+    use super::*;
+
+    /// Run a test with a properly scoped SessionManager. Storage lives on the
+    /// stack so it outlives the manager — no `Box::leak` needed.
+    fn with_test_manager(f: impl FnOnce(SessionManager<'_>)) {
+        let dir = tempdir().expect("failed to create temp dir");
+        let storage = Storage::with_base(dir.path().to_path_buf()).expect("storage");
+        let mgr = SessionManager::new(&storage, "test-project");
+        f(mgr);
+    }
+
+    #[test]
+    fn create_and_load_session_roundtrip() {
+        with_test_manager(|mgr| {
+            let session = mgr.create_session("openai/gpt-4o").expect("create");
+            let loaded = mgr.load_session(&session.id).expect("load");
+            assert_eq!(loaded.title, "New session");
+            assert_eq!(loaded.model_ref, "openai/gpt-4o");
+            assert_eq!(loaded.id, session.id);
+            assert_eq!(loaded.project_id, "test-project");
+        });
+    }
+
+    #[test]
+    fn list_sessions_sorted_by_updated_at() {
+        with_test_manager(|mgr| {
+            let s1 = mgr.create_session("m/a").expect("create s1");
+            std::thread::sleep(Duration::from_millis(10));
+            let s2 = mgr.create_session("m/b").expect("create s2");
+            std::thread::sleep(Duration::from_millis(10));
+            let s3 = mgr.create_session("m/c").expect("create s3");
+
+            let sessions = mgr.list_sessions().expect("list");
+            assert_eq!(sessions.len(), 3);
+            // Most recent first
+            assert_eq!(sessions[0].id, s3.id);
+            assert_eq!(sessions[1].id, s2.id);
+            assert_eq!(sessions[2].id, s1.id);
+        });
+    }
+
+    #[test]
+    fn save_and_load_message_roundtrip() {
+        with_test_manager(|mgr| {
+            let session = mgr.create_session("m/x").expect("create");
+            let msg = Message::user(&session.id, "hello");
+            mgr.save_message(&msg).expect("save msg");
+
+            let messages = mgr.load_messages(&session.id).expect("load msgs");
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].text_content(), "hello");
+            assert_eq!(messages[0].id, msg.id);
+        });
+    }
+
+    #[test]
+    fn messages_sorted_chronologically() {
+        with_test_manager(|mgr| {
+            let session = mgr.create_session("m/x").expect("create");
+
+        let m1 = Message::user(&session.id, "first");
+        mgr.save_message(&m1).expect("save m1");
+        std::thread::sleep(Duration::from_millis(10));
+
+        let m2 = Message::user(&session.id, "second");
+        mgr.save_message(&m2).expect("save m2");
+        std::thread::sleep(Duration::from_millis(10));
+
+        let m3 = Message::user(&session.id, "third");
+        mgr.save_message(&m3).expect("save m3");
+
+            let messages = mgr.load_messages(&session.id).expect("load");
+            assert_eq!(messages.len(), 3);
+            assert_eq!(messages[0].text_content(), "first");
+            assert_eq!(messages[1].text_content(), "second");
+            assert_eq!(messages[2].text_content(), "third");
+        });
+    }
+
+    #[test]
+    fn rename_updates_title() {
+        with_test_manager(|mgr| {
+            let mut session = mgr.create_session("m/x").expect("create");
+            assert_eq!(session.title, "New session");
+
+            mgr.rename_session(&mut session, "New Title").expect("rename");
+            assert_eq!(session.title, "New Title");
+
+            // Reload from storage to confirm persistence
+            let reloaded = mgr.load_session(&session.id).expect("load");
+            assert_eq!(reloaded.title, "New Title");
+        });
+    }
+
+    #[test]
+    fn touch_updates_timestamp() {
+        with_test_manager(|mgr| {
+            let mut session = mgr.create_session("m/x").expect("create");
+            let before = session.updated_at;
+
+            std::thread::sleep(Duration::from_millis(10));
+            mgr.touch_session(&mut session).expect("touch");
+
+            assert!(session.updated_at > before);
+
+            // Verify persisted
+            let reloaded = mgr.load_session(&session.id).expect("load");
+            assert!(reloaded.updated_at > before);
+        });
+    }
+
+    #[test]
+    fn add_usage_accumulates() {
+        with_test_manager(|mgr| {
+            let mut session = mgr.create_session("m/x").expect("create");
+
+            mgr.add_usage(&mut session, 100, 50).expect("add_usage 1");
+            mgr.add_usage(&mut session, 200, 100).expect("add_usage 2");
+
+            assert_eq!(session.token_usage.prompt_tokens, 300);
+            assert_eq!(session.token_usage.completion_tokens, 150);
+            assert_eq!(session.token_usage.total_tokens, 450);
+
+            // Verify persisted
+            let reloaded = mgr.load_session(&session.id).expect("load");
+            assert_eq!(reloaded.token_usage.prompt_tokens, 300);
+            assert_eq!(reloaded.token_usage.completion_tokens, 150);
+            assert_eq!(reloaded.token_usage.total_tokens, 450);
+        });
+    }
+
+    #[test]
+    fn delete_messages_clears_all() {
+        with_test_manager(|mgr| {
+            let session = mgr.create_session("m/x").expect("create");
+
+            for text in &["one", "two", "three"] {
+                let msg = Message::user(&session.id, text);
+                mgr.save_message(&msg).expect("save");
+            }
+            assert_eq!(mgr.load_messages(&session.id).expect("load").len(), 3);
+
+            mgr.delete_messages(&session.id).expect("delete");
+            let after = mgr.load_messages(&session.id).expect("load after delete");
+            assert!(after.is_empty());
+        });
+    }
+}
