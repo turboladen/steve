@@ -29,6 +29,18 @@ pub enum DiffLine {
     HunkHeader(String),
 }
 
+/// An ordered part within an assistant response block.
+///
+/// Text and tool groups are interleaved in the order they arrive from the
+/// LLM stream, preserving the chronological reading order.
+#[derive(Debug, Clone)]
+pub enum AssistantPart {
+    /// A segment of response text (may be streamed token-by-token).
+    Text(String),
+    /// A batch of tool calls executed together.
+    ToolGroup(ToolGroup),
+}
+
 /// A structured message block in the conversation.
 #[derive(Debug, Clone)]
 pub enum MessageBlock {
@@ -39,10 +51,8 @@ pub enum MessageBlock {
     Assistant {
         /// Collapsed thinking indicator, if model emitted reasoning tokens.
         thinking: Option<ThinkingBlock>,
-        /// The actual response text (streamed token by token).
-        text: String,
-        /// Tool activity that occurred during this response turn.
-        tool_groups: Vec<ToolGroup>,
+        /// Ordered sequence of text and tool groups, preserving stream order.
+        parts: Vec<AssistantPart>,
     },
 
     /// System notification (session started, model switched, etc.).
@@ -114,37 +124,42 @@ impl MessageBlock {
         matches!(self, MessageBlock::Assistant { .. })
     }
 
-    /// Returns true if this is an `Assistant` block with empty text and no tool groups.
+    /// Returns true if this is an `Assistant` block with no parts and no thinking.
     pub fn is_empty_assistant(&self) -> bool {
-        matches!(self, MessageBlock::Assistant { text, tool_groups, thinking, .. }
-            if text.is_empty() && tool_groups.is_empty() && thinking.is_none())
+        matches!(self, MessageBlock::Assistant { parts, thinking, .. }
+            if parts.is_empty() && thinking.is_none())
     }
 
-    /// Append text to an `Assistant` block. No-op on other variants.
+    /// Append text to an `Assistant` block. If the last part is `Text`, appends
+    /// to it; otherwise pushes a new `Text` part. No-op on other variants.
     pub fn append_text(&mut self, delta: &str) {
-        if let MessageBlock::Assistant { text, .. } = self {
-            text.push_str(delta);
-        }
-    }
-
-    /// Ensure the last tool group is in `Preparing` status. Creates one if needed.
-    /// No-op on non-Assistant blocks.
-    pub fn ensure_preparing_tool_group(&mut self) {
-        if let MessageBlock::Assistant { tool_groups, .. } = self {
-            let needs_new = tool_groups
-                .last()
-                .map(|g| g.status != ToolGroupStatus::Preparing)
-                .unwrap_or(true);
-            if needs_new {
-                tool_groups.push(ToolGroup {
-                    calls: vec![],
-                    status: ToolGroupStatus::Preparing,
-                });
+        if let MessageBlock::Assistant { parts, .. } = self {
+            if let Some(AssistantPart::Text(text)) = parts.last_mut() {
+                text.push_str(delta);
+            } else {
+                parts.push(AssistantPart::Text(delta.to_string()));
             }
         }
     }
 
-    /// Add a tool call to the last tool group, setting its status to `Running`.
+    /// Ensure the last part is a `ToolGroup` in `Preparing` status. Creates one if needed.
+    /// No-op on non-Assistant blocks.
+    pub fn ensure_preparing_tool_group(&mut self) {
+        if let MessageBlock::Assistant { parts, .. } = self {
+            let needs_new = match parts.last() {
+                Some(AssistantPart::ToolGroup(g)) => g.status != ToolGroupStatus::Preparing,
+                _ => true,
+            };
+            if needs_new {
+                parts.push(AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![],
+                    status: ToolGroupStatus::Preparing,
+                }));
+            }
+        }
+    }
+
+    /// Add a tool call to the last tool group part, setting its status to `Running`.
     /// Write tools auto-expand to show inline diffs. No-op on non-Assistant blocks.
     pub fn add_tool_call(
         &mut self,
@@ -152,8 +167,8 @@ impl MessageBlock {
         args_summary: String,
         diff_content: Option<DiffContent>,
     ) {
-        if let MessageBlock::Assistant { tool_groups, .. } = self {
-            if let Some(group) = tool_groups.last_mut() {
+        if let MessageBlock::Assistant { parts, .. } = self {
+            if let Some(AssistantPart::ToolGroup(group)) = parts.last_mut() {
                 group.calls.push(ToolCall {
                     tool_name,
                     args_summary,
@@ -180,13 +195,20 @@ impl MessageBlock {
         full_output: String,
         is_error: bool,
     ) {
-        if let MessageBlock::Assistant { tool_groups, .. } = self {
-            if let Some(group) = tool_groups.last_mut() {
-                // Find the matching call (last one with this tool name and no result)
+        if let MessageBlock::Assistant { parts, .. } = self {
+            // Find the last ToolGroup part
+            if let Some(AssistantPart::ToolGroup(group)) =
+                parts.iter_mut().rev().find_map(|p| match p {
+                    AssistantPart::ToolGroup(_) => Some(p),
+                    _ => None,
+                })
+            {
+                // Find the matching call (first pending one with this tool name).
+                // Forward search: results arrive in the same order as calls were added
+                // (stream.rs emits events iterating auto_allowed in original order).
                 if let Some(call) = group
                     .calls
                     .iter_mut()
-                    .rev()
                     .find(|c| c.tool_name == tool_name && c.result_summary.is_none())
                 {
                     call.result_summary = Some(result_summary);
@@ -241,14 +263,12 @@ mod tests {
     fn assistant_block_default_state() {
         let block = MessageBlock::Assistant {
             thinking: None,
-            text: String::new(),
-            tool_groups: vec![],
+            parts: vec![],
         };
         match &block {
-            MessageBlock::Assistant { thinking, text, tool_groups } => {
+            MessageBlock::Assistant { thinking, parts } => {
                 assert!(thinking.is_none());
-                assert!(text.is_empty());
-                assert!(tool_groups.is_empty());
+                assert!(parts.is_empty());
             }
             _ => panic!("expected Assistant block"),
         }
@@ -314,12 +334,17 @@ mod tests {
     fn assistant_append_text() {
         let mut block = MessageBlock::Assistant {
             thinking: None,
-            text: "Hello".into(),
-            tool_groups: vec![],
+            parts: vec![AssistantPart::Text("Hello".into())],
         };
         block.append_text(" world");
         match &block {
-            MessageBlock::Assistant { text, .. } => assert_eq!(text, "Hello world"),
+            MessageBlock::Assistant { parts, .. } => {
+                assert_eq!(parts.len(), 1);
+                match &parts[0] {
+                    AssistantPart::Text(t) => assert_eq!(t, "Hello world"),
+                    _ => panic!("expected Text part"),
+                }
+            }
             _ => panic!("expected Assistant"),
         }
     }
@@ -340,14 +365,18 @@ mod tests {
     fn assistant_ensure_tool_group_creates_new() {
         let mut block = MessageBlock::Assistant {
             thinking: None,
-            text: String::new(),
-            tool_groups: vec![],
+            parts: vec![],
         };
         block.ensure_preparing_tool_group();
         match &block {
-            MessageBlock::Assistant { tool_groups, .. } => {
-                assert_eq!(tool_groups.len(), 1);
-                assert_eq!(tool_groups[0].status, ToolGroupStatus::Preparing);
+            MessageBlock::Assistant { parts, .. } => {
+                assert_eq!(parts.len(), 1);
+                match &parts[0] {
+                    AssistantPart::ToolGroup(g) => {
+                        assert_eq!(g.status, ToolGroupStatus::Preparing);
+                    }
+                    _ => panic!("expected ToolGroup part"),
+                }
             }
             _ => panic!("expected Assistant"),
         }
@@ -357,16 +386,15 @@ mod tests {
     fn assistant_ensure_tool_group_reuses_preparing() {
         let mut block = MessageBlock::Assistant {
             thinking: None,
-            text: String::new(),
-            tool_groups: vec![ToolGroup {
+            parts: vec![AssistantPart::ToolGroup(ToolGroup {
                 calls: vec![],
                 status: ToolGroupStatus::Preparing,
-            }],
+            })],
         };
         block.ensure_preparing_tool_group();
         match &block {
-            MessageBlock::Assistant { tool_groups, .. } => {
-                assert_eq!(tool_groups.len(), 1);
+            MessageBlock::Assistant { parts, .. } => {
+                assert_eq!(parts.len(), 1);
             }
             _ => panic!("expected Assistant"),
         }
@@ -376,17 +404,20 @@ mod tests {
     fn assistant_add_tool_call() {
         let mut block = MessageBlock::Assistant {
             thinking: None,
-            text: String::new(),
-            tool_groups: vec![ToolGroup {
+            parts: vec![AssistantPart::ToolGroup(ToolGroup {
                 calls: vec![],
                 status: ToolGroupStatus::Preparing,
-            }],
+            })],
         };
         block.add_tool_call(ToolName::Read, "src/main.rs".into(), None);
         match &block {
-            MessageBlock::Assistant { tool_groups, .. } => {
-                assert_eq!(tool_groups.last().unwrap().calls.len(), 1);
-                let call = &tool_groups.last().unwrap().calls[0];
+            MessageBlock::Assistant { parts, .. } => {
+                let group = match &parts[0] {
+                    AssistantPart::ToolGroup(g) => g,
+                    _ => panic!("expected ToolGroup part"),
+                };
+                assert_eq!(group.calls.len(), 1);
+                let call = &group.calls[0];
                 assert_eq!(call.tool_name, ToolName::Read);
                 assert_eq!(call.args_summary, "src/main.rs");
                 assert!(call.result_summary.is_none());
@@ -401,8 +432,7 @@ mod tests {
     fn assistant_complete_tool_call() {
         let mut block = MessageBlock::Assistant {
             thinking: None,
-            text: String::new(),
-            tool_groups: vec![ToolGroup {
+            parts: vec![AssistantPart::ToolGroup(ToolGroup {
                 calls: vec![ToolCall {
                     tool_name: ToolName::Read,
                     args_summary: "src/main.rs".into(),
@@ -415,7 +445,7 @@ mod tests {
                 status: ToolGroupStatus::Running {
                     current_tool: ToolName::Read,
                 },
-            }],
+            })],
         };
         block.complete_tool_call(
             ToolName::Read,
@@ -424,16 +454,17 @@ mod tests {
             false,
         );
         match &block {
-            MessageBlock::Assistant { tool_groups, .. } => {
-                let call = &tool_groups.last().unwrap().calls[0];
+            MessageBlock::Assistant { parts, .. } => {
+                let group = match &parts[0] {
+                    AssistantPart::ToolGroup(g) => g,
+                    _ => panic!("expected ToolGroup part"),
+                };
+                let call = &group.calls[0];
                 assert_eq!(call.result_summary.as_deref(), Some("150 lines"));
                 assert_eq!(call.full_output.as_deref(), Some("fn main() {}"));
                 assert!(!call.is_error);
                 // Group should be marked Complete since all calls have results
-                assert_eq!(
-                    tool_groups.last().unwrap().status,
-                    ToolGroupStatus::Complete
-                );
+                assert_eq!(group.status, ToolGroupStatus::Complete);
             }
             _ => panic!("expected Assistant"),
         }
@@ -443,8 +474,7 @@ mod tests {
     fn assistant_append_thinking() {
         let mut block = MessageBlock::Assistant {
             thinking: None,
-            text: String::new(),
-            tool_groups: vec![],
+            parts: vec![],
         };
         block.append_thinking("Let me ");
         block.append_thinking("think...");
@@ -463,8 +493,7 @@ mod tests {
     fn is_assistant_check() {
         let a = MessageBlock::Assistant {
             thinking: None,
-            text: String::new(),
-            tool_groups: vec![],
+            parts: vec![],
         };
         let u = MessageBlock::User {
             text: "hi".into(),
@@ -502,13 +531,11 @@ mod tests {
     fn is_empty_assistant() {
         let empty = MessageBlock::Assistant {
             thinking: None,
-            text: String::new(),
-            tool_groups: vec![],
+            parts: vec![],
         };
         let non_empty = MessageBlock::Assistant {
             thinking: None,
-            text: "hello".into(),
-            tool_groups: vec![],
+            parts: vec![AssistantPart::Text("hello".into())],
         };
         assert!(empty.is_empty_assistant());
         assert!(!non_empty.is_empty_assistant());
@@ -519,17 +546,19 @@ mod tests {
         for tool in [ToolName::Edit, ToolName::Write, ToolName::Patch] {
             let mut block = MessageBlock::Assistant {
                 thinking: None,
-                text: String::new(),
-                tool_groups: vec![ToolGroup {
+                parts: vec![AssistantPart::ToolGroup(ToolGroup {
                     calls: vec![],
                     status: ToolGroupStatus::Preparing,
-                }],
+                })],
             };
             block.add_tool_call(tool, "file.rs".into(), None);
             match &block {
-                MessageBlock::Assistant { tool_groups, .. } => {
-                    let call = &tool_groups.last().unwrap().calls[0];
-                    assert!(call.expanded, "{tool} should auto-expand");
+                MessageBlock::Assistant { parts, .. } => {
+                    let group = match &parts[0] {
+                        AssistantPart::ToolGroup(g) => g,
+                        _ => panic!("expected ToolGroup part"),
+                    };
+                    assert!(group.calls[0].expanded, "{tool} should auto-expand");
                 }
                 _ => panic!("expected Assistant"),
             }
@@ -551,17 +580,19 @@ mod tests {
         ] {
             let mut block = MessageBlock::Assistant {
                 thinking: None,
-                text: String::new(),
-                tool_groups: vec![ToolGroup {
+                parts: vec![AssistantPart::ToolGroup(ToolGroup {
                     calls: vec![],
                     status: ToolGroupStatus::Preparing,
-                }],
+                })],
             };
             block.add_tool_call(tool, "pattern".into(), None);
             match &block {
-                MessageBlock::Assistant { tool_groups, .. } => {
-                    let call = &tool_groups.last().unwrap().calls[0];
-                    assert!(!call.expanded, "{tool} should not auto-expand");
+                MessageBlock::Assistant { parts, .. } => {
+                    let group = match &parts[0] {
+                        AssistantPart::ToolGroup(g) => g,
+                        _ => panic!("expected ToolGroup part"),
+                    };
+                    assert!(!group.calls[0].expanded, "{tool} should not auto-expand");
                 }
                 _ => panic!("expected Assistant"),
             }
@@ -572,11 +603,10 @@ mod tests {
     fn diff_content_stored_in_tool_call() {
         let mut block = MessageBlock::Assistant {
             thinking: None,
-            text: String::new(),
-            tool_groups: vec![ToolGroup {
+            parts: vec![AssistantPart::ToolGroup(ToolGroup {
                 calls: vec![],
                 status: ToolGroupStatus::Preparing,
-            }],
+            })],
         };
         let diff = DiffContent::EditDiff {
             lines: vec![
@@ -586,10 +616,159 @@ mod tests {
         };
         block.add_tool_call(ToolName::Edit, "src/main.rs".into(), Some(diff));
         match &block {
-            MessageBlock::Assistant { tool_groups, .. } => {
-                let call = &tool_groups.last().unwrap().calls[0];
-                assert!(call.diff_content.is_some());
-                assert!(call.expanded);
+            MessageBlock::Assistant { parts, .. } => {
+                let group = match &parts[0] {
+                    AssistantPart::ToolGroup(g) => g,
+                    _ => panic!("expected ToolGroup part"),
+                };
+                assert!(group.calls[0].diff_content.is_some());
+                assert!(group.calls[0].expanded);
+            }
+            _ => panic!("expected Assistant"),
+        }
+    }
+
+    #[test]
+    fn append_text_creates_new_part_after_tool_group() {
+        let mut block = MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![
+                AssistantPart::Text("intro".into()),
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![],
+                    status: ToolGroupStatus::Complete,
+                }),
+            ],
+        };
+        block.append_text("summary");
+        match &block {
+            MessageBlock::Assistant { parts, .. } => {
+                assert_eq!(parts.len(), 3);
+                match &parts[2] {
+                    AssistantPart::Text(t) => assert_eq!(t, "summary"),
+                    _ => panic!("expected Text part"),
+                }
+            }
+            _ => panic!("expected Assistant"),
+        }
+    }
+
+    #[test]
+    fn append_text_to_empty_parts() {
+        let mut block = MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![],
+        };
+        block.append_text("hello");
+        match &block {
+            MessageBlock::Assistant { parts, .. } => {
+                assert_eq!(parts.len(), 1);
+                match &parts[0] {
+                    AssistantPart::Text(t) => assert_eq!(t, "hello"),
+                    _ => panic!("expected Text part"),
+                }
+            }
+            _ => panic!("expected Assistant"),
+        }
+    }
+
+    #[test]
+    fn complete_tool_call_finds_group_after_text() {
+        // Simulate: tool group → text appended → complete arrives
+        let mut block = MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Read,
+                        args_summary: "f.rs".into(),
+                        full_output: None,
+                        result_summary: None,
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Running {
+                        current_tool: ToolName::Read,
+                    },
+                }),
+                AssistantPart::Text("some text".into()),
+            ],
+        };
+        block.complete_tool_call(ToolName::Read, "ok".into(), "content".into(), false);
+        match &block {
+            MessageBlock::Assistant { parts, .. } => {
+                let group = match &parts[0] {
+                    AssistantPart::ToolGroup(g) => g,
+                    _ => panic!("expected ToolGroup"),
+                };
+                assert_eq!(group.calls[0].result_summary.as_deref(), Some("ok"));
+                assert_eq!(group.status, ToolGroupStatus::Complete);
+            }
+            _ => panic!("expected Assistant"),
+        }
+    }
+
+    #[test]
+    fn complete_tool_call_same_tool_parallel_preserves_order() {
+        // Two parallel read calls — results arrive in forward order (stream.rs
+        // iterates auto_allowed in original order). Each result must match the
+        // corresponding call, not get swapped by a reverse search.
+        let mut block = MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::ToolGroup(ToolGroup {
+                calls: vec![
+                    ToolCall {
+                        tool_name: ToolName::Read,
+                        args_summary: "a.rs".into(),
+                        full_output: None,
+                        result_summary: None,
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    },
+                    ToolCall {
+                        tool_name: ToolName::Read,
+                        args_summary: "b.rs".into(),
+                        full_output: None,
+                        result_summary: None,
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    },
+                ],
+                status: ToolGroupStatus::Running {
+                    current_tool: ToolName::Read,
+                },
+            })],
+        };
+        block.complete_tool_call(ToolName::Read, "10 lines".into(), "content_a".into(), false);
+        block.complete_tool_call(ToolName::Read, "20 lines".into(), "content_b".into(), false);
+        match &block {
+            MessageBlock::Assistant { parts, .. } => {
+                let group = match &parts[0] {
+                    AssistantPart::ToolGroup(g) => g,
+                    _ => panic!("expected ToolGroup"),
+                };
+                assert_eq!(
+                    group.calls[0].result_summary.as_deref(),
+                    Some("10 lines"),
+                    "first result should go to first call (a.rs)"
+                );
+                assert_eq!(
+                    group.calls[0].full_output.as_deref(),
+                    Some("content_a"),
+                );
+                assert_eq!(
+                    group.calls[1].result_summary.as_deref(),
+                    Some("20 lines"),
+                    "second result should go to second call (b.rs)"
+                );
+                assert_eq!(
+                    group.calls[1].full_output.as_deref(),
+                    Some("content_b"),
+                );
+                assert_eq!(group.status, ToolGroupStatus::Complete);
             }
             _ => panic!("expected Assistant"),
         }

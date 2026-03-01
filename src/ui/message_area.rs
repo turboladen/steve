@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-use super::message_block::{DiffContent, DiffLine, MessageBlock, ToolGroupStatus};
+use super::message_block::{AssistantPart, DiffContent, DiffLine, MessageBlock, ToolGroupStatus};
 use super::theme::Theme;
 
 /// State for the scrollable message area.
@@ -109,8 +109,7 @@ pub fn render_message_blocks(
 
             MessageBlock::Assistant {
                 thinking,
-                text,
-                tool_groups,
+                parts,
             } => {
                 // Thinking block (collapsed by default)
                 if let Some(t) = thinking {
@@ -137,64 +136,68 @@ pub fn render_message_blocks(
                     }
                 }
 
-                // Tool groups
-                for group in tool_groups {
-                    for call in &group.calls {
-                        let status_indicator = match (&group.status, &call.result_summary) {
-                            (_, Some(_)) if call.expanded => "\u{25bc}",
-                            (_, Some(_)) => "\u{25b6}",
-                            _ => "\u{2819}",
-                        };
+                // Parts in chronological order
+                for part in parts {
+                    match part {
+                        AssistantPart::Text(text) => {
+                            for text_line in text.lines() {
+                                lines.push(Line::from(Span::styled(
+                                    text_line.to_string(),
+                                    Style::default().fg(theme.assistant_msg),
+                                )));
+                            }
+                        }
+                        AssistantPart::ToolGroup(group) => {
+                            for call in &group.calls {
+                                let status_indicator = match (&group.status, &call.result_summary) {
+                                    (_, Some(_)) if call.expanded => "\u{25bc}",
+                                    (_, Some(_)) => "\u{25b6}",
+                                    _ => "\u{2819}",
+                                };
 
-                        let result_part = match &call.result_summary {
-                            Some(summary) => format!(" \u{2192} {summary}"),
-                            None => match &group.status {
-                                ToolGroupStatus::Preparing => " preparing...".to_string(),
-                                ToolGroupStatus::Running { .. } => " running...".to_string(),
-                                ToolGroupStatus::Complete => String::new(),
-                            },
-                        };
+                                let result_part = match &call.result_summary {
+                                    Some(summary) => format!(" \u{2192} {summary}"),
+                                    None => match &group.status {
+                                        ToolGroupStatus::Preparing => " preparing...".to_string(),
+                                        ToolGroupStatus::Running { .. } => " running...".to_string(),
+                                        ToolGroupStatus::Complete => String::new(),
+                                    },
+                                };
 
-                        let color = if call.is_error {
-                            theme.error
-                        } else if call.tool_name.is_write_tool()
-                            || call.tool_name.is_memory()
-                        {
-                            theme.tool_write
-                        } else {
-                            theme.tool_read
-                        };
+                                let color = if call.is_error {
+                                    theme.error
+                                } else if call.tool_name.is_write_tool()
+                                    || call.tool_name.is_memory()
+                                {
+                                    theme.tool_write
+                                } else {
+                                    theme.tool_read
+                                };
 
-                        lines.push(Line::from(Span::styled(
-                            format!(
-                                "{status_indicator} \u{26a1} {}({}){}",
-                                call.tool_name, call.args_summary, result_part
-                            ),
-                            Style::default().fg(color),
-                        )));
+                                lines.push(Line::from(Span::styled(
+                                    format!(
+                                        "{status_indicator} \u{26a1} {}({}){}",
+                                        call.tool_name, call.args_summary, result_part
+                                    ),
+                                    Style::default().fg(color),
+                                )));
 
-                        // Expanded output — diff content or raw output fallback
-                        if call.expanded {
-                            if let Some(diff) = &call.diff_content {
-                                render_diff_lines(&mut lines, diff, call.result_summary.as_deref(), theme);
-                            } else if let Some(output) = &call.full_output {
-                                for output_line in output.lines() {
-                                    lines.push(Line::from(Span::styled(
-                                        format!("  {output_line}"),
-                                        Style::default().fg(theme.dim),
-                                    )));
+                                // Expanded output — diff content or raw output fallback
+                                if call.expanded {
+                                    if let Some(diff) = &call.diff_content {
+                                        render_diff_lines(&mut lines, diff, call.result_summary.as_deref(), theme);
+                                    } else if let Some(output) = &call.full_output {
+                                        for output_line in output.lines() {
+                                            lines.push(Line::from(Span::styled(
+                                                format!("  {output_line}"),
+                                                Style::default().fg(theme.dim),
+                                            )));
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                }
-
-                // Response text
-                for text_line in text.lines() {
-                    lines.push(Line::from(Span::styled(
-                        text_line.to_string(),
-                        Style::default().fg(theme.assistant_msg),
-                    )));
                 }
             }
 

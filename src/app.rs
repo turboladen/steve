@@ -31,7 +31,7 @@ use crate::ui;
 use crate::ui::autocomplete::AutocompleteState;
 use crate::ui::input::InputState;
 use crate::ui::message_area::MessageAreaState;
-use crate::ui::message_block::{DiffContent, DiffLine, MessageBlock};
+use crate::ui::message_block::{AssistantPart, DiffContent, DiffLine, MessageBlock};
 use crate::ui::sidebar::SidebarState;
 use crate::ui::status_line::{Activity, StatusLineState};
 use crate::ui::theme::Theme;
@@ -295,14 +295,12 @@ impl App {
         if config.providers.is_empty() {
             messages.push(MessageBlock::Assistant {
                 thinking: None,
-                text: "No providers configured. Create a steve.json or steve.jsonc config file to get started.".to_string(),
-                tool_groups: vec![],
+                parts: vec![AssistantPart::Text("No providers configured. Create a steve.json or steve.jsonc config file to get started.".to_string())],
             });
         } else if let Some(err) = provider_error {
             messages.push(MessageBlock::Assistant {
                 thinking: None,
-                text: format!("Provider setup failed: {err}"),
-                tool_groups: vec![],
+                parts: vec![AssistantPart::Text(format!("Provider setup failed: {err}"))],
             });
         }
 
@@ -403,8 +401,7 @@ impl App {
                         Role::Assistant => {
                             self.messages.push(MessageBlock::Assistant {
                                 thinking: None,
-                                text: msg.text_content(),
-                                tool_groups: vec![],
+                                parts: vec![AssistantPart::Text(msg.text_content())],
                             });
                         }
                         Role::System => continue, // Don't display system messages
@@ -456,7 +453,7 @@ impl App {
                 match msg.role {
                     Role::User => self.messages.push(MessageBlock::User { text: msg.text_content() }),
                     Role::Assistant => self.messages.push(MessageBlock::Assistant {
-                        thinking: None, text: msg.text_content(), tool_groups: vec![],
+                        thinking: None, parts: vec![AssistantPart::Text(msg.text_content())],
                     }),
                     Role::System => continue,
                 }
@@ -706,8 +703,7 @@ impl App {
                 });
                 self.messages.push(MessageBlock::Assistant {
                     thinking: None,
-                    text: summary,
-                    tool_groups: vec![],
+                    parts: vec![AssistantPart::Text(summary)],
                 });
                 self.message_area_state.scroll_to_bottom();
                 // Reset context warning and prompt tokens since conversation is fresh
@@ -986,8 +982,7 @@ impl App {
         // Push an empty assistant message to the display
         self.messages.push(MessageBlock::Assistant {
             thinking: None,
-            text: String::new(),
-            tool_groups: vec![],
+            parts: vec![],
         });
 
         let system_prompt = self.build_system_prompt();
