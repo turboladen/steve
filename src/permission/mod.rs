@@ -77,8 +77,10 @@ pub fn build_mode_rules() -> Vec<PermissionRule> {
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Grep), pattern: "*".into(), action: Allow },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Glob), pattern: "*".into(), action: Allow },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::List), pattern: "*".into(), action: Allow },
-        // Utility tools: always allowed
+        // Utility tools: always allowed (no filesystem side effects)
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Memory), pattern: "*".into(), action: Allow },
+        PermissionRule { tool: ToolMatcher::Specific(ToolName::Todo), pattern: "*".into(), action: Allow },
+        PermissionRule { tool: ToolMatcher::Specific(ToolName::Question), pattern: "*".into(), action: Allow },
         // Write/execute tools: require permission
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Edit), pattern: "*".into(), action: Ask },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Write), pattern: "*".into(), action: Ask },
@@ -100,6 +102,8 @@ pub fn plan_mode_rules() -> Vec<PermissionRule> {
         PermissionRule { tool: ToolMatcher::Specific(ToolName::List), pattern: "*".into(), action: Allow },
         // Utility tools: always allowed (even in Plan mode)
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Memory), pattern: "*".into(), action: Allow },
+        PermissionRule { tool: ToolMatcher::Specific(ToolName::Todo), pattern: "*".into(), action: Allow },
+        PermissionRule { tool: ToolMatcher::Specific(ToolName::Question), pattern: "*".into(), action: Allow },
         // Write/execute tools: denied in Plan mode
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Edit), pattern: "*".into(), action: Deny },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Write), pattern: "*".into(), action: Deny },
@@ -120,6 +124,10 @@ mod tests {
         assert_eq!(engine.check(ToolName::Grep, None), PermissionAction::Allow);
         assert_eq!(engine.check(ToolName::Glob, None), PermissionAction::Allow);
         assert_eq!(engine.check(ToolName::List, None), PermissionAction::Allow);
+        // Utility tools also auto-allowed
+        assert_eq!(engine.check(ToolName::Memory, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Todo, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Question, None), PermissionAction::Allow);
     }
 
     #[test]
@@ -144,6 +152,9 @@ mod tests {
         let engine = PermissionEngine::new(plan_mode_rules());
         assert_eq!(engine.check(ToolName::Read, None), PermissionAction::Allow);
         assert_eq!(engine.check(ToolName::Grep, None), PermissionAction::Allow);
+        // Utility tools also auto-allowed in plan mode
+        assert_eq!(engine.check(ToolName::Todo, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Question, None), PermissionAction::Allow);
     }
 
     #[test]
@@ -172,7 +183,7 @@ mod tests {
     #[test]
     fn unmatched_tool_defaults_to_ask() {
         let engine = PermissionEngine::new(build_mode_rules());
-        assert_eq!(engine.check(ToolName::Question, None), PermissionAction::Ask);
+        assert_eq!(engine.check(ToolName::Webfetch, None), PermissionAction::Ask);
     }
 
     #[test]
