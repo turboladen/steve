@@ -51,7 +51,8 @@ const TOOL_GUIDANCE: &str = "\n\n## Tool Usage Guidelines\n\n\
 - **Glob for discovery**: Use `glob` to find files by pattern before reading them.\n\
 - **Batch related reads**: If you need multiple files, request them in a single response to enable parallel execution.\n\
 - **Avoid re-reading**: Files you've already read are cached. The system will tell you if content is unchanged.\n\
-- **Record discoveries**: Use the `memory` tool to save important project context (architecture, patterns, key files) that persists across sessions.";
+- **Record discoveries**: Use the `memory` tool to save important project context (architecture, patterns, key files) that persists across sessions.\n\
+- **Track multi-step work**: For tasks with 3+ steps, use the `todo` tool to create a checklist. Mark items complete as you finish them — the user sees your progress in the sidebar.";
 
 /// A permission prompt waiting for user input.
 struct PendingPermission {
