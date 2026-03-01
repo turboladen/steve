@@ -423,6 +423,7 @@ impl App {
             self.current_session = Some(session);
         }
 
+        self.sync_sidebar_tokens();
         self.update_sidebar();
     }
 
@@ -472,6 +473,8 @@ impl App {
 
         self.current_model = Some(session.model_ref.clone());
         self.current_session = Some(session.clone());
+        self.sidebar_state.changes.clear();
+        self.sync_sidebar_tokens();
         self.messages.push(MessageBlock::System {
             text: format!("Switched to: {}", session.title),
         });
@@ -632,6 +635,7 @@ impl App {
                         self.maybe_generate_title();
                     }
 
+                    self.sync_sidebar_tokens();
                     self.update_sidebar();
 
                     // Check context usage and warn if approaching limits
@@ -649,8 +653,14 @@ impl App {
                 // usage.prompt_tokens is the current call's prompt tokens (context pressure).
                 self.last_prompt_tokens = usage.prompt_tokens as u64;
                 self.status_line_state.last_prompt_tokens = usage.prompt_tokens as u64;
-                // Don't update session.token_usage here — that happens on LlmFinish
-                // to avoid intermediate disk writes. Only update display-side fields.
+                // Accumulate into sidebar display counters for live updates.
+                // session.token_usage is NOT updated here (happens on LlmFinish to
+                // avoid intermediate disk writes). update_sidebar() will overwrite
+                // these with authoritative session values after LlmFinish.
+                self.sidebar_state.prompt_tokens += usage.prompt_tokens as u64;
+                self.sidebar_state.completion_tokens += usage.completion_tokens as u64;
+                self.sidebar_state.total_tokens +=
+                    (usage.prompt_tokens + usage.completion_tokens) as u64;
                 self.check_context_warning();
             }
             AppEvent::LlmRetry { attempt, max_attempts, error } => {
@@ -725,6 +735,7 @@ impl App {
                 // Reset context warning and prompt tokens since conversation is fresh
                 self.context_warned = false;
                 self.last_prompt_tokens = 0;
+                self.sync_sidebar_tokens();
                 self.update_sidebar();
 
                 tracing::info!("conversation compacted successfully");
@@ -1143,12 +1154,12 @@ impl App {
     }
 
     /// Update the sidebar state from current app state.
+    /// Note: token counters are NOT synced here — they are updated live by
+    /// `LlmUsageUpdate` (accumulate per-call) and authoritatively by
+    /// `sync_sidebar_tokens()` after `add_usage()` on `LlmFinish`.
     fn update_sidebar(&mut self) {
         if let Some(session) = &self.current_session {
             self.sidebar_state.session_title = session.title.clone();
-            self.sidebar_state.prompt_tokens = session.token_usage.prompt_tokens;
-            self.sidebar_state.completion_tokens = session.token_usage.completion_tokens;
-            self.sidebar_state.total_tokens = session.token_usage.total_tokens;
         }
         if let Some(model) = &self.current_model {
             self.sidebar_state.model_name = model.clone();
@@ -1183,6 +1194,20 @@ impl App {
             self.status_line_state.total_tokens = session.token_usage.total_tokens;
         }
         self.status_line_state.last_prompt_tokens = self.last_prompt_tokens;
+    }
+
+    /// Sync sidebar token counters from the authoritative session data.
+    /// Call after `add_usage()` (LlmFinish) or session reset (/new).
+    fn sync_sidebar_tokens(&mut self) {
+        if let Some(session) = &self.current_session {
+            self.sidebar_state.prompt_tokens = session.token_usage.prompt_tokens;
+            self.sidebar_state.completion_tokens = session.token_usage.completion_tokens;
+            self.sidebar_state.total_tokens = session.token_usage.total_tokens;
+        } else {
+            self.sidebar_state.prompt_tokens = 0;
+            self.sidebar_state.completion_tokens = 0;
+            self.sidebar_state.total_tokens = 0;
+        }
     }
 
     /// Find the most recently completed tool call with the given name in the last
@@ -1415,9 +1440,10 @@ impl App {
                 // Reset tool result cache for the new session
                 *self.tool_cache.lock().unwrap() =
                     ToolResultCache::new(self.project.root.clone());
-                // Clear changeset tracking
+                // Clear changeset tracking and reset token counters
                 self.sidebar_state.changes.clear();
                 self.ensure_session();
+                self.sync_sidebar_tokens();
                 self.message_area_state.scroll_to_bottom();
                 self.messages.push(MessageBlock::System {
                     text: "New session started.".to_string(),
