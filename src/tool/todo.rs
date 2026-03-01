@@ -91,6 +91,11 @@ pub fn get_todos() -> Vec<TodoItem> {
     TODOS.lock().unwrap().clone()
 }
 
+/// Clear all todos (called on `/new` session).
+pub fn clear_todos() {
+    TODOS.lock().unwrap().clear();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1444,8 +1444,9 @@ impl App {
                 // Reset tool result cache for the new session
                 *self.tool_cache.lock().unwrap() =
                     ToolResultCache::new(self.project.root.clone());
-                // Clear changeset tracking and reset token counters
+                // Clear changeset tracking, todos, and reset token counters
                 self.sidebar_state.changes.clear();
+                crate::tool::todo::clear_todos();
                 self.ensure_session();
                 self.sync_sidebar_tokens();
                 self.message_area_state.scroll_to_bottom();
