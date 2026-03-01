@@ -211,8 +211,196 @@ After computing content height, enforce `scroll_offset = min(scroll_offset, max_
 - If Shift+Enter detection requires explicit bracketed paste, `crossterm::event::EnableBracketedPaste` is already available in crossterm 0.28
 - Spinner implementation is hand-rolled (static array of braille chars)
 
-## Open Questions
+## Resolved Questions
 
-- Exact keybinding for sidebar toggle (Ctrl+B? F2? backslash?)
-- Keyboard navigation between message blocks (j/k) — deferred to Phase 2
-- Whether to persist expand/collapse state across re-renders (yes — state lives on the MessageBlock)
+- Sidebar toggle: Ctrl+B (cycles auto → hide → show → auto)
+- Expand/collapse state: persisted on MessageBlock structs
+- Keyboard navigation between blocks: deferred
+
+---
+
+## Milestone 3: Aesthetic Refresh & UX Overhaul
+
+**Date:** 2026-02-28
+**Status:** Draft
+
+### Problem
+
+The TUI is functionally solid after Milestones 1–2, but aesthetically generic. Cyan-on-dark is the default for every TUI app (lazygit, bottom, gitui). Tool calls read like log lines. The sidebar shows bookkeeping instead of situational awareness. There's no visual distinction between read and write operations. The conversation is a scrolling wall with no spatial structure.
+
+### Design Direction: "Warm Terminal"
+
+Move from cold cyan to a **warm amber/gold** palette. Not retro cosplay — just warm, inviting, and instantly recognizable.
+
+| Element | Current | Proposed |
+|---------|---------|----------|
+| Accent | Cyan | Amber/Gold (`#FFAA33` / `Color::Rgb(255, 170, 51)`) |
+| UI chrome/borders | DarkGray | Warm gray (`Color::Rgb(88, 88, 88)`) |
+| User messages | Blue | Soft warm white |
+| Assistant text | White | Slightly warm off-white |
+| Mutations (write/edit/patch) | Magenta | Coral/Orange — visually distinct from reads |
+| Reads (grep/glob/read) | Magenta (same as writes!) | Muted/dim — background operations |
+| Mode: Build | Green bg | Amber bg |
+| Mode: Plan | Cyan bg | Cool blue bg |
+| Major dividers | `─` DarkGray | `═` warm gray (double-line for emphasis) |
+
+### A. Inline Diff Rendering for Mutations
+
+When `edit`/`write`/`patch` completes, render a compact inline diff instead of raw tool output:
+
+```
+  ✎ edit src/main.rs
+  ┌──────────────────────────────
+  │ -use std::collections::HashMap;
+  │ +use std::collections::BTreeMap;
+  └──────────────────────────────
+```
+
+Green for additions, red for removals, framed in a subtle box. This is the single highest-impact UX change — it makes Steve feel like a *coding tool* rather than a chatbot that happens to edit files.
+
+### B. Read vs Write Visual Distinction
+
+Trivial but important: use different colors and symbols for read-only vs mutation tools.
+
+- **Read ops** (read, grep, glob, list): dim color, subtle dot marker `·`
+- **Write ops** (edit, write, patch): coral/orange, pen marker `✎`
+- **Execute** (bash): accent color, terminal marker `$`
+- **Interactive** (question, todo): accent color, current markers
+
+This makes it immediately obvious when the agent is observing vs changing.
+
+### C. Changeset Panel (Sidebar Redesign)
+
+Replace the current sidebar content with a **live changeset view** as the primary section:
+
+```
+╔═ Changes ═══════════════╗
+║                         ║
+║  src/main.rs       +3 -1║
+║  src/tool/mod.rs   +12  ║
+║  Cargo.toml        +1   ║
+║                         ║
+║─────────────────────────║
+║  3 files · +16 -1       ║
+║                         ║
+╠═ Session ═══════════════╣
+║  Model: gpt-4o          ║
+║  Ctx: 23.4k/128k (18%)  ║
+║  Cost: $0.12             ║
+╚═════════════════════════╝
+```
+
+Answers the question users actually have: **"what has the agent done to my codebase?"** Token info drops to a compact footer. Changeset tracks files touched by write tools this session. Reset on `/new`.
+
+### D. Code Block Framing
+
+When the assistant outputs fenced code blocks in its response text, detect them and render with a visible frame and language label:
+
+```
+  Here's the fix:
+
+  ┌─ rust ──────────────────────────┐
+  │ fn main() {                     │
+  │     println!("Hello, world!");  │
+  │ }                               │
+  └─────────────────────────────────┘
+```
+
+#### Copy-text constraint (critical)
+
+The frame characters (`│`, `┌`, `└`, `─`) are rendered by ratatui as part of the terminal output — they **cannot** appear in the selectable text region if we want clean copy-paste. Two strategies:
+
+1. **Gutter-only framing**: Place the `│` border in a dedicated left gutter column (1-2 chars) that sits outside the content area. The language label and top/bottom rules render on their own lines. When the user Shift+click+drags to select code lines, the gutter column is outside the selection rectangle if the terminal supports rectangular selection (iTerm2 Alt+drag, Kitty). For standard line selection, the `│` will be included — but it's a single predictable character at column 0, trivially stripped.
+
+2. **Background-color framing (preferred)**: Instead of box-drawing characters around code, use a **different background color** for code block lines (e.g., slightly lighter than the terminal background, `Color::Rgb(30, 30, 30)` on a black terminal). The language label renders as a styled prefix on the first line. No border characters at all — the background shift creates the visual "card" effect. Shift+click+drag copies pure code text with zero cleanup needed.
+
+   ```
+     Here's the fix:
+
+      fn main() {                      ← these lines have a tinted background
+          println!("Hello, world!");    ← visually distinct without border chars
+      }
+
+   ```
+
+   The language label can render as a dim right-aligned tag on the first line of the block, or as a separate line above with the same background. Either way, no characters intrude into the copyable content.
+
+**Decision**: Prefer strategy 2 (background-color framing). It gives a clean visual card effect and preserves perfect copy-paste. Falls back gracefully on terminals that don't support RGB colors (the code still renders, just without the background tint).
+
+### E. Activity Rail (Left Gutter)
+
+Add a narrow left gutter (3-4 cols) to the message area that shows a vertical activity timeline:
+
+```
+ │   Assistant: I'll fix the import...
+ ├── · read src/main.rs
+ ├── · grep "use std"
+ ├── ✎ edit src/main.rs        ← mutation: highlighted in coral
+ │
+ │   Done. I updated the import to use...
+```
+
+- Reads are dim markers (background operations)
+- Writes are bold/colored marks (mutations are what matter)
+- The conversation text stays clean — tool output doesn't interleave with prose
+- Select a rail entry to expand and see full output
+
+This separates "what the agent said" from "what the agent did" spatially.
+
+### F. Intent Indicators
+
+Before each assistant turn, show a contextual label derived from which tools the agent calls:
+
+```
+  ── exploring ──────────────────
+  I'll look at the current implementation...
+
+  ── editing ────────────────────
+  Let me fix that import and update the tests.
+```
+
+Heuristic: if the agent only calls read/grep/glob → "exploring." If it calls edit/write/patch → "editing." If it calls bash with test-like commands → "testing." Inferred after the turn completes, or updated live as tools execute.
+
+### G. Permission Prompts with Diff Preview
+
+Render permission prompts as contextual cards showing *what will change*:
+
+```
+  ┌─ Allow? ──────────────────────────┐
+  │  ✎ edit  src/main.rs:42           │
+  │                                    │
+  │  -use std::collections::HashMap;   │
+  │  +use std::collections::BTreeMap;  │
+  │                                    │
+  │  [y]es  [n]o  [a]lways    Esc=deny│
+  └────────────────────────────────────┘
+```
+
+For `bash`, show the command. For `write`, show a file-size summary. The user sees the actual impact, not just the tool name and args.
+
+### H. Ambient Context Pressure
+
+Shift border color as context pressure increases:
+
+- <40%: Normal warm gray borders
+- 40–60%: Slightly warmer tint
+- 60–80%: Yellow borders (warning zone)
+- 80%+: Red/orange borders (auto-compact imminent)
+
+The entire UI "feels" different as you approach limits — visceral, not just a number.
+
+### Implementation Priority
+
+Ordered by impact-to-effort ratio:
+
+| # | Item | Effort | Impact |
+|---|------|--------|--------|
+| 1 | Color palette swap (Warm Terminal) | Low — theme.rs only | Instant identity |
+| 2 | Read vs write distinction (B) | Low — theme.rs + message_area.rs | Clarity |
+| 3 | Inline diff rendering (A) | Medium — tool output parsing | "This is a coding tool" moment |
+| 4 | Code block framing with bg color (D) | Medium — markdown detection in render | Visual polish + clean copy |
+| 5 | Changeset panel (C) | Medium — sidebar rewrite + file tracking | Situational awareness |
+| 6 | Ambient context pressure (H) | Low — border color logic | Polish |
+| 7 | Intent indicators (F) | Low — heuristic + render label | Contextual clarity |
+| 8 | Activity rail (E) | High — message_area layout refactor | Spatial separation |
+| 9 | Permission diff preview (G) | High — data through permission channel | Informed decisions |
