@@ -154,6 +154,8 @@ The tool call loop partitions pending tool calls into two phases:
 
 Every `tool_call_id` in an assistant message **must** have a corresponding tool result message — missing one causes an API error. The parallel phase uses `unwrap_or_else` with an error fallback to guarantee this.
 
+**Event ordering invariant**: Phase 2 results are emitted by iterating `auto_allowed` in original index order (not completion order), so `LlmToolCall`/`ToolResult` pairs arrive in the same order the calls were added. `complete_tool_call()` in `message_block.rs` relies on this — it uses forward search to match results to calls by `tool_name`.
+
 ### Tool System (`tool/mod.rs`)
 
 Tools are registered in `ToolRegistry` as `ToolEntry` structs containing a `ToolDef` (name, description, JSON schema) and a handler closure `Fn(Value, ToolContext) -> Result<ToolOutput>`. Tools are synchronous (not async) — they run inside the stream task's spawned tokio task.
