@@ -44,15 +44,19 @@ decisions that were made, and what the next steps are. \
 Preserve specific technical details, file paths, and code patterns.";
 
 /// Guidance for efficient tool usage, injected into the system prompt.
-const TOOL_GUIDANCE: &str = "\n\n## Tool Usage Guidelines\n\n\
+const TOOL_GUIDANCE: &str = "\n\n## Task Planning\n\n\
+When the user gives you a task with multiple sequential steps (e.g. \"do X, then Y, then Z\") or any task that will require 3+ distinct actions, \
+you MUST use the `todo` tool FIRST to create your plan before doing any other work. \
+Add one todo item per step, then work through them one at a time — complete each item before starting the next. \
+This keeps you focused and shows the user your progress in the sidebar.\n\n\
+## Tool Usage Guidelines\n\n\
 - **Search before reading**: Use `grep` to find relevant code, then `read` with specific line ranges. Avoid reading entire large files.\n\
 - **Use line ranges**: The `read` tool supports `offset` and `limit` parameters. For files over 200 lines, read only the relevant section.\n\
 - **Be context-efficient**: Each tool result consumes context window space. Prefer targeted searches over broad reads.\n\
 - **Glob for discovery**: Use `glob` to find files by pattern before reading them.\n\
 - **Batch related reads**: If you need multiple files, request them in a single response to enable parallel execution.\n\
 - **Avoid re-reading**: Files you've already read are cached. The system will tell you if content is unchanged.\n\
-- **Record discoveries**: Use the `memory` tool to save important project context (architecture, patterns, key files) that persists across sessions.\n\
-- **Track multi-step work**: For tasks with 3+ steps, use the `todo` tool to plan your steps upfront. Work through items one at a time — finish and mark complete before starting the next. This keeps you focused and shows the user your progress in the sidebar.";
+- **Record discoveries**: Use the `memory` tool to save important project context (architecture, patterns, key files) that persists across sessions.";
 
 /// A permission prompt waiting for user input.
 struct PendingPermission {

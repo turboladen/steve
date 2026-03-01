@@ -23,7 +23,7 @@ fn definition() -> Value {
         "type": "function",
         "function": {
             "name": "todo",
-            "description": "Manage a todo list that is displayed in the sidebar. You can add, complete, or clear items. Use this to track progress on multi-step tasks.",
+            "description": "Manage a task list displayed in the sidebar. Always use this FIRST when given multi-step work: add one item per step, then work through them sequentially — complete each before starting the next. Actions: add, complete, remove, list, clear.",
             "parameters": {
                 "type": "object",
                 "properties": {
