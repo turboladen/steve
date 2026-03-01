@@ -737,9 +737,7 @@ impl App {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     if let Some(perm) = self.pending_permission.take() {
                         let _ = perm.response_tx.send(PermissionReply::AllowOnce);
-                        self.messages.push(MessageBlock::System {
-                            text: format!("\u{2713} allowed: {}", perm.tool_name),
-                        });
+                        self.remove_last_permission_block();
                         self.status_line_state.activity = Activity::Thinking;
                         self.message_area_state.scroll_to_bottom();
                     }
@@ -748,6 +746,7 @@ impl App {
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     if let Some(perm) = self.pending_permission.take() {
                         let _ = perm.response_tx.send(PermissionReply::Deny);
+                        self.remove_last_permission_block();
                         self.messages.push(MessageBlock::System {
                             text: format!("\u{2717} denied: {}", perm.tool_name),
                         });
@@ -759,9 +758,7 @@ impl App {
                 KeyCode::Char('a') | KeyCode::Char('A') => {
                     if let Some(perm) = self.pending_permission.take() {
                         let _ = perm.response_tx.send(PermissionReply::AllowAlways);
-                        self.messages.push(MessageBlock::System {
-                            text: format!("\u{2713} always allow: {}", perm.tool_name),
-                        });
+                        self.remove_last_permission_block();
                         self.status_line_state.activity = Activity::Thinking;
                         self.message_area_state.scroll_to_bottom();
                     }
@@ -850,6 +847,19 @@ impl App {
     /// `messages.last_mut()` may not be the Assistant block we need.
     fn last_assistant_mut(&mut self) -> Option<&mut MessageBlock> {
         self.messages.iter_mut().rev().find(|m| m.is_assistant())
+    }
+
+    /// Remove the last Permission block from messages.
+    /// Called after the user responds to a permission prompt so the ephemeral
+    /// prompt doesn't appear out-of-order with tool call results.
+    fn remove_last_permission_block(&mut self) {
+        if let Some(pos) = self
+            .messages
+            .iter()
+            .rposition(|m| matches!(m, MessageBlock::Permission { .. }))
+        {
+            self.messages.remove(pos);
+        }
     }
 
     /// Cancel the current streaming task.
