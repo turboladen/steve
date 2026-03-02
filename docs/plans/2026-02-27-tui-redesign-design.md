@@ -327,6 +327,8 @@ The frame characters (`│`, `┌`, `└`, `─`) are rendered by ratatui as par
 
 **Decision**: Prefer strategy 2 (background-color framing). It gives a clean visual card effect and preserves perfect copy-paste. Falls back gracefully on terminals that don't support RGB colors (the code still renders, just without the background tint).
 
+**Remaining limitation**: Background-color framing solves intra-block copy cleanliness, but terminal text selection is row-based — when the sidebar is visible, shift-drag copies sidebar content (token counters, changeset) on the same rows as code. Ctrl+B hides the sidebar as a workaround. See section I (OSC 52 Clipboard Copy) for a proper solution that bypasses terminal selection entirely.
+
 ### E. Activity Rail (Left Gutter)
 
 Add a narrow left gutter (3-4 cols) to the message area that shows a vertical activity timeline:
@@ -389,6 +391,52 @@ Shift border color as context pressure increases:
 
 The entire UI "feels" different as you approach limits — visceral, not just a number.
 
+### I. OSC 52 Clipboard Copy
+
+Terminal text selection is fundamentally row-based — shift-drag always grabs the full terminal width, including sidebar content on the same rows. No amount of character tricks or background-color framing can prevent this. The proper solution is to bypass terminal selection entirely.
+
+**OSC 52** (`\x1b]52;c;<base64-data>\x07`) is a terminal escape sequence that writes directly to the system clipboard. Most modern terminals support it: iTerm2, WezTerm, Alacritty, Kitty, Ghostty, foot, Windows Terminal. It works over SSH and tmux (with `set -g set-clipboard on`).
+
+**Feature: keyboard-driven code block copy**
+
+Add a keybinding (e.g., `Ctrl+Y`) that copies the most recently rendered code block to the clipboard via OSC 52:
+
+1. Track the "last code block" content in `App` state — updated whenever `render_text_with_code_blocks` processes a fenced block, storing the raw text content (no UI decoration, no language label, no background)
+2. On `Ctrl+Y`, base64-encode the content and emit `\x1b]52;c;{base64}\x07` to stdout
+3. Show a brief system message: "Copied N lines to clipboard"
+
+```
+> Show me the main function
+
+  rust
+  fn main() {
+      println!("Hello, world!");
+  }
+
+  Here's the main function. It prints a greeting.
+
+[Ctrl+Y]
+⟡ Copied 3 lines to clipboard
+```
+
+**Advantages over terminal selection**:
+- Copies clean code without sidebar content, line numbers, or UI decoration
+- Works even when sidebar is visible
+- No shift-drag coordination needed
+- Content is always the raw code, not what's visually rendered
+
+**Edge cases**:
+- Multiple code blocks: copy the last one by default, or add `Ctrl+Shift+Y` to enter a "pick which block" mode
+- No code blocks visible: show "No code block to copy" system message
+- Terminal doesn't support OSC 52: content isn't written to clipboard, but the operation is silent (no crash). Could detect support via OSC 52 query mode and fall back to a "copy not supported" message
+- tmux: requires `set -g set-clipboard on` in tmux config
+
+**Implementation sketch**:
+- New `App` field: `last_code_block: Option<String>` — raw content of most recent code block
+- Updated in `render_text_with_code_blocks` (or a parallel extraction pass) to capture content between opening and closing fences
+- Keybinding handler: base64-encode → write OSC 52 → show confirmation
+- No new dependencies needed (`base64` encoding is trivial, or use the `base64` crate)
+
 ### Implementation Priority
 
 Ordered by impact-to-effort ratio:
@@ -402,5 +450,6 @@ Ordered by impact-to-effort ratio:
 | 5 | Changeset panel (C) | Medium — sidebar rewrite + file tracking | Situational awareness |
 | 6 | Ambient context pressure (H) | Low — border color logic | Polish |
 | 7 | Intent indicators (F) | Low — heuristic + render label | Contextual clarity |
-| 8 | Activity rail (E) | High — message_area layout refactor | Spatial separation |
-| 9 | Permission diff preview (G) | High — data through permission channel | Informed decisions |
+| 8 | OSC 52 clipboard copy (I) | Low — keybinding + escape sequence | Clean copy without sidebar |
+| 9 | Activity rail (E) | High — message_area layout refactor | Spatial separation |
+| 10 | Permission diff preview (G) | High — data through permission channel | Informed decisions |
