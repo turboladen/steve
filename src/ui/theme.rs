@@ -20,6 +20,7 @@ pub struct Theme {
     pub mode_build: Color,
     pub mode_plan: Color,
     pub permission: Color,
+    pub code_bg: Color,
 }
 
 impl Default for Theme {
@@ -48,6 +49,7 @@ impl Theme {
             mode_build: Color::Rgb(255, 170, 51),    // Amber
             mode_plan: Color::Rgb(100, 149, 237),    // Cornflower blue
             permission: Color::Rgb(255, 200, 60),    // Warm yellow
+            code_bg: Color::Rgb(35, 33, 30),            // Warm dark tint for code blocks
         }
     }
 }
@@ -77,6 +79,18 @@ mod tests {
     fn reasoning_differs_from_tool_read() {
         let t = Theme::dark();
         assert_ne!(t.reasoning, t.tool_read);
+    }
+
+    #[test]
+    fn code_bg_is_rgb() {
+        let t = Theme::dark();
+        assert!(matches!(t.code_bg, Color::Rgb(35, 33, 30)));
+    }
+
+    #[test]
+    fn code_bg_differs_from_bg() {
+        let t = Theme::dark();
+        assert_ne!(t.code_bg, t.bg);
     }
 
     #[test]
