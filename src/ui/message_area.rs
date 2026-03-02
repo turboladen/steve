@@ -88,6 +88,7 @@ pub fn render_message_blocks(
     activity: Option<(char, String)>,
 ) {
     let mut lines: Vec<Line> = Vec::new();
+    let available_width = area.width.max(1) as usize;
 
     for msg in messages {
         match msg {
@@ -141,12 +142,7 @@ pub fn render_message_blocks(
                 for part in parts {
                     match part {
                         AssistantPart::Text(text) => {
-                            for text_line in text.lines() {
-                                lines.push(Line::from(Span::styled(
-                                    text_line.to_string(),
-                                    Style::default().fg(theme.assistant_msg),
-                                )));
-                            }
+                            render_text_with_code_blocks(text, &mut lines, theme, available_width);
                         }
                         AssistantPart::ToolGroup(group) => {
                             for call in &group.calls {
@@ -302,7 +298,6 @@ pub fn render_message_blocks(
     }
 
     // Compute content height with wrapping
-    let available_width = area.width.max(1) as usize;
     let content_height_u32: u32 = lines
         .iter()
         .map(|line| {
@@ -378,6 +373,74 @@ fn render_diff_lines(
             lines.push(Line::from(Span::styled(
                 format!("  {verb} ({line_count} lines)"),
                 Style::default().fg(theme.dim),
+            )));
+        }
+    }
+}
+
+/// Detect fenced code blocks in assistant text and render with tinted background.
+///
+/// Uses a stateless line-by-line scanner: lines starting with ` ``` ` (≤3 leading
+/// spaces) toggle code block mode. Opening fences emit a header line with optional
+/// language label; closing fences are consumed. Code lines get `code_bg` background.
+fn render_text_with_code_blocks(
+    text: &str,
+    lines: &mut Vec<Line<'_>>,
+    theme: &Theme,
+    available_width: usize,
+) {
+    let mut in_code_block = false;
+
+    for text_line in text.lines() {
+        let trimmed = text_line.trim_start_matches(' ');
+        let leading_spaces = text_line.len() - trimmed.len();
+
+        // A fence is ``` with ≤3 leading ASCII spaces (CommonMark rule)
+        if leading_spaces <= 3 && trimmed.starts_with("```") {
+            if !in_code_block {
+                // Opening fence — extract language label
+                let lang = trimmed[3..].trim();
+                let code_bg_style = Style::default().fg(theme.dim).bg(theme.code_bg);
+
+                if lang.is_empty() {
+                    // No language: header is all ─ characters
+                    let rule = "\u{2500}".repeat(available_width);
+                    lines.push(
+                        Line::from(Span::styled(rule, code_bg_style))
+                            .style(Style::default().bg(theme.code_bg)),
+                    );
+                } else {
+                    // Language label followed by ─ fill
+                    let label = format!("{lang} ");
+                    let fill_len = available_width.saturating_sub(label.chars().count());
+                    let rule = "\u{2500}".repeat(fill_len);
+                    lines.push(
+                        Line::from(vec![
+                            Span::styled(label, code_bg_style),
+                            Span::styled(rule, code_bg_style),
+                        ])
+                        .style(Style::default().bg(theme.code_bg)),
+                    );
+                }
+                in_code_block = true;
+            } else {
+                // Closing fence — consume without rendering
+                in_code_block = false;
+            }
+        } else if in_code_block {
+            // Code line — tinted background
+            lines.push(
+                Line::from(Span::styled(
+                    text_line.to_string(),
+                    Style::default().fg(theme.assistant_msg).bg(theme.code_bg),
+                ))
+                .style(Style::default().bg(theme.code_bg)),
+            );
+        } else {
+            // Normal prose line
+            lines.push(Line::from(Span::styled(
+                text_line.to_string(),
+                Style::default().fg(theme.assistant_msg),
             )));
         }
     }
@@ -771,5 +834,161 @@ mod tests {
         let between = &text[pos1..pos2];
         let line_count = between.lines().count();
         assert!(line_count >= 2, "should have blank line separation, got {line_count} lines between messages");
+    }
+
+    // -- render_text_with_code_blocks tests --
+
+    #[test]
+    fn code_block_renders_with_header() {
+        let theme = Theme::default();
+        let text = "before\n```rust\nfn main() {}\n```\nafter";
+        let mut lines: Vec<Line> = Vec::new();
+        render_text_with_code_blocks(text, &mut lines, &theme, 40);
+        // 5 input lines → "before", header, "fn main() {}", (closing consumed), "after" = 4 output lines
+        assert_eq!(lines.len(), 4, "expected 4 lines, got {}", lines.len());
+        // Header should contain language label
+        let header_text: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(header_text.starts_with("rust "), "header should start with 'rust ', got: {header_text}");
+        assert!(header_text.contains('\u{2500}'), "header should contain ─ fill");
+    }
+
+    #[test]
+    fn code_block_no_language_renders_rule_only() {
+        let theme = Theme::default();
+        let text = "```\ncode\n```";
+        let mut lines: Vec<Line> = Vec::new();
+        render_text_with_code_blocks(text, &mut lines, &theme, 30);
+        // header + code = 2 lines (closing consumed)
+        assert_eq!(lines.len(), 2);
+        let header_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        // Should be all ─ characters
+        assert!(header_text.chars().all(|c| c == '\u{2500}'), "bare fence header should be all ─, got: {header_text}");
+    }
+
+    #[test]
+    fn unclosed_code_block_tints_remaining() {
+        let theme = Theme::default();
+        let text = "before\n```python\nline1\nline2";
+        let mut lines: Vec<Line> = Vec::new();
+        render_text_with_code_blocks(text, &mut lines, &theme, 40);
+        // "before", header, "line1", "line2" = 4 lines
+        assert_eq!(lines.len(), 4);
+        // Lines 2 and 3 (code lines) should have code_bg background on Line.style
+        for i in 2..4 {
+            assert_eq!(
+                lines[i].style.bg, Some(theme.code_bg),
+                "unclosed code line {i} should have code_bg"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_code_block() {
+        let theme = Theme::default();
+        let text = "```\n```";
+        let mut lines: Vec<Line> = Vec::new();
+        render_text_with_code_blocks(text, &mut lines, &theme, 20);
+        // Just the header line (closing fence consumed, no code lines)
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn inline_backticks_not_treated_as_fence() {
+        let theme = Theme::default();
+        let text = "use `foo` and ``bar``";
+        let mut lines: Vec<Line> = Vec::new();
+        render_text_with_code_blocks(text, &mut lines, &theme, 40);
+        assert_eq!(lines.len(), 1);
+        // Should have no code_bg
+        assert_eq!(lines[0].style.bg, None, "inline backticks should not trigger code block");
+    }
+
+    #[test]
+    fn multiple_code_blocks() {
+        let theme = Theme::default();
+        let text = "text1\n```rust\nfn a() {}\n```\ntext2\n```go\nfunc b() {}\n```\ntext3";
+        let mut lines: Vec<Line> = Vec::new();
+        render_text_with_code_blocks(text, &mut lines, &theme, 40);
+        // text1, header1, "fn a() {}", text2, header2, "func b() {}", text3 = 7 lines
+        assert_eq!(lines.len(), 7, "expected 7 lines, got {}", lines.len());
+        // Normal text lines should NOT have code_bg
+        assert_eq!(lines[0].style.bg, None, "text1 should not have bg");
+        assert_eq!(lines[3].style.bg, None, "text2 should not have bg");
+        assert_eq!(lines[6].style.bg, None, "text3 should not have bg");
+        // Code lines should have code_bg
+        assert_eq!(lines[2].style.bg, Some(theme.code_bg), "code line 1 should have bg");
+        assert_eq!(lines[5].style.bg, Some(theme.code_bg), "code line 2 should have bg");
+    }
+
+    #[test]
+    fn deeply_indented_fence_ignored() {
+        let theme = Theme::default();
+        let text = "    ```rust\nstill normal";
+        let mut lines: Vec<Line> = Vec::new();
+        render_text_with_code_blocks(text, &mut lines, &theme, 40);
+        // 4 spaces = not a fence, both lines rendered as normal text
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].style.bg, None, "4-space indented fence should be normal text");
+        assert_eq!(lines[1].style.bg, None, "following line should be normal text");
+    }
+
+    #[test]
+    fn code_block_header_has_bg() {
+        let theme = Theme::default();
+        let text = "```js\nconsole.log();\n```";
+        let mut lines: Vec<Line> = Vec::new();
+        render_text_with_code_blocks(text, &mut lines, &theme, 40);
+        // Header line should have code_bg on Line.style
+        assert_eq!(
+            lines[0].style.bg,
+            Some(theme.code_bg),
+            "header line should have code_bg background"
+        );
+    }
+
+    #[test]
+    fn fence_closes_code_block() {
+        let theme = Theme::default();
+        let text = "```\ncode\n```\nafter";
+        let mut lines: Vec<Line> = Vec::new();
+        render_text_with_code_blocks(text, &mut lines, &theme, 40);
+        // header + "code" + "after" = 3 lines (closing fence consumed)
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].style.bg, Some(theme.code_bg), "header should have code_bg");
+        assert_eq!(lines[1].style.bg, Some(theme.code_bg), "code line should have code_bg");
+        assert_eq!(lines[2].style.bg, None, "line after closing fence should be normal text");
+    }
+
+    #[test]
+    fn tab_indented_fence_ignored() {
+        let theme = Theme::default();
+        let text = "\t```rust\nstill normal";
+        let mut lines: Vec<Line> = Vec::new();
+        render_text_with_code_blocks(text, &mut lines, &theme, 40);
+        // Tab is not a space — fence should not be recognized
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].style.bg, None, "tab-indented fence should be normal text");
+        assert_eq!(lines[1].style.bg, None, "following line should be normal text");
+    }
+
+    #[test]
+    fn buffer_code_block_renders_with_tint() {
+        let messages = vec![MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::Text(
+                "Here is code:\n```rust\nfn main() {}\n```\nDone.".to_string(),
+            )],
+        }];
+        let text = render_messages_to_string(60, 15, &messages, None);
+        // The header should appear with language label
+        assert!(text.contains("rust"), "should contain language label 'rust'");
+        assert!(text.contains('\u{2500}'), "should contain ─ rule");
+        // The code line should appear
+        assert!(text.contains("fn main() {}"), "should contain code content");
+        // The fence lines (```) should NOT appear
+        assert!(!text.contains("```"), "fence markers should be consumed, not rendered");
+        // Normal text should appear
+        assert!(text.contains("Here is code:"), "text before block should appear");
+        assert!(text.contains("Done."), "text after block should appear");
     }
 }
