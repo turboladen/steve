@@ -100,5 +100,6 @@ mod tests {
         assert!(matches!(t.reasoning, Color::Rgb(..)));
         assert!(matches!(t.border, Color::Rgb(..)));
         assert!(matches!(t.tool_read, Color::Rgb(..)));
+        assert!(matches!(t.code_bg, Color::Rgb(..)));
     }
 }

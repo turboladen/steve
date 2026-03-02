@@ -392,10 +392,10 @@ fn render_text_with_code_blocks(
     let mut in_code_block = false;
 
     for text_line in text.lines() {
-        let trimmed = text_line.trim_start();
+        let trimmed = text_line.trim_start_matches(' ');
         let leading_spaces = text_line.len() - trimmed.len();
 
-        // A fence is ``` with ≤3 leading spaces (CommonMark rule)
+        // A fence is ``` with ≤3 leading ASCII spaces (CommonMark rule)
         if leading_spaces <= 3 && trimmed.starts_with("```") {
             if !in_code_block {
                 // Opening fence — extract language label
@@ -412,7 +412,7 @@ fn render_text_with_code_blocks(
                 } else {
                     // Language label followed by ─ fill
                     let label = format!("{lang} ");
-                    let fill_len = available_width.saturating_sub(label.len());
+                    let fill_len = available_width.saturating_sub(label.chars().count());
                     let rule = "\u{2500}".repeat(fill_len);
                     lines.push(
                         Line::from(vec![
@@ -944,6 +944,31 @@ mod tests {
             Some(theme.code_bg),
             "header line should have code_bg background"
         );
+    }
+
+    #[test]
+    fn fence_closes_code_block() {
+        let theme = Theme::default();
+        let text = "```\ncode\n```\nafter";
+        let mut lines: Vec<Line> = Vec::new();
+        render_text_with_code_blocks(text, &mut lines, &theme, 40);
+        // header + "code" + "after" = 3 lines (closing fence consumed)
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].style.bg, Some(theme.code_bg), "header should have code_bg");
+        assert_eq!(lines[1].style.bg, Some(theme.code_bg), "code line should have code_bg");
+        assert_eq!(lines[2].style.bg, None, "line after closing fence should be normal text");
+    }
+
+    #[test]
+    fn tab_indented_fence_ignored() {
+        let theme = Theme::default();
+        let text = "\t```rust\nstill normal";
+        let mut lines: Vec<Line> = Vec::new();
+        render_text_with_code_blocks(text, &mut lines, &theme, 40);
+        // Tab is not a space — fence should not be recognized
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].style.bg, None, "tab-indented fence should be normal text");
+        assert_eq!(lines[1].style.bg, None, "following line should be normal text");
     }
 
     #[test]
