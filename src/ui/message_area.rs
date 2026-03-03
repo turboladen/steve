@@ -403,21 +403,17 @@ fn render_text_with_code_blocks(
                 let code_bg_style = Style::default().fg(theme.dim).bg(theme.code_bg);
 
                 if lang.is_empty() {
-                    // No language: header is all ─ characters
-                    let rule = "\u{2500}".repeat(available_width);
-                    lines.push(
-                        Line::from(Span::styled(rule, code_bg_style))
-                            .style(Style::default().bg(theme.code_bg)),
-                    );
+                    // No language: skip header entirely — code_bg on code lines
+                    // provides framing. An all-space header would be invisible.
                 } else {
-                    // Language label followed by ─ fill
+                    // Language label followed by space fill (background tint provides framing)
                     let label = format!("{lang} ");
                     let fill_len = available_width.saturating_sub(label.chars().count());
-                    let rule = "\u{2500}".repeat(fill_len);
+                    let fill = " ".repeat(fill_len);
                     lines.push(
                         Line::from(vec![
                             Span::styled(label, code_bg_style),
-                            Span::styled(rule, code_bg_style),
+                            Span::styled(fill, code_bg_style),
                         ])
                         .style(Style::default().bg(theme.code_bg)),
                     );
@@ -849,20 +845,22 @@ mod tests {
         // Header should contain language label
         let header_text: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(header_text.starts_with("rust "), "header should start with 'rust ', got: {header_text}");
-        assert!(header_text.contains('\u{2500}'), "header should contain ─ fill");
+        // Fill after label should be all spaces (copy-text constraint: no box-drawing chars)
+        assert!(header_text["rust ".len()..].chars().all(|c| c == ' '),
+            "header fill should be all spaces, got: {header_text}");
     }
 
     #[test]
-    fn code_block_no_language_renders_rule_only() {
+    fn code_block_no_language_skips_header() {
         let theme = Theme::default();
         let text = "```\ncode\n```";
         let mut lines: Vec<Line> = Vec::new();
         render_text_with_code_blocks(text, &mut lines, &theme, 30);
-        // header + code = 2 lines (closing consumed)
-        assert_eq!(lines.len(), 2);
-        let header_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        // Should be all ─ characters
-        assert!(header_text.chars().all(|c| c == '\u{2500}'), "bare fence header should be all ─, got: {header_text}");
+        // No header for bare fences — just the code line (closing consumed)
+        assert_eq!(lines.len(), 1);
+        let code_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(code_text, "code");
+        assert_eq!(lines[0].style.bg, Some(theme.code_bg), "code line should have code_bg");
     }
 
     #[test]
@@ -888,8 +886,8 @@ mod tests {
         let text = "```\n```";
         let mut lines: Vec<Line> = Vec::new();
         render_text_with_code_blocks(text, &mut lines, &theme, 20);
-        // Just the header line (closing fence consumed, no code lines)
-        assert_eq!(lines.len(), 1);
+        // No header for bare fences, no code content — nothing to render
+        assert_eq!(lines.len(), 0);
     }
 
     #[test]
@@ -952,11 +950,10 @@ mod tests {
         let text = "```\ncode\n```\nafter";
         let mut lines: Vec<Line> = Vec::new();
         render_text_with_code_blocks(text, &mut lines, &theme, 40);
-        // header + "code" + "after" = 3 lines (closing fence consumed)
-        assert_eq!(lines.len(), 3);
-        assert_eq!(lines[0].style.bg, Some(theme.code_bg), "header should have code_bg");
-        assert_eq!(lines[1].style.bg, Some(theme.code_bg), "code line should have code_bg");
-        assert_eq!(lines[2].style.bg, None, "line after closing fence should be normal text");
+        // No header for bare fence, "code" + "after" = 2 lines (closing fence consumed)
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].style.bg, Some(theme.code_bg), "code line should have code_bg");
+        assert_eq!(lines[1].style.bg, None, "line after closing fence should be normal text");
     }
 
     #[test]
@@ -982,7 +979,7 @@ mod tests {
         let text = render_messages_to_string(60, 15, &messages, None);
         // The header should appear with language label
         assert!(text.contains("rust"), "should contain language label 'rust'");
-        assert!(text.contains('\u{2500}'), "should contain ─ rule");
+        assert!(!text.contains('\u{2500}'), "should not contain ─ (copy-text constraint)");
         // The code line should appear
         assert!(text.contains("fn main() {}"), "should contain code content");
         // The fence lines (```) should NOT appear

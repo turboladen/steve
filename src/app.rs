@@ -55,6 +55,7 @@ This keeps you focused and shows the user your progress in the sidebar.\n\n\
 - **Be context-efficient**: Each tool result consumes context window space. Prefer targeted searches over broad reads.\n\
 - **Glob for discovery**: Use `glob` to find files by pattern before reading them.\n\
 - **Batch related reads**: If you need multiple files, request them in a single response to enable parallel execution.\n\
+- **Respond literally**: When the user asks to see, show, or display content, output the actual content in a fenced code block — do not summarize or paraphrase. In general, follow the user's request directly rather than reinterpreting what they want.\n\
 - **Avoid re-reading**: Files you've already read are cached. The system will tell you if content is unchanged.\n\
 - **Record discoveries**: Use the `memory` tool to save important project context (architecture, patterns, key files) that persists across sessions.";
 
