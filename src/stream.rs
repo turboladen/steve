@@ -713,7 +713,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 };
 
                 // Cache the result
-                tool_cache.lock().unwrap().put(tool_name, &args, &call_id, &output);
+                tool_cache.lock().unwrap().put(tool_name, &args, &output);
 
                 parallel_results.insert(call_id, output);
             }
@@ -887,7 +887,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                         };
 
                         let mut cache = tool_cache.lock().unwrap();
-                        cache.put(tc.tool_name, &tc.args, &tc.id, &result);
+                        cache.put(tc.tool_name, &tc.args, &result);
 
                         // Invalidate cache entries when write operations modify files
                         if tc.tool_name.is_write_tool() {
@@ -940,7 +940,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                         };
 
                         let mut cache = tool_cache.lock().unwrap();
-                        cache.put(tc.tool_name, &tc.args, &tc.id, &result);
+                        cache.put(tc.tool_name, &tc.args, &result);
 
                         // Invalidate cache entries when write operations modify files
                         if tc.tool_name.is_write_tool() {
@@ -1655,7 +1655,7 @@ mod tests {
                 output: "cached_result.rs".to_string(),
                 is_error: false,
             };
-            c.put(ToolName::Glob, &args, "precache_1", &output);
+            c.put(ToolName::Glob, &args, &output);
         }
 
         let mock = Arc::new(MockChatStream::new(vec![

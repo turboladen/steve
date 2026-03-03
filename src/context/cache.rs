@@ -15,8 +15,6 @@ use crate::tool::{ToolName, ToolOutput};
 struct CachedResult {
     /// The original full tool output.
     output: ToolOutput,
-    /// The tool_call_id from when this was first cached.
-    first_call_id: String,
 }
 
 /// Cache for tool results within a session.
@@ -48,7 +46,11 @@ impl ToolResultCache {
         }
     }
 
-    /// Try to get a cached result. Returns the compact reference string if cached.
+    /// Try to get a cached result. Returns the full cached output if available.
+    ///
+    /// Returns the original tool output (not a compact reference) so the LLM
+    /// can use the content directly. The compressor handles token optimization
+    /// separately — it's the right layer for deciding when to summarize.
     pub fn get(&mut self, tool_name: ToolName, args: &Value) -> Option<ToolOutput> {
         let key = self.cache_key(tool_name, args)?;
 
@@ -61,14 +63,7 @@ impl ToolResultCache {
                 "cache hit"
             );
 
-            Some(ToolOutput {
-                title: cached.output.title.clone(),
-                output: format!(
-                    "[Cached: same content as tool_call {}. File unchanged.]",
-                    cached.first_call_id
-                ),
-                is_error: false,
-            })
+            Some(cached.output.clone())
         } else {
             self.misses += 1;
             None
@@ -80,7 +75,6 @@ impl ToolResultCache {
         &mut self,
         tool_name: ToolName,
         args: &Value,
-        tool_call_id: &str,
         output: &ToolOutput,
     ) {
         // Don't cache errors
@@ -104,7 +98,6 @@ impl ToolResultCache {
             key,
             CachedResult {
                 output: output.clone(),
-                first_call_id: tool_call_id.to_string(),
             },
         );
     }
@@ -278,12 +271,12 @@ mod tests {
         assert!(cache.get(ToolName::Read, &args).is_none());
 
         // Put
-        cache.put(ToolName::Read, &args, "call_1", &test_output("file content"));
+        cache.put(ToolName::Read, &args, &test_output("file content"));
 
-        // Hit
+        // Hit — returns the original content, not a compact reference
         let result = cache.get(ToolName::Read, &args);
         assert!(result.is_some());
-        assert!(result.unwrap().output.contains("Cached"));
+        assert_eq!(result.unwrap().output, "file content");
     }
 
     #[test]
@@ -291,7 +284,7 @@ mod tests {
         let mut cache = test_cache();
         let args = json!({"path": "src/main.rs"});
 
-        cache.put(ToolName::Read, &args, "call_1", &test_output("content"));
+        cache.put(ToolName::Read, &args, &test_output("content"));
         assert!(cache.get(ToolName::Read, &args).is_some());
 
         // Invalidate
@@ -306,7 +299,7 @@ mod tests {
 
         // bash should not be cacheable
         assert!(cache.get(ToolName::Bash, &args).is_none());
-        cache.put(ToolName::Bash, &args, "call_1", &test_output("output"));
+        cache.put(ToolName::Bash, &args, &test_output("output"));
         assert!(cache.get(ToolName::Bash, &args).is_none());
     }
 
@@ -316,12 +309,12 @@ mod tests {
 
         // Cache a grep result
         let grep_args = json!({"pattern": "fn main", "path": "src/"});
-        cache.put(ToolName::Grep, &grep_args, "call_1", &test_output("src/main.rs:1: fn main()"));
+        cache.put(ToolName::Grep, &grep_args, &test_output("src/main.rs:1: fn main()"));
         assert!(cache.get(ToolName::Grep, &grep_args).is_some());
 
         // Cache a glob result
         let glob_args = json!({"pattern": "**/*.rs"});
-        cache.put(ToolName::Glob, &glob_args, "call_2", &test_output("src/main.rs\nsrc/lib.rs"));
+        cache.put(ToolName::Glob, &glob_args, &test_output("src/main.rs\nsrc/lib.rs"));
         assert!(cache.get(ToolName::Glob, &glob_args).is_some());
 
         // Editing any file should invalidate grep and glob entries
@@ -341,7 +334,7 @@ mod tests {
             is_error: true,
         };
 
-        cache.put(ToolName::Read, &args, "call_1", &error_output);
+        cache.put(ToolName::Read, &args, &error_output);
         assert!(cache.get(ToolName::Read, &args).is_none());
     }
 }
