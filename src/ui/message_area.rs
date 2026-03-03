@@ -140,8 +140,8 @@ pub fn render_message_blocks(
                 }
 
                 // Intent indicator (derived from tool calls at render time)
-                if let Some(label) = infer_intent(parts) {
-                    lines.push(render_intent_line(label, available_width, theme));
+                if let Some(category) = infer_intent(parts) {
+                    lines.push(render_intent_line(category, available_width, theme));
                 }
 
                 // Parts in chronological order
@@ -385,13 +385,13 @@ fn render_diff_lines(
     }
 }
 
-/// Infer an intent label from the tool calls in an assistant block's parts.
+/// Infer an intent category from the tool calls in an assistant block's parts.
 /// Returns `None` if there are no tool groups (pure text response) or if
 /// only `Asking` tools (question/todo) were called.
 ///
 /// Priority: editing > executing > exploring. When multiple categories are
-/// present, the highest-priority label wins (mutations matter most to users).
-fn infer_intent(parts: &[AssistantPart]) -> Option<&'static str> {
+/// present, the highest-priority wins (mutations matter most to users).
+fn infer_intent(parts: &[AssistantPart]) -> Option<IntentCategory> {
     let mut has_exploring = false;
     let mut has_editing = false;
     let mut has_executing = false;
@@ -410,11 +410,11 @@ fn infer_intent(parts: &[AssistantPart]) -> Option<&'static str> {
     }
 
     if has_editing {
-        Some("editing")
+        Some(IntentCategory::Editing)
     } else if has_executing {
-        Some("executing")
+        Some(IntentCategory::Executing)
     } else if has_exploring {
-        Some("exploring")
+        Some(IntentCategory::Exploring)
     } else {
         None
     }
@@ -424,12 +424,13 @@ fn infer_intent(parts: &[AssistantPart]) -> Option<&'static str> {
 ///
 /// Uses box-drawing `─` chars with the label colored per intent category,
 /// reusing existing theme colors for visual consistency with tool call lines.
-fn render_intent_line(label: &str, width: usize, theme: &Theme) -> Line<'static> {
-    let color = match label {
-        "editing" => theme.tool_write,
-        "executing" => theme.accent,
-        "exploring" => theme.tool_read,
-        _ => theme.dim,
+/// Exhaustive match on `IntentCategory` — adding a variant forces updating this.
+fn render_intent_line(category: IntentCategory, width: usize, theme: &Theme) -> Line<'static> {
+    let (label, color) = match category {
+        IntentCategory::Exploring => ("exploring", theme.tool_read),
+        IntentCategory::Editing => ("editing", theme.tool_write),
+        IntentCategory::Executing => ("executing", theme.accent),
+        IntentCategory::Asking => ("asking", theme.dim),
     };
 
     let prefix = format!("\u{2500}\u{2500} {label} ");
@@ -932,7 +933,7 @@ mod tests {
     fn infer_intent_read_only_tools() {
         for tool in [ToolName::Read, ToolName::Grep, ToolName::Glob, ToolName::List, ToolName::Webfetch] {
             let parts = vec![make_tool_group(&[tool])];
-            assert_eq!(infer_intent(&parts), Some("exploring"), "{tool} should produce 'exploring'");
+            assert_eq!(infer_intent(&parts), Some(IntentCategory::Exploring), "{tool} should produce Exploring");
         }
     }
 
@@ -940,26 +941,32 @@ mod tests {
     fn infer_intent_write_tools() {
         for tool in [ToolName::Edit, ToolName::Write, ToolName::Patch, ToolName::Memory] {
             let parts = vec![make_tool_group(&[tool])];
-            assert_eq!(infer_intent(&parts), Some("editing"), "{tool} should produce 'editing'");
+            assert_eq!(infer_intent(&parts), Some(IntentCategory::Editing), "{tool} should produce Editing");
         }
     }
 
     #[test]
     fn infer_intent_bash_tool() {
         let parts = vec![make_tool_group(&[ToolName::Bash])];
-        assert_eq!(infer_intent(&parts), Some("executing"));
+        assert_eq!(infer_intent(&parts), Some(IntentCategory::Executing));
     }
 
     #[test]
     fn infer_intent_mixed_read_write() {
         let parts = vec![make_tool_group(&[ToolName::Read, ToolName::Edit])];
-        assert_eq!(infer_intent(&parts), Some("editing"), "editing takes priority over exploring");
+        assert_eq!(infer_intent(&parts), Some(IntentCategory::Editing), "editing takes priority over exploring");
     }
 
     #[test]
     fn infer_intent_mixed_read_bash() {
         let parts = vec![make_tool_group(&[ToolName::Read, ToolName::Bash])];
-        assert_eq!(infer_intent(&parts), Some("executing"), "executing takes priority over exploring");
+        assert_eq!(infer_intent(&parts), Some(IntentCategory::Executing), "executing takes priority over exploring");
+    }
+
+    #[test]
+    fn infer_intent_mixed_edit_bash() {
+        let parts = vec![make_tool_group(&[ToolName::Edit, ToolName::Bash])];
+        assert_eq!(infer_intent(&parts), Some(IntentCategory::Editing), "editing takes priority over executing");
     }
 
     #[test]
@@ -971,13 +978,13 @@ mod tests {
     #[test]
     fn infer_intent_asking_plus_exploring() {
         let parts = vec![make_tool_group(&[ToolName::Todo, ToolName::Read])];
-        assert_eq!(infer_intent(&parts), Some("exploring"), "exploring should show even with asking tools");
+        assert_eq!(infer_intent(&parts), Some(IntentCategory::Exploring), "exploring should show even with asking tools");
     }
 
     #[test]
     fn infer_intent_all_categories() {
         let parts = vec![make_tool_group(&[ToolName::Read, ToolName::Edit, ToolName::Bash, ToolName::Question])];
-        assert_eq!(infer_intent(&parts), Some("editing"), "editing has highest priority");
+        assert_eq!(infer_intent(&parts), Some(IntentCategory::Editing), "editing has highest priority");
     }
 
     #[test]
@@ -987,7 +994,7 @@ mod tests {
             AssistantPart::Text("some text".into()),
             make_tool_group(&[ToolName::Edit]),
         ];
-        assert_eq!(infer_intent(&parts), Some("editing"), "should scan all groups");
+        assert_eq!(infer_intent(&parts), Some(IntentCategory::Editing), "should scan all groups");
     }
 
     // -- render_intent_line tests --
@@ -995,7 +1002,7 @@ mod tests {
     #[test]
     fn render_intent_line_format() {
         let theme = Theme::default();
-        let line = render_intent_line("exploring", 40, &theme);
+        let line = render_intent_line(IntentCategory::Exploring, 40, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.starts_with("\u{2500}\u{2500} exploring "), "should start with '── exploring '");
         assert!(text.ends_with('\u{2500}'), "should end with ─ dashes");
@@ -1007,24 +1014,33 @@ mod tests {
     #[test]
     fn render_intent_line_editing_color() {
         let theme = Theme::default();
-        let line = render_intent_line("editing", 30, &theme);
+        let line = render_intent_line(IntentCategory::Editing, 30, &theme);
         assert_eq!(line.spans[0].style.fg, Some(theme.tool_write));
     }
 
     #[test]
     fn render_intent_line_executing_color() {
         let theme = Theme::default();
-        let line = render_intent_line("executing", 30, &theme);
+        let line = render_intent_line(IntentCategory::Executing, 30, &theme);
         assert_eq!(line.spans[0].style.fg, Some(theme.accent));
     }
 
     #[test]
     fn render_intent_line_narrow_width() {
         let theme = Theme::default();
-        // Width smaller than prefix — should not panic, dashes saturate to 0
-        let line = render_intent_line("exploring", 5, &theme);
+        // Width exactly equal to prefix — no trailing dashes
+        let prefix_len = "\u{2500}\u{2500} exploring ".chars().count(); // 13 chars
+        let line = render_intent_line(IntentCategory::Exploring, prefix_len, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("exploring"), "label should still appear");
+        assert_eq!(text, "\u{2500}\u{2500} exploring ", "at exact prefix width, no dashes appended");
+        assert_eq!(text.chars().count(), prefix_len, "should be exactly prefix length");
+
+        // Width smaller than prefix — no dashes, no panic
+        let line2 = render_intent_line(IntentCategory::Exploring, 5, &theme);
+        let text2: String = line2.spans.iter().map(|s| s.content.as_ref()).collect();
+        // Still contains the full prefix (saturating_sub produces 0 dashes)
+        assert!(text2.starts_with("\u{2500}\u{2500} exploring "), "prefix always rendered");
+        assert_eq!(text2.chars().count(), prefix_len, "output is prefix-length when width < prefix");
     }
 
     // -- render_text_with_code_blocks tests --
