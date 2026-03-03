@@ -139,16 +139,24 @@ pub fn render_message_blocks(
                     }
                 }
 
-                // Parts in chronological order
+                // Parts in chronological order.
+                // Track last-emitted intent to suppress repeated labels for
+                // consecutive same-category tool groups (e.g. 3 reads in a row).
+                // Text between groups resets tracking so the label reappears.
+                let mut last_intent: Option<IntentCategory> = None;
                 for part in parts {
                     match part {
                         AssistantPart::Text(text) => {
                             render_text_with_code_blocks(text, &mut lines, theme, available_width);
+                            last_intent = None;
                         }
                         AssistantPart::ToolGroup(group) => {
-                            // Intent indicator before each tool group
+                            // Intent indicator — suppressed if same as previous group
                             if let Some(category) = infer_group_intent(group) {
-                                lines.push(render_intent_line(category, available_width, theme));
+                                if last_intent != Some(category) {
+                                    lines.push(render_intent_line(category, available_width, theme));
+                                }
+                                last_intent = Some(category);
                             }
                             for call in &group.calls {
                                 let status_indicator = match (&group.status, &call.result_summary) {
@@ -1100,6 +1108,136 @@ mod tests {
         assert!(!text.contains("exploring"), "no exploring label for question tool");
         assert!(!text.contains("editing"), "no editing label for question tool");
         assert!(!text.contains("executing"), "no executing label for question tool");
+    }
+
+    #[test]
+    fn buffer_intent_consecutive_same_category_deduped() {
+        // Three consecutive exploring groups (like list → glob → read across turns).
+        // Should produce ONE "exploring" label, not three.
+        let messages = vec![MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::List,
+                        args_summary: ".".into(),
+                        full_output: None,
+                        result_summary: Some("10 files".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Glob,
+                        args_summary: "src/**/*.rs".into(),
+                        full_output: None,
+                        result_summary: Some("5 files".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Read,
+                        args_summary: "src/main.rs".into(),
+                        full_output: None,
+                        result_summary: Some("150 lines".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+            ],
+        }];
+        let text = render_messages_to_string(80, 20, &messages, None);
+        // "exploring" should appear exactly once
+        let count = text.matches("exploring").count();
+        assert_eq!(count, 1, "expected 1 'exploring' label but found {count}");
+    }
+
+    #[test]
+    fn buffer_intent_text_resets_dedup() {
+        // exploring → text → exploring should show TWO "exploring" labels
+        // because text between groups resets the tracking.
+        let messages = vec![MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Read,
+                        args_summary: "a.rs".into(),
+                        full_output: None,
+                        result_summary: Some("50 lines".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+                AssistantPart::Text("I see, let me check another file.".into()),
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Read,
+                        args_summary: "b.rs".into(),
+                        full_output: None,
+                        result_summary: Some("30 lines".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+            ],
+        }];
+        let text = render_messages_to_string(80, 20, &messages, None);
+        let count = text.matches("exploring").count();
+        assert_eq!(count, 2, "expected 2 'exploring' labels (text resets dedup) but found {count}");
+    }
+
+    #[test]
+    fn buffer_intent_category_change_shows_both() {
+        // exploring → editing (no text between) → both labels shown.
+        let messages = vec![MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Read,
+                        args_summary: "a.rs".into(),
+                        full_output: None,
+                        result_summary: Some("50 lines".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Edit,
+                        args_summary: "a.rs".into(),
+                        full_output: None,
+                        result_summary: Some("edited".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+            ],
+        }];
+        let text = render_messages_to_string(80, 20, &messages, None);
+        assert!(text.contains("exploring"), "should have exploring label");
+        assert!(text.contains("editing"), "should have editing label");
+        let pos_exploring = text.find("exploring").unwrap();
+        let pos_editing = text.find("editing").unwrap();
+        assert!(pos_exploring < pos_editing, "exploring before editing");
     }
 
     // -- render_text_with_code_blocks tests --
