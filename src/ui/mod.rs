@@ -66,6 +66,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let show_sidebar = app.should_show_sidebar(area.width);
     let layout = compute_layout(area, show_sidebar);
 
+    // Context pressure percentage — drives ambient border color shifts
+    let pct = app.status_line_state.context_usage_pct();
+
     // Build activity info for inline display in message area
     let activity = if app.is_loading {
         let state = &app.status_line_state;
@@ -85,11 +88,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         &mut app.message_area_state,
         &app.theme,
         activity,
+        pct,
     );
 
     if let Some(sep_area) = layout.sidebar_separator {
         // Render a thin colored column as visual separator — copies as a space, not │
-        let sep = Block::default().style(Style::default().bg(app.theme.border));
+        let sep = Block::default().style(Style::default().bg(app.theme.border_color(pct)));
         frame.render_widget(sep, sep_area);
     }
 
@@ -122,6 +126,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         layout.input_area,
         &app.autocomplete_state,
         &app.theme,
+        pct,
     );
 }
 
@@ -184,8 +189,8 @@ mod tests {
         let sep_x = 79;
         let cell = &buf[(sep_x, 0)];
         assert_eq!(
-            cell.bg, app.theme.border,
-            "separator column should have theme.border background"
+            cell.bg, app.theme.border_color(0),
+            "separator column should have theme.border_color background"
         );
     }
 }

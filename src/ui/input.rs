@@ -102,7 +102,7 @@ pub fn render_input(
     // Top border for visual separation from message area
     let border_block = Block::default()
         .borders(Borders::TOP)
-        .border_style(Style::default().fg(theme.border));
+        .border_style(Style::default().fg(theme.border_color(context.context_usage_pct)));
     let inner_area = border_block.inner(area);
     frame.render_widget(border_block, area);
 

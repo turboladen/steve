@@ -30,6 +30,26 @@ impl Default for Theme {
 }
 
 impl Theme {
+    /// Return the border color shifted by context window pressure.
+    ///
+    /// | Range   | Color                     | Visual           |
+    /// |---------|---------------------------|------------------|
+    /// | <40%    | `self.border`             | Normal warm gray |
+    /// | 40–59%  | `Rgb(140, 120, 60)`       | Warm amber-brown |
+    /// | 60–79%  | `self.warning`            | Yellow           |
+    /// | 80%+    | `self.error`              | Red              |
+    pub fn border_color(&self, context_pct: u8) -> Color {
+        if context_pct >= 80 {
+            self.error
+        } else if context_pct >= 60 {
+            self.warning
+        } else if context_pct >= 40 {
+            Color::Rgb(140, 120, 60)
+        } else {
+            self.border
+        }
+    }
+
     /// Default dark theme with warm palette.
     pub fn dark() -> Self {
         Self {
@@ -91,6 +111,34 @@ mod tests {
     fn code_bg_differs_from_bg() {
         let t = Theme::dark();
         assert_ne!(t.code_bg, t.bg);
+    }
+
+    #[test]
+    fn border_color_below_40_returns_border() {
+        let t = Theme::dark();
+        assert_eq!(t.border_color(0), t.border);
+        assert_eq!(t.border_color(39), t.border);
+    }
+
+    #[test]
+    fn border_color_40_to_59_returns_amber_brown() {
+        let t = Theme::dark();
+        assert_eq!(t.border_color(40), Color::Rgb(140, 120, 60));
+        assert_eq!(t.border_color(59), Color::Rgb(140, 120, 60));
+    }
+
+    #[test]
+    fn border_color_60_to_79_returns_warning() {
+        let t = Theme::dark();
+        assert_eq!(t.border_color(60), t.warning);
+        assert_eq!(t.border_color(79), t.warning);
+    }
+
+    #[test]
+    fn border_color_80_plus_returns_error() {
+        let t = Theme::dark();
+        assert_eq!(t.border_color(80), t.error);
+        assert_eq!(t.border_color(100), t.error);
     }
 
     #[test]

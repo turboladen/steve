@@ -85,6 +85,7 @@ pub fn render_autocomplete(
     input_area: Rect,
     state: &AutocompleteState,
     theme: &Theme,
+    context_pct: u8,
 ) {
     if !state.visible || state.matches.is_empty() {
         return;
@@ -121,7 +122,7 @@ pub fn render_autocomplete(
     let list = List::new(items)
         .block(Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.border))
+            .border_style(Style::default().fg(theme.border_color(context_pct)))
         );
 
     frame.render_widget(list, popup_area);
@@ -210,7 +211,7 @@ mod tests {
     ) -> String {
         let theme = Theme::default();
         let buf = super::super::render_to_buffer(width, height, |frame| {
-            render_autocomplete(frame, input_area, state, &theme);
+            render_autocomplete(frame, input_area, state, &theme, 0);
         });
         let mut text = String::new();
         for y in 0..height {
@@ -250,7 +251,7 @@ mod tests {
         let input_area = Rect::new(0, 20, 80, 5);
         let theme = Theme::default();
         let buf = super::super::render_to_buffer(80, 25, |frame| {
-            render_autocomplete(frame, input_area, &state, &theme);
+            render_autocomplete(frame, input_area, &state, &theme, 0);
         });
         // The selected item should be rendered with accent color
         // Find the first character of the selected command
@@ -276,7 +277,7 @@ mod tests {
         let input_area = Rect::new(0, 25, 80, 5);
         let buf = super::super::render_to_buffer(80, 30, |frame| {
             let theme = Theme::default();
-            render_autocomplete(frame, input_area, &state, &theme);
+            render_autocomplete(frame, input_area, &state, &theme, 0);
         });
         // The popup should be above the input area (y < 25)
         // Check that there's content above the input area
