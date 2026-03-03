@@ -21,6 +21,7 @@ pub struct Theme {
     pub mode_plan: Color,
     pub permission: Color,
     pub code_bg: Color,
+    pub context_amber: Color,
 }
 
 impl Default for Theme {
@@ -35,7 +36,7 @@ impl Theme {
     /// | Range   | Color                     | Visual           |
     /// |---------|---------------------------|------------------|
     /// | <40%    | `self.border`             | Normal warm gray |
-    /// | 40–59%  | `Rgb(140, 120, 60)`       | Warm amber-brown |
+    /// | 40–59%  | `self.context_amber`      | Warm amber-brown |
     /// | 60–79%  | `self.warning`            | Yellow           |
     /// | 80%+    | `self.error`              | Red              |
     pub fn border_color(&self, context_pct: u8) -> Color {
@@ -44,7 +45,7 @@ impl Theme {
         } else if context_pct >= 60 {
             self.warning
         } else if context_pct >= 40 {
-            Color::Rgb(140, 120, 60)
+            self.context_amber
         } else {
             self.border
         }
@@ -70,6 +71,7 @@ impl Theme {
             mode_plan: Color::Rgb(100, 149, 237),    // Cornflower blue
             permission: Color::Rgb(255, 200, 60),    // Warm yellow
             code_bg: Color::Rgb(35, 33, 30),            // Warm dark tint for code blocks
+            context_amber: Color::Rgb(140, 120, 60),    // Amber-brown for 40-59% context pressure
         }
     }
 }
@@ -123,8 +125,8 @@ mod tests {
     #[test]
     fn border_color_40_to_59_returns_amber_brown() {
         let t = Theme::dark();
-        assert_eq!(t.border_color(40), Color::Rgb(140, 120, 60));
-        assert_eq!(t.border_color(59), Color::Rgb(140, 120, 60));
+        assert_eq!(t.border_color(40), t.context_amber);
+        assert_eq!(t.border_color(59), t.context_amber);
     }
 
     #[test]

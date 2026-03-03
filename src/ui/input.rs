@@ -3,7 +3,7 @@ use std::path::Path;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
@@ -147,7 +147,7 @@ pub fn render_input(
         } else if pct >= 60 {
             theme.warning
         } else if pct >= 40 {
-            Color::Rgb(140, 120, 60)
+            theme.context_amber
         } else {
             theme.dim
         };
@@ -333,14 +333,18 @@ mod tests {
     fn buffer_context_pressure_amber() {
         let (buf, text) = render_input_to_parts(80, 5, AgentMode::Build, 50, 64000, 128000);
         assert!(text.contains("50%"), "should show 50%");
+        let theme = Theme::default();
         // Find the "5" of "50%" and check color is amber-brown (40-59% tier)
+        let mut found = false;
         for x in (0..80).rev() {
             let cell = &buf[(x, 1)];
             if cell.symbol() == "5" {
-                assert_eq!(cell.fg, Color::Rgb(140, 120, 60), "50% should use amber-brown color");
+                assert_eq!(cell.fg, theme.context_amber, "50% should use amber-brown color");
+                found = true;
                 break;
             }
         }
+        assert!(found, "should find '5' digit in buffer for 50% context pressure");
     }
 
     #[test]
