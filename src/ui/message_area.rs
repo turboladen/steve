@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-use super::message_block::{AssistantPart, DiffContent, DiffLine, MessageBlock, ToolGroupStatus};
+use super::message_block::{AssistantPart, DiffContent, DiffLine, MessageBlock, ToolGroup, ToolGroupStatus};
 use super::theme::Theme;
 use crate::tool::{IntentCategory, ToolName};
 
@@ -139,11 +139,6 @@ pub fn render_message_blocks(
                     }
                 }
 
-                // Intent indicator (derived from tool calls at render time)
-                if let Some(category) = infer_intent(parts) {
-                    lines.push(render_intent_line(category, available_width, theme));
-                }
-
                 // Parts in chronological order
                 for part in parts {
                     match part {
@@ -151,6 +146,10 @@ pub fn render_message_blocks(
                             render_text_with_code_blocks(text, &mut lines, theme, available_width);
                         }
                         AssistantPart::ToolGroup(group) => {
+                            // Intent indicator before each tool group
+                            if let Some(category) = infer_group_intent(group) {
+                                lines.push(render_intent_line(category, available_width, theme));
+                            }
                             for call in &group.calls {
                                 let status_indicator = match (&group.status, &call.result_summary) {
                                     (_, Some(_)) if call.expanded => "\u{25bc}",
@@ -385,27 +384,23 @@ fn render_diff_lines(
     }
 }
 
-/// Infer an intent category from the tool calls in an assistant block's parts.
-/// Returns `None` if there are no tool groups (pure text response) or if
-/// only `Asking` tools (question/todo) were called.
+/// Infer an intent category from the tool calls in a single tool group.
+/// Returns `None` if the group has no calls or only `Asking` tools
+/// (question/todo).
 ///
-/// Priority: editing > executing > exploring. When multiple categories are
-/// present, the highest-priority wins (mutations matter most to users).
-fn infer_intent(parts: &[AssistantPart]) -> Option<IntentCategory> {
+/// Priority: editing > executing > exploring. When a group contains
+/// mixed tools, the highest-priority wins (mutations matter most).
+fn infer_group_intent(group: &ToolGroup) -> Option<IntentCategory> {
     let mut has_exploring = false;
     let mut has_editing = false;
     let mut has_executing = false;
 
-    for part in parts {
-        if let AssistantPart::ToolGroup(group) = part {
-            for call in &group.calls {
-                match call.tool_name.intent_category() {
-                    IntentCategory::Exploring => has_exploring = true,
-                    IntentCategory::Editing => has_editing = true,
-                    IntentCategory::Executing => has_executing = true,
-                    IntentCategory::Asking => {} // doesn't influence the label
-                }
-            }
+    for call in &group.calls {
+        match call.tool_name.intent_category() {
+            IntentCategory::Exploring => has_exploring = true,
+            IntentCategory::Editing => has_editing = true,
+            IntentCategory::Executing => has_executing = true,
+            IntentCategory::Asking => {} // doesn't influence the label
         }
     }
 
@@ -897,10 +892,10 @@ mod tests {
         assert!(line_count >= 2, "should have blank line separation, got {line_count} lines between messages");
     }
 
-    // -- infer_intent tests --
+    // -- infer_group_intent tests --
 
-    fn make_tool_group(tool_names: &[ToolName]) -> AssistantPart {
-        AssistantPart::ToolGroup(ToolGroup {
+    fn make_tool_group(tool_names: &[ToolName]) -> ToolGroup {
+        ToolGroup {
             calls: tool_names
                 .iter()
                 .map(|&name| ToolCall {
@@ -914,87 +909,71 @@ mod tests {
                 })
                 .collect(),
             status: ToolGroupStatus::Complete,
-        })
+        }
     }
 
     #[test]
-    fn infer_intent_no_tools() {
-        let parts: Vec<AssistantPart> = vec![];
-        assert_eq!(infer_intent(&parts), None);
+    fn infer_group_intent_empty() {
+        let group = make_tool_group(&[]);
+        assert_eq!(infer_group_intent(&group), None);
     }
 
     #[test]
-    fn infer_intent_text_only() {
-        let parts = vec![AssistantPart::Text("hello world".into())];
-        assert_eq!(infer_intent(&parts), None);
-    }
-
-    #[test]
-    fn infer_intent_read_only_tools() {
+    fn infer_group_intent_read_only_tools() {
         for tool in [ToolName::Read, ToolName::Grep, ToolName::Glob, ToolName::List, ToolName::Webfetch] {
-            let parts = vec![make_tool_group(&[tool])];
-            assert_eq!(infer_intent(&parts), Some(IntentCategory::Exploring), "{tool} should produce Exploring");
+            let group = make_tool_group(&[tool]);
+            assert_eq!(infer_group_intent(&group), Some(IntentCategory::Exploring), "{tool} should produce Exploring");
         }
     }
 
     #[test]
-    fn infer_intent_write_tools() {
+    fn infer_group_intent_write_tools() {
         for tool in [ToolName::Edit, ToolName::Write, ToolName::Patch, ToolName::Memory] {
-            let parts = vec![make_tool_group(&[tool])];
-            assert_eq!(infer_intent(&parts), Some(IntentCategory::Editing), "{tool} should produce Editing");
+            let group = make_tool_group(&[tool]);
+            assert_eq!(infer_group_intent(&group), Some(IntentCategory::Editing), "{tool} should produce Editing");
         }
     }
 
     #[test]
-    fn infer_intent_bash_tool() {
-        let parts = vec![make_tool_group(&[ToolName::Bash])];
-        assert_eq!(infer_intent(&parts), Some(IntentCategory::Executing));
+    fn infer_group_intent_bash_tool() {
+        let group = make_tool_group(&[ToolName::Bash]);
+        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Executing));
     }
 
     #[test]
-    fn infer_intent_mixed_read_write() {
-        let parts = vec![make_tool_group(&[ToolName::Read, ToolName::Edit])];
-        assert_eq!(infer_intent(&parts), Some(IntentCategory::Editing), "editing takes priority over exploring");
+    fn infer_group_intent_mixed_read_write() {
+        let group = make_tool_group(&[ToolName::Read, ToolName::Edit]);
+        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Editing), "editing takes priority over exploring");
     }
 
     #[test]
-    fn infer_intent_mixed_read_bash() {
-        let parts = vec![make_tool_group(&[ToolName::Read, ToolName::Bash])];
-        assert_eq!(infer_intent(&parts), Some(IntentCategory::Executing), "executing takes priority over exploring");
+    fn infer_group_intent_mixed_read_bash() {
+        let group = make_tool_group(&[ToolName::Read, ToolName::Bash]);
+        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Executing), "executing takes priority over exploring");
     }
 
     #[test]
-    fn infer_intent_mixed_edit_bash() {
-        let parts = vec![make_tool_group(&[ToolName::Edit, ToolName::Bash])];
-        assert_eq!(infer_intent(&parts), Some(IntentCategory::Editing), "editing takes priority over executing");
+    fn infer_group_intent_mixed_edit_bash() {
+        let group = make_tool_group(&[ToolName::Edit, ToolName::Bash]);
+        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Editing), "editing takes priority over executing");
     }
 
     #[test]
-    fn infer_intent_only_asking_tools() {
-        let parts = vec![make_tool_group(&[ToolName::Question, ToolName::Todo])];
-        assert_eq!(infer_intent(&parts), None, "asking tools should not produce a label");
+    fn infer_group_intent_only_asking_tools() {
+        let group = make_tool_group(&[ToolName::Question, ToolName::Todo]);
+        assert_eq!(infer_group_intent(&group), None, "asking tools should not produce a label");
     }
 
     #[test]
-    fn infer_intent_asking_plus_exploring() {
-        let parts = vec![make_tool_group(&[ToolName::Todo, ToolName::Read])];
-        assert_eq!(infer_intent(&parts), Some(IntentCategory::Exploring), "exploring should show even with asking tools");
+    fn infer_group_intent_asking_plus_exploring() {
+        let group = make_tool_group(&[ToolName::Todo, ToolName::Read]);
+        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Exploring), "exploring should show even with asking tools");
     }
 
     #[test]
-    fn infer_intent_all_categories() {
-        let parts = vec![make_tool_group(&[ToolName::Read, ToolName::Edit, ToolName::Bash, ToolName::Question])];
-        assert_eq!(infer_intent(&parts), Some(IntentCategory::Editing), "editing has highest priority");
-    }
-
-    #[test]
-    fn infer_intent_across_multiple_groups() {
-        let parts = vec![
-            make_tool_group(&[ToolName::Read]),
-            AssistantPart::Text("some text".into()),
-            make_tool_group(&[ToolName::Edit]),
-        ];
-        assert_eq!(infer_intent(&parts), Some(IntentCategory::Editing), "should scan all groups");
+    fn infer_group_intent_all_categories() {
+        let group = make_tool_group(&[ToolName::Read, ToolName::Edit, ToolName::Bash, ToolName::Question]);
+        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Editing), "editing has highest priority");
     }
 
     // -- render_intent_line tests --
@@ -1041,6 +1020,86 @@ mod tests {
         // Still contains the full prefix (saturating_sub produces 0 dashes)
         assert!(text2.starts_with("\u{2500}\u{2500} exploring "), "prefix always rendered");
         assert_eq!(text2.chars().count(), prefix_len, "output is prefix-length when width < prefix");
+    }
+
+    // -- per-group intent rendering buffer tests --
+
+    #[test]
+    fn buffer_intent_per_group_shows_exploring_then_editing() {
+        // Two tool groups: read (exploring) then edit (editing).
+        // Each should get its own intent label.
+        let messages = vec![MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Read,
+                        args_summary: "src/main.rs".into(),
+                        full_output: None,
+                        result_summary: Some("150 lines".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+                AssistantPart::Text("Let me edit that.".into()),
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Edit,
+                        args_summary: "src/main.rs".into(),
+                        full_output: None,
+                        result_summary: Some("edited".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+            ],
+        }];
+        let text = render_messages_to_string(80, 20, &messages, None);
+        assert!(text.contains("exploring"), "should have exploring label for read group");
+        assert!(text.contains("editing"), "should have editing label for edit group");
+        // exploring should appear before editing in the output
+        let pos_exploring = text.find("exploring").unwrap();
+        let pos_editing = text.find("editing").unwrap();
+        assert!(pos_exploring < pos_editing, "exploring should come before editing");
+    }
+
+    #[test]
+    fn buffer_intent_no_label_for_text_only() {
+        let messages = vec![MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::Text("Just a text response.".into())],
+        }];
+        let text = render_messages_to_string(80, 10, &messages, None);
+        assert!(!text.contains("exploring"), "no intent label for text-only response");
+        assert!(!text.contains("editing"), "no intent label for text-only response");
+        assert!(!text.contains("executing"), "no intent label for text-only response");
+    }
+
+    #[test]
+    fn buffer_intent_no_label_for_asking_only() {
+        let messages = vec![MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::ToolGroup(ToolGroup {
+                calls: vec![ToolCall {
+                    tool_name: ToolName::Question,
+                    args_summary: "test".into(),
+                    full_output: None,
+                    result_summary: Some("answered".into()),
+                    diff_content: None,
+                    is_error: false,
+                    expanded: false,
+                }],
+                status: ToolGroupStatus::Complete,
+            })],
+        }];
+        let text = render_messages_to_string(80, 10, &messages, None);
+        assert!(!text.contains("exploring"), "no exploring label for question tool");
+        assert!(!text.contains("editing"), "no editing label for question tool");
+        assert!(!text.contains("executing"), "no executing label for question tool");
     }
 
     // -- render_text_with_code_blocks tests --
