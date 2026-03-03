@@ -8,7 +8,7 @@ use ratatui::{
 
 use super::message_block::{AssistantPart, DiffContent, DiffLine, MessageBlock, ToolGroupStatus};
 use super::theme::Theme;
-use crate::tool::ToolName;
+use crate::tool::{IntentCategory, ToolName};
 
 /// State for the scrollable message area.
 ///
@@ -137,6 +137,11 @@ pub fn render_message_blocks(
                                 .add_modifier(Modifier::ITALIC),
                         )));
                     }
+                }
+
+                // Intent indicator (derived from tool calls at render time)
+                if let Some(label) = infer_intent(parts) {
+                    lines.push(render_intent_line(label, available_width, theme));
                 }
 
                 // Parts in chronological order
@@ -378,6 +383,62 @@ fn render_diff_lines(
             )));
         }
     }
+}
+
+/// Infer an intent label from the tool calls in an assistant block's parts.
+/// Returns `None` if there are no tool groups (pure text response) or if
+/// only `Asking` tools (question/todo) were called.
+///
+/// Priority: editing > executing > exploring. When multiple categories are
+/// present, the highest-priority label wins (mutations matter most to users).
+fn infer_intent(parts: &[AssistantPart]) -> Option<&'static str> {
+    let mut has_exploring = false;
+    let mut has_editing = false;
+    let mut has_executing = false;
+
+    for part in parts {
+        if let AssistantPart::ToolGroup(group) = part {
+            for call in &group.calls {
+                match call.tool_name.intent_category() {
+                    IntentCategory::Exploring => has_exploring = true,
+                    IntentCategory::Editing => has_editing = true,
+                    IntentCategory::Executing => has_executing = true,
+                    IntentCategory::Asking => {} // doesn't influence the label
+                }
+            }
+        }
+    }
+
+    if has_editing {
+        Some("editing")
+    } else if has_executing {
+        Some("executing")
+    } else if has_exploring {
+        Some("exploring")
+    } else {
+        None
+    }
+}
+
+/// Render an intent indicator line: `── label ──────────────────`
+///
+/// Uses box-drawing `─` chars with the label colored per intent category,
+/// reusing existing theme colors for visual consistency with tool call lines.
+fn render_intent_line(label: &str, width: usize, theme: &Theme) -> Line<'static> {
+    let color = match label {
+        "editing" => theme.tool_write,
+        "executing" => theme.accent,
+        "exploring" => theme.tool_read,
+        _ => theme.dim,
+    };
+
+    let prefix = format!("\u{2500}\u{2500} {label} ");
+    let prefix_chars = prefix.chars().count();
+    let dash_count = width.saturating_sub(prefix_chars);
+    let dashes = "\u{2500}".repeat(dash_count);
+    let full = format!("{prefix}{dashes}");
+
+    Line::from(Span::styled(full, Style::default().fg(color)))
 }
 
 /// Detect fenced code blocks in assistant text and render with tinted background.
@@ -833,6 +894,137 @@ mod tests {
         let between = &text[pos1..pos2];
         let line_count = between.lines().count();
         assert!(line_count >= 2, "should have blank line separation, got {line_count} lines between messages");
+    }
+
+    // -- infer_intent tests --
+
+    fn make_tool_group(tool_names: &[ToolName]) -> AssistantPart {
+        AssistantPart::ToolGroup(ToolGroup {
+            calls: tool_names
+                .iter()
+                .map(|&name| ToolCall {
+                    tool_name: name,
+                    args_summary: "test".into(),
+                    full_output: None,
+                    result_summary: None,
+                    diff_content: None,
+                    is_error: false,
+                    expanded: false,
+                })
+                .collect(),
+            status: ToolGroupStatus::Complete,
+        })
+    }
+
+    #[test]
+    fn infer_intent_no_tools() {
+        let parts: Vec<AssistantPart> = vec![];
+        assert_eq!(infer_intent(&parts), None);
+    }
+
+    #[test]
+    fn infer_intent_text_only() {
+        let parts = vec![AssistantPart::Text("hello world".into())];
+        assert_eq!(infer_intent(&parts), None);
+    }
+
+    #[test]
+    fn infer_intent_read_only_tools() {
+        for tool in [ToolName::Read, ToolName::Grep, ToolName::Glob, ToolName::List, ToolName::Webfetch] {
+            let parts = vec![make_tool_group(&[tool])];
+            assert_eq!(infer_intent(&parts), Some("exploring"), "{tool} should produce 'exploring'");
+        }
+    }
+
+    #[test]
+    fn infer_intent_write_tools() {
+        for tool in [ToolName::Edit, ToolName::Write, ToolName::Patch, ToolName::Memory] {
+            let parts = vec![make_tool_group(&[tool])];
+            assert_eq!(infer_intent(&parts), Some("editing"), "{tool} should produce 'editing'");
+        }
+    }
+
+    #[test]
+    fn infer_intent_bash_tool() {
+        let parts = vec![make_tool_group(&[ToolName::Bash])];
+        assert_eq!(infer_intent(&parts), Some("executing"));
+    }
+
+    #[test]
+    fn infer_intent_mixed_read_write() {
+        let parts = vec![make_tool_group(&[ToolName::Read, ToolName::Edit])];
+        assert_eq!(infer_intent(&parts), Some("editing"), "editing takes priority over exploring");
+    }
+
+    #[test]
+    fn infer_intent_mixed_read_bash() {
+        let parts = vec![make_tool_group(&[ToolName::Read, ToolName::Bash])];
+        assert_eq!(infer_intent(&parts), Some("executing"), "executing takes priority over exploring");
+    }
+
+    #[test]
+    fn infer_intent_only_asking_tools() {
+        let parts = vec![make_tool_group(&[ToolName::Question, ToolName::Todo])];
+        assert_eq!(infer_intent(&parts), None, "asking tools should not produce a label");
+    }
+
+    #[test]
+    fn infer_intent_asking_plus_exploring() {
+        let parts = vec![make_tool_group(&[ToolName::Todo, ToolName::Read])];
+        assert_eq!(infer_intent(&parts), Some("exploring"), "exploring should show even with asking tools");
+    }
+
+    #[test]
+    fn infer_intent_all_categories() {
+        let parts = vec![make_tool_group(&[ToolName::Read, ToolName::Edit, ToolName::Bash, ToolName::Question])];
+        assert_eq!(infer_intent(&parts), Some("editing"), "editing has highest priority");
+    }
+
+    #[test]
+    fn infer_intent_across_multiple_groups() {
+        let parts = vec![
+            make_tool_group(&[ToolName::Read]),
+            AssistantPart::Text("some text".into()),
+            make_tool_group(&[ToolName::Edit]),
+        ];
+        assert_eq!(infer_intent(&parts), Some("editing"), "should scan all groups");
+    }
+
+    // -- render_intent_line tests --
+
+    #[test]
+    fn render_intent_line_format() {
+        let theme = Theme::default();
+        let line = render_intent_line("exploring", 40, &theme);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.starts_with("\u{2500}\u{2500} exploring "), "should start with '── exploring '");
+        assert!(text.ends_with('\u{2500}'), "should end with ─ dashes");
+        assert_eq!(text.chars().count(), 40, "should fill to width");
+        // Color should be tool_read for exploring
+        assert_eq!(line.spans[0].style.fg, Some(theme.tool_read));
+    }
+
+    #[test]
+    fn render_intent_line_editing_color() {
+        let theme = Theme::default();
+        let line = render_intent_line("editing", 30, &theme);
+        assert_eq!(line.spans[0].style.fg, Some(theme.tool_write));
+    }
+
+    #[test]
+    fn render_intent_line_executing_color() {
+        let theme = Theme::default();
+        let line = render_intent_line("executing", 30, &theme);
+        assert_eq!(line.spans[0].style.fg, Some(theme.accent));
+    }
+
+    #[test]
+    fn render_intent_line_narrow_width() {
+        let theme = Theme::default();
+        // Width smaller than prefix — should not panic, dashes saturate to 0
+        let line = render_intent_line("exploring", 5, &theme);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("exploring"), "label should still appear");
     }
 
     // -- render_text_with_code_blocks tests --

@@ -19,6 +19,22 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use strum::{Display, EnumString, IntoStaticStr};
 
+/// High-level intent category for UI intent indicators.
+///
+/// Derived from the tool calls in an assistant turn to show what the agent
+/// is *doing* (exploring, editing, executing). Used purely at render time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntentCategory {
+    /// Read-only observation (read, grep, glob, list, webfetch).
+    Exploring,
+    /// File mutations (edit, write, patch, memory).
+    Editing,
+    /// Shell commands (bash).
+    Executing,
+    /// Interactive/utility (question, todo).
+    Asking,
+}
+
 /// Names of all registered tools.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize,
          EnumString, Display, IntoStaticStr)]
@@ -69,6 +85,20 @@ impl ToolName {
     /// Whether this is the memory tool.
     pub fn is_memory(self) -> bool {
         matches!(self, ToolName::Memory)
+    }
+
+    /// High-level intent category for UI intent indicators.
+    ///
+    /// Exhaustive match — adding a new variant forces updating this.
+    pub fn intent_category(self) -> IntentCategory {
+        match self {
+            ToolName::Read | ToolName::Grep | ToolName::Glob
+            | ToolName::List | ToolName::Webfetch => IntentCategory::Exploring,
+            ToolName::Edit | ToolName::Write | ToolName::Patch
+            | ToolName::Memory => IntentCategory::Editing,
+            ToolName::Bash => IntentCategory::Executing,
+            ToolName::Question | ToolName::Todo => IntentCategory::Asking,
+        }
     }
 
     /// Marker symbol for display: read=·, write=✎, execute=$, interactive=⚡
@@ -403,6 +433,38 @@ mod tests {
         // Webfetch specifically: read marker despite is_read_only() == false
         assert_eq!(ToolName::Webfetch.tool_marker(), "\u{00b7}",
             "Webfetch should have read marker (UI-only, not in is_read_only() group)");
+    }
+
+    /// Every variant maps to the expected intent category.
+    /// Uses if/else if/else so every variant hits at least one assertion.
+    #[test]
+    fn intent_category_exhaustive() {
+        let all = [
+            ToolName::Read,
+            ToolName::Grep,
+            ToolName::Glob,
+            ToolName::List,
+            ToolName::Edit,
+            ToolName::Write,
+            ToolName::Patch,
+            ToolName::Bash,
+            ToolName::Question,
+            ToolName::Todo,
+            ToolName::Webfetch,
+            ToolName::Memory,
+        ];
+        for t in all {
+            let cat = t.intent_category();
+            if t.is_read_only() || t == ToolName::Webfetch {
+                assert_eq!(cat, IntentCategory::Exploring, "{t} should be Exploring");
+            } else if t.is_write_tool() || t.is_memory() {
+                assert_eq!(cat, IntentCategory::Editing, "{t} should be Editing");
+            } else if t == ToolName::Bash {
+                assert_eq!(cat, IntentCategory::Executing, "{t} should be Executing");
+            } else {
+                assert_eq!(cat, IntentCategory::Asking, "{t} should be Asking");
+            }
+        }
     }
 
     /// Write tools and read-only tools must be disjoint sets, and together
