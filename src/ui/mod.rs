@@ -110,7 +110,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         working_dir: abbreviate_path(&app.project.root),
         last_prompt_tokens: app.status_line_state.last_prompt_tokens,
         context_window: app.status_line_state.context_window,
-        context_usage_pct: app.status_line_state.context_usage_pct(),
+        context_usage_pct: pct,
     };
 
     render_input(
