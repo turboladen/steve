@@ -86,6 +86,7 @@ pub fn render_message_blocks(
     state: &mut MessageAreaState,
     theme: &Theme,
     activity: Option<(char, String)>,
+    context_pct: u8,
 ) {
     let mut lines: Vec<Line> = Vec::new();
     let available_width = area.width.max(1) as usize;
@@ -185,7 +186,7 @@ pub fn render_message_blocks(
                                 // Expanded output — diff content or raw output fallback
                                 if call.expanded {
                                     if let Some(diff) = &call.diff_content {
-                                        render_diff_lines(&mut lines, diff, call.result_summary.as_deref(), theme);
+                                        render_diff_lines(&mut lines, diff, call.result_summary.as_deref(), theme, context_pct);
                                     } else if let Some(output) = &call.full_output {
                                         for output_line in output.lines() {
                                             lines.push(Line::from(Span::styled(
@@ -332,6 +333,7 @@ fn render_diff_lines(
     diff: &DiffContent,
     result_summary: Option<&str>,
     theme: &Theme,
+    context_pct: u8,
 ) {
     match diff {
         DiffContent::EditDiff { lines: diff_lines }
@@ -339,7 +341,7 @@ fn render_diff_lines(
             // Top border
             lines.push(Line::from(Span::styled(
                 "  \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
-                Style::default().fg(theme.border),
+                Style::default().fg(theme.border_color(context_pct)),
             )));
 
             for diff_line in diff_lines {
@@ -350,7 +352,7 @@ fn render_diff_lines(
                     DiffLine::HunkHeader(t) => ("", t.as_str(), theme.dim),
                 };
                 lines.push(Line::from(vec![
-                    Span::styled("  \u{2502} ", Style::default().fg(theme.border)),
+                    Span::styled("  \u{2502} ", Style::default().fg(theme.border_color(context_pct))),
                     Span::styled(
                         format!("{prefix}{text}"),
                         Style::default().fg(color),
@@ -361,7 +363,7 @@ fn render_diff_lines(
             // Bottom border
             lines.push(Line::from(Span::styled(
                 "  \u{2514}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
-                Style::default().fg(theme.border),
+                Style::default().fg(theme.border_color(context_pct)),
             )));
         }
         DiffContent::WriteSummary { line_count } => {
@@ -544,7 +546,7 @@ mod tests {
             ],
         };
         let mut output: Vec<Line> = Vec::new();
-        render_diff_lines(&mut output, &diff, None, &theme);
+        render_diff_lines(&mut output, &diff, None, &theme, 0);
         // top border + 2 diff lines + bottom border = 4 lines
         assert_eq!(output.len(), 4);
     }
@@ -561,7 +563,7 @@ mod tests {
             ],
         };
         let mut output: Vec<Line> = Vec::new();
-        render_diff_lines(&mut output, &diff, None, &theme);
+        render_diff_lines(&mut output, &diff, None, &theme, 0);
         // top border + 4 diff lines + bottom border = 6 lines
         assert_eq!(output.len(), 6);
     }
@@ -571,7 +573,7 @@ mod tests {
         let theme = Theme::default();
         let diff = DiffContent::WriteSummary { line_count: 10 };
         let mut output: Vec<Line> = Vec::new();
-        render_diff_lines(&mut output, &diff, Some("Created /tmp/foo (42 bytes)"), &theme);
+        render_diff_lines(&mut output, &diff, Some("Created /tmp/foo (42 bytes)"), &theme, 0);
         assert_eq!(output.len(), 1);
         let text = format!("{:?}", output[0]);
         assert!(text.contains("Created"), "verb should be Created");
@@ -583,7 +585,7 @@ mod tests {
         let theme = Theme::default();
         let diff = DiffContent::WriteSummary { line_count: 5 };
         let mut output: Vec<Line> = Vec::new();
-        render_diff_lines(&mut output, &diff, Some("Overwrote /tmp/foo (20 bytes)"), &theme);
+        render_diff_lines(&mut output, &diff, Some("Overwrote /tmp/foo (20 bytes)"), &theme, 0);
         assert_eq!(output.len(), 1);
         let text = format!("{:?}", output[0]);
         assert!(text.contains("Overwrote"), "verb should be Overwrote");
@@ -594,7 +596,7 @@ mod tests {
         let theme = Theme::default();
         let diff = DiffContent::WriteSummary { line_count: 3 };
         let mut output: Vec<Line> = Vec::new();
-        render_diff_lines(&mut output, &diff, None, &theme);
+        render_diff_lines(&mut output, &diff, None, &theme, 0);
         assert_eq!(output.len(), 1);
         let text = format!("{:?}", output[0]);
         assert!(text.contains("Overwrote"), "should default to Overwrote when no summary");
@@ -605,7 +607,7 @@ mod tests {
         let theme = Theme::default();
         let diff = DiffContent::EditDiff { lines: vec![] };
         let mut output: Vec<Line> = Vec::new();
-        render_diff_lines(&mut output, &diff, None, &theme);
+        render_diff_lines(&mut output, &diff, None, &theme, 0);
         // top border + 0 diff lines + bottom border = 2 lines
         assert_eq!(output.len(), 2);
     }
@@ -635,6 +637,7 @@ mod tests {
                 &mut state,
                 &theme,
                 activity,
+                0, // context_pct: no pressure in tests
             );
         });
         // Collect all cells into a string, row by row

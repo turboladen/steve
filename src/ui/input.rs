@@ -102,7 +102,7 @@ pub fn render_input(
     // Top border for visual separation from message area
     let border_block = Block::default()
         .borders(Borders::TOP)
-        .border_style(Style::default().fg(theme.border));
+        .border_style(Style::default().fg(theme.border_color(context.context_usage_pct)));
     let inner_area = border_block.inner(area);
     frame.render_widget(border_block, area);
 
@@ -144,8 +144,10 @@ pub fn render_input(
         let pct = context.context_usage_pct;
         let token_color = if pct >= 80 {
             theme.error
-        } else if pct >= 50 {
+        } else if pct >= 60 {
             theme.warning
+        } else if pct >= 40 {
+            theme.context_amber
         } else {
             theme.dim
         };
@@ -325,6 +327,24 @@ mod tests {
                 break;
             }
         }
+    }
+
+    #[test]
+    fn buffer_context_pressure_amber() {
+        let (buf, text) = render_input_to_parts(80, 5, AgentMode::Build, 50, 64000, 128000);
+        assert!(text.contains("50%"), "should show 50%");
+        let theme = Theme::default();
+        // Find the "5" of "50%" and check color is amber-brown (40-59% tier)
+        let mut found = false;
+        for x in (0..80).rev() {
+            let cell = &buf[(x, 1)];
+            if cell.symbol() == "5" {
+                assert_eq!(cell.fg, theme.context_amber, "50% should use amber-brown color");
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "should find '5' digit in buffer for 50% context pressure");
     }
 
     #[test]
