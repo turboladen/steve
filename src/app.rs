@@ -196,6 +196,57 @@ fn parse_unified_diff_lines(patch: &str) -> Vec<DiffLine> {
     lines
 }
 
+/// Extract the last fenced code block from conversation messages.
+///
+/// Scans messages backwards for `MessageBlock::Assistant` blocks, then scans
+/// their text parts for CommonMark fenced code blocks (triple backticks with
+/// ≤3 leading spaces). Returns the content of the last code block found,
+/// or `None` if there are no code blocks.
+///
+/// Uses the same fence detection rules as `render_text_with_code_blocks()`.
+fn extract_last_code_block(messages: &[MessageBlock]) -> Option<String> {
+    for msg in messages.iter().rev() {
+        if let MessageBlock::Assistant { parts, .. } = msg {
+            // Scan parts backwards — we want the last code block in the most recent assistant message
+            for part in parts.iter().rev() {
+                if let AssistantPart::Text(text) = part {
+                    let mut in_code_block = false;
+                    let mut current_block = Vec::new();
+                    let mut last_block: Option<String> = None;
+
+                    for line in text.lines() {
+                        let trimmed = line.trim_start_matches(' ');
+                        let leading_spaces = line.len() - trimmed.len();
+
+                        if leading_spaces <= 3 && trimmed.starts_with("```") {
+                            if !in_code_block {
+                                in_code_block = true;
+                                current_block.clear();
+                            } else {
+                                // Closing fence — save this block
+                                last_block = Some(current_block.join("\n"));
+                                in_code_block = false;
+                                current_block.clear();
+                            }
+                        } else if in_code_block {
+                            current_block.push(line);
+                        }
+                    }
+                    // Unclosed code block — still capture it
+                    if in_code_block && !current_block.is_empty() {
+                        last_block = Some(current_block.join("\n"));
+                    }
+
+                    if last_block.is_some() {
+                        return last_block;
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 pub struct App {
     // Core state
     pub project: ProjectInfo,
@@ -845,6 +896,34 @@ impl App {
                     Some(false) => Some(true),  // hidden -> show
                     Some(true) => None,         // forced visible -> auto
                 };
+            }
+            (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
+                // Copy last code block to clipboard via OSC 52
+                match extract_last_code_block(&self.messages) {
+                    Some(content) => {
+                        use base64::Engine;
+                        let encoded =
+                            base64::engine::general_purpose::STANDARD.encode(&content);
+                        // OSC 52: set clipboard contents
+                        let mut stdout = std::io::stdout();
+                        let _ = std::io::Write::write_fmt(
+                            &mut stdout,
+                            format_args!("\x1b]52;c;{encoded}\x07"),
+                        );
+                        let _ = std::io::Write::flush(&mut stdout);
+                        let n = content.lines().count();
+                        self.messages.push(MessageBlock::System {
+                            text: format!("Copied {n} lines to clipboard"),
+                        });
+                        self.message_area_state.scroll_to_bottom();
+                    }
+                    None => {
+                        self.messages.push(MessageBlock::System {
+                            text: "No code block to copy".to_string(),
+                        });
+                        self.message_area_state.scroll_to_bottom();
+                    }
+                }
             }
             (KeyCode::Enter, KeyModifiers::SHIFT) => {
                 // Shift+Enter: insert newline in textarea (forward as plain Enter)
@@ -2233,6 +2312,120 @@ pub(crate) mod tests {
     /// Note: uses `Storage::new` which writes to the real app data dir. This is
     /// acceptable because UI rendering tests don't perform storage writes. A
     /// temp-dir approach would require returning `TempDir` to keep it alive.
+    // --- extract_last_code_block tests ---
+
+    fn assistant_text(text: &str) -> MessageBlock {
+        MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::Text(text.to_string())],
+        }
+    }
+
+    #[test]
+    fn extract_last_code_block_no_messages() {
+        assert_eq!(extract_last_code_block(&[]), None);
+    }
+
+    #[test]
+    fn extract_last_code_block_no_code_blocks() {
+        let msgs = vec![assistant_text("Just some text without any code.")];
+        assert_eq!(extract_last_code_block(&msgs), None);
+    }
+
+    #[test]
+    fn extract_last_code_block_single_block() {
+        let msgs = vec![assistant_text("Here:\n```\nfoo\nbar\n```\nDone.")];
+        assert_eq!(extract_last_code_block(&msgs), Some("foo\nbar".to_string()));
+    }
+
+    #[test]
+    fn extract_last_code_block_multiple_blocks_returns_last() {
+        let msgs = vec![assistant_text(
+            "First:\n```\nalpha\n```\nSecond:\n```\nbeta\n```",
+        )];
+        assert_eq!(extract_last_code_block(&msgs), Some("beta".to_string()));
+    }
+
+    #[test]
+    fn extract_last_code_block_with_language_label() {
+        let msgs = vec![assistant_text("```rust\nfn main() {}\n```")];
+        assert_eq!(
+            extract_last_code_block(&msgs),
+            Some("fn main() {}".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_last_code_block_indented_backticks_not_fence() {
+        // >3 leading spaces means it's NOT a fence — treated as code content
+        let msgs = vec![assistant_text("```\n    ```\nreal content\n```")];
+        let result = extract_last_code_block(&msgs).unwrap();
+        assert!(result.contains("    ```"));
+        assert!(result.contains("real content"));
+    }
+
+    #[test]
+    fn extract_last_code_block_three_spaces_is_fence() {
+        // Exactly 3 leading spaces is still a valid fence
+        let msgs = vec![assistant_text("   ```\nindented fence\n   ```")];
+        assert_eq!(
+            extract_last_code_block(&msgs),
+            Some("indented fence".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_last_code_block_multiple_assistant_messages() {
+        let msgs = vec![
+            assistant_text("Old:\n```\nold code\n```"),
+            MessageBlock::User {
+                text: "continue".to_string(),
+            },
+            assistant_text("New:\n```\nnew code\n```"),
+        ];
+        // Should find the block in the most recent assistant message
+        assert_eq!(
+            extract_last_code_block(&msgs),
+            Some("new code".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_last_code_block_skips_non_assistant() {
+        let msgs = vec![
+            MessageBlock::User {
+                text: "```\nnot this\n```".to_string(),
+            },
+            MessageBlock::System {
+                text: "```\nor this\n```".to_string(),
+            },
+        ];
+        assert_eq!(extract_last_code_block(&msgs), None);
+    }
+
+    #[test]
+    fn extract_last_code_block_unclosed_block() {
+        // Unclosed code block should still be captured
+        let msgs = vec![assistant_text("```\nunclosed content")];
+        assert_eq!(
+            extract_last_code_block(&msgs),
+            Some("unclosed content".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_last_code_block_scans_parts_backwards() {
+        // Multiple text parts in one assistant message — should find the last one's block
+        let msg = MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![
+                AssistantPart::Text("```\nearly\n```".to_string()),
+                AssistantPart::Text("```\nlater\n```".to_string()),
+            ],
+        };
+        assert_eq!(extract_last_code_block(&[msg]), Some("later".to_string()));
+    }
+
     pub(crate) fn make_test_app() -> App {
         use crate::config::types::Config;
         use crate::project::ProjectInfo;
