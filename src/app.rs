@@ -813,8 +813,36 @@ impl App {
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         // If there's a pending permission prompt, intercept keystrokes
         if self.pending_permission.is_some() {
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
+            match (key.code, key.modifiers) {
+                (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
+                    // Ctrl+Y: copy last code block to clipboard (even during permission prompt)
+                    match extract_last_code_block(&self.messages) {
+                        Some(content) => {
+                            use base64::Engine;
+                            let encoded =
+                                base64::engine::general_purpose::STANDARD.encode(&content);
+                            let mut stdout = std::io::stdout();
+                            let _ = std::io::Write::write_fmt(
+                                &mut stdout,
+                                format_args!("\x1b]52;c;{encoded}\x07"),
+                            );
+                            let _ = std::io::Write::flush(&mut stdout);
+                            let n = content.lines().count();
+                            self.messages.push(MessageBlock::System {
+                                text: format!("Copied {n} lines to clipboard"),
+                            });
+                            self.message_area_state.scroll_to_bottom();
+                        }
+                        None => {
+                            self.messages.push(MessageBlock::System {
+                                text: "No code block to copy".to_string(),
+                            });
+                            self.message_area_state.scroll_to_bottom();
+                        }
+                    }
+                    return Ok(());
+                }
+                (KeyCode::Char('y'), _) | (KeyCode::Char('Y'), _) => {
                     if let Some(perm) = self.pending_permission.take() {
                         let _ = perm.response_tx.send(PermissionReply::AllowOnce);
                         self.remove_last_permission_block();
@@ -823,7 +851,7 @@ impl App {
                     }
                     return Ok(());
                 }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                (KeyCode::Char('n'), _) | (KeyCode::Char('N'), _) | (KeyCode::Esc, _) => {
                     if let Some(perm) = self.pending_permission.take() {
                         let _ = perm.response_tx.send(PermissionReply::Deny);
                         self.remove_last_permission_block();
@@ -835,7 +863,7 @@ impl App {
                     }
                     return Ok(());
                 }
-                KeyCode::Char('a') | KeyCode::Char('A') => {
+                (KeyCode::Char('a'), _) | (KeyCode::Char('A'), _) => {
                     if let Some(perm) = self.pending_permission.take() {
                         let _ = perm.response_tx.send(PermissionReply::AllowAlways);
                         self.remove_last_permission_block();
@@ -844,7 +872,7 @@ impl App {
                     }
                     return Ok(());
                 }
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
                     // Cancel the stream (which will drop the permission request)
                     self.cancel_stream();
                     return Ok(());
@@ -1817,7 +1845,7 @@ impl App {
             }
             Command::Help => {
                 self.messages.push(MessageBlock::System {
-                    text: "Commands:\n  /new                   \u{2014} Start a new session\n  /rename <t>            \u{2014} Rename current session\n  /models                \u{2014} List available models\n  /model <r>             \u{2014} Switch to a model\n  /compact               \u{2014} Compact conversation into a summary\n  /sessions              \u{2014} Browse sessions\n  /export-debug          \u{2014} Export session as markdown\n  /export-debug-with-logs \u{2014} Export session with logs\n  /init                  \u{2014} Create AGENTS.md in project root\n  /help                  \u{2014} Show this help\n  /exit                  \u{2014} Quit\n\nKeys:\n  Enter       \u{2014} Send message\n  Shift+Enter \u{2014} Insert newline\n  Tab         \u{2014} Cycle autocomplete / toggle Build\u{2013}Plan mode\n  Ctrl+C      \u{2014} Cancel stream / quit\n  Ctrl+B      \u{2014} Toggle sidebar\n  Mouse wheel \u{2014} Scroll messages\n\nTips:\n  Shift+click/drag \u{2014} Select text for copy (terminal feature)".to_string(),
+                    text: "Commands:\n  /new                   \u{2014} Start a new session\n  /rename <t>            \u{2014} Rename current session\n  /models                \u{2014} List available models\n  /model <r>             \u{2014} Switch to a model\n  /compact               \u{2014} Compact conversation into a summary\n  /sessions              \u{2014} Browse sessions\n  /export-debug          \u{2014} Export session as markdown\n  /export-debug-with-logs \u{2014} Export session with logs\n  /init                  \u{2014} Create AGENTS.md in project root\n  /help                  \u{2014} Show this help\n  /exit                  \u{2014} Quit\n\nKeys:\n  Enter       \u{2014} Send message\n  Shift+Enter \u{2014} Insert newline\n  Tab         \u{2014} Cycle autocomplete / toggle Build\u{2013}Plan mode\n  Ctrl+C      \u{2014} Cancel stream / quit\n  Ctrl+B      \u{2014} Toggle sidebar\n  Ctrl+Y      \u{2014} Copy last code block to clipboard (OSC 52)\n  Mouse wheel \u{2014} Scroll messages\n\nTips:\n  Shift+click/drag \u{2014} Select text for copy (terminal feature)".to_string(),
                 });
             }
         }
@@ -2308,10 +2336,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// Create a minimal App for testing (without real storage/config).
-    /// Note: uses `Storage::new` which writes to the real app data dir. This is
-    /// acceptable because UI rendering tests don't perform storage writes. A
-    /// temp-dir approach would require returning `TempDir` to keep it alive.
     // --- extract_last_code_block tests ---
 
     fn assistant_text(text: &str) -> MessageBlock {
@@ -2426,6 +2450,10 @@ pub(crate) mod tests {
         assert_eq!(extract_last_code_block(&[msg]), Some("later".to_string()));
     }
 
+    /// Create a minimal App for testing (without real storage/config).
+    /// Note: uses `Storage::new` which writes to the real app data dir. This is
+    /// acceptable because UI rendering tests don't perform storage writes. A
+    /// temp-dir approach would require returning `TempDir` to keep it alive.
     pub(crate) fn make_test_app() -> App {
         use crate::config::types::Config;
         use crate::project::ProjectInfo;
