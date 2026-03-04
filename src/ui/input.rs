@@ -7,7 +7,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
-use tui_textarea::TextArea;
+use ratatui_textarea::TextArea;
 
 use super::status_line::format_tokens;
 use super::theme::Theme;

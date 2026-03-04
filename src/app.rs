@@ -816,7 +816,7 @@ impl App {
             (KeyCode::Enter, KeyModifiers::NONE) if self.autocomplete_state.visible => {
                 if let Some(cmd_name) = self.autocomplete_state.selected_command() {
                     let cmd_name = cmd_name.to_string();
-                    let mut textarea = tui_textarea::TextArea::default();
+                    let mut textarea = ratatui_textarea::TextArea::default();
                     textarea.set_cursor_line_style(ratatui::style::Style::default());
                     textarea.set_placeholder_text("Type a message...");
                     textarea.insert_str(&cmd_name);

@@ -185,7 +185,7 @@ Messages are stored one-per-file under `messages/{session_id}/{message_id}.json`
 
 ### UI (`ui/`)
 
-Built with ratatui 0.29 + crossterm 0.28 + tui-textarea 0.7 (version-pinned for compatibility). Sidebar appears at terminal width >= 120. The TUI owns stdout, so all logging goes to a file via `tracing-appender`.
+Built with ratatui 0.30 + crossterm 0.29 + ratatui-textarea 0.8. Sidebar appears at terminal width >= 120. The TUI owns stdout, so all logging goes to a file via `tracing-appender`.
 
 Messages render as `MessageBlock` variants: `User`, `Assistant` (with thinking/parts), `System`, `Error`, `Permission`. Styled per-variant in `message_area.rs`. Permission prompts render as bold yellow blocks with highlighted key letters.
 
@@ -214,7 +214,7 @@ Auto-scroll calculates content height using wrapped line widths (not `lines.len(
 - **strum 0.28** derives `EnumString`, `Display`, `EnumIter`, `IntoStaticStr` on `ToolName`. Use `ToolName::iter()` (via `strum::IntoEnumIterator`) in tests for truly exhaustive variant coverage — never hard-code variant lists. Use `IntoStaticStr` (not `AsRefStr`) when you need `&'static str` — `AsRefStr` returns `&str` tied to `&self` lifetime
 - **wait-timeout 0.2** provides `ChildExt::wait_timeout()` for bash tool timeout enforcement. Requires `Stdio::piped()` + `spawn()` (not `output()`)
 - **mpatch 1.3** applies unified diffs with fuzzy matching via `patch_content_str()`. Always appends trailing newline — `apply_unified_diff()` in `patch.rs` post-processes to preserve original newline behavior
-- **tui-textarea 0.7** requires ratatui 0.29 and crossterm 0.28 — do not upgrade independently
+- **ratatui-textarea 0.8** is the official ratatui fork of tui-textarea, supports ratatui 0.30 + crossterm 0.29
 - **async-openai 0.33** requires `features = ["chat-completion"]`; types live under `async_openai::types::chat::`, not `async_openai::types::`
 - **async-openai 0.33 tool types**: `ChatCompletionTools` (plural enum with `Function` variant), `ChatCompletionMessageToolCalls` (plural enum with `Function` variant). `ChatCompletionRequestAssistantMessage` requires `audio: None` and `function_call: None` fields. `ChatCompletionStreamOptions` has `include_usage` and `include_obfuscation` fields
 - **stream_options is required**: `CreateChatCompletionRequest` must include `stream_options: Some(ChatCompletionStreamOptions { include_usage: Some(true), .. })` — without it, token usage is never reported and auto-compact cannot trigger
