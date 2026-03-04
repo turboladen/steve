@@ -129,7 +129,7 @@ When a tool needs user permission, the stream task sends a `PermissionRequest` c
 
 **Critical**: Permission and System blocks are interleaved into `self.messages` during the stream. Streaming event handlers (`LlmDelta`, `LlmReasoning`, `LlmToolCallStreaming`, `LlmToolCall`, `ToolResult`) must use `last_assistant_mut()` to find the correct Assistant block — **not** `messages.last_mut()`, which may return a Permission or System block after a permission prompt.
 
-The permission prompt handler matches `(key.code, key.modifiers)` tuples — `Ctrl+Y` is explicitly carved out before the bare `y`/`Y` arm so clipboard copy works even during permission prompts. When adding new `Ctrl+<key>` bindings, check whether the key conflicts with the permission prompt's letter handlers (`y`/`n`/`a`).
+The permission prompt handler matches `(key.code, key.modifiers)` tuples — `Ctrl+Y` is explicitly carved out before the bare `y`/`Y` arm so clipboard copy works even during permission prompts. When adding new `Ctrl+<key>` bindings, check whether the key conflicts with the permission prompt's letter handlers (`y`/`n`/`a`). `Ctrl+Y` clipboard copy is implemented in `App::copy_last_code_block_to_clipboard()` — called from both the permission-prompt branch and the main key handler. Handles OSC 52 I/O errors (shows `MessageBlock::Error` on failure).
 
 ### Agent Modes
 
