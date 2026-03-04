@@ -423,8 +423,9 @@ impl App {
                 }
             }
 
-            // Restore model from session
-            self.current_model = Some(session.model_ref.clone());
+            // Restore model from session, falling back to config if the saved
+            // model_ref is no longer valid (e.g. config was updated after save).
+            self.current_model = Some(self.validated_model_ref(&session.model_ref));
             self.current_session = Some(session);
         }
 
@@ -476,7 +477,7 @@ impl App {
         meta.last_model = Some(session.model_ref.clone());
         let _ = mgr.save_project_meta(&meta);
 
-        self.current_model = Some(session.model_ref.clone());
+        self.current_model = Some(self.validated_model_ref(&session.model_ref));
         self.current_session = Some(session.clone());
         self.sidebar_state.changes.clear();
         self.sync_sidebar_tokens();
@@ -1332,6 +1333,31 @@ impl App {
             .small_model
             .clone()
             .or_else(|| self.current_model.clone())
+    }
+
+    /// Validate a model ref from a saved session against the current provider
+    /// registry. If it is no longer valid (e.g. the config was updated after
+    /// the session was saved), log a warning and fall back to the model
+    /// specified in the current config.
+    fn validated_model_ref(&self, model_ref: &str) -> String {
+        let Some(registry) = self.provider_registry.as_ref() else {
+            // No registry to validate against — keep the stored model_ref as-is.
+            return model_ref.to_string();
+        };
+        if registry.resolve_model(model_ref).is_ok() {
+            return model_ref.to_string();
+        }
+        let fallback = self
+            .config
+            .model
+            .clone()
+            .unwrap_or_else(|| model_ref.to_string());
+        tracing::warn!(
+            "session model_ref '{}' is no longer valid, falling back to '{}'",
+            model_ref,
+            fallback
+        );
+        fallback
     }
 
     /// Build a transcript of stored messages for the summarizer.

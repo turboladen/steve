@@ -6,9 +6,9 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-use super::message_block::{AssistantPart, DiffContent, DiffLine, MessageBlock, ToolGroupStatus};
+use super::message_block::{AssistantPart, DiffContent, DiffLine, MessageBlock, ToolGroup, ToolGroupStatus};
 use super::theme::Theme;
-use crate::tool::ToolName;
+use crate::tool::{IntentCategory, ToolName};
 
 /// State for the scrollable message area.
 ///
@@ -139,13 +139,29 @@ pub fn render_message_blocks(
                     }
                 }
 
-                // Parts in chronological order
+                // Parts in chronological order.
+                // Track last-emitted intent to suppress repeated labels for
+                // consecutive same-category tool groups (e.g. 3 reads in a row).
+                // Text between groups resets tracking so the label reappears.
+                let mut last_intent: Option<IntentCategory> = None;
                 for part in parts {
                     match part {
                         AssistantPart::Text(text) => {
                             render_text_with_code_blocks(text, &mut lines, theme, available_width);
+                            last_intent = None;
                         }
                         AssistantPart::ToolGroup(group) => {
+                            // Intent indicator — suppressed if same as previous group
+                            if let Some(category) = infer_group_intent(group) {
+                                if last_intent != Some(category) {
+                                    lines.push(render_intent_line(category, available_width, theme));
+                                }
+                                last_intent = Some(category);
+                            } else {
+                                // Asking-only groups have no label — reset tracking so the
+                                // next labeled group isn't incorrectly suppressed.
+                                last_intent = None;
+                            }
                             for call in &group.calls {
                                 let status_indicator = match (&group.status, &call.result_summary) {
                                     (_, Some(_)) if call.expanded => "\u{25bc}",
@@ -378,6 +394,59 @@ fn render_diff_lines(
             )));
         }
     }
+}
+
+/// Infer an intent category from the tool calls in a single tool group.
+/// Returns `None` if the group has no calls or only `Asking` tools
+/// (question/todo).
+///
+/// Priority: editing > executing > exploring. When a group contains
+/// mixed tools, the highest-priority wins (mutations matter most).
+fn infer_group_intent(group: &ToolGroup) -> Option<IntentCategory> {
+    let mut has_exploring = false;
+    let mut has_editing = false;
+    let mut has_executing = false;
+
+    for call in &group.calls {
+        match call.tool_name.intent_category() {
+            IntentCategory::Exploring => has_exploring = true,
+            IntentCategory::Editing => has_editing = true,
+            IntentCategory::Executing => has_executing = true,
+            IntentCategory::Asking => {} // doesn't influence the label
+        }
+    }
+
+    if has_editing {
+        Some(IntentCategory::Editing)
+    } else if has_executing {
+        Some(IntentCategory::Executing)
+    } else if has_exploring {
+        Some(IntentCategory::Exploring)
+    } else {
+        None
+    }
+}
+
+/// Render an intent indicator line: `── label ──────────────────`
+///
+/// Uses box-drawing `─` chars with the label colored per intent category,
+/// reusing existing theme colors for visual consistency with tool call lines.
+/// Exhaustive match on `IntentCategory` — adding a variant forces updating this.
+fn render_intent_line(category: IntentCategory, width: usize, theme: &Theme) -> Line<'static> {
+    let (label, color) = match category {
+        IntentCategory::Exploring => ("exploring", theme.tool_read),
+        IntentCategory::Editing => ("editing", theme.tool_write),
+        IntentCategory::Executing => ("executing", theme.accent),
+        IntentCategory::Asking => ("asking", theme.dim),
+    };
+
+    let prefix = format!("\u{2500}\u{2500} {label} ");
+    let prefix_chars = prefix.chars().count();
+    let dash_count = width.saturating_sub(prefix_chars);
+    let dashes = "\u{2500}".repeat(dash_count);
+    let full = format!("{prefix}{dashes}");
+
+    Line::from(Span::styled(full, Style::default().fg(color)))
 }
 
 /// Detect fenced code blocks in assistant text and render with tinted background.
@@ -833,6 +902,396 @@ mod tests {
         let between = &text[pos1..pos2];
         let line_count = between.lines().count();
         assert!(line_count >= 2, "should have blank line separation, got {line_count} lines between messages");
+    }
+
+    // -- infer_group_intent tests --
+
+    fn make_tool_group(tool_names: &[ToolName]) -> ToolGroup {
+        ToolGroup {
+            calls: tool_names
+                .iter()
+                .map(|&name| ToolCall {
+                    tool_name: name,
+                    args_summary: "test".into(),
+                    full_output: None,
+                    result_summary: None,
+                    diff_content: None,
+                    is_error: false,
+                    expanded: false,
+                })
+                .collect(),
+            status: ToolGroupStatus::Complete,
+        }
+    }
+
+    #[test]
+    fn infer_group_intent_empty() {
+        let group = make_tool_group(&[]);
+        assert_eq!(infer_group_intent(&group), None);
+    }
+
+    #[test]
+    fn infer_group_intent_read_only_tools() {
+        for tool in [ToolName::Read, ToolName::Grep, ToolName::Glob, ToolName::List, ToolName::Webfetch] {
+            let group = make_tool_group(&[tool]);
+            assert_eq!(infer_group_intent(&group), Some(IntentCategory::Exploring), "{tool} should produce Exploring");
+        }
+    }
+
+    #[test]
+    fn infer_group_intent_write_tools() {
+        for tool in [ToolName::Edit, ToolName::Write, ToolName::Patch, ToolName::Memory] {
+            let group = make_tool_group(&[tool]);
+            assert_eq!(infer_group_intent(&group), Some(IntentCategory::Editing), "{tool} should produce Editing");
+        }
+    }
+
+    #[test]
+    fn infer_group_intent_bash_tool() {
+        let group = make_tool_group(&[ToolName::Bash]);
+        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Executing));
+    }
+
+    #[test]
+    fn infer_group_intent_mixed_read_write() {
+        let group = make_tool_group(&[ToolName::Read, ToolName::Edit]);
+        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Editing), "editing takes priority over exploring");
+    }
+
+    #[test]
+    fn infer_group_intent_mixed_read_bash() {
+        let group = make_tool_group(&[ToolName::Read, ToolName::Bash]);
+        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Executing), "executing takes priority over exploring");
+    }
+
+    #[test]
+    fn infer_group_intent_mixed_edit_bash() {
+        let group = make_tool_group(&[ToolName::Edit, ToolName::Bash]);
+        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Editing), "editing takes priority over executing");
+    }
+
+    #[test]
+    fn infer_group_intent_only_asking_tools() {
+        let group = make_tool_group(&[ToolName::Question, ToolName::Todo]);
+        assert_eq!(infer_group_intent(&group), None, "asking tools should not produce a label");
+    }
+
+    #[test]
+    fn infer_group_intent_asking_plus_exploring() {
+        let group = make_tool_group(&[ToolName::Todo, ToolName::Read]);
+        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Exploring), "exploring should show even with asking tools");
+    }
+
+    #[test]
+    fn infer_group_intent_all_categories() {
+        let group = make_tool_group(&[ToolName::Read, ToolName::Edit, ToolName::Bash, ToolName::Question]);
+        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Editing), "editing has highest priority");
+    }
+
+    // -- render_intent_line tests --
+
+    #[test]
+    fn render_intent_line_format() {
+        let theme = Theme::default();
+        let line = render_intent_line(IntentCategory::Exploring, 40, &theme);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.starts_with("\u{2500}\u{2500} exploring "), "should start with '── exploring '");
+        assert!(text.ends_with('\u{2500}'), "should end with ─ dashes");
+        assert_eq!(text.chars().count(), 40, "should fill to width");
+        // Color should be tool_read for exploring
+        assert_eq!(line.spans[0].style.fg, Some(theme.tool_read));
+    }
+
+    #[test]
+    fn render_intent_line_editing_color() {
+        let theme = Theme::default();
+        let line = render_intent_line(IntentCategory::Editing, 30, &theme);
+        assert_eq!(line.spans[0].style.fg, Some(theme.tool_write));
+    }
+
+    #[test]
+    fn render_intent_line_executing_color() {
+        let theme = Theme::default();
+        let line = render_intent_line(IntentCategory::Executing, 30, &theme);
+        assert_eq!(line.spans[0].style.fg, Some(theme.accent));
+    }
+
+    #[test]
+    fn render_intent_line_narrow_width() {
+        let theme = Theme::default();
+        // Width exactly equal to prefix — no trailing dashes
+        let prefix_len = "\u{2500}\u{2500} exploring ".chars().count(); // 13 chars
+        let line = render_intent_line(IntentCategory::Exploring, prefix_len, &theme);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "\u{2500}\u{2500} exploring ", "at exact prefix width, no dashes appended");
+        assert_eq!(text.chars().count(), prefix_len, "should be exactly prefix length");
+
+        // Width smaller than prefix — no dashes, no panic
+        let line2 = render_intent_line(IntentCategory::Exploring, 5, &theme);
+        let text2: String = line2.spans.iter().map(|s| s.content.as_ref()).collect();
+        // Still contains the full prefix (saturating_sub produces 0 dashes)
+        assert!(text2.starts_with("\u{2500}\u{2500} exploring "), "prefix always rendered");
+        assert_eq!(text2.chars().count(), prefix_len, "output is prefix-length when width < prefix");
+    }
+
+    // -- per-group intent rendering buffer tests --
+
+    #[test]
+    fn buffer_intent_per_group_shows_exploring_then_editing() {
+        // Two tool groups: read (exploring) then edit (editing).
+        // Each should get its own intent label.
+        let messages = vec![MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Read,
+                        args_summary: "src/main.rs".into(),
+                        full_output: None,
+                        result_summary: Some("150 lines".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+                AssistantPart::Text("Let me edit that.".into()),
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Edit,
+                        args_summary: "src/main.rs".into(),
+                        full_output: None,
+                        result_summary: Some("edited".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+            ],
+        }];
+        let text = render_messages_to_string(80, 20, &messages, None);
+        assert!(text.contains("exploring"), "should have exploring label for read group");
+        assert!(text.contains("editing"), "should have editing label for edit group");
+        // exploring should appear before editing in the output
+        let pos_exploring = text.find("exploring").unwrap();
+        let pos_editing = text.find("editing").unwrap();
+        assert!(pos_exploring < pos_editing, "exploring should come before editing");
+    }
+
+    #[test]
+    fn buffer_intent_no_label_for_text_only() {
+        let messages = vec![MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::Text("Just a text response.".into())],
+        }];
+        let text = render_messages_to_string(80, 10, &messages, None);
+        assert!(!text.contains("exploring"), "no intent label for text-only response");
+        assert!(!text.contains("editing"), "no intent label for text-only response");
+        assert!(!text.contains("executing"), "no intent label for text-only response");
+    }
+
+    #[test]
+    fn buffer_intent_no_label_for_asking_only() {
+        let messages = vec![MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::ToolGroup(ToolGroup {
+                calls: vec![ToolCall {
+                    tool_name: ToolName::Question,
+                    args_summary: "test".into(),
+                    full_output: None,
+                    result_summary: Some("answered".into()),
+                    diff_content: None,
+                    is_error: false,
+                    expanded: false,
+                }],
+                status: ToolGroupStatus::Complete,
+            })],
+        }];
+        let text = render_messages_to_string(80, 10, &messages, None);
+        assert!(!text.contains("exploring"), "no exploring label for question tool");
+        assert!(!text.contains("editing"), "no editing label for question tool");
+        assert!(!text.contains("executing"), "no executing label for question tool");
+    }
+
+    #[test]
+    fn buffer_intent_consecutive_same_category_deduped() {
+        // Three consecutive exploring groups (like list → glob → read across turns).
+        // Should produce ONE "exploring" label, not three.
+        let messages = vec![MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::List,
+                        args_summary: ".".into(),
+                        full_output: None,
+                        result_summary: Some("10 files".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Glob,
+                        args_summary: "src/**/*.rs".into(),
+                        full_output: None,
+                        result_summary: Some("5 files".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Read,
+                        args_summary: "src/main.rs".into(),
+                        full_output: None,
+                        result_summary: Some("150 lines".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+            ],
+        }];
+        let text = render_messages_to_string(80, 20, &messages, None);
+        // "exploring" should appear exactly once
+        let count = text.matches("exploring").count();
+        assert_eq!(count, 1, "expected 1 'exploring' label but found {count}");
+    }
+
+    #[test]
+    fn buffer_intent_text_resets_dedup() {
+        // exploring → text → exploring should show TWO "exploring" labels
+        // because text between groups resets the tracking.
+        let messages = vec![MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Read,
+                        args_summary: "a.rs".into(),
+                        full_output: None,
+                        result_summary: Some("50 lines".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+                AssistantPart::Text("I see, let me check another file.".into()),
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Read,
+                        args_summary: "b.rs".into(),
+                        full_output: None,
+                        result_summary: Some("30 lines".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+            ],
+        }];
+        let text = render_messages_to_string(80, 20, &messages, None);
+        let count = text.matches("exploring").count();
+        assert_eq!(count, 2, "expected 2 'exploring' labels (text resets dedup) but found {count}");
+    }
+
+    #[test]
+    fn buffer_intent_category_change_shows_both() {
+        // exploring → editing (no text between) → both labels shown.
+        let messages = vec![MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Read,
+                        args_summary: "a.rs".into(),
+                        full_output: None,
+                        result_summary: Some("50 lines".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Edit,
+                        args_summary: "a.rs".into(),
+                        full_output: None,
+                        result_summary: Some("edited".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+            ],
+        }];
+        let text = render_messages_to_string(80, 20, &messages, None);
+        assert!(text.contains("exploring"), "should have exploring label");
+        assert!(text.contains("editing"), "should have editing label");
+        let pos_exploring = text.find("exploring").unwrap();
+        let pos_editing = text.find("editing").unwrap();
+        assert!(pos_exploring < pos_editing, "exploring before editing");
+    }
+
+    #[test]
+    fn buffer_intent_asking_group_resets_dedup() {
+        // exploring → asking-only → exploring should show TWO "exploring" labels
+        // because asking-only groups reset intent tracking (they emit no label).
+        let messages = vec![MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Read,
+                        args_summary: "a.rs".into(),
+                        full_output: None,
+                        result_summary: Some("50 lines".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Question,
+                        args_summary: "proceed?".into(),
+                        full_output: None,
+                        result_summary: Some("yes".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Read,
+                        args_summary: "b.rs".into(),
+                        full_output: None,
+                        result_summary: Some("30 lines".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+            ],
+        }];
+        let text = render_messages_to_string(80, 20, &messages, None);
+        let count = text.matches("exploring").count();
+        assert_eq!(count, 2, "expected 2 'exploring' labels (asking resets dedup) but found {count}");
     }
 
     // -- render_text_with_code_blocks tests --
