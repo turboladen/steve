@@ -84,6 +84,8 @@ Example `steve.json`:
 | `/models` | List available models |
 | `/model <ref>` | Switch to a model (e.g., `/model openai/gpt-4o`) |
 | `/compact` | Compact conversation into a summary (frees context window) |
+| `/export-debug` | Export session as structured markdown for debugging |
+| `/export-debug-with-logs` | Export session with filtered log entries |
 | `/init` | Create AGENTS.md in project root |
 | `/help` | Show help |
 | `/exit` | Quit |
@@ -132,6 +134,10 @@ When a tool needs user permission, the stream task sends a `PermissionRequest` c
 - **Plan mode**: read tools auto-allowed, write tools denied entirely (excluded from LLM tool list), bash requires permission
 
 Tab toggles between modes. Mode rules live in `permission/mod.rs` as `build_mode_rules()` / `plan_mode_rules()`. Auto-allowed in both modes: read/grep/glob/list (read-only) + memory/todo/question (utility). Unmatched tools default to `Ask` — new tools must be added to the rules or they'll silently require permission prompts.
+
+### Debug Export (`export.rs`)
+
+`/export-debug` and `/export-debug-with-logs` write the current session to `steve-debug-<timestamp>.md` in the project root. Synchronous (filesystem I/O only). `ExportParams` borrows session state — no cloning. `extract_tool_summary()` mirrors `extract_args_summary()` in `app.rs` with exhaustive `ToolName` match (keep both in sync when adding tools). Log filtering uses per-file `emitting` flag to track whether continuation lines (no timestamp) should be included — resets at file boundaries and when a timestamped line falls outside the session range.
 
 ### Compaction (`/compact`)
 
@@ -229,6 +235,7 @@ Auto-scroll calculates content height using wrapped line widths (not `lines.len(
 - **File locking (Rust 2024)**: `std::fs::File` has native `lock()` (exclusive), `lock_shared()`, `unlock()` methods. `fs2::FileExt` still provides `lock_exclusive()` (no native equivalent with that name) but `lock_shared`/`unlock` shadow the trait — importing `fs2::FileExt` triggers unused-import warnings for those
 - **`ToolContext` fields**: `project_root: PathBuf` and `storage_dir: Option<PathBuf>`. In tests, use `storage_dir: None` unless testing the memory tool
 - **Unicode width in TUI**: Box-drawing characters like `─` (U+2500) are 3 bytes in UTF-8 but 1 display character. Use `.chars().count()` (not `.len()`) for visual width calculations. The `unicode-width` crate is available if true terminal column width is needed (e.g., CJK characters)
+- **`all_commands()` ordering**: New commands inserted in `all_commands()` affect autocomplete match order. Tests like `selected_command_returns_name` and `buffer_shows_filtered_matches` in `autocomplete.rs` use prefix matching — update them when adding commands that share a prefix with existing ones
 
 ## Provider Compatibility
 
