@@ -11,6 +11,7 @@ pub enum Command {
     Init,
     Compact,
     Sessions,
+    ExportDebug { include_logs: bool },
     Help,
 }
 
@@ -53,6 +54,8 @@ impl Command {
             "/init" => Ok(Command::Init),
             "/compact" => Ok(Command::Compact),
             "/sessions" => Ok(Command::Sessions),
+            "/export-debug" => Ok(Command::ExportDebug { include_logs: false }),
+            "/export-debug-with-logs" => Ok(Command::ExportDebug { include_logs: true }),
             "/help" => Ok(Command::Help),
             _ => Err(format!("Unknown command: {cmd}. Type /help for available commands.")),
         }
@@ -68,6 +71,8 @@ impl Command {
             CommandInfo { name: "/compact", description: "Compact conversation" },
             CommandInfo { name: "/sessions", description: "Browse sessions" },
             CommandInfo { name: "/init", description: "Create AGENTS.md" },
+            CommandInfo { name: "/export-debug", description: "Export session as markdown" },
+            CommandInfo { name: "/export-debug-with-logs", description: "Export session with logs" },
             CommandInfo { name: "/help", description: "Show help" },
             CommandInfo { name: "/exit", description: "Quit" },
         ]
@@ -148,7 +153,21 @@ mod tests {
         assert!(names.contains(&"/compact"));
         assert!(names.contains(&"/sessions"));
         assert!(names.contains(&"/help"));
-        assert_eq!(cmds.len(), 9);
+        assert!(names.contains(&"/export-debug"));
+        assert!(names.contains(&"/export-debug-with-logs"));
+        assert_eq!(cmds.len(), 11);
+    }
+
+    #[test]
+    fn parse_export_debug_commands() {
+        assert_eq!(
+            Command::parse("/export-debug").unwrap(),
+            Command::ExportDebug { include_logs: false }
+        );
+        assert_eq!(
+            Command::parse("/export-debug-with-logs").unwrap(),
+            Command::ExportDebug { include_logs: true }
+        );
     }
 
     #[test]
@@ -163,7 +182,7 @@ mod tests {
     #[test]
     fn filter_commands_slash_only() {
         let matches = Command::matching_commands("/");
-        assert_eq!(matches.len(), 9);
+        assert_eq!(matches.len(), 11);
     }
 
     #[test]

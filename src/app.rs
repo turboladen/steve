@@ -1701,9 +1701,44 @@ impl App {
                     }
                 });
             }
+            Command::ExportDebug { include_logs } => {
+                if self.current_session.is_none() || self.stored_messages.is_empty() {
+                    self.messages.push(MessageBlock::Error {
+                        text: "No active session to export.".to_string(),
+                    });
+                } else {
+                    let session = self.current_session.as_ref().unwrap();
+                    let system_prompt = self.build_system_prompt();
+                    let model_ref = self.current_model.as_deref();
+                    let params = crate::export::ExportParams {
+                        session_id: &session.id,
+                        session_title: &session.title,
+                        session_created_at: session.created_at,
+                        token_usage: &session.token_usage,
+                        messages: &self.stored_messages,
+                        system_prompt,
+                        model_ref,
+                        project_root: &self.project.root,
+                        include_logs,
+                    };
+                    match crate::export::export_debug(&params) {
+                        Ok(path) => {
+                            let display = self.strip_project_root(&path.to_string_lossy());
+                            self.messages.push(MessageBlock::System {
+                                text: format!("Debug export written to: {display}"),
+                            });
+                        }
+                        Err(e) => {
+                            self.messages.push(MessageBlock::Error {
+                                text: format!("Export failed: {e}"),
+                            });
+                        }
+                    }
+                }
+            }
             Command::Help => {
                 self.messages.push(MessageBlock::System {
-                    text: "Commands:\n  /new        \u{2014} Start a new session\n  /rename <t> \u{2014} Rename current session\n  /models     \u{2014} List available models\n  /model <r>  \u{2014} Switch to a model\n  /compact    \u{2014} Compact conversation into a summary\n  /sessions   \u{2014} Browse sessions\n  /init       \u{2014} Create AGENTS.md in project root\n  /help       \u{2014} Show this help\n  /exit       \u{2014} Quit\n\nKeys:\n  Enter       \u{2014} Send message\n  Shift+Enter \u{2014} Insert newline\n  Tab         \u{2014} Cycle autocomplete / toggle Build\u{2013}Plan mode\n  Ctrl+C      \u{2014} Cancel stream / quit\n  Ctrl+B      \u{2014} Toggle sidebar\n  Mouse wheel \u{2014} Scroll messages\n\nTips:\n  Shift+click/drag \u{2014} Select text for copy (terminal feature)".to_string(),
+                    text: "Commands:\n  /new                   \u{2014} Start a new session\n  /rename <t>            \u{2014} Rename current session\n  /models                \u{2014} List available models\n  /model <r>             \u{2014} Switch to a model\n  /compact               \u{2014} Compact conversation into a summary\n  /sessions              \u{2014} Browse sessions\n  /export-debug          \u{2014} Export session as markdown\n  /export-debug-with-logs \u{2014} Export session with logs\n  /init                  \u{2014} Create AGENTS.md in project root\n  /help                  \u{2014} Show this help\n  /exit                  \u{2014} Quit\n\nKeys:\n  Enter       \u{2014} Send message\n  Shift+Enter \u{2014} Insert newline\n  Tab         \u{2014} Cycle autocomplete / toggle Build\u{2013}Plan mode\n  Ctrl+C      \u{2014} Cancel stream / quit\n  Ctrl+B      \u{2014} Toggle sidebar\n  Mouse wheel \u{2014} Scroll messages\n\nTips:\n  Shift+click/drag \u{2014} Select text for copy (terminal feature)".to_string(),
                 });
             }
         }
