@@ -56,7 +56,7 @@ impl Default for InputState {
         textarea.set_placeholder_text("Type a message...");
         Self {
             textarea,
-            mode: AgentMode::Build,
+            mode: AgentMode::Plan,
         }
     }
 }

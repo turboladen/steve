@@ -286,9 +286,9 @@ impl App {
         // Build tool registry
         let tool_registry = Arc::new(ToolRegistry::new(project.root.clone()));
 
-        // Build permission engine with Build mode rules (default)
+        // Build permission engine with Plan mode rules (default)
         let permission_engine = Arc::new(tokio::sync::Mutex::new(
-            PermissionEngine::new(crate::permission::build_mode_rules()),
+            PermissionEngine::new(crate::permission::plan_mode_rules()),
         ));
 
         // Build tool result cache (session-scoped, shared across stream tasks)
