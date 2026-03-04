@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn selected_command_returns_name() {
         let mut state = AutocompleteState::default();
-        state.update("/e");
+        state.update("/exi");
         assert_eq!(state.selected_command(), Some("/exit"));
     }
 
