@@ -1278,8 +1278,9 @@ impl App {
         let mut parts: Vec<String> = Vec::new();
 
         parts.push(format!(
-            "You are a helpful AI coding assistant. You are working in the project at: {}",
-            self.project.root.display()
+            "You are a helpful AI coding assistant. You are working in the project at: {}\n\nThe current date and time is {}.",
+            self.project.root.display(),
+            chrono::Local::now().format("%A, %B %-d, %Y at %-I:%M %p")
         ));
 
         parts.push(TOOL_GUIDANCE.to_string());
@@ -2051,6 +2052,7 @@ pub(crate) mod tests {
         assert!(prompt.contains("Search before reading"), "should contain search guidance");
         assert!(prompt.contains("offset"), "should mention offset param");
         assert!(prompt.contains("context-efficient"), "should mention context efficiency");
+        assert!(prompt.contains("current date and time is"), "should contain current date and time");
     }
 
     #[test]
