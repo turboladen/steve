@@ -86,11 +86,9 @@ fn write_system_prompt(out: &mut String, system_prompt: Option<&str>) {
         return;
     };
     let _ = writeln!(out, "## System Prompt\n");
-    let _ = writeln!(out, "<details>\n<summary>System prompt (click to expand)</summary>\n");
     let _ = writeln!(out, "```");
     let _ = writeln!(out, "{prompt}");
     let _ = writeln!(out, "```\n");
-    let _ = writeln!(out, "</details>\n");
 }
 
 fn write_messages(out: &mut String, messages: &[Message]) {
@@ -138,12 +136,10 @@ fn write_message_part(out: &mut String, part: &MessagePart) {
                 "#### Tool Call: `{tool_name}` — {summary} [{state_label}]\n"
             );
             let _ = writeln!(out, "Call ID: `{call_id}`\n");
-            let _ = writeln!(out, "<details>\n<summary>Arguments</summary>\n");
             let _ = writeln!(out, "```json");
             let pretty = serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
             let _ = writeln!(out, "{pretty}");
             let _ = writeln!(out, "```\n");
-            let _ = writeln!(out, "</details>\n");
         }
         MessagePart::ToolResult {
             call_id,
@@ -159,11 +155,9 @@ fn write_message_part(out: &mut String, part: &MessagePart) {
             );
             let _ = writeln!(out, "Call ID: `{call_id}`\n");
             let truncated = truncate_tool_output(output, 200);
-            let _ = writeln!(out, "<details>\n<summary>Output</summary>\n");
             let _ = writeln!(out, "```");
             let _ = writeln!(out, "{truncated}");
             let _ = writeln!(out, "```\n");
-            let _ = writeln!(out, "</details>\n");
         }
     }
 }
@@ -304,7 +298,6 @@ fn write_logs(out: &mut String, session_start: DateTime<Utc>) {
         return;
     }
 
-    let _ = writeln!(out, "<details>\n<summary>Log entries (click to expand)</summary>\n");
     let _ = writeln!(out, "```");
 
     let mut count = 0;
@@ -333,7 +326,6 @@ fn write_logs(out: &mut String, session_start: DateTime<Utc>) {
         let _ = writeln!(out, "*No log entries matched the session timespan.*\n");
     }
 
-    let _ = writeln!(out, "</details>\n");
 }
 
 /// Parse an RFC 3339 timestamp from the start of a log line.
