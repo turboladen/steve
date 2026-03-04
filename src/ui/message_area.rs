@@ -486,7 +486,7 @@ fn find_last_code_block_position(messages: &[MessageBlock]) -> Option<(usize, us
 }
 
 /// Tracks the last code block header position within a `render_text_with_code_blocks` call
-/// so we can post-patch it with the `^Y` copy hint.
+/// so we can post-patch it with the copy hint.
 enum LastHeaderInfo {
     /// A rendered header line (language label) — index into the `lines` vec.
     Rendered(usize),
@@ -501,7 +501,7 @@ enum LastHeaderInfo {
 /// language label; closing fences are consumed. Code lines get `code_bg` background.
 ///
 /// When `show_copy_hint` is true, the last code block's header line gets a
-/// right-aligned `^Y` hint (dim text on code_bg) to indicate the copy-to-clipboard
+/// right-aligned copy hint (dim text on code_bg) to indicate the copy-to-clipboard
 /// keybinding. Bare fences that normally produce no header get a minimal header
 /// inserted just for the hint.
 fn render_text_with_code_blocks(
@@ -566,12 +566,12 @@ fn render_text_with_code_blocks(
         }
     }
 
-    // Post-patch: add right-aligned ^Y hint to the last code block's header
+    // Post-patch: add right-aligned copy hint to the last code block's header
     if show_copy_hint {
         if let Some(header_info) = last_header {
             let code_bg_style = Style::default().fg(theme.dim).bg(theme.code_bg);
-            let hint = "^Y";
-            let hint_len = hint.len(); // 2 ASCII chars
+            let hint = "(press ctrl-y to copy)";
+            let hint_len = hint.len(); // all ASCII
 
             match header_info {
                 LastHeaderInfo::Rendered(idx) => {
@@ -592,7 +592,7 @@ fn render_text_with_code_blocks(
                     .style(Style::default().bg(theme.code_bg));
                 }
                 LastHeaderInfo::BareAt(idx) => {
-                    // Insert a minimal header with just the ^Y hint right-aligned.
+                    // Insert a minimal header with just the copy hint right-aligned.
                     let gap_len = available_width.saturating_sub(hint_len);
                     let gap = " ".repeat(gap_len);
                     lines.insert(
@@ -1636,6 +1636,9 @@ mod tests {
 
     // -- render_text_with_code_blocks copy hint tests --
 
+    /// The hint text used in copy hint assertions.
+    const COPY_HINT: &str = "(press ctrl-y to copy)";
+
     #[test]
     fn copy_hint_with_language_label() {
         let theme = Theme::default();
@@ -1646,7 +1649,7 @@ mod tests {
         assert_eq!(lines.len(), 2);
         let header_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(header_text.starts_with("rust "), "header should start with lang label");
-        assert!(header_text.ends_with("^Y"), "header should end with ^Y hint, got: {header_text}");
+        assert!(header_text.ends_with(COPY_HINT), "header should end with copy hint, got: {header_text}");
     }
 
     #[test]
@@ -1654,12 +1657,12 @@ mod tests {
         let theme = Theme::default();
         let text = "```\ncode\n```";
         let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 30, true);
+        render_text_with_code_blocks(text, &mut lines, &theme, 40, true);
         // Minimal header inserted + code line = 2 lines (vs 1 without hint)
         assert_eq!(lines.len(), 2, "bare fence with hint should get a header line");
         let header_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(header_text.ends_with("^Y"), "minimal header should end with ^Y, got: {header_text}");
-        assert_eq!(header_text.chars().count(), 30, "header should fill available width");
+        assert!(header_text.ends_with(COPY_HINT), "minimal header should end with copy hint, got: {header_text}");
+        assert_eq!(header_text.chars().count(), 40, "header should fill available width");
     }
 
     #[test]
@@ -1667,13 +1670,13 @@ mod tests {
         let theme = Theme::default();
         let text = "```rust\nfirst\n```\n```go\nsecond\n```";
         let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40, true);
+        render_text_with_code_blocks(text, &mut lines, &theme, 60, true);
         // header1 + code1 + header2 + code2 = 4 lines
         assert_eq!(lines.len(), 4);
         let header1: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         let header2: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(!header1.contains("^Y"), "first block header should NOT have ^Y");
-        assert!(header2.ends_with("^Y"), "last block header should have ^Y");
+        assert!(!header1.contains(COPY_HINT), "first block header should NOT have copy hint");
+        assert!(header2.ends_with(COPY_HINT), "last block header should have copy hint");
     }
 
     #[test]
@@ -1683,7 +1686,7 @@ mod tests {
         let mut lines: Vec<Line> = Vec::new();
         render_text_with_code_blocks(text, &mut lines, &theme, 40, false);
         let header_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(!header_text.contains("^Y"), "show_copy_hint=false should not add ^Y");
+        assert!(!header_text.contains(COPY_HINT), "show_copy_hint=false should not add hint");
     }
 
     #[test]
@@ -1694,7 +1697,7 @@ mod tests {
         render_text_with_code_blocks(text, &mut lines, &theme, 40, true);
         assert_eq!(lines.len(), 1);
         let line_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(!line_text.contains("^Y"), "no code blocks means no ^Y");
+        assert!(!line_text.contains(COPY_HINT), "no code blocks means no copy hint");
     }
 
     #[test]
@@ -1703,13 +1706,13 @@ mod tests {
         // First block has language, second is bare — hint goes on bare (last)
         let text = "```rust\nfirst\n```\n```\nsecond\n```";
         let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 30, true);
+        render_text_with_code_blocks(text, &mut lines, &theme, 40, true);
         // header1 + code1 + bare_header + code2 = 4 lines
         assert_eq!(lines.len(), 4, "expected 4 lines, got {}", lines.len());
         let header1: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         let bare_header: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(!header1.contains("^Y"), "first header should not have ^Y");
-        assert!(bare_header.ends_with("^Y"), "bare last header should have ^Y");
+        assert!(!header1.contains(COPY_HINT), "first header should not have copy hint");
+        assert!(bare_header.ends_with(COPY_HINT), "bare last header should have copy hint");
     }
 
     #[test]
@@ -1718,11 +1721,11 @@ mod tests {
         // First block is bare, second has language — hint goes on language (last)
         let text = "```\nfirst\n```\n```rust\nsecond\n```";
         let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 30, true);
+        render_text_with_code_blocks(text, &mut lines, &theme, 40, true);
         // code1 (bare, no header since not last) + header2 + code2 = 3 lines
         assert_eq!(lines.len(), 3, "expected 3 lines, got {}", lines.len());
         let header: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(header.ends_with("^Y"), "last block's lang header should have ^Y");
+        assert!(header.ends_with(COPY_HINT), "last block's lang header should have copy hint");
     }
 
     // -- Integration test: full render pipeline --
@@ -1739,8 +1742,8 @@ mod tests {
             },
         ];
         let text = render_messages_to_string(60, 15, &messages, None);
-        // ^Y should appear exactly once in the rendered output
-        let count = text.matches("^Y").count();
-        assert_eq!(count, 1, "expected exactly 1 '^Y' hint, found {count} in:\n{text}");
+        // Copy hint should appear exactly once in the rendered output
+        let count = text.matches("ctrl-y to copy").count();
+        assert_eq!(count, 1, "expected exactly 1 copy hint, found {count} in:\n{text}");
     }
 }
