@@ -1,6 +1,6 @@
 # Implementation Plan
 
-Remaining TUI redesign items. Completed items archived in `docs/plans/2026-02-27-tui-redesign-design.md`.
+Remaining work items. TUI redesign items (8–13) archived from `docs/plans/2026-02-27-tui-redesign-design.md`. Items 14–15 from `docs/vision.md` Milestone 3 audit. Milestones 4–5 (agent intelligence, ecosystem integration) remain in `docs/vision.md` as longer-term roadmap items.
 
 ## Priority Order
 
@@ -9,6 +9,11 @@ Remaining TUI redesign items. Completed items archived in `docs/plans/2026-02-27
 | 8 | OSC 52 clipboard copy | Low | Clean copy without sidebar |
 | 9 | Activity rail | High | Spatial separation of prose vs tool activity |
 | 10 | Permission diff preview | High | Informed permission decisions |
+| 11 | Keyboard scrolling (Up/Down, PgUp/PgDn) | Low | Navigate messages without mouse |
+| 12 | `/models` interactive picker overlay | Medium | Discoverable model switching |
+| 13 | OSC 10/11 terminal-adaptive theme | Medium | Correct colors in light terminals |
+| 14 | Binary file detection in `read` tool | Low | Prevents garbled output / wasted tokens |
+| 15 | `ropey`-based text editing | Medium | Reliable multi-edit, UTF-8 safety |
 
 ---
 
@@ -77,3 +82,126 @@ Render permission prompts as contextual cards showing *what will change*:
 For `bash`, show the command. For `write`, show a file-size summary. The user sees the actual impact, not just the tool name and args.
 
 **Effort note:** Requires threading diff data through the permission channel (`PermissionRequest`). Currently the stream task has the tool call arguments when it sends the permission request, but that data doesn't flow to the UI's permission rendering.
+
+---
+
+## 11. Keyboard Scrolling (Up/Down, PageUp/PageDown)
+
+*Originally promised in PLAN.md Phase 1 key bindings but never implemented.*
+
+Currently only mouse wheel scrolling works. Add keyboard-based message area scrolling:
+
+| Key | Action |
+|-----|--------|
+| Up | Scroll up one line |
+| Down | Scroll down one line |
+| PageUp | Scroll up one page |
+| PageDown | Scroll down one page |
+
+**Implementation:** Handle `KeyCode::Up`, `KeyCode::Down`, `KeyCode::PageUp`, `KeyCode::PageDown` in `app.rs` `handle_key()`. Route to existing `scroll_up()` / `scroll_down()` methods. PageUp/PageDown should scroll by the visible message area height.
+
+**Consideration:** Up/Down arrows conflict with tui-textarea cursor movement when the input is focused. Only scroll when the input area doesn't need the keys (e.g., input is empty or a modifier indicates scroll intent). Alternatively, always forward to scroll since tui-textarea is single-line-send (Enter submits).
+
+**Effort:** Low — the scroll infrastructure already exists.
+
+---
+
+## 12. `/models` Interactive Picker Overlay
+
+*PLAN.md Phase 10 promised a "picker overlay" but the current implementation just prints a text list.*
+
+Replace the text-list `/models` output with a floating overlay widget (similar to the autocomplete popup) that lets the user arrow-key through available models and press Enter to select.
+
+**Sketch:**
+```
+┌─ Models ──────────────────────┐
+│  ● openai/gpt-4o        ◄    │
+│    openai/gpt-4o-mini         │
+│    anthropic/claude-sonnet    │
+│                               │
+│  Enter=select  Esc=cancel     │
+└───────────────────────────────┘
+```
+
+**Implementation:**
+- Add `ModelPicker` state to `App` (visible flag, selected index, filtered model list)
+- Render as a centered floating `Paragraph` or `List` widget with `Clear` background
+- Arrow keys navigate, Enter selects and calls the existing model-switch logic, Esc dismisses
+
+**Effort:** Medium — similar pattern to autocomplete popup but needs its own state and key handling mode.
+
+---
+
+## 13. OSC 10/11 Terminal-Adaptive Theme
+
+*PLAN.md Phase 10 promised "Terminal-adaptive theme via ANSI OSC 10/11" but the theme is hardcoded RGB.*
+
+Query the terminal's background color at startup using OSC 10/11 escape sequences to detect light vs dark terminals, then select the appropriate color palette.
+
+**How OSC 10/11 works:**
+1. Emit `\x1b]11;?\x07` (query background color)
+2. Terminal responds with `\x1b]11;rgb:RRRR/GGGG/BBBB\x07`
+3. Parse the RGB values; compute luminance to determine light vs dark
+
+**Implementation:**
+- Add `Theme::light()` palette (dark text on light background)
+- At startup (before entering raw mode or immediately after), send the OSC query and read the response with a short timeout
+- If response received: pick `dark()` or `light()` based on luminance
+- If no response (terminal doesn't support it): default to `dark()`
+
+**Edge cases:**
+- tmux/screen may not forward OSC responses — timeout gracefully
+- Some terminals return `rgba:` format — handle both
+- Query must happen before or immediately after entering raw mode
+
+**Effort:** Medium — the palette work is the bulk; the OSC query itself is ~20 lines.
+
+**Dependencies:** None (raw escape sequence I/O).
+
+---
+
+## 14. Binary File Detection in `read` Tool
+
+*Vision doc Milestone 3 item: "Language-aware file read — detect binary files."*
+
+`read.rs` currently calls `std::fs::read_to_string()` directly. If the LLM asks to read a binary file (compiled output, images, `.wasm`, etc.), the result is garbled text that wastes context tokens and confuses the model.
+
+**Implementation:**
+1. Read the first 8KB of the file as raw bytes
+2. Check for null bytes (`\0`) — presence indicates binary
+3. If binary, return early: `"Binary file (N bytes), not displayed"` with `is_error: false`
+4. Otherwise, convert to string and proceed as normal
+
+**Edge cases:**
+- Empty files: not binary (current behavior is fine)
+- UTF-8 with BOM: still valid text
+- Files with embedded nulls that are technically text (rare, acceptable false positive)
+
+**Optional enhancement:** Use file extension heuristics (`.png`, `.o`, `.wasm` → skip entirely without reading) as a fast path before byte inspection.
+
+**Effort:** Low — ~10 lines added to `read.rs`.
+
+**Dependencies:** None.
+
+---
+
+## 15. `ropey`-Based Text Editing
+
+*Vision doc Milestone 3 item: "Text editing via ropey — rope-based in-memory buffer for edit/write/patch operations."*
+
+Currently `edit.rs` uses `String::replacen()` for find-and-replace. This works for single edits but has limitations:
+- No efficient line indexing (line-range operations require scanning from the start)
+- Multi-edit within the same file requires careful offset tracking
+- Large files are fully loaded into a single `String`
+
+**Implementation:**
+- Replace `String`-based file manipulation in `edit.rs`, `write.rs`, and `patch.rs` with `ropey::Rope`
+- Use `Rope::from_reader()` for efficient loading
+- Line-indexed access for range operations (read tool could also benefit)
+- Multi-edit batching: apply edits in reverse-offset order to avoid position shifts
+
+**When to do this:** When string-based editing hits real problems. The current approach works for the MVP use case (single find-and-replace per tool call). This is an optimization for robustness, not a blocker.
+
+**Effort:** Medium — touches three tool files and needs careful testing.
+
+**Dependencies:** Add `ropey` crate.
