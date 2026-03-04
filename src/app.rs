@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
-use serde_json::Value;
 use futures::StreamExt;
+use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -15,23 +15,25 @@ use async_openai::types::chat::{
 };
 
 use crate::config::types::Config;
+use crate::context::cache::ToolResultCache;
 use crate::event::AppEvent;
 use crate::permission::PermissionEngine;
 use crate::permission::types::PermissionReply;
 use crate::project::ProjectInfo;
 use crate::provider::ProviderRegistry;
+use crate::session::SessionManager;
 use crate::session::message::{Message, Role};
 use crate::session::types::SessionInfo;
-use crate::session::SessionManager;
 use crate::storage::Storage;
 use crate::stream::{self, StreamRequest};
-use crate::context::cache::ToolResultCache;
 use crate::tool::{ToolContext, ToolName, ToolRegistry};
 use crate::ui;
 use crate::ui::autocomplete::AutocompleteState;
 use crate::ui::input::InputState;
 use crate::ui::message_area::MessageAreaState;
-use crate::ui::message_block::{AssistantPart, DiffContent, DiffLine, MessageBlock, ToolCall};
+use crate::ui::message_block::{
+    AssistantPart, CodeFence, DiffContent, DiffLine, MessageBlock, ToolCall,
+};
 use crate::ui::sidebar::{SidebarState, count_diff_lines};
 use crate::ui::status_line::{Activity, StatusLineState};
 use crate::ui::theme::Theme;
@@ -86,10 +88,7 @@ fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
             .unwrap_or("")
             .to_string(),
         ToolName::Bash => {
-            let cmd = args
-                .get("command")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
             if cmd.chars().count() > 40 {
                 let truncated: String = cmd.chars().take(37).collect();
                 format!("{truncated}...")
@@ -128,8 +127,14 @@ fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
 fn extract_diff_content(tool_name: ToolName, args: &Value) -> Option<DiffContent> {
     match tool_name {
         ToolName::Edit => {
-            let old = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-            let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+            let old = args
+                .get("old_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let new = args
+                .get("new_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if old.is_empty() && new.is_empty() {
                 return None;
             }
@@ -194,6 +199,54 @@ fn parse_unified_diff_lines(patch: &str) -> Vec<DiffLine> {
         }
     }
     lines
+}
+
+// Extract the last fenced code block from conversation messages.
+//
+// Scans messages backwards for `MessageBlock::Assistant` blocks, then scans
+// their text parts for CommonMark fenced code blocks (at least three backticks
+// with ≤3 leading spaces). Returns the content of the last code block found,
+// or `None` if there are no code blocks.
+fn extract_last_code_block(messages: &[MessageBlock]) -> Option<String> {
+    for msg in messages.iter().rev() {
+        if let MessageBlock::Assistant { parts, .. } = msg {
+            // Scan parts backwards — we want the last code block in the most recent assistant message
+            for part in parts.iter().rev() {
+                if let AssistantPart::Text(text) = part {
+                    let mut in_code_block = false;
+                    let mut current_block = Vec::new();
+                    let mut last_block: Option<String> = None;
+
+                    for line in text.lines() {
+                        match CodeFence::classify(line, in_code_block) {
+                            CodeFence::Open { .. } => {
+                                in_code_block = true;
+                                current_block.clear();
+                            }
+                            CodeFence::Close => {
+                                last_block = Some(current_block.join("\n"));
+                                in_code_block = false;
+                                current_block.clear();
+                            }
+                            CodeFence::NotFence if in_code_block => {
+                                current_block.push(line);
+                            }
+                            CodeFence::NotFence => {}
+                        }
+                    }
+                    // Unclosed code block — still capture it
+                    if in_code_block && !current_block.is_empty() {
+                        last_block = Some(current_block.join("\n"));
+                    }
+
+                    if last_block.is_some() {
+                        return last_block;
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 pub struct App {
@@ -287,14 +340,14 @@ impl App {
         let tool_registry = Arc::new(ToolRegistry::new(project.root.clone()));
 
         // Build permission engine with Plan mode rules (default)
-        let permission_engine = Arc::new(tokio::sync::Mutex::new(
-            PermissionEngine::new(crate::permission::plan_mode_rules()),
-        ));
+        let permission_engine = Arc::new(tokio::sync::Mutex::new(PermissionEngine::new(
+            crate::permission::plan_mode_rules(),
+        )));
 
         // Build tool result cache (session-scoped, shared across stream tasks)
-        let tool_cache = Arc::new(std::sync::Mutex::new(
-            ToolResultCache::new(project.root.clone()),
-        ));
+        let tool_cache = Arc::new(std::sync::Mutex::new(ToolResultCache::new(
+            project.root.clone(),
+        )));
 
         // Build startup messages
         let mut messages = Vec::new();
@@ -457,13 +510,18 @@ impl App {
 
         // Load messages
         if let Ok(loaded_messages) = mgr.load_messages(&session.id) {
-            self.exchange_count = loaded_messages.iter()
-                .filter(|m| m.role == Role::User).count();
+            self.exchange_count = loaded_messages
+                .iter()
+                .filter(|m| m.role == Role::User)
+                .count();
             for msg in &loaded_messages {
                 match msg.role {
-                    Role::User => self.messages.push(MessageBlock::User { text: msg.text_content() }),
+                    Role::User => self.messages.push(MessageBlock::User {
+                        text: msg.text_content(),
+                    }),
                     Role::Assistant => self.messages.push(MessageBlock::Assistant {
-                        thinking: None, parts: vec![AssistantPart::Text(msg.text_content())],
+                        thinking: None,
+                        parts: vec![AssistantPart::Text(msg.text_content())],
                     }),
                     Role::System => continue,
                 }
@@ -534,7 +592,10 @@ impl App {
             }
 
             // -- Tool events --
-            AppEvent::LlmToolCallStreaming { count: _, tool_name } => {
+            AppEvent::LlmToolCallStreaming {
+                count: _,
+                tool_name,
+            } => {
                 if let Some(last) = self.last_assistant_mut() {
                     last.ensure_preparing_tool_group();
                 }
@@ -589,7 +650,9 @@ impl App {
                             let (additions, removals) = count_diff_lines(diff);
                             let display_path = self.strip_project_root(&call.args_summary);
                             self.sidebar_state.record_file_change(
-                                display_path, additions, removals,
+                                display_path,
+                                additions,
+                                removals,
                             );
                         }
                     }
@@ -623,14 +686,8 @@ impl App {
                     // already set the correct per-call value. The usage here is
                     // accumulated across all loop iterations, which is wrong for
                     // context pressure display but correct for cumulative cost.
-                    if let (Some(u), Some(session)) =
-                        (usage, &mut self.current_session)
-                    {
-                        let _ = mgr.add_usage(
-                            session,
-                            u.prompt_tokens,
-                            u.completion_tokens,
-                        );
+                    if let (Some(u), Some(session)) = (usage, &mut self.current_session) {
+                        let _ = mgr.add_usage(session, u.prompt_tokens, u.completion_tokens);
                     } else if let Some(session) = &mut self.current_session {
                         let _ = mgr.touch_session(session);
                     }
@@ -669,7 +726,11 @@ impl App {
                     (usage.prompt_tokens + usage.completion_tokens) as u64;
                 self.check_context_warning();
             }
-            AppEvent::LlmRetry { attempt, max_attempts, error } => {
+            AppEvent::LlmRetry {
+                attempt,
+                max_attempts,
+                error,
+            } => {
                 self.messages.push(MessageBlock::System {
                     text: format!(
                         "Connection error: {error}\nRetrying ({attempt}/{max_attempts})..."
@@ -759,11 +820,52 @@ impl App {
         Ok(())
     }
 
+    /// Copy the last code block to the system clipboard via OSC 52.
+    /// Pushes a system message indicating success or failure.
+    fn copy_last_code_block_to_clipboard(&mut self) {
+        match extract_last_code_block(&self.messages) {
+            Some(content) => {
+                use base64::Engine;
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&content);
+                let mut stdout = std::io::stdout();
+                let write_result = std::io::Write::write_fmt(
+                    &mut stdout,
+                    format_args!("\x1b]52;c;{encoded}\x07"),
+                );
+                let result = write_result.and_then(|_| std::io::Write::flush(&mut stdout));
+                let n = content.lines().count();
+                match result {
+                    Ok(()) => {
+                        self.messages.push(MessageBlock::System {
+                            text: format!("Copied {n} lines to clipboard"),
+                        });
+                    }
+                    Err(err) => {
+                        self.messages.push(MessageBlock::Error {
+                            text: format!("Failed to copy to clipboard via OSC 52: {err}"),
+                        });
+                    }
+                }
+            }
+            None => {
+                self.messages.push(MessageBlock::System {
+                    text: "No code block to copy".to_string(),
+                });
+            }
+        }
+        self.message_area_state.scroll_to_bottom();
+    }
+
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         // If there's a pending permission prompt, intercept keystrokes
         if self.pending_permission.is_some() {
-            match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
+            match (key.code, key.modifiers) {
+                (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
+                    // Ctrl+Y: copy last code block to clipboard (even during permission prompt)
+                    self.copy_last_code_block_to_clipboard();
+                    return Ok(());
+                }
+                (KeyCode::Char('y'), _) | (KeyCode::Char('Y'), _) => {
                     if let Some(perm) = self.pending_permission.take() {
                         let _ = perm.response_tx.send(PermissionReply::AllowOnce);
                         self.remove_last_permission_block();
@@ -772,7 +874,7 @@ impl App {
                     }
                     return Ok(());
                 }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                (KeyCode::Char('n'), _) | (KeyCode::Char('N'), _) | (KeyCode::Esc, _) => {
                     if let Some(perm) = self.pending_permission.take() {
                         let _ = perm.response_tx.send(PermissionReply::Deny);
                         self.remove_last_permission_block();
@@ -784,7 +886,7 @@ impl App {
                     }
                     return Ok(());
                 }
-                KeyCode::Char('a') | KeyCode::Char('A') => {
+                (KeyCode::Char('a'), _) | (KeyCode::Char('A'), _) => {
                     if let Some(perm) = self.pending_permission.take() {
                         let _ = perm.response_tx.send(PermissionReply::AllowAlways);
                         self.remove_last_permission_block();
@@ -793,7 +895,7 @@ impl App {
                     }
                     return Ok(());
                 }
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
                     // Cancel the stream (which will drop the permission request)
                     self.cancel_stream();
                     return Ok(());
@@ -841,17 +943,19 @@ impl App {
             }
             (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
                 self.sidebar_override = match self.sidebar_override {
-                    None => Some(false),        // auto (likely visible) -> hide
-                    Some(false) => Some(true),  // hidden -> show
-                    Some(true) => None,         // forced visible -> auto
+                    None => Some(false),       // auto (likely visible) -> hide
+                    Some(false) => Some(true), // hidden -> show
+                    Some(true) => None,        // forced visible -> auto
                 };
+            }
+            (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
+                self.copy_last_code_block_to_clipboard();
             }
             (KeyCode::Enter, KeyModifiers::SHIFT) => {
                 // Shift+Enter: insert newline in textarea (forward as plain Enter)
-                self.input.textarea.input(KeyEvent::new(
-                    KeyCode::Enter,
-                    KeyModifiers::NONE,
-                ));
+                self.input
+                    .textarea
+                    .input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
             }
             (KeyCode::Enter, KeyModifiers::NONE) => {
                 if !self.is_loading {
@@ -970,7 +1074,8 @@ impl App {
         self.stored_messages.push(user_msg);
 
         // Add user message to display
-        self.messages.push(MessageBlock::User { text: text.clone() });
+        self.messages
+            .push(MessageBlock::User { text: text.clone() });
         self.message_area_state.scroll_to_bottom();
 
         // Try to send to LLM
@@ -1034,7 +1139,9 @@ impl App {
 
         // Launch the streaming task with tool support
         stream::spawn_stream(StreamRequest {
-            stream_provider: std::sync::Arc::new(stream::OpenAIChatStream::new(client.inner().clone())),
+            stream_provider: std::sync::Arc::new(stream::OpenAIChatStream::new(
+                client.inner().clone(),
+            )),
             model: resolved.api_model_id().to_string(),
             system_prompt,
             history,
@@ -1089,13 +1196,10 @@ impl App {
 
         // Use the first user message as a simple title (truncated).
         // TODO: Upgrade to use small_model for LLM-generated titles.
-        let first_user_msg = self
-            .messages
-            .iter()
-            .find_map(|m| match m {
-                MessageBlock::User { text } => Some(text.clone()),
-                _ => None,
-            });
+        let first_user_msg = self.messages.iter().find_map(|m| match m {
+            MessageBlock::User { text } => Some(text.clone()),
+            _ => None,
+        });
 
         if let Some(text) = first_user_msg {
             let title = if text.chars().count() > 60 {
@@ -1172,9 +1276,11 @@ impl App {
         }
         // Calculate session cost if model has pricing
         self.sidebar_state.session_cost = None;
-        if let (Some(model_ref), Some(registry), Some(session)) =
-            (&self.current_model, &self.provider_registry, &self.current_session)
-        {
+        if let (Some(model_ref), Some(registry), Some(session)) = (
+            &self.current_model,
+            &self.provider_registry,
+            &self.current_session,
+        ) {
             if let Ok(resolved) = registry.resolve_model(model_ref) {
                 self.sidebar_state.session_cost = resolved.session_cost(
                     session.token_usage.prompt_tokens,
@@ -1470,8 +1576,7 @@ impl App {
                 self.current_session = None;
                 self.session_browse_list = None;
                 // Reset tool result cache for the new session
-                *self.tool_cache.lock().unwrap() =
-                    ToolResultCache::new(self.project.root.clone());
+                *self.tool_cache.lock().unwrap() = ToolResultCache::new(self.project.root.clone());
                 // Clear changeset tracking, todos, and reset token counters
                 self.sidebar_state.changes.clear();
                 crate::tool::todo::clear_todos();
@@ -1533,7 +1638,12 @@ impl App {
                                     .as_ref()
                                     .is_some_and(|c| c == &m.display_ref());
                                 let marker = if current { " \u{25cf}" } else { "" };
-                                format!("  {} \u{2014} {}{}", m.display_ref(), m.config.name, marker)
+                                format!(
+                                    "  {} \u{2014} {}{}",
+                                    m.display_ref(),
+                                    m.config.name,
+                                    marker
+                                )
                             })
                             .collect::<Vec<_>>()
                             .join("\n");
@@ -1588,13 +1698,16 @@ impl App {
                         let display_sessions: Vec<_> = sessions.into_iter().take(20).collect();
                         let mut list = String::from("Sessions (enter number to switch):\n");
                         for (i, s) in display_sessions.iter().enumerate() {
-                            let current_marker = self.current_session.as_ref()
-                                .is_some_and(|c| c.id == s.id);
+                            let current_marker =
+                                self.current_session.as_ref().is_some_and(|c| c.id == s.id);
                             let marker = if current_marker { " *" } else { "" };
                             let date = s.updated_at.format("%m/%d %H:%M");
                             list.push_str(&format!(
                                 "  {:>2}. {} \u{2014} {}{}\n",
-                                i + 1, date, s.title, marker
+                                i + 1,
+                                date,
+                                s.title,
+                                marker
                             ));
                         }
                         self.messages.push(MessageBlock::System { text: list });
@@ -1738,7 +1851,7 @@ impl App {
             }
             Command::Help => {
                 self.messages.push(MessageBlock::System {
-                    text: "Commands:\n  /new                   \u{2014} Start a new session\n  /rename <t>            \u{2014} Rename current session\n  /models                \u{2014} List available models\n  /model <r>             \u{2014} Switch to a model\n  /compact               \u{2014} Compact conversation into a summary\n  /sessions              \u{2014} Browse sessions\n  /export-debug          \u{2014} Export session as markdown\n  /export-debug-with-logs \u{2014} Export session with logs\n  /init                  \u{2014} Create AGENTS.md in project root\n  /help                  \u{2014} Show this help\n  /exit                  \u{2014} Quit\n\nKeys:\n  Enter       \u{2014} Send message\n  Shift+Enter \u{2014} Insert newline\n  Tab         \u{2014} Cycle autocomplete / toggle Build\u{2013}Plan mode\n  Ctrl+C      \u{2014} Cancel stream / quit\n  Ctrl+B      \u{2014} Toggle sidebar\n  Mouse wheel \u{2014} Scroll messages\n\nTips:\n  Shift+click/drag \u{2014} Select text for copy (terminal feature)".to_string(),
+                    text: "Commands:\n  /new                   \u{2014} Start a new session\n  /rename <t>            \u{2014} Rename current session\n  /models                \u{2014} List available models\n  /model <r>             \u{2014} Switch to a model\n  /compact               \u{2014} Compact conversation into a summary\n  /sessions              \u{2014} Browse sessions\n  /export-debug          \u{2014} Export session as markdown\n  /export-debug-with-logs \u{2014} Export session with logs\n  /init                  \u{2014} Create AGENTS.md in project root\n  /help                  \u{2014} Show this help\n  /exit                  \u{2014} Quit\n\nKeys:\n  Enter       \u{2014} Send message\n  Shift+Enter \u{2014} Insert newline\n  Tab         \u{2014} Cycle autocomplete / toggle Build\u{2013}Plan mode\n  Ctrl+C      \u{2014} Cancel stream / quit\n  Ctrl+B      \u{2014} Toggle sidebar\n  Ctrl+Y      \u{2014} Copy last code block to clipboard (OSC 52)\n  Mouse wheel \u{2014} Scroll messages\n\nTips:\n  Shift+click/drag \u{2014} Select text for copy (terminal feature)".to_string(),
                 });
             }
         }
@@ -1821,7 +1934,10 @@ pub(crate) mod tests {
     #[test]
     fn extract_args_summary_question_short() {
         let args = json!({"text": "What is this?"});
-        assert_eq!(extract_args_summary(ToolName::Question, &args), "What is this?");
+        assert_eq!(
+            extract_args_summary(ToolName::Question, &args),
+            "What is this?"
+        );
     }
 
     #[test]
@@ -1842,7 +1958,10 @@ pub(crate) mod tests {
     #[test]
     fn extract_args_summary_webfetch_url() {
         let args = json!({"url": "https://example.com"});
-        assert_eq!(extract_args_summary(ToolName::Webfetch, &args), "https://example.com");
+        assert_eq!(
+            extract_args_summary(ToolName::Webfetch, &args),
+            "https://example.com"
+        );
     }
 
     #[test]
@@ -2045,7 +2164,10 @@ pub(crate) mod tests {
                 // — the key assertion is that this doesn't panic.
                 let _ = result;
             } else {
-                assert!(result.is_none(), "{tool} should return None for diff content");
+                assert!(
+                    result.is_none(),
+                    "{tool} should return None for diff content"
+                );
             }
         }
     }
@@ -2084,10 +2206,19 @@ pub(crate) mod tests {
     fn system_prompt_includes_tool_guidance() {
         let app = make_test_app();
         let prompt = app.build_system_prompt().unwrap();
-        assert!(prompt.contains("Search before reading"), "should contain search guidance");
+        assert!(
+            prompt.contains("Search before reading"),
+            "should contain search guidance"
+        );
         assert!(prompt.contains("offset"), "should mention offset param");
-        assert!(prompt.contains("context-efficient"), "should mention context efficiency");
-        assert!(prompt.contains("current date and time is"), "should contain current date and time");
+        assert!(
+            prompt.contains("context-efficient"),
+            "should mention context efficiency"
+        );
+        assert!(
+            prompt.contains("current date and time is"),
+            "should contain current date and time"
+        );
     }
 
     #[test]
@@ -2197,7 +2328,10 @@ pub(crate) mod tests {
     #[test]
     fn strip_project_root_absolute_path() {
         let app = make_test_app();
-        assert_eq!(app.strip_project_root("/tmp/test/src/main.rs"), "src/main.rs");
+        assert_eq!(
+            app.strip_project_root("/tmp/test/src/main.rs"),
+            "src/main.rs"
+        );
     }
 
     #[test]
@@ -2209,7 +2343,10 @@ pub(crate) mod tests {
     #[test]
     fn strip_project_root_no_match() {
         let app = make_test_app();
-        assert_eq!(app.strip_project_root("/other/path/file.rs"), "/other/path/file.rs");
+        assert_eq!(
+            app.strip_project_root("/other/path/file.rs"),
+            "/other/path/file.rs"
+        );
     }
 
     #[test]
@@ -2227,6 +2364,117 @@ pub(crate) mod tests {
             app.strip_project_root("/tmp/test-backup/file.rs"),
             "/tmp/test-backup/file.rs"
         );
+    }
+
+    // --- extract_last_code_block tests ---
+
+    fn assistant_text(text: &str) -> MessageBlock {
+        MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::Text(text.to_string())],
+        }
+    }
+
+    #[test]
+    fn extract_last_code_block_no_messages() {
+        assert_eq!(extract_last_code_block(&[]), None);
+    }
+
+    #[test]
+    fn extract_last_code_block_no_code_blocks() {
+        let msgs = vec![assistant_text("Just some text without any code.")];
+        assert_eq!(extract_last_code_block(&msgs), None);
+    }
+
+    #[test]
+    fn extract_last_code_block_single_block() {
+        let msgs = vec![assistant_text("Here:\n```\nfoo\nbar\n```\nDone.")];
+        assert_eq!(extract_last_code_block(&msgs), Some("foo\nbar".to_string()));
+    }
+
+    #[test]
+    fn extract_last_code_block_multiple_blocks_returns_last() {
+        let msgs = vec![assistant_text(
+            "First:\n```\nalpha\n```\nSecond:\n```\nbeta\n```",
+        )];
+        assert_eq!(extract_last_code_block(&msgs), Some("beta".to_string()));
+    }
+
+    #[test]
+    fn extract_last_code_block_with_language_label() {
+        let msgs = vec![assistant_text("```rust\nfn main() {}\n```")];
+        assert_eq!(
+            extract_last_code_block(&msgs),
+            Some("fn main() {}".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_last_code_block_indented_backticks_not_fence() {
+        // >3 leading spaces means it's NOT a fence — treated as code content
+        let msgs = vec![assistant_text("```\n    ```\nreal content\n```")];
+        let result = extract_last_code_block(&msgs).unwrap();
+        assert!(result.contains("    ```"));
+        assert!(result.contains("real content"));
+    }
+
+    #[test]
+    fn extract_last_code_block_three_spaces_is_fence() {
+        // Exactly 3 leading spaces is still a valid fence
+        let msgs = vec![assistant_text("   ```\nindented fence\n   ```")];
+        assert_eq!(
+            extract_last_code_block(&msgs),
+            Some("indented fence".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_last_code_block_multiple_assistant_messages() {
+        let msgs = vec![
+            assistant_text("Old:\n```\nold code\n```"),
+            MessageBlock::User {
+                text: "continue".to_string(),
+            },
+            assistant_text("New:\n```\nnew code\n```"),
+        ];
+        // Should find the block in the most recent assistant message
+        assert_eq!(extract_last_code_block(&msgs), Some("new code".to_string()));
+    }
+
+    #[test]
+    fn extract_last_code_block_skips_non_assistant() {
+        let msgs = vec![
+            MessageBlock::User {
+                text: "```\nnot this\n```".to_string(),
+            },
+            MessageBlock::System {
+                text: "```\nor this\n```".to_string(),
+            },
+        ];
+        assert_eq!(extract_last_code_block(&msgs), None);
+    }
+
+    #[test]
+    fn extract_last_code_block_unclosed_block() {
+        // Unclosed code block should still be captured
+        let msgs = vec![assistant_text("```\nunclosed content")];
+        assert_eq!(
+            extract_last_code_block(&msgs),
+            Some("unclosed content".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_last_code_block_scans_parts_backwards() {
+        // Multiple text parts in one assistant message — should find the last one's block
+        let msg = MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![
+                AssistantPart::Text("```\nearly\n```".to_string()),
+                AssistantPart::Text("```\nlater\n```".to_string()),
+            ],
+        };
+        assert_eq!(extract_last_code_block(&[msg]), Some("later".to_string()));
     }
 
     /// Create a minimal App for testing (without real storage/config).

@@ -246,6 +246,43 @@ impl MessageBlock {
     }
 }
 
+/// Classification of a text line as a CommonMark fenced code block delimiter.
+///
+/// A fence is at least three backticks (`` ``` ``) with ≤3 leading ASCII spaces per the CommonMark spec.
+/// Used by `render_text_with_code_blocks()` and `extract_last_code_block()` as the single
+/// source of truth for fence detection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodeFence {
+    /// Not a fence — regular text line.
+    NotFence,
+    /// Opening fence, with optional language label (e.g., "rust", "").
+    Open { lang: String },
+    /// Closing fence.
+    Close,
+}
+
+impl CodeFence {
+    /// Classify a text line as a fence or not.
+    ///
+    /// `in_code_block` is needed because the same line (e.g. `` ``` ``)
+    /// is an opening fence or a closing fence depending on context.
+    pub fn classify(line: &str, in_code_block: bool) -> Self {
+        let trimmed = line.trim_start_matches(' ');
+        let leading_spaces = line.len() - trimmed.len();
+        if leading_spaces <= 3 && trimmed.starts_with("```") {
+            if in_code_block {
+                CodeFence::Close
+            } else {
+                CodeFence::Open {
+                    lang: trimmed[3..].trim().to_string(),
+                }
+            }
+        } else {
+            CodeFence::NotFence
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -784,5 +821,61 @@ mod tests {
             DiffLine::Removal("foo".into()),
             DiffLine::Addition("foo".into())
         );
+    }
+
+    // --- CodeFence tests ---
+
+    #[test]
+    fn code_fence_plain_text() {
+        assert_eq!(CodeFence::classify("hello", false), CodeFence::NotFence);
+        assert_eq!(CodeFence::classify("hello", true), CodeFence::NotFence);
+    }
+
+    #[test]
+    fn code_fence_open_bare() {
+        assert_eq!(
+            CodeFence::classify("```", false),
+            CodeFence::Open { lang: String::new() }
+        );
+    }
+
+    #[test]
+    fn code_fence_open_with_lang() {
+        assert_eq!(
+            CodeFence::classify("```rust", false),
+            CodeFence::Open { lang: "rust".to_string() }
+        );
+        assert_eq!(
+            CodeFence::classify("```  python  ", false),
+            CodeFence::Open { lang: "python".to_string() }
+        );
+    }
+
+    #[test]
+    fn code_fence_close() {
+        assert_eq!(CodeFence::classify("```", true), CodeFence::Close);
+        // Language label on closing fence still counts as close
+        assert_eq!(CodeFence::classify("```rust", true), CodeFence::Close);
+    }
+
+    #[test]
+    fn code_fence_four_spaces_not_fence() {
+        assert_eq!(CodeFence::classify("    ```", false), CodeFence::NotFence);
+        assert_eq!(CodeFence::classify("    ```", true), CodeFence::NotFence);
+    }
+
+    #[test]
+    fn code_fence_three_spaces_is_fence() {
+        assert_eq!(
+            CodeFence::classify("   ```", false),
+            CodeFence::Open { lang: String::new() }
+        );
+        assert_eq!(CodeFence::classify("   ```", true), CodeFence::Close);
+    }
+
+    #[test]
+    fn code_fence_tab_not_fence() {
+        assert_eq!(CodeFence::classify("\t```", false), CodeFence::NotFence);
+        assert_eq!(CodeFence::classify("\t```", true), CodeFence::NotFence);
     }
 }

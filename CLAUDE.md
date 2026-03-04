@@ -97,6 +97,7 @@ Example `steve.json`:
 | Tab | Cycle autocomplete / toggle Build–Plan mode |
 | Ctrl+C | Cancel stream (first press) / quit (second press) |
 | Ctrl+B | Toggle sidebar (auto → hide → show → auto) |
+| Ctrl+Y | Copy last code block to clipboard (OSC 52) |
 | Mouse wheel | Scroll messages |
 
 ## Architecture
@@ -127,6 +128,8 @@ The stream is decoupled from async-openai via the `ChatStreamProvider` trait (`#
 When a tool needs user permission, the stream task sends a `PermissionRequest` containing a `oneshot::Sender`, then awaits the `oneshot::Receiver`. The main event loop shows the prompt; when the user responds (y/n/a), it sends the reply through the stored sender. This suspends the stream task at exactly the right point without polling.
 
 **Critical**: Permission and System blocks are interleaved into `self.messages` during the stream. Streaming event handlers (`LlmDelta`, `LlmReasoning`, `LlmToolCallStreaming`, `LlmToolCall`, `ToolResult`) must use `last_assistant_mut()` to find the correct Assistant block — **not** `messages.last_mut()`, which may return a Permission or System block after a permission prompt.
+
+The permission prompt handler matches `(key.code, key.modifiers)` tuples — `Ctrl+Y` is explicitly carved out before the bare `y`/`Y` arm so clipboard copy works even during permission prompts. When adding new `Ctrl+<key>` bindings, check whether the key conflicts with the permission prompt's letter handlers (`y`/`n`/`a`). `Ctrl+Y` clipboard copy is implemented in `App::copy_last_code_block_to_clipboard()` — called from both the permission-prompt branch and the main key handler. Handles OSC 52 I/O errors (shows `MessageBlock::Error` on failure).
 
 ### Agent Modes
 
@@ -199,7 +202,7 @@ Messages render as `MessageBlock` variants: `User`, `Assistant` (with thinking/p
 
 **Inline diff rendering**: Write tools (edit/write/patch) auto-expand (`expanded: true`) and show colored inline diffs extracted from tool call arguments at `LlmToolCall` time. Diff content is UI-only — it does not change tool output or what the LLM sees. Types: `DiffContent` (enum: `EditDiff`, `WriteSummary`, `PatchDiff`) and `DiffLine` (enum: `Removal`, `Addition`, `Context`, `HunkHeader`) live in `message_block.rs`. Extraction logic (`extract_diff_content`, `parse_unified_diff_lines`) lives in `app.rs` alongside `extract_args_summary`. Rendering (`render_diff_lines`) lives in `message_area.rs` — uses box-drawing frame (`┌─│└─`) with `theme.error` for removals, `theme.success` for additions, `theme.dim` for context. Both `extract_args_summary` and `extract_diff_content` use exhaustive `ToolName` matches (no wildcards).
 
-**Code block rendering**: `render_text_with_code_blocks()` in `message_area.rs` replaces plain text rendering for `AssistantPart::Text`. Detects CommonMark fenced code blocks (triple-backtick with ≤3 leading spaces) and renders them with `theme.code_bg` background tint. Opening fences with a language label render a header line (label + space fill on `code_bg` background — no box-drawing characters, so copied text stays clean); bare fences (no language) skip the header entirely. Closing fences are consumed. Unclosed blocks tint all remaining lines gracefully. The function is stateless (line-by-line scanner toggling `in_code_block` flag). `code_bg` is a warm dark tint (`Rgb(35, 33, 30)`) distinct from the base `bg`.
+**Code block rendering**: `render_text_with_code_blocks()` in `message_area.rs` replaces plain text rendering for `AssistantPart::Text`. Detects CommonMark fenced code blocks (triple-backtick with ≤3 leading spaces) and renders them with `theme.code_bg` background tint. Opening fences with a language label render a header line (label + space fill on `code_bg` background — no box-drawing characters, so copied text stays clean); bare fences (no language) skip the header entirely. Closing fences are consumed. Unclosed blocks tint all remaining lines gracefully. The function is stateless (line-by-line scanner toggling `in_code_block` flag). `code_bg` is a warm dark tint (`Rgb(35, 33, 30)`) distinct from the base `bg`. Both `render_text_with_code_blocks()` and `extract_last_code_block()` (used by `Ctrl+Y` clipboard copy) use `CodeFence::classify()` from `message_block.rs` as the single source of truth for fence detection — no inline duplication to keep in sync.
 
 **Warm Terminal palette** (`theme.rs`): Uses RGB colors for consistent appearance across terminals. `Theme` derives `Debug, PartialEq`. Tool calls use three color categories: `tool_read` (muted warm gray) for read-only tools + webfetch, `tool_write` (coral) for write tools + memory, and `accent` (amber) for bash/question/todo. The `memory` tool gets `tool_write` because it writes to disk (see critical invariant in Context Management). Each category also has a distinct marker symbol: `·` (read), `✎` (write), `$` (execute/bash), `⚡` (interactive/question/todo) — see `ToolName::tool_marker()`. `Webfetch` gets the read marker/color despite `is_read_only()` being false — it's read-like in the UI but not in the permission/caching domain. `reasoning` uses muted lavender to distinguish from `tool_read`.
 

@@ -2871,6 +2871,7 @@ dependencies = [
  "anyhow",
  "async-openai",
  "async-trait",
+ "base64",
  "chrono",
  "crossterm",
  "directories",
