@@ -204,11 +204,9 @@ fn parse_unified_diff_lines(patch: &str) -> Vec<DiffLine> {
 // Extract the last fenced code block from conversation messages.
 //
 // Scans messages backwards for `MessageBlock::Assistant` blocks, then scans
-// their text parts for CommonMark fenced code blocks (triple backticks with
-// ≤3 leading spaces). Returns the content of the last code block found,
+// their text parts for CommonMark fenced code blocks (at least three backticks
+// with ≤3 leading spaces). Returns the content of the last code block found,
 // or `None` if there are no code blocks.
-//
-// Uses the same fence detection rules as `render_text_with_code_blocks()`.
 fn extract_last_code_block(messages: &[MessageBlock]) -> Option<String> {
     for msg in messages.iter().rev() {
         if let MessageBlock::Assistant { parts, .. } = msg {
@@ -822,36 +820,49 @@ impl App {
         Ok(())
     }
 
+    /// Copy the last code block to the system clipboard via OSC 52.
+    /// Pushes a system message indicating success or failure.
+    fn copy_last_code_block_to_clipboard(&mut self) {
+        match extract_last_code_block(&self.messages) {
+            Some(content) => {
+                use base64::Engine;
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&content);
+                let mut stdout = std::io::stdout();
+                let write_result = std::io::Write::write_fmt(
+                    &mut stdout,
+                    format_args!("\x1b]52;c;{encoded}\x07"),
+                );
+                let result = write_result.and_then(|_| std::io::Write::flush(&mut stdout));
+                let n = content.lines().count();
+                match result {
+                    Ok(()) => {
+                        self.messages.push(MessageBlock::System {
+                            text: format!("Copied {n} lines to clipboard"),
+                        });
+                    }
+                    Err(err) => {
+                        self.messages.push(MessageBlock::Error {
+                            text: format!("Failed to copy to clipboard via OSC 52: {err}"),
+                        });
+                    }
+                }
+            }
+            None => {
+                self.messages.push(MessageBlock::System {
+                    text: "No code block to copy".to_string(),
+                });
+            }
+        }
+        self.message_area_state.scroll_to_bottom();
+    }
+
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         // If there's a pending permission prompt, intercept keystrokes
         if self.pending_permission.is_some() {
             match (key.code, key.modifiers) {
                 (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
                     // Ctrl+Y: copy last code block to clipboard (even during permission prompt)
-                    match extract_last_code_block(&self.messages) {
-                        Some(content) => {
-                            use base64::Engine;
-                            let encoded =
-                                base64::engine::general_purpose::STANDARD.encode(&content);
-                            let mut stdout = std::io::stdout();
-                            let _ = std::io::Write::write_fmt(
-                                &mut stdout,
-                                format_args!("\x1b]52;c;{encoded}\x07"),
-                            );
-                            let _ = std::io::Write::flush(&mut stdout);
-                            let n = content.lines().count();
-                            self.messages.push(MessageBlock::System {
-                                text: format!("Copied {n} lines to clipboard"),
-                            });
-                            self.message_area_state.scroll_to_bottom();
-                        }
-                        None => {
-                            self.messages.push(MessageBlock::System {
-                                text: "No code block to copy".to_string(),
-                            });
-                            self.message_area_state.scroll_to_bottom();
-                        }
-                    }
+                    self.copy_last_code_block_to_clipboard();
                     return Ok(());
                 }
                 (KeyCode::Char('y'), _) | (KeyCode::Char('Y'), _) => {
@@ -938,31 +949,7 @@ impl App {
                 };
             }
             (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
-                // Copy last code block to clipboard via OSC 52
-                match extract_last_code_block(&self.messages) {
-                    Some(content) => {
-                        use base64::Engine;
-                        let encoded = base64::engine::general_purpose::STANDARD.encode(&content);
-                        // OSC 52: set clipboard contents
-                        let mut stdout = std::io::stdout();
-                        let _ = std::io::Write::write_fmt(
-                            &mut stdout,
-                            format_args!("\x1b]52;c;{encoded}\x07"),
-                        );
-                        let _ = std::io::Write::flush(&mut stdout);
-                        let n = content.lines().count();
-                        self.messages.push(MessageBlock::System {
-                            text: format!("Copied {n} lines to clipboard"),
-                        });
-                        self.message_area_state.scroll_to_bottom();
-                    }
-                    None => {
-                        self.messages.push(MessageBlock::System {
-                            text: "No code block to copy".to_string(),
-                        });
-                        self.message_area_state.scroll_to_bottom();
-                    }
-                }
+                self.copy_last_code_block_to_clipboard();
             }
             (KeyCode::Enter, KeyModifiers::SHIFT) => {
                 // Shift+Enter: insert newline in textarea (forward as plain Enter)
