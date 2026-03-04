@@ -309,19 +309,19 @@ fn write_logs(out: &mut String, session_start: DateTime<Utc>) {
 
     let mut count = 0;
     for log_file in &log_files {
+        let mut emitting = false;
         if let Ok(content) = std::fs::read_to_string(log_file) {
             for line in content.lines() {
                 if let Some(ts) = parse_log_timestamp(line) {
-                    if ts >= session_start && ts <= now {
+                    emitting = ts >= session_start && ts <= now;
+                    if emitting {
                         let _ = writeln!(out, "{line}");
                         count += 1;
                     }
-                } else {
-                    // Continuation line (e.g., multi-line log entry) — include if we've
-                    // already started emitting lines from this file
-                    if count > 0 {
-                        let _ = writeln!(out, "{line}");
-                    }
+                } else if emitting {
+                    // Continuation line (e.g., multi-line log entry) — include if
+                    // the most recent timestamped line in this file was in range
+                    let _ = writeln!(out, "{line}");
                 }
             }
         }
