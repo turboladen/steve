@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use strum::{Display, EnumString, IntoStaticStr};
+use strum::{Display, EnumIter, EnumString, IntoStaticStr};
 
 /// High-level intent category for UI intent indicators.
 ///
@@ -37,7 +37,7 @@ pub enum IntentCategory {
 
 /// Names of all registered tools.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize,
-         EnumString, Display, IntoStaticStr)]
+         EnumString, Display, EnumIter, IntoStaticStr)]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum ToolName {
@@ -242,25 +242,12 @@ impl ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use strum::IntoEnumIterator;
 
     /// Every variant round-trips through as_str -> FromStr.
     #[test]
     fn tool_name_round_trip_all_variants() {
-        let all = [
-            ToolName::Read,
-            ToolName::Grep,
-            ToolName::Glob,
-            ToolName::List,
-            ToolName::Edit,
-            ToolName::Write,
-            ToolName::Patch,
-            ToolName::Bash,
-            ToolName::Question,
-            ToolName::Todo,
-            ToolName::Webfetch,
-            ToolName::Memory,
-        ];
-        for name in all {
+        for name in ToolName::iter() {
             let s = name.as_str();
             let parsed: ToolName = s.parse().unwrap();
             assert_eq!(parsed, name, "round-trip failed for {s}");
@@ -360,21 +347,7 @@ mod tests {
     /// to the correct symbol.
     #[test]
     fn tool_marker_exhaustive() {
-        let all = [
-            ToolName::Read,
-            ToolName::Grep,
-            ToolName::Glob,
-            ToolName::List,
-            ToolName::Edit,
-            ToolName::Write,
-            ToolName::Patch,
-            ToolName::Bash,
-            ToolName::Question,
-            ToolName::Todo,
-            ToolName::Webfetch,
-            ToolName::Memory,
-        ];
-        for t in all {
+        for t in ToolName::iter() {
             assert!(!t.tool_marker().is_empty(), "{t} marker should be non-empty");
         }
 
@@ -402,21 +375,7 @@ mod tests {
     /// Webfetch gets the read marker despite is_read_only() == false (UI-only divergence).
     #[test]
     fn tool_marker_categories_consistent() {
-        let all = [
-            ToolName::Read,
-            ToolName::Grep,
-            ToolName::Glob,
-            ToolName::List,
-            ToolName::Edit,
-            ToolName::Write,
-            ToolName::Patch,
-            ToolName::Bash,
-            ToolName::Question,
-            ToolName::Todo,
-            ToolName::Webfetch,
-            ToolName::Memory,
-        ];
-        for t in all {
+        for t in ToolName::iter() {
             if t.is_read_only() {
                 assert_eq!(t.tool_marker(), "\u{00b7}", "{t} is read-only but doesn't have read marker");
             } else if t.is_write_tool() || t.is_memory() {
@@ -439,21 +398,7 @@ mod tests {
     /// Uses if/else if/else so every variant hits at least one assertion.
     #[test]
     fn intent_category_exhaustive() {
-        let all = [
-            ToolName::Read,
-            ToolName::Grep,
-            ToolName::Glob,
-            ToolName::List,
-            ToolName::Edit,
-            ToolName::Write,
-            ToolName::Patch,
-            ToolName::Bash,
-            ToolName::Question,
-            ToolName::Todo,
-            ToolName::Webfetch,
-            ToolName::Memory,
-        ];
-        for t in all {
+        for t in ToolName::iter() {
             let cat = t.intent_category();
             if t.is_read_only() || t == ToolName::Webfetch {
                 assert_eq!(cat, IntentCategory::Exploring, "{t} should be Exploring");
@@ -471,21 +416,7 @@ mod tests {
     /// with the remaining tools must cover all variants.
     #[test]
     fn write_and_read_only_are_disjoint() {
-        let all = [
-            ToolName::Read,
-            ToolName::Grep,
-            ToolName::Glob,
-            ToolName::List,
-            ToolName::Edit,
-            ToolName::Write,
-            ToolName::Patch,
-            ToolName::Bash,
-            ToolName::Question,
-            ToolName::Todo,
-            ToolName::Webfetch,
-            ToolName::Memory,
-        ];
-        for t in all {
+        for t in ToolName::iter() {
             assert!(
                 !(t.is_write_tool() && t.is_read_only()),
                 "{t} is both write and read-only"

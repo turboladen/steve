@@ -157,6 +157,10 @@ pub fn render_message_blocks(
                                     lines.push(render_intent_line(category, available_width, theme));
                                 }
                                 last_intent = Some(category);
+                            } else {
+                                // Asking-only groups have no label — reset tracking so the
+                                // next labeled group isn't incorrectly suppressed.
+                                last_intent = None;
                             }
                             for call in &group.calls {
                                 let status_indicator = match (&group.status, &call.result_summary) {
@@ -1238,6 +1242,56 @@ mod tests {
         let pos_exploring = text.find("exploring").unwrap();
         let pos_editing = text.find("editing").unwrap();
         assert!(pos_exploring < pos_editing, "exploring before editing");
+    }
+
+    #[test]
+    fn buffer_intent_asking_group_resets_dedup() {
+        // exploring → asking-only → exploring should show TWO "exploring" labels
+        // because asking-only groups reset intent tracking (they emit no label).
+        let messages = vec![MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Read,
+                        args_summary: "a.rs".into(),
+                        full_output: None,
+                        result_summary: Some("50 lines".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Question,
+                        args_summary: "proceed?".into(),
+                        full_output: None,
+                        result_summary: Some("yes".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+                AssistantPart::ToolGroup(ToolGroup {
+                    calls: vec![ToolCall {
+                        tool_name: ToolName::Read,
+                        args_summary: "b.rs".into(),
+                        full_output: None,
+                        result_summary: Some("30 lines".into()),
+                        diff_content: None,
+                        is_error: false,
+                        expanded: false,
+                    }],
+                    status: ToolGroupStatus::Complete,
+                }),
+            ],
+        }];
+        let text = render_messages_to_string(80, 20, &messages, None);
+        let count = text.matches("exploring").count();
+        assert_eq!(count, 2, "expected 2 'exploring' labels (asking resets dedup) but found {count}");
     }
 
     // -- render_text_with_code_blocks tests --

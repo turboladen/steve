@@ -1340,12 +1340,11 @@ impl App {
     /// the session was saved), log a warning and fall back to the model
     /// specified in the current config.
     fn validated_model_ref(&self, model_ref: &str) -> String {
-        let is_valid = self
-            .provider_registry
-            .as_ref()
-            .map(|r| r.resolve_model(model_ref).is_ok())
-            .unwrap_or(false);
-        if is_valid {
+        let Some(registry) = self.provider_registry.as_ref() else {
+            // No registry to validate against — keep the stored model_ref as-is.
+            return model_ref.to_string();
+        };
+        if registry.resolve_model(model_ref).is_ok() {
             return model_ref.to_string();
         }
         let fallback = self
