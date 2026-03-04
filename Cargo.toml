@@ -19,7 +19,7 @@ serde_json = "1"
 jsonc-parser = { version = "0.29", features = ["serde"] }
 
 # LLM Client
-async-openai = { version = "0.32", features = ["chat-completion"] }
+async-openai = { version = "0.33", features = ["chat-completion"] }
 
 # Search tools (ripgrep ecosystem)
 grep = "0.3"

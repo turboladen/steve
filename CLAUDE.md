@@ -215,8 +215,8 @@ Auto-scroll calculates content height using wrapped line widths (not `lines.len(
 - **wait-timeout 0.2** provides `ChildExt::wait_timeout()` for bash tool timeout enforcement. Requires `Stdio::piped()` + `spawn()` (not `output()`)
 - **mpatch 1.3** applies unified diffs with fuzzy matching via `patch_content_str()`. Always appends trailing newline — `apply_unified_diff()` in `patch.rs` post-processes to preserve original newline behavior
 - **tui-textarea 0.7** requires ratatui 0.29 and crossterm 0.28 — do not upgrade independently
-- **async-openai 0.32** requires `features = ["chat-completion"]`; types live under `async_openai::types::chat::`, not `async_openai::types::`
-- **async-openai 0.32 tool types**: `ChatCompletionTools` (plural enum with `Function` variant), `ChatCompletionMessageToolCalls` (plural enum with `Function` variant). `ChatCompletionRequestAssistantMessage` requires `audio: None` and `function_call: None` fields. `ChatCompletionStreamOptions` has `include_usage` and `include_obfuscation` fields
+- **async-openai 0.33** requires `features = ["chat-completion"]`; types live under `async_openai::types::chat::`, not `async_openai::types::`
+- **async-openai 0.33 tool types**: `ChatCompletionTools` (plural enum with `Function` variant), `ChatCompletionMessageToolCalls` (plural enum with `Function` variant). `ChatCompletionRequestAssistantMessage` requires `audio: None` and `function_call: None` fields. `ChatCompletionStreamOptions` has `include_usage` and `include_obfuscation` fields
 - **stream_options is required**: `CreateChatCompletionRequest` must include `stream_options: Some(ChatCompletionStreamOptions { include_usage: Some(true), .. })` — without it, token usage is never reported and auto-compact cannot trigger
 - **jsonc-parser** requires `features = ["serde"]` for `parse_to_serde_value`
 - **html2text v0.14** `from_read()` returns `Result<String, Error>`, not `String`
