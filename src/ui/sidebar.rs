@@ -171,6 +171,15 @@ pub fn render_sidebar(
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD),
     )));
+    let title = if state.session_title.is_empty() {
+        "(untitled)"
+    } else {
+        &state.session_title
+    };
+    lines.push(Line::from(Span::styled(
+        format!("  {title}"),
+        Style::default().fg(theme.fg),
+    )));
     let model = if state.model_name.is_empty() {
         "(none)"
     } else {
@@ -497,6 +506,36 @@ mod tests {
         let state = SidebarState::default();
         let text = render_sidebar_to_string(40, 20, &state);
         assert!(text.contains("(none)"), "empty model should show '(none)'");
+    }
+
+    #[test]
+    fn buffer_sidebar_session_title_displayed() {
+        let state = SidebarState {
+            session_title: "My Session".to_string(),
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(text.contains("My Session"), "should show session title");
+    }
+
+    #[test]
+    fn buffer_sidebar_empty_title_shows_untitled() {
+        let state = SidebarState::default();
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(text.contains("(untitled)"), "empty title should show '(untitled)'");
+    }
+
+    #[test]
+    fn buffer_sidebar_title_renders_before_model() {
+        let state = SidebarState {
+            session_title: "My Session".to_string(),
+            model_name: "gpt-4o".to_string(),
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 20, &state);
+        let title_pos = text.find("My Session").expect("title not found");
+        let model_pos = text.find("gpt-4o").expect("model not found");
+        assert!(title_pos < model_pos, "title should render before model");
     }
 }
 
