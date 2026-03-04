@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-use super::message_block::{AssistantPart, DiffContent, DiffLine, MessageBlock, ToolGroup, ToolGroupStatus};
+use super::message_block::{AssistantPart, CodeFence, DiffContent, DiffLine, MessageBlock, ToolGroup, ToolGroupStatus};
 use super::theme::Theme;
 use crate::tool::{IntentCategory, ToolName};
 
@@ -463,20 +463,11 @@ fn render_text_with_code_blocks(
     let mut in_code_block = false;
 
     for text_line in text.lines() {
-        let trimmed = text_line.trim_start_matches(' ');
-        let leading_spaces = text_line.len() - trimmed.len();
-
-        // A fence is ``` with ≤3 leading ASCII spaces (CommonMark rule)
-        if leading_spaces <= 3 && trimmed.starts_with("```") {
-            if !in_code_block {
-                // Opening fence — extract language label
-                let lang = trimmed[3..].trim();
+        match CodeFence::classify(text_line, in_code_block) {
+            CodeFence::Open { lang } => {
                 let code_bg_style = Style::default().fg(theme.dim).bg(theme.code_bg);
 
-                if lang.is_empty() {
-                    // No language: skip header entirely — code_bg on code lines
-                    // provides framing. An all-space header would be invisible.
-                } else {
+                if !lang.is_empty() {
                     // Language label followed by space fill (background tint provides framing)
                     let label = format!("{lang} ");
                     let fill_len = available_width.saturating_sub(label.chars().count());
@@ -489,26 +480,30 @@ fn render_text_with_code_blocks(
                         .style(Style::default().bg(theme.code_bg)),
                     );
                 }
+                // No language: skip header entirely — code_bg on code lines
+                // provides framing. An all-space header would be invisible.
                 in_code_block = true;
-            } else {
-                // Closing fence — consume without rendering
+            }
+            CodeFence::Close => {
                 in_code_block = false;
             }
-        } else if in_code_block {
-            // Code line — tinted background
-            lines.push(
-                Line::from(Span::styled(
+            CodeFence::NotFence if in_code_block => {
+                // Code line — tinted background
+                lines.push(
+                    Line::from(Span::styled(
+                        text_line.to_string(),
+                        Style::default().fg(theme.assistant_msg).bg(theme.code_bg),
+                    ))
+                    .style(Style::default().bg(theme.code_bg)),
+                );
+            }
+            CodeFence::NotFence => {
+                // Normal prose line
+                lines.push(Line::from(Span::styled(
                     text_line.to_string(),
-                    Style::default().fg(theme.assistant_msg).bg(theme.code_bg),
-                ))
-                .style(Style::default().bg(theme.code_bg)),
-            );
-        } else {
-            // Normal prose line
-            lines.push(Line::from(Span::styled(
-                text_line.to_string(),
-                Style::default().fg(theme.assistant_msg),
-            )));
+                    Style::default().fg(theme.assistant_msg),
+                )));
+            }
         }
     }
 }

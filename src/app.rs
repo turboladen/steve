@@ -31,7 +31,7 @@ use crate::ui;
 use crate::ui::autocomplete::AutocompleteState;
 use crate::ui::input::InputState;
 use crate::ui::message_area::MessageAreaState;
-use crate::ui::message_block::{AssistantPart, DiffContent, DiffLine, MessageBlock, ToolCall};
+use crate::ui::message_block::{AssistantPart, CodeFence, DiffContent, DiffLine, MessageBlock, ToolCall};
 use crate::ui::sidebar::{SidebarState, count_diff_lines};
 use crate::ui::status_line::{Activity, StatusLineState};
 use crate::ui::theme::Theme;
@@ -215,21 +215,20 @@ fn extract_last_code_block(messages: &[MessageBlock]) -> Option<String> {
                     let mut last_block: Option<String> = None;
 
                     for line in text.lines() {
-                        let trimmed = line.trim_start_matches(' ');
-                        let leading_spaces = line.len() - trimmed.len();
-
-                        if leading_spaces <= 3 && trimmed.starts_with("```") {
-                            if !in_code_block {
+                        match CodeFence::classify(line, in_code_block) {
+                            CodeFence::Open { .. } => {
                                 in_code_block = true;
                                 current_block.clear();
-                            } else {
-                                // Closing fence — save this block
+                            }
+                            CodeFence::Close => {
                                 last_block = Some(current_block.join("\n"));
                                 in_code_block = false;
                                 current_block.clear();
                             }
-                        } else if in_code_block {
-                            current_block.push(line);
+                            CodeFence::NotFence if in_code_block => {
+                                current_block.push(line);
+                            }
+                            CodeFence::NotFence => {}
                         }
                     }
                     // Unclosed code block — still capture it
