@@ -169,7 +169,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
     // Safety limit: prevent infinite tool-call loops (e.g. compressor/cache
     // feedback oscillation where the LLM re-reads the same files forever).
-    const MAX_TOOL_ITERATIONS: u32 = 25;
+    const MAX_TOOL_ITERATIONS: u32 = 75;
     let mut iteration_count: u32 = 0;
 
     // Mid-stream error retry limit (separate from stream creation retries).
@@ -1768,7 +1768,7 @@ mod tests {
         // the infinite loop scenario where the LLM never produces a final
         // text response.
         let mut streams = Vec::new();
-        for i in 0..30 {
+        for i in 0..80 {
             streams.push(vec![
                 Ok(tool_call_chunk(
                     0,
