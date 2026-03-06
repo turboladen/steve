@@ -56,11 +56,12 @@ impl ToolResultCache {
         }
     }
 
-    /// Try to get a cached result. Returns the full cached output if available.
+    /// Try to get a cached result.
     ///
-    /// Returns the original tool output (not a compact reference) so the LLM
-    /// can use the content directly. The compressor handles token optimization
-    /// separately — it's the right layer for deciding when to summarize.
+    /// For the first `REPEAT_THRESHOLD - 1` hits, returns the full cached
+    /// output so the LLM can use the content directly. After that, returns
+    /// a short summary to break compressor/cache feedback loops where the
+    /// LLM re-reads the same file indefinitely.
     pub fn get(&mut self, tool_name: ToolName, args: &Value) -> Option<ToolOutput> {
         let key = self.cache_key(tool_name, args)?;
 
@@ -83,8 +84,8 @@ impl ToolResultCache {
                 Some(ToolOutput {
                     title: cached.output.title.clone(),
                     output: format!(
-                        "[This content was already provided {} times. It has not changed since last read.]",
-                        count
+                        "[This content was already provided {} times. It has not changed.]",
+                        *count - 1
                     ),
                     is_error: false,
                 })
@@ -112,6 +113,9 @@ impl ToolResultCache {
         let Some(key) = self.cache_key(tool_name, args) else {
             return;
         };
+
+        // Reset hit count so re-cached content gets full delivery again
+        self.hit_counts.remove(&key);
 
         // Track which file paths this cache entry references (for invalidation)
         if let Some(path) = self.extract_path(tool_name, args) {

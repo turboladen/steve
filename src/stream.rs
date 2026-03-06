@@ -191,6 +191,9 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                     "Tool loop exceeded {MAX_TOOL_ITERATIONS} iterations. Try /compact or /new."
                 ),
             });
+            let _ = event_tx.send(AppEvent::LlmFinish {
+                usage: Some(total_usage),
+            });
             return Ok(());
         }
 
@@ -1760,11 +1763,11 @@ mod tests {
             );
         }
 
-        // Should NOT have a regular LlmFinish (LlmError replaces it)
+        // Should also get LlmFinish to persist accumulated token usage
         let finishes: Vec<&AppEvent> = events
             .iter()
             .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
             .collect();
-        assert!(finishes.is_empty(), "should not get LlmFinish on iteration limit");
+        assert_eq!(finishes.len(), 1, "should get LlmFinish to persist token usage");
     }
 }
