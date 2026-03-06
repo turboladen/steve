@@ -172,7 +172,7 @@ fn compress_read(content: &str) -> String {
     };
 
     format!(
-        "[Previously read: {line_count} lines, {lang}.{defs_str} Re-read if needed.]"
+        "[Previously read: {line_count} lines, {lang}.{defs_str}]"
     )
 }
 
@@ -180,7 +180,7 @@ fn compress_read(content: &str) -> String {
 /// Input format: "path/file.rs:42: matched line\n" per match
 fn compress_grep(content: &str) -> String {
     if content.starts_with("No matches found") {
-        return format!("[Previously searched: no matches. Re-search if needed.]");
+        return format!("[Previously searched: no matches.]");
     }
 
     let lines: Vec<&str> = content.lines().collect();
@@ -215,7 +215,7 @@ fn compress_grep(content: &str) -> String {
         .collect();
 
     format!(
-        "[Previously searched: {total} matches in {file_count} files ({}). Re-search if needed.]",
+        "[Previously searched: {total} matches in {file_count} files ({}).]",
         top_files.join(", ")
     )
 }
@@ -224,7 +224,7 @@ fn compress_grep(content: &str) -> String {
 /// Input format: one file path per line
 fn compress_glob(content: &str) -> String {
     if content.starts_with("No files found") {
-        return format!("[Previously globbed: no matches. Re-glob if needed.]");
+        return format!("[Previously globbed: no matches.]");
     }
 
     let lines: Vec<&str> = content.lines().collect();
@@ -233,14 +233,14 @@ fn compress_glob(content: &str) -> String {
         .filter(|l| !l.starts_with("(showing first"))
         .count();
 
-    format!("[Previously globbed: {count} files found. Re-glob if needed.]")
+    format!("[Previously globbed: {count} files found.]")
 }
 
 /// Compress list tool output.
 /// Input format: "path/file.ext (1.2KB)" or "path/dir/" per line
 fn compress_list(content: &str) -> String {
     if content.ends_with("(empty)") {
-        return format!("[Previously listed: empty directory. Re-list if needed.]");
+        return format!("[Previously listed: empty directory.]");
     }
 
     let lines: Vec<&str> = content.lines().collect();
@@ -253,7 +253,7 @@ fn compress_list(content: &str) -> String {
     let file_count = entry_count - dir_count;
 
     format!(
-        "[Previously listed: {entry_count} entries ({file_count} files, {dir_count} dirs). Re-list if needed.]"
+        "[Previously listed: {entry_count} entries ({file_count} files, {dir_count} dirs).]"
     )
 }
 
@@ -287,7 +287,7 @@ fn compress_bash(content: &str) -> String {
     };
 
     format!(
-        "[Previously ran: {exit_info}, {line_count} lines output. Re-run if needed.]"
+        "[Previously ran: {exit_info}, {line_count} lines output.]"
     )
 }
 
@@ -297,7 +297,7 @@ fn compress_edit(content: &str) -> String {
     if content.len() < 200 {
         return content.to_string(); // Don't compress short outputs
     }
-    format!("[Previously edited file. Re-read if needed.]")
+    format!("[Previously edited file.]")
 }
 
 /// Compress write tool output.
@@ -305,7 +305,7 @@ fn compress_write(content: &str) -> String {
     if content.len() < 200 {
         return content.to_string();
     }
-    format!("[Previously wrote file. Re-read if needed.]")
+    format!("[Previously wrote file.]")
 }
 
 /// Compress patch tool output.
@@ -313,14 +313,14 @@ fn compress_patch(content: &str) -> String {
     if content.len() < 200 {
         return content.to_string();
     }
-    format!("[Previously patched file. Re-read if needed.]")
+    format!("[Previously patched file.]")
 }
 
 /// Generic compression for unknown tools.
 fn compress_generic(content: &str) -> String {
     let line_count = content.lines().count();
     let char_count = content.len();
-    format!("[Previous tool result: {line_count} lines, {char_count} chars. Re-run if needed.]")
+    format!("[Previous tool result: {line_count} lines, {char_count} chars.]")
 }
 
 /// Detect programming language from file content heuristics.
@@ -499,7 +499,7 @@ mod tests {
         assert!(result.starts_with("[Previously read:"));
         assert!(result.contains("100 lines"));
         assert!(result.contains("Rust"));
-        assert!(result.ends_with("Re-read if needed.]"));
+        assert!(result.ends_with("]"));
     }
 
     #[test]

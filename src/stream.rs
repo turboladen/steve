@@ -167,6 +167,11 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
     // Tool result cache — shared across stream tasks within a session.
     // Avoids re-executing identical read operations across messages.
 
+    // Safety limit: prevent infinite tool-call loops (e.g. compressor/cache
+    // feedback oscillation where the LLM re-reads the same files forever).
+    const MAX_TOOL_ITERATIONS: u32 = 25;
+    let mut iteration_count: u32 = 0;
+
     // Tool call loop — keep going until the LLM produces a response with no tool calls
     loop {
         // Check for cancellation before each LLM call
@@ -174,6 +179,17 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             tracing::info!("stream cancelled before LLM call");
             let _ = event_tx.send(AppEvent::LlmFinish {
                 usage: Some(total_usage),
+            });
+            return Ok(());
+        }
+
+        iteration_count += 1;
+        if iteration_count > MAX_TOOL_ITERATIONS {
+            tracing::error!(iterations = iteration_count, "tool loop exceeded max iterations");
+            let _ = event_tx.send(AppEvent::LlmError {
+                error: format!(
+                    "Tool loop exceeded {MAX_TOOL_ITERATIONS} iterations. Try /compact or /new."
+                ),
             });
             return Ok(());
         }
@@ -1695,5 +1711,60 @@ mod tests {
         // Should still have a tool result (from cache)
         let tool_results: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::ToolResult { .. })).collect();
         assert!(!tool_results.is_empty(), "should have tool result even from cache");
+    }
+
+    #[tokio::test]
+    async fn stream_terminates_after_max_iterations() {
+        // Configure MockChatStream to always return tool calls — simulates
+        // the infinite loop scenario where the LLM never produces a final
+        // text response.
+        let mut streams = Vec::new();
+        for i in 0..30 {
+            streams.push(vec![
+                Ok(tool_call_chunk(
+                    0,
+                    Some(&format!("call_{i}")),
+                    Some("glob"),
+                    Some(r#"{"pattern":"*.rs"}"#),
+                )),
+                Ok(finish_chunk(FinishReason::ToolCalls, 50, 20)),
+            ]);
+        }
+        let mock = Arc::new(MockChatStream::new(streams));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut req = mock_stream_request(mock, tx);
+        req.tool_registry = Some(Arc::new(ToolRegistry::new(
+            std::path::PathBuf::from("/tmp/test"),
+        )));
+        req.tool_context = Some(ToolContext {
+            project_root: std::path::PathBuf::from("/tmp/test"),
+            storage_dir: None,
+        });
+        req.permission_engine = Some(Arc::new(tokio::sync::Mutex::new(
+            crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
+        )));
+
+        run_stream(req).await.expect("should terminate gracefully");
+        let events = collect_events(rx).await;
+
+        // Should emit LlmError about exceeding max iterations
+        let errors: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmError { .. }))
+            .collect();
+        assert_eq!(errors.len(), 1, "should have exactly 1 LlmError");
+        if let AppEvent::LlmError { error } = errors[0] {
+            assert!(
+                error.contains("exceeded"),
+                "error should mention exceeded: {error}"
+            );
+        }
+
+        // Should NOT have a regular LlmFinish (LlmError replaces it)
+        let finishes: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
+            .collect();
+        assert!(finishes.is_empty(), "should not get LlmFinish on iteration limit");
     }
 }

@@ -28,6 +28,11 @@ pub struct ToolResultCache {
     /// Map from normalized file path to set of cache keys that reference it.
     /// Used for invalidation when a file is modified.
     path_index: HashMap<PathBuf, Vec<String>>,
+    /// Per-key hit counter. After `REPEAT_THRESHOLD` hits on the same key,
+    /// `get()` returns a short summary instead of full content to break
+    /// compressor/cache feedback loops where the LLM re-reads the same file
+    /// indefinitely.
+    hit_counts: HashMap<String, u32>,
     /// Project root for normalizing paths.
     project_root: PathBuf,
     /// Stats
@@ -36,10 +41,15 @@ pub struct ToolResultCache {
 }
 
 impl ToolResultCache {
+    /// Number of cache hits on the same key before `get()` returns a summary
+    /// instead of the full cached content.
+    const REPEAT_THRESHOLD: u32 = 3;
+
     pub fn new(project_root: PathBuf) -> Self {
         Self {
             entries: HashMap::new(),
             path_index: HashMap::new(),
+            hit_counts: HashMap::new(),
             project_root,
             hits: 0,
             misses: 0,
@@ -56,14 +66,31 @@ impl ToolResultCache {
 
         if let Some(cached) = self.entries.get(&key) {
             self.hits += 1;
+            let count = self.hit_counts.entry(key.clone()).or_insert(0);
+            *count += 1;
+
             tracing::info!(
                 tool = %tool_name,
                 key = %key,
                 hits = self.hits,
+                repeat_count = *count,
                 "cache hit"
             );
 
-            Some(cached.output.clone())
+            if *count >= Self::REPEAT_THRESHOLD {
+                // Break the compressor/cache feedback loop: after repeated
+                // hits the LLM is clearly stuck re-reading the same content.
+                Some(ToolOutput {
+                    title: cached.output.title.clone(),
+                    output: format!(
+                        "[This content was already provided {} times. It has not changed since last read.]",
+                        count
+                    ),
+                    is_error: false,
+                })
+            } else {
+                Some(cached.output.clone())
+            }
         } else {
             self.misses += 1;
             None
@@ -115,6 +142,7 @@ impl ToolResultCache {
             invalidated += keys.len();
             for key in keys {
                 self.entries.remove(&key);
+                self.hit_counts.remove(&key);
             }
         }
 
@@ -129,6 +157,7 @@ impl ToolResultCache {
         invalidated += grep_glob_keys.len();
         for key in grep_glob_keys {
             self.entries.remove(&key);
+            self.hit_counts.remove(&key);
         }
 
         if invalidated > 0 {
@@ -321,6 +350,69 @@ mod tests {
         cache.invalidate_path("src/other.rs");
         assert!(cache.get(ToolName::Grep, &grep_args).is_none());
         assert!(cache.get(ToolName::Glob, &glob_args).is_none());
+    }
+
+    #[test]
+    fn test_cache_repeat_first_two_hits_return_full_content() {
+        let mut cache = test_cache();
+        let args = json!({"path": "src/main.rs"});
+
+        cache.put(ToolName::Read, &args, &test_output("full file content"));
+
+        // First two hits should return the original content
+        let r1 = cache.get(ToolName::Read, &args).unwrap();
+        assert_eq!(r1.output, "full file content");
+
+        let r2 = cache.get(ToolName::Read, &args).unwrap();
+        assert_eq!(r2.output, "full file content");
+    }
+
+    #[test]
+    fn test_cache_repeat_returns_summary_after_threshold() {
+        let mut cache = test_cache();
+        let args = json!({"path": "src/main.rs"});
+
+        cache.put(ToolName::Read, &args, &test_output("full file content"));
+
+        // Exhaust the threshold
+        for _ in 0..ToolResultCache::REPEAT_THRESHOLD - 1 {
+            let r = cache.get(ToolName::Read, &args).unwrap();
+            assert_eq!(r.output, "full file content");
+        }
+
+        // Third hit should return a summary, not the full content
+        let r = cache.get(ToolName::Read, &args).unwrap();
+        assert!(
+            r.output.contains("already provided"),
+            "expected summary after threshold, got: {}",
+            r.output
+        );
+        assert!(!r.is_error);
+    }
+
+    #[test]
+    fn test_cache_repeat_counter_resets_on_invalidation() {
+        let mut cache = test_cache();
+        let args = json!({"path": "src/main.rs"});
+
+        cache.put(ToolName::Read, &args, &test_output("original content"));
+
+        // Hit twice (just under threshold)
+        cache.get(ToolName::Read, &args);
+        cache.get(ToolName::Read, &args);
+
+        // Invalidate (simulating a write to the file)
+        cache.invalidate_path("src/main.rs");
+
+        // Re-populate cache with new content
+        cache.put(ToolName::Read, &args, &test_output("updated content"));
+
+        // Counter should be reset — first two hits return full content
+        let r1 = cache.get(ToolName::Read, &args).unwrap();
+        assert_eq!(r1.output, "updated content");
+
+        let r2 = cache.get(ToolName::Read, &args).unwrap();
+        assert_eq!(r2.output, "updated content");
     }
 
     #[test]
