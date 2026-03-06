@@ -453,7 +453,16 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                             }
                         }
                         Err(e) => {
-                            tracing::error!(error = %e, "stream chunk error");
+                            tracing::error!(
+                                error = %e,
+                                error_debug = ?e,
+                                iteration = iteration_count,
+                                message_count = messages.len(),
+                                chunks_received = if first_token_logged { "yes" } else { "no" },
+                                partial_text_len = assistant_content.len(),
+                                pending_tool_calls = pending_tool_calls.len(),
+                                "stream chunk error"
+                            );
                             stream_chunk_error = Some(e.to_string());
                             break;
                         }
