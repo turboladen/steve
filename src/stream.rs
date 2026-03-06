@@ -169,8 +169,12 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
     // Safety limit: prevent infinite tool-call loops (e.g. compressor/cache
     // feedback oscillation where the LLM re-reads the same files forever).
-    const MAX_TOOL_ITERATIONS: u32 = 75;
-    let mut iteration_count: u32 = 0;
+    // Only counts consecutive iterations with no user permission interaction.
+    // Resets when the user grants permission (proving human-in-the-loop).
+    const MAX_AUTO_ITERATIONS: u32 = 25;
+    let mut auto_iteration_count: u32 = 0;
+    let mut total_iteration_count: u32 = 0;
+    let mut user_interacted_this_iteration = false;
 
     // Mid-stream error retry limit (separate from stream creation retries).
     const MAX_STREAM_RETRIES: u32 = 2;
@@ -187,12 +191,18 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             return Ok(());
         }
 
-        iteration_count += 1;
-        if iteration_count > MAX_TOOL_ITERATIONS {
-            tracing::error!(iterations = iteration_count, "tool loop exceeded max iterations");
+        total_iteration_count += 1;
+        auto_iteration_count += 1;
+        user_interacted_this_iteration = false;
+        if auto_iteration_count > MAX_AUTO_ITERATIONS {
+            tracing::error!(
+                auto_iterations = auto_iteration_count,
+                total_iterations = total_iteration_count,
+                "tool loop exceeded max autonomous iterations"
+            );
             let _ = event_tx.send(AppEvent::LlmError {
                 error: format!(
-                    "Tool loop exceeded {MAX_TOOL_ITERATIONS} iterations. Try /compact or /new."
+                    "Tool loop exceeded {MAX_AUTO_ITERATIONS} autonomous iterations without user interaction. Try /compact or /new."
                 ),
             });
             let _ = event_tx.send(AppEvent::LlmFinish {
@@ -456,7 +466,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                             tracing::error!(
                                 error = %e,
                                 error_debug = ?e,
-                                iteration = iteration_count,
+                                iteration = total_iteration_count,
                                 message_count = messages.len(),
                                 chunks_received = if first_token_logged { "yes" } else { "no" },
                                 partial_text_len = assistant_content.len(),
@@ -486,7 +496,8 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 });
                 // Don't count this as a tool iteration — it's a retry of
                 // the same call. Undo the increment from the top of the loop.
-                iteration_count -= 1;
+                total_iteration_count -= 1;
+                auto_iteration_count -= 1;
                 continue;
             }
             tracing::error!(
@@ -892,9 +903,11 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                             match reply {
                                 Ok(PermissionReply::AllowOnce) => {
                                     tracing::info!(tool = %tc.tool_name, "permission granted (once)");
+                                    user_interacted_this_iteration = true;
                                 }
                                 Ok(PermissionReply::AllowAlways) => {
                                     tracing::info!(tool = %tc.tool_name, "permission granted (always)");
+                                    user_interacted_this_iteration = true;
                                     if let Some(ref engine) = permission_engine {
                                         let mut engine = engine.lock().await;
                                         engine.grant_session(tc.tool_name);
@@ -1032,6 +1045,16 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                     current_iteration_tool_count += 1;
                 }
             }
+        }
+
+        // Reset autonomous iteration counter if user interacted this iteration
+        if user_interacted_this_iteration {
+            tracing::debug!(
+                auto_iterations = auto_iteration_count,
+                total_iterations = total_iteration_count,
+                "resetting auto-iteration counter (user interacted)"
+            );
+            auto_iteration_count = 0;
         }
 
         // Loop back to send the messages (with tool results) to the LLM again
@@ -1763,12 +1786,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_terminates_after_max_iterations() {
-        // Configure MockChatStream to always return tool calls — simulates
-        // the infinite loop scenario where the LLM never produces a final
-        // text response.
+    async fn stream_terminates_after_max_auto_iterations() {
+        // Configure MockChatStream to always return auto-allowed tool calls
+        // (no user permission needed). Simulates the infinite loop scenario
+        // where the LLM autonomously re-reads files forever.
         let mut streams = Vec::new();
-        for i in 0..80 {
+        for i in 0..30 {
             streams.push(vec![
                 Ok(tool_call_chunk(
                     0,
@@ -1796,7 +1819,7 @@ mod tests {
         run_stream(req).await.expect("should terminate gracefully");
         let events = collect_events(rx).await;
 
-        // Should emit LlmError about exceeding max iterations
+        // Should emit LlmError about exceeding autonomous iterations
         let errors: Vec<&AppEvent> = events
             .iter()
             .filter(|e| matches!(e, AppEvent::LlmError { .. }))
@@ -1804,8 +1827,8 @@ mod tests {
         assert_eq!(errors.len(), 1, "should have exactly 1 LlmError");
         if let AppEvent::LlmError { error } = errors[0] {
             assert!(
-                error.contains("exceeded"),
-                "error should mention exceeded: {error}"
+                error.contains("autonomous iterations"),
+                "error should mention autonomous iterations: {error}"
             );
         }
 
