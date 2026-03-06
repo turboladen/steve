@@ -43,7 +43,7 @@ pub struct ToolResultCache {
 impl ToolResultCache {
     /// Number of cache hits on the same key before `get()` returns a summary
     /// instead of the full cached content.
-    const REPEAT_THRESHOLD: u32 = 3;
+    const REPEAT_THRESHOLD: u32 = 2;
 
     pub fn new(project_root: PathBuf) -> Self {
         Self {
@@ -357,18 +357,17 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_repeat_first_two_hits_return_full_content() {
+    fn test_cache_hits_below_threshold_return_full_content() {
         let mut cache = test_cache();
         let args = json!({"path": "src/main.rs"});
 
         cache.put(ToolName::Read, &args, &test_output("full file content"));
 
-        // First two hits should return the original content
-        let r1 = cache.get(ToolName::Read, &args).unwrap();
-        assert_eq!(r1.output, "full file content");
-
-        let r2 = cache.get(ToolName::Read, &args).unwrap();
-        assert_eq!(r2.output, "full file content");
+        // Hits below the threshold should return the original content
+        for i in 0..ToolResultCache::REPEAT_THRESHOLD - 1 {
+            let r = cache.get(ToolName::Read, &args).unwrap();
+            assert_eq!(r.output, "full file content", "hit {} should return full content", i + 1);
+        }
     }
 
     #[test]
@@ -384,7 +383,7 @@ mod tests {
             assert_eq!(r.output, "full file content");
         }
 
-        // Third hit should return a summary, not the full content
+        // Next hit should return a summary, not the full content
         let r = cache.get(ToolName::Read, &args).unwrap();
         assert!(
             r.output.contains("already provided"),
@@ -401,9 +400,9 @@ mod tests {
 
         cache.put(ToolName::Read, &args, &test_output("original content"));
 
-        // Hit twice (just under threshold)
-        cache.get(ToolName::Read, &args);
-        cache.get(ToolName::Read, &args);
+        // Hit once (just under threshold)
+        let r = cache.get(ToolName::Read, &args).unwrap();
+        assert_eq!(r.output, "original content");
 
         // Invalidate (simulating a write to the file)
         cache.invalidate_path("src/main.rs");
@@ -411,12 +410,11 @@ mod tests {
         // Re-populate cache with new content
         cache.put(ToolName::Read, &args, &test_output("updated content"));
 
-        // Counter should be reset — first two hits return full content
-        let r1 = cache.get(ToolName::Read, &args).unwrap();
-        assert_eq!(r1.output, "updated content");
-
-        let r2 = cache.get(ToolName::Read, &args).unwrap();
-        assert_eq!(r2.output, "updated content");
+        // Counter should be reset — hits below threshold return full content
+        for i in 0..ToolResultCache::REPEAT_THRESHOLD - 1 {
+            let r = cache.get(ToolName::Read, &args).unwrap();
+            assert_eq!(r.output, "updated content", "post-invalidation hit {} should return full content", i + 1);
+        }
     }
 
     #[test]
