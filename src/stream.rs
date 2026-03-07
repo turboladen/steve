@@ -169,11 +169,14 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
     // Safety limit: prevent infinite tool-call loops (e.g. compressor/cache
     // feedback oscillation where the LLM re-reads the same files forever).
-    // Only counts consecutive iterations with no user permission interaction.
-    // Resets when the user grants permission (proving human-in-the-loop).
+    // Two tiers: strict limit (25) for fully autonomous sessions, relaxed
+    // limit (75) once the user has granted any permission (proving they're
+    // actively supervising). Counter resets on each permission grant.
     const MAX_AUTO_ITERATIONS: u32 = 25;
+    const MAX_SUPERVISED_ITERATIONS: u32 = 75;
     let mut auto_iteration_count: u32 = 0;
     let mut total_iteration_count: u32 = 0;
+    let mut user_has_interacted = false;
     let mut user_interacted_this_iteration = false;
 
     // Mid-stream error retry limit (separate from stream creation retries).
@@ -194,15 +197,22 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         total_iteration_count += 1;
         auto_iteration_count += 1;
         user_interacted_this_iteration = false;
-        if auto_iteration_count > MAX_AUTO_ITERATIONS {
+        let effective_limit = if user_has_interacted {
+            MAX_SUPERVISED_ITERATIONS
+        } else {
+            MAX_AUTO_ITERATIONS
+        };
+        if auto_iteration_count > effective_limit {
             tracing::error!(
                 auto_iterations = auto_iteration_count,
                 total_iterations = total_iteration_count,
-                "tool loop exceeded max autonomous iterations"
+                effective_limit,
+                user_has_interacted,
+                "tool loop exceeded max iterations"
             );
             let _ = event_tx.send(AppEvent::LlmError {
                 error: format!(
-                    "Tool loop exceeded {MAX_AUTO_ITERATIONS} autonomous iterations without user interaction. Try /compact or /new."
+                    "Tool loop exceeded {effective_limit} iterations without user interaction. Try /compact or /new."
                 ),
             });
             let _ = event_tx.send(AppEvent::LlmFinish {
@@ -904,10 +914,12 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                                 Ok(PermissionReply::AllowOnce) => {
                                     tracing::info!(tool = %tc.tool_name, "permission granted (once)");
                                     user_interacted_this_iteration = true;
+                                    user_has_interacted = true;
                                 }
                                 Ok(PermissionReply::AllowAlways) => {
                                     tracing::info!(tool = %tc.tool_name, "permission granted (always)");
                                     user_interacted_this_iteration = true;
+                                    user_has_interacted = true;
                                     if let Some(ref engine) = permission_engine {
                                         let mut engine = engine.lock().await;
                                         engine.grant_session(tc.tool_name);
@@ -1827,8 +1839,8 @@ mod tests {
         assert_eq!(errors.len(), 1, "should have exactly 1 LlmError");
         if let AppEvent::LlmError { error } = errors[0] {
             assert!(
-                error.contains("autonomous iterations"),
-                "error should mention autonomous iterations: {error}"
+                error.contains("iterations without user interaction"),
+                "error should mention iterations without user interaction: {error}"
             );
         }
 
