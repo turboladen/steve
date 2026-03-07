@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde_json::Value;
 
@@ -15,6 +16,8 @@ use crate::tool::{ToolName, ToolOutput};
 struct CachedResult {
     /// The original full tool output.
     output: ToolOutput,
+    /// mtime of the file when cached (None for non-file tools like grep/glob).
+    mtime: Option<SystemTime>,
 }
 
 /// Cache for tool results within a session.
@@ -28,6 +31,11 @@ pub struct ToolResultCache {
     /// Map from normalized file path to set of cache keys that reference it.
     /// Used for invalidation when a file is modified.
     path_index: HashMap<PathBuf, Vec<String>>,
+    /// Per-key hit counter. After `REPEAT_THRESHOLD` hits on the same key,
+    /// `get()` returns a short summary instead of full content to break
+    /// compressor/cache feedback loops where the LLM re-reads the same file
+    /// indefinitely.
+    hit_counts: HashMap<String, u32>,
     /// Project root for normalizing paths.
     project_root: PathBuf,
     /// Stats
@@ -36,34 +44,80 @@ pub struct ToolResultCache {
 }
 
 impl ToolResultCache {
+    /// Number of cache hits on the same key before `get()` returns a summary
+    /// instead of the full cached content.
+    const REPEAT_THRESHOLD: u32 = 2;
+
     pub fn new(project_root: PathBuf) -> Self {
         Self {
             entries: HashMap::new(),
             path_index: HashMap::new(),
+            hit_counts: HashMap::new(),
             project_root,
             hits: 0,
             misses: 0,
         }
     }
 
-    /// Try to get a cached result. Returns the full cached output if available.
+    /// Try to get a cached result.
     ///
-    /// Returns the original tool output (not a compact reference) so the LLM
-    /// can use the content directly. The compressor handles token optimization
-    /// separately — it's the right layer for deciding when to summarize.
+    /// For the first `REPEAT_THRESHOLD - 1` hits, returns the full cached
+    /// output so the LLM can use the content directly. After that, returns
+    /// a short summary to break compressor/cache feedback loops where the
+    /// LLM re-reads the same file indefinitely.
     pub fn get(&mut self, tool_name: ToolName, args: &Value) -> Option<ToolOutput> {
         let key = self.cache_key(tool_name, args)?;
 
+        // Check if the file has been modified externally since we cached it.
+        if let Some(cached) = self.entries.get(&key) {
+            if let Some(cached_mtime) = cached.mtime {
+                let stale = self
+                    .extract_path(tool_name, args)
+                    .and_then(|path| std::fs::metadata(&path).ok())
+                    .and_then(|meta| meta.modified().ok())
+                    .is_some_and(|current_mtime| current_mtime != cached_mtime);
+                if stale {
+                    tracing::info!(
+                        tool = %tool_name,
+                        key = %key,
+                        "cache miss — file modified externally"
+                    );
+                    self.entries.remove(&key);
+                    self.hit_counts.remove(&key);
+                    self.misses += 1;
+                    return None;
+                }
+            }
+        }
+
         if let Some(cached) = self.entries.get(&key) {
             self.hits += 1;
+            let count = self.hit_counts.entry(key.clone()).or_insert(0);
+            *count += 1;
+
             tracing::info!(
                 tool = %tool_name,
                 key = %key,
                 hits = self.hits,
+                repeat_count = *count,
                 "cache hit"
             );
 
-            Some(cached.output.clone())
+            if *count >= Self::REPEAT_THRESHOLD {
+                // Break the compressor/cache feedback loop: after repeated
+                // hits the LLM is clearly stuck re-reading the same content.
+                let prior_hits = *count - 1;
+                let time_word = if prior_hits == 1 { "time" } else { "times" };
+                Some(ToolOutput {
+                    title: cached.output.title.clone(),
+                    output: format!(
+                        "[This content was already provided {prior_hits} {time_word}. It has not changed.]"
+                    ),
+                    is_error: false,
+                })
+            } else {
+                Some(cached.output.clone())
+            }
         } else {
             self.misses += 1;
             None
@@ -86,18 +140,28 @@ impl ToolResultCache {
             return;
         };
 
+        // Reset hit count so re-cached content gets full delivery again
+        self.hit_counts.remove(&key);
+
         // Track which file paths this cache entry references (for invalidation)
-        if let Some(path) = self.extract_path(tool_name, args) {
-            self.path_index
-                .entry(path)
-                .or_default()
-                .push(key.clone());
-        }
+        // and capture the file's mtime for external-change detection.
+        let mtime = self
+            .extract_path(tool_name, args)
+            .and_then(|path| {
+                self.path_index
+                    .entry(path.clone())
+                    .or_default()
+                    .push(key.clone());
+                std::fs::metadata(&path)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+            });
 
         self.entries.insert(
             key,
             CachedResult {
                 output: output.clone(),
+                mtime,
             },
         );
     }
@@ -115,6 +179,7 @@ impl ToolResultCache {
             invalidated += keys.len();
             for key in keys {
                 self.entries.remove(&key);
+                self.hit_counts.remove(&key);
             }
         }
 
@@ -129,6 +194,7 @@ impl ToolResultCache {
         invalidated += grep_glob_keys.len();
         for key in grep_glob_keys {
             self.entries.remove(&key);
+            self.hit_counts.remove(&key);
         }
 
         if invalidated > 0 {
@@ -324,6 +390,67 @@ mod tests {
     }
 
     #[test]
+    fn test_cache_hits_below_threshold_return_full_content() {
+        let mut cache = test_cache();
+        let args = json!({"path": "src/main.rs"});
+
+        cache.put(ToolName::Read, &args, &test_output("full file content"));
+
+        // Hits below the threshold should return the original content
+        for i in 0..ToolResultCache::REPEAT_THRESHOLD - 1 {
+            let r = cache.get(ToolName::Read, &args).unwrap();
+            assert_eq!(r.output, "full file content", "hit {} should return full content", i + 1);
+        }
+    }
+
+    #[test]
+    fn test_cache_repeat_returns_summary_after_threshold() {
+        let mut cache = test_cache();
+        let args = json!({"path": "src/main.rs"});
+
+        cache.put(ToolName::Read, &args, &test_output("full file content"));
+
+        // Exhaust the threshold
+        for _ in 0..ToolResultCache::REPEAT_THRESHOLD - 1 {
+            let r = cache.get(ToolName::Read, &args).unwrap();
+            assert_eq!(r.output, "full file content");
+        }
+
+        // Next hit should return a summary, not the full content
+        let r = cache.get(ToolName::Read, &args).unwrap();
+        assert!(
+            r.output.contains("already provided"),
+            "expected summary after threshold, got: {}",
+            r.output
+        );
+        assert!(!r.is_error);
+    }
+
+    #[test]
+    fn test_cache_repeat_counter_resets_on_invalidation() {
+        let mut cache = test_cache();
+        let args = json!({"path": "src/main.rs"});
+
+        cache.put(ToolName::Read, &args, &test_output("original content"));
+
+        // Hit once (just under threshold)
+        let r = cache.get(ToolName::Read, &args).unwrap();
+        assert_eq!(r.output, "original content");
+
+        // Invalidate (simulating a write to the file)
+        cache.invalidate_path("src/main.rs");
+
+        // Re-populate cache with new content
+        cache.put(ToolName::Read, &args, &test_output("updated content"));
+
+        // Counter should be reset — hits below threshold return full content
+        for i in 0..ToolResultCache::REPEAT_THRESHOLD - 1 {
+            let r = cache.get(ToolName::Read, &args).unwrap();
+            assert_eq!(r.output, "updated content", "post-invalidation hit {} should return full content", i + 1);
+        }
+    }
+
+    #[test]
     fn test_no_cache_errors() {
         let mut cache = test_cache();
         let args = json!({"path": "missing.rs"});
@@ -336,5 +463,32 @@ mod tests {
 
         cache.put(ToolName::Read, &args, &error_output);
         assert!(cache.get(ToolName::Read, &args).is_none());
+    }
+
+    #[test]
+    fn test_cache_invalidates_on_external_mtime_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.rs");
+        std::fs::write(&file_path, "original").unwrap();
+
+        let mut cache = ToolResultCache::new(dir.path().to_path_buf());
+        let path_str = file_path.to_string_lossy().to_string();
+        let args = json!({"path": path_str});
+
+        cache.put(ToolName::Read, &args, &test_output("original"));
+
+        // First hit — file unchanged, should return cached content
+        let r = cache.get(ToolName::Read, &args);
+        assert!(r.is_some(), "should hit cache when file unchanged");
+        assert_eq!(r.unwrap().output, "original");
+
+        // Modify the file externally (simulate git merge, editor save, etc.)
+        // Sleep to ensure mtime differs (HFS+ on macOS has 1-second granularity)
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(&file_path, "modified externally").unwrap();
+
+        // Next hit — file mtime changed, should be a cache miss
+        let r = cache.get(ToolName::Read, &args);
+        assert!(r.is_none(), "should miss cache when file modified externally");
     }
 }

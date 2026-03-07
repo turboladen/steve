@@ -1416,7 +1416,7 @@ impl App {
         }
 
         if self.input.mode == AgentMode::Plan {
-            parts.push("\n---\n\nYou are currently in PLAN mode. You can read files and analyze the codebase, but you CANNOT write, edit, patch, or create files. Focus on planning, analysis, and providing recommendations. If the user asks you to make changes, explain what you would do but do not attempt to use write tools.".to_string());
+            parts.push("\n---\n\nYou are currently in PLAN mode. You can read files and analyze the codebase, but you CANNOT write, edit, patch, or create files. Focus on planning, analysis, and providing recommendations. If the user asks you to make changes, explain what you would do but note that the user must switch to BUILD mode (via the Tab key) before changes can be applied.".to_string());
         }
 
         Some(parts.join("\n"))

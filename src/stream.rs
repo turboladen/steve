@@ -167,11 +167,42 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
     // Tool result cache — shared across stream tasks within a session.
     // Avoids re-executing identical read operations across messages.
 
+    // Safety limit: prevent infinite tool-call loops (e.g. compressor/cache
+    // feedback oscillation where the LLM re-reads the same files forever).
+    // Resets when the user grants a permission (proving active supervision).
+    const MAX_TOOL_ITERATIONS: u32 = 75;
+    let mut iteration_count: u32 = 0;
+    let mut total_iteration_count: u32 = 0;
+
+    // Mid-stream error retry limit (separate from stream creation retries).
+    const MAX_STREAM_RETRIES: u32 = 2;
+    let mut stream_retry_count: u32 = 0;
+
     // Tool call loop — keep going until the LLM produces a response with no tool calls
     loop {
         // Check for cancellation before each LLM call
         if cancel_token.is_cancelled() {
             tracing::info!("stream cancelled before LLM call");
+            let _ = event_tx.send(AppEvent::LlmFinish {
+                usage: Some(total_usage),
+            });
+            return Ok(());
+        }
+
+        total_iteration_count += 1;
+        iteration_count += 1;
+        let mut user_interacted_this_iteration = false;
+        if iteration_count > MAX_TOOL_ITERATIONS {
+            tracing::error!(
+                iterations = iteration_count,
+                total_iterations = total_iteration_count,
+                "tool loop exceeded max iterations"
+            );
+            let _ = event_tx.send(AppEvent::LlmError {
+                error: format!(
+                    "Tool loop exceeded {MAX_TOOL_ITERATIONS} iterations. Try /compact or /new."
+                ),
+            });
             let _ = event_tx.send(AppEvent::LlmFinish {
                 usage: Some(total_usage),
             });
@@ -317,6 +348,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         let mut finish_reason: Option<FinishReason> = None;
         let mut assistant_content = String::new();
         let mut first_token_logged = false;
+        let mut stream_chunk_error: Option<String> = None;
 
         // Process chunks — use select! to check cancellation while streaming
         loop {
@@ -429,16 +461,60 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                             }
                         }
                         Err(e) => {
-                            tracing::error!(error = %e, "stream chunk error");
-                            let _ = event_tx.send(AppEvent::LlmError {
-                                error: format!("stream error: {e}"),
-                            });
-                            return Err(());
+                            tracing::error!(
+                                error = %e,
+                                error_debug = ?e,
+                                iteration = total_iteration_count,
+                                message_count = messages.len(),
+                                chunks_received = if first_token_logged { "yes" } else { "no" },
+                                partial_text_len = assistant_content.len(),
+                                pending_tool_calls = pending_tool_calls.len(),
+                                "stream chunk error"
+                            );
+                            stream_chunk_error = Some(e.to_string());
+                            break;
                         }
                     }
                 }
             }
         }
+
+        // Mid-stream error — retry the LLM call if retries remain.
+        if let Some(err_msg) = stream_chunk_error {
+            stream_retry_count += 1;
+            if stream_retry_count <= MAX_STREAM_RETRIES {
+                tracing::warn!(
+                    error = %err_msg,
+                    attempt = stream_retry_count,
+                    max = MAX_STREAM_RETRIES,
+                    "mid-stream error, retrying LLM call"
+                );
+                let _ = event_tx.send(AppEvent::LlmRetry {
+                    attempt: stream_retry_count,
+                    max_attempts: MAX_STREAM_RETRIES,
+                    error: err_msg,
+                });
+                // Don't count this as a tool iteration — it's a retry of
+                // the same call. Undo the increment from the top of the loop.
+                total_iteration_count -= 1;
+                iteration_count -= 1;
+                continue;
+            }
+            tracing::error!(
+                error = %err_msg,
+                retries = stream_retry_count,
+                "mid-stream error, retries exhausted"
+            );
+            let _ = event_tx.send(AppEvent::LlmError {
+                error: format!("stream error: {err_msg}"),
+            });
+            let _ = event_tx.send(AppEvent::LlmFinish {
+                usage: Some(total_usage),
+            });
+            return Ok(());
+        }
+        // Reset stream retry counter on successful completion
+        stream_retry_count = 0;
 
         // Stream ended — check if we have tool calls to execute.
         // Some providers don't set finish_reason=tool_calls reliably,
@@ -827,9 +903,11 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                             match reply {
                                 Ok(PermissionReply::AllowOnce) => {
                                     tracing::info!(tool = %tc.tool_name, "permission granted (once)");
+                                    user_interacted_this_iteration = true;
                                 }
                                 Ok(PermissionReply::AllowAlways) => {
                                     tracing::info!(tool = %tc.tool_name, "permission granted (always)");
+                                    user_interacted_this_iteration = true;
                                     if let Some(ref engine) = permission_engine {
                                         let mut engine = engine.lock().await;
                                         engine.grant_session(tc.tool_name);
@@ -967,6 +1045,16 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                     current_iteration_tool_count += 1;
                 }
             }
+        }
+
+        // Reset iteration counter if user granted permission this iteration
+        if user_interacted_this_iteration {
+            tracing::debug!(
+                iterations = iteration_count,
+                total_iterations = total_iteration_count,
+                "resetting iteration counter (user granted permission)"
+            );
+            iteration_count = 0;
         }
 
         // Loop back to send the messages (with tool results) to the LLM again
@@ -1695,5 +1783,146 @@ mod tests {
         // Should still have a tool result (from cache)
         let tool_results: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::ToolResult { .. })).collect();
         assert!(!tool_results.is_empty(), "should have tool result even from cache");
+    }
+
+    #[tokio::test]
+    async fn stream_terminates_after_max_iterations() {
+        // Configure MockChatStream to always return tool calls — simulates
+        // the infinite loop scenario where the LLM never produces a final
+        // text response.
+        let mut streams = Vec::new();
+        for i in 0..80 {
+            streams.push(vec![
+                Ok(tool_call_chunk(
+                    0,
+                    Some(&format!("call_{i}")),
+                    Some("glob"),
+                    Some(r#"{"pattern":"*.rs"}"#),
+                )),
+                Ok(finish_chunk(FinishReason::ToolCalls, 50, 20)),
+            ]);
+        }
+        let mock = Arc::new(MockChatStream::new(streams));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut req = mock_stream_request(mock, tx);
+        req.tool_registry = Some(Arc::new(ToolRegistry::new(
+            std::path::PathBuf::from("/tmp/test"),
+        )));
+        req.tool_context = Some(ToolContext {
+            project_root: std::path::PathBuf::from("/tmp/test"),
+            storage_dir: None,
+        });
+        req.permission_engine = Some(Arc::new(tokio::sync::Mutex::new(
+            crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
+        )));
+
+        run_stream(req).await.expect("should terminate gracefully");
+        let events = collect_events(rx).await;
+
+        // Should emit LlmError about exceeding max iterations
+        let errors: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmError { .. }))
+            .collect();
+        assert_eq!(errors.len(), 1, "should have exactly 1 LlmError");
+        if let AppEvent::LlmError { error } = errors[0] {
+            assert!(
+                error.contains("exceeded"),
+                "error should mention exceeded: {error}"
+            );
+        }
+
+        // Should also get LlmFinish to persist accumulated token usage
+        let finishes: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
+            .collect();
+        assert_eq!(finishes.len(), 1, "should get LlmFinish to persist token usage");
+    }
+
+    #[tokio::test]
+    async fn stream_retries_mid_stream_error() {
+        // First stream: partial text then error
+        // Second stream (retry): successful completion
+        let error_stream = vec![
+            Ok(text_delta("partial ")),
+            Err(OpenAIError::StreamError(Box::new(
+                StreamError::EventStream("error decoding response body".to_string()),
+            ))),
+        ];
+        let success_stream = vec![
+            Ok(text_delta("Hello world!")),
+            Ok(finish_chunk(FinishReason::Stop, 100, 20)),
+        ];
+        let mock = Arc::new(MockChatStream::new(vec![error_stream, success_stream]));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let req = mock_stream_request(mock, tx);
+
+        run_stream(req).await.expect("should recover from mid-stream error");
+        let events = collect_events(rx).await;
+
+        // Should have a retry notification (LlmRetry, not LlmError)
+        let retries: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmRetry { .. }))
+            .collect();
+        assert_eq!(retries.len(), 1, "should have 1 LlmRetry for the retry notification");
+        if let AppEvent::LlmRetry { attempt, max_attempts, .. } = retries[0] {
+            assert_eq!(*attempt, 1);
+            assert_eq!(*max_attempts, 2);
+        }
+
+        // Should complete successfully with LlmFinish
+        let finishes: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
+            .collect();
+        assert_eq!(finishes.len(), 1, "should get LlmFinish after successful retry");
+
+        // Should have text deltas from the successful retry
+        let deltas: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmDelta { .. }))
+            .collect();
+        assert!(!deltas.is_empty(), "should have text deltas from retry");
+    }
+
+    #[tokio::test]
+    async fn stream_exhausts_mid_stream_retries() {
+        // All streams fail with errors — retries should be exhausted
+        let error_streams: Vec<Vec<Result<CreateChatCompletionStreamResponse, OpenAIError>>> =
+            (0..5)
+                .map(|_| {
+                    vec![Err(OpenAIError::StreamError(Box::new(
+                        StreamError::EventStream("error decoding response body".to_string()),
+                    )))]
+                })
+                .collect();
+        let mock = Arc::new(MockChatStream::new(error_streams));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let req = mock_stream_request(mock, tx);
+
+        run_stream(req).await.expect("should handle exhausted retries gracefully");
+        let events = collect_events(rx).await;
+
+        // Should have 2 LlmRetry events + 1 final LlmError
+        let retries: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmRetry { .. }))
+            .collect();
+        assert_eq!(retries.len(), 2, "should have 2 LlmRetry events, got {}", retries.len());
+
+        let errors: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmError { .. }))
+            .collect();
+        assert_eq!(errors.len(), 1, "should have 1 final LlmError, got {}", errors.len());
+
+        // Should get LlmFinish to persist usage
+        let finishes: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
+            .collect();
+        assert_eq!(finishes.len(), 1, "should get LlmFinish even after exhausted retries");
     }
 }
