@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde_json::Value;
 
@@ -15,6 +16,8 @@ use crate::tool::{ToolName, ToolOutput};
 struct CachedResult {
     /// The original full tool output.
     output: ToolOutput,
+    /// mtime of the file when cached (None for non-file tools like grep/glob).
+    mtime: Option<SystemTime>,
 }
 
 /// Cache for tool results within a session.
@@ -64,6 +67,28 @@ impl ToolResultCache {
     /// LLM re-reads the same file indefinitely.
     pub fn get(&mut self, tool_name: ToolName, args: &Value) -> Option<ToolOutput> {
         let key = self.cache_key(tool_name, args)?;
+
+        // Check if the file has been modified externally since we cached it.
+        if let Some(cached) = self.entries.get(&key) {
+            if let Some(cached_mtime) = cached.mtime {
+                let stale = self
+                    .extract_path(tool_name, args)
+                    .and_then(|path| std::fs::metadata(&path).ok())
+                    .and_then(|meta| meta.modified().ok())
+                    .is_some_and(|current_mtime| current_mtime != cached_mtime);
+                if stale {
+                    tracing::info!(
+                        tool = %tool_name,
+                        key = %key,
+                        "cache miss — file modified externally"
+                    );
+                    self.entries.remove(&key);
+                    self.hit_counts.remove(&key);
+                    self.misses += 1;
+                    return None;
+                }
+            }
+        }
 
         if let Some(cached) = self.entries.get(&key) {
             self.hits += 1;
@@ -118,17 +143,24 @@ impl ToolResultCache {
         self.hit_counts.remove(&key);
 
         // Track which file paths this cache entry references (for invalidation)
-        if let Some(path) = self.extract_path(tool_name, args) {
-            self.path_index
-                .entry(path)
-                .or_default()
-                .push(key.clone());
-        }
+        // and capture the file's mtime for external-change detection.
+        let mtime = self
+            .extract_path(tool_name, args)
+            .and_then(|path| {
+                self.path_index
+                    .entry(path.clone())
+                    .or_default()
+                    .push(key.clone());
+                std::fs::metadata(&path)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+            });
 
         self.entries.insert(
             key,
             CachedResult {
                 output: output.clone(),
+                mtime,
             },
         );
     }
@@ -430,5 +462,32 @@ mod tests {
 
         cache.put(ToolName::Read, &args, &error_output);
         assert!(cache.get(ToolName::Read, &args).is_none());
+    }
+
+    #[test]
+    fn test_cache_invalidates_on_external_mtime_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.rs");
+        std::fs::write(&file_path, "original").unwrap();
+
+        let mut cache = ToolResultCache::new(dir.path().to_path_buf());
+        let path_str = file_path.to_string_lossy().to_string();
+        let args = json!({"path": path_str});
+
+        cache.put(ToolName::Read, &args, &test_output("original"));
+
+        // First hit — file unchanged, should return cached content
+        let r = cache.get(ToolName::Read, &args);
+        assert!(r.is_some(), "should hit cache when file unchanged");
+        assert_eq!(r.unwrap().output, "original");
+
+        // Modify the file externally (simulate git merge, editor save, etc.)
+        // Sleep briefly to ensure mtime differs (filesystem granularity)
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(&file_path, "modified externally").unwrap();
+
+        // Next hit — file mtime changed, should be a cache miss
+        let r = cache.get(ToolName::Read, &args);
+        assert!(r.is_none(), "should miss cache when file modified externally");
     }
 }
