@@ -177,7 +177,6 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
     let mut auto_iteration_count: u32 = 0;
     let mut total_iteration_count: u32 = 0;
     let mut user_has_interacted = false;
-    let mut user_interacted_this_iteration = false;
 
     // Mid-stream error retry limit (separate from stream creation retries).
     const MAX_STREAM_RETRIES: u32 = 2;
@@ -196,7 +195,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
         total_iteration_count += 1;
         auto_iteration_count += 1;
-        user_interacted_this_iteration = false;
+        let mut user_interacted_this_iteration = false;
         let effective_limit = if user_has_interacted {
             MAX_SUPERVISED_ITERATIONS
         } else {
