@@ -106,11 +106,12 @@ impl ToolResultCache {
             if *count >= Self::REPEAT_THRESHOLD {
                 // Break the compressor/cache feedback loop: after repeated
                 // hits the LLM is clearly stuck re-reading the same content.
+                let prior_hits = *count - 1;
+                let time_word = if prior_hits == 1 { "time" } else { "times" };
                 Some(ToolOutput {
                     title: cached.output.title.clone(),
                     output: format!(
-                        "[This content was already provided {} times. It has not changed.]",
-                        *count - 1
+                        "[This content was already provided {prior_hits} {time_word}. It has not changed.]"
                     ),
                     is_error: false,
                 })
@@ -482,8 +483,8 @@ mod tests {
         assert_eq!(r.unwrap().output, "original");
 
         // Modify the file externally (simulate git merge, editor save, etc.)
-        // Sleep briefly to ensure mtime differs (filesystem granularity)
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        // Sleep to ensure mtime differs (HFS+ on macOS has 1-second granularity)
+        std::thread::sleep(std::time::Duration::from_millis(1100));
         std::fs::write(&file_path, "modified externally").unwrap();
 
         // Next hit — file mtime changed, should be a cache miss

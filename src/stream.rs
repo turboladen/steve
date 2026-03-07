@@ -489,8 +489,10 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                     max = MAX_STREAM_RETRIES,
                     "mid-stream error, retrying LLM call"
                 );
-                let _ = event_tx.send(AppEvent::LlmError {
-                    error: format!("stream error (retrying): {err_msg}"),
+                let _ = event_tx.send(AppEvent::LlmRetry {
+                    attempt: stream_retry_count,
+                    max_attempts: MAX_STREAM_RETRIES,
+                    error: err_msg,
                 });
                 // Don't count this as a tool iteration — it's a retry of
                 // the same call. Undo the increment from the top of the loop.
@@ -1859,14 +1861,15 @@ mod tests {
         run_stream(req).await.expect("should recover from mid-stream error");
         let events = collect_events(rx).await;
 
-        // Should have a retry error message
-        let errors: Vec<&AppEvent> = events
+        // Should have a retry notification (LlmRetry, not LlmError)
+        let retries: Vec<&AppEvent> = events
             .iter()
-            .filter(|e| matches!(e, AppEvent::LlmError { .. }))
+            .filter(|e| matches!(e, AppEvent::LlmRetry { .. }))
             .collect();
-        assert_eq!(errors.len(), 1, "should have 1 LlmError for the retry notification");
-        if let AppEvent::LlmError { error } = errors[0] {
-            assert!(error.contains("retrying"), "error should mention retrying: {error}");
+        assert_eq!(retries.len(), 1, "should have 1 LlmRetry for the retry notification");
+        if let AppEvent::LlmRetry { attempt, max_attempts, .. } = retries[0] {
+            assert_eq!(*attempt, 1);
+            assert_eq!(*max_attempts, 2);
         }
 
         // Should complete successfully with LlmFinish
@@ -1902,13 +1905,18 @@ mod tests {
         run_stream(req).await.expect("should handle exhausted retries gracefully");
         let events = collect_events(rx).await;
 
-        // Should have retry errors + final error
+        // Should have 2 LlmRetry events + 1 final LlmError
+        let retries: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmRetry { .. }))
+            .collect();
+        assert_eq!(retries.len(), 2, "should have 2 LlmRetry events, got {}", retries.len());
+
         let errors: Vec<&AppEvent> = events
             .iter()
             .filter(|e| matches!(e, AppEvent::LlmError { .. }))
             .collect();
-        // 2 retries (with "retrying" message) + 1 final error = 3
-        assert_eq!(errors.len(), 3, "should have 3 LlmError events (2 retries + 1 final), got {}", errors.len());
+        assert_eq!(errors.len(), 1, "should have 1 final LlmError, got {}", errors.len());
 
         // Should get LlmFinish to persist usage
         let finishes: Vec<&AppEvent> = events
