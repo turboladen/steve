@@ -169,14 +169,10 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
     // Safety limit: prevent infinite tool-call loops (e.g. compressor/cache
     // feedback oscillation where the LLM re-reads the same files forever).
-    // Two tiers: strict limit (25) for fully autonomous sessions, relaxed
-    // limit (75) once the user has granted any permission (proving they're
-    // actively supervising). Counter resets on each permission grant.
-    const MAX_AUTO_ITERATIONS: u32 = 25;
-    const MAX_SUPERVISED_ITERATIONS: u32 = 75;
-    let mut auto_iteration_count: u32 = 0;
+    // Resets when the user grants a permission (proving active supervision).
+    const MAX_TOOL_ITERATIONS: u32 = 75;
+    let mut iteration_count: u32 = 0;
     let mut total_iteration_count: u32 = 0;
-    let mut user_has_interacted = false;
 
     // Mid-stream error retry limit (separate from stream creation retries).
     const MAX_STREAM_RETRIES: u32 = 2;
@@ -194,24 +190,17 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         }
 
         total_iteration_count += 1;
-        auto_iteration_count += 1;
+        iteration_count += 1;
         let mut user_interacted_this_iteration = false;
-        let effective_limit = if user_has_interacted {
-            MAX_SUPERVISED_ITERATIONS
-        } else {
-            MAX_AUTO_ITERATIONS
-        };
-        if auto_iteration_count > effective_limit {
+        if iteration_count > MAX_TOOL_ITERATIONS {
             tracing::error!(
-                auto_iterations = auto_iteration_count,
+                iterations = iteration_count,
                 total_iterations = total_iteration_count,
-                effective_limit,
-                user_has_interacted,
                 "tool loop exceeded max iterations"
             );
             let _ = event_tx.send(AppEvent::LlmError {
                 error: format!(
-                    "Tool loop exceeded {effective_limit} iterations without user interaction. Try /compact or /new."
+                    "Tool loop exceeded {MAX_TOOL_ITERATIONS} iterations. Try /compact or /new."
                 ),
             });
             let _ = event_tx.send(AppEvent::LlmFinish {
@@ -506,7 +495,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 // Don't count this as a tool iteration — it's a retry of
                 // the same call. Undo the increment from the top of the loop.
                 total_iteration_count -= 1;
-                auto_iteration_count -= 1;
+                iteration_count -= 1;
                 continue;
             }
             tracing::error!(
@@ -913,12 +902,10 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                                 Ok(PermissionReply::AllowOnce) => {
                                     tracing::info!(tool = %tc.tool_name, "permission granted (once)");
                                     user_interacted_this_iteration = true;
-                                    user_has_interacted = true;
                                 }
                                 Ok(PermissionReply::AllowAlways) => {
                                     tracing::info!(tool = %tc.tool_name, "permission granted (always)");
                                     user_interacted_this_iteration = true;
-                                    user_has_interacted = true;
                                     if let Some(ref engine) = permission_engine {
                                         let mut engine = engine.lock().await;
                                         engine.grant_session(tc.tool_name);
@@ -1058,14 +1045,14 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             }
         }
 
-        // Reset autonomous iteration counter if user interacted this iteration
+        // Reset iteration counter if user granted permission this iteration
         if user_interacted_this_iteration {
             tracing::debug!(
-                auto_iterations = auto_iteration_count,
+                iterations = iteration_count,
                 total_iterations = total_iteration_count,
-                "resetting auto-iteration counter (user interacted)"
+                "resetting iteration counter (user granted permission)"
             );
-            auto_iteration_count = 0;
+            iteration_count = 0;
         }
 
         // Loop back to send the messages (with tool results) to the LLM again
@@ -1797,12 +1784,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_terminates_after_max_auto_iterations() {
-        // Configure MockChatStream to always return auto-allowed tool calls
-        // (no user permission needed). Simulates the infinite loop scenario
-        // where the LLM autonomously re-reads files forever.
+    async fn stream_terminates_after_max_iterations() {
+        // Configure MockChatStream to always return tool calls — simulates
+        // the infinite loop scenario where the LLM never produces a final
+        // text response.
         let mut streams = Vec::new();
-        for i in 0..30 {
+        for i in 0..80 {
             streams.push(vec![
                 Ok(tool_call_chunk(
                     0,
@@ -1830,7 +1817,7 @@ mod tests {
         run_stream(req).await.expect("should terminate gracefully");
         let events = collect_events(rx).await;
 
-        // Should emit LlmError about exceeding autonomous iterations
+        // Should emit LlmError about exceeding max iterations
         let errors: Vec<&AppEvent> = events
             .iter()
             .filter(|e| matches!(e, AppEvent::LlmError { .. }))
@@ -1838,8 +1825,8 @@ mod tests {
         assert_eq!(errors.len(), 1, "should have exactly 1 LlmError");
         if let AppEvent::LlmError { error } = errors[0] {
             assert!(
-                error.contains("iterations without user interaction"),
-                "error should mention iterations without user interaction: {error}"
+                error.contains("exceeded"),
+                "error should mention exceeded: {error}"
             );
         }
 
