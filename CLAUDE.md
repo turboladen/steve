@@ -50,7 +50,7 @@ Logs are written to `{data_dir}/logs/steve.log` (daily rolling via `tracing-appe
 ## Configuration
 
 Steve loads config from two layers, merged at startup (`config/mod.rs`):
-1. **Global config**: `~/.config/steve/config.jsonc` (platform config dir via `directories::ProjectDirs`)
+1. **Global config**: `~/.config/steve/config.jsonc`
 2. **Project config**: `.steve.jsonc` in the project root (dotfile — user-specific, not committed)
 
 Both are parsed through the JSONC parser. Project values override global values; providers deep-merge by provider ID, then by model ID within providers.

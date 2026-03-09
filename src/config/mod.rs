@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use types::Config;
 
 /// Load configuration with global + project merge.
-/// Global config at `~/.config/steve/config.jsonc` provides defaults;
+/// Global config at `~/.config/steve/config.jsonc` (XDG-style on all platforms) provides defaults;
 /// project-level `.steve.jsonc` overlays on top.
 pub fn load(project_root: &Path) -> Result<Config> {
     let global = load_global();
@@ -56,14 +56,11 @@ fn global_config_path() -> Option<PathBuf> {
 }
 
 /// Find the global `config.jsonc` file. Accepts an optional override directory
-/// for testing; when `None`, uses the platform config directory.
+/// for testing; when `None`, uses `~/.config/steve/`.
 fn find_global_config_in(dir_override: Option<&Path>) -> Option<PathBuf> {
     let config_dir = match dir_override {
         Some(d) => d.to_path_buf(),
-        None => {
-            let dirs = directories::ProjectDirs::from("", "", "steve")?;
-            dirs.config_dir().to_path_buf()
-        }
+        None => global_config_dir()?,
     };
     let path = config_dir.join("config.jsonc");
     if path.exists() {
@@ -73,10 +70,11 @@ fn find_global_config_in(dir_override: Option<&Path>) -> Option<PathBuf> {
     }
 }
 
-/// Exposed for logging/diagnostics — returns the global config directory path.
+/// Returns `~/.config/steve/` — the global config directory.
+/// Uses `$HOME/.config/steve/` directly (XDG-style) on all platforms.
 pub fn global_config_dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "steve")
-        .map(|d| d.config_dir().to_path_buf())
+    let home = std::env::var("HOME").ok()?;
+    Some(PathBuf::from(home).join(".config").join("steve"))
 }
 
 /// Persist a tool name to the project's `.steve.jsonc` `allow_tools` list.
