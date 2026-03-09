@@ -2426,10 +2426,13 @@ pub(crate) mod tests {
         let mut state = crate::ui::message_area::MessageAreaState::default();
         state.update_dimensions(500, 100);
         state.scroll_to_bottom(); // offset = 400
+        assert!(state.auto_scroll);
         state.scroll_up(1);
         assert_eq!(state.scroll_offset, 399);
+        assert!(!state.auto_scroll, "scrolling up should disable auto_scroll");
         state.scroll_down(1);
         assert_eq!(state.scroll_offset, 400);
+        assert!(state.auto_scroll, "returning to bottom should re-enable auto_scroll");
     }
 
     #[test]
@@ -2437,11 +2440,14 @@ pub(crate) mod tests {
         let mut state = crate::ui::message_area::MessageAreaState::default();
         state.update_dimensions(500, 100);
         state.scroll_to_bottom(); // offset = 400
+        assert!(state.auto_scroll);
         let page = state.visible_height(); // 100
         state.scroll_up(page);
         assert_eq!(state.scroll_offset, 300);
+        assert!(!state.auto_scroll, "page up should disable auto_scroll");
         state.scroll_down(page);
         assert_eq!(state.scroll_offset, 400);
+        assert!(state.auto_scroll, "page down to bottom should re-enable auto_scroll");
     }
 
     // -- strip_project_root tests --
