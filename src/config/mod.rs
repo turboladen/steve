@@ -1,15 +1,33 @@
 pub mod types;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
 use types::Config;
 
-/// Load configuration from the project root.
-/// Looks for `steve.json` or `steve.jsonc` in the given directory.
+/// Load configuration with global + project merge.
+/// Global config at `~/.config/steve/config.json` (or `.jsonc`) provides defaults;
+/// project-level `steve.json` overlays on top.
 pub fn load(project_root: &Path) -> Result<Config> {
-    // Try steve.json first, then steve.jsonc
+    let global = load_global();
+    let project = load_project(project_root)?;
+
+    Ok(global.merge(project))
+}
+
+/// Load global config from the platform config directory.
+/// Returns `Config::default()` if no global config exists.
+fn load_global() -> Config {
+    let Some(path) = global_config_path() else {
+        return Config::default();
+    };
+    load_jsonc_file(&path).unwrap_or_default()
+}
+
+/// Load project-level config from the project root.
+/// Looks for `steve.json` or `steve.jsonc`.
+fn load_project(project_root: &Path) -> Result<Config> {
     let json_path = project_root.join("steve.json");
     let jsonc_path = project_root.join("steve.jsonc");
 
@@ -18,24 +36,47 @@ pub fn load(project_root: &Path) -> Result<Config> {
     } else if jsonc_path.exists() {
         jsonc_path
     } else {
-        // No config file found — return defaults
         return Ok(Config::default());
     };
 
-    let content = std::fs::read_to_string(&path)
+    load_jsonc_file(&path)
+}
+
+/// Parse a JSONC file into a Config. Works for both `.json` and `.jsonc`.
+fn load_jsonc_file(path: &Path) -> Result<Config> {
+    let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read config file: {}", path.display()))?;
 
-    // Always parse through JSONC parser — it handles both plain JSON and JSONC (with comments)
     let json_value = jsonc_parser::parse_to_serde_value(&content, &Default::default())
         .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", path.display()))?;
 
-    let config = match json_value {
+    match json_value {
         Some(value) => serde_json::from_value(value)
-            .with_context(|| format!("failed to deserialize config from {}", path.display()))?,
-        None => Config::default(),
-    };
+            .with_context(|| format!("failed to deserialize config from {}", path.display())),
+        None => Ok(Config::default()),
+    }
+}
 
-    Ok(config)
+/// Returns the path to the global config file, if the config directory can be determined.
+/// Checks for `config.json` first, then `config.jsonc`.
+fn global_config_path() -> Option<PathBuf> {
+    let dirs = directories::ProjectDirs::from("", "", "steve")?;
+    let config_dir = dirs.config_dir();
+    let json_path = config_dir.join("config.json");
+    if json_path.exists() {
+        return Some(json_path);
+    }
+    let jsonc_path = config_dir.join("config.jsonc");
+    if jsonc_path.exists() {
+        return Some(jsonc_path);
+    }
+    None
+}
+
+/// Exposed for logging/diagnostics — returns the global config directory path.
+pub fn global_config_dir() -> Option<PathBuf> {
+    directories::ProjectDirs::from("", "", "steve")
+        .map(|d| d.config_dir().to_path_buf())
 }
 
 /// Load the AGENTS.md file from the project root, if it exists.
@@ -130,5 +171,45 @@ mod tests {
         let config = load(dir.path()).unwrap();
         assert_eq!(config.model, Some("test/m".into()));
         assert!(config.auto_compact);
+    }
+
+    #[test]
+    fn load_jsonc_file_parses_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.json");
+        std::fs::write(&path, r#"{"model": "test/m"}"#).unwrap();
+        let config = load_jsonc_file(&path).unwrap();
+        assert_eq!(config.model, Some("test/m".into()));
+    }
+
+    #[test]
+    fn load_jsonc_file_parses_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonc");
+        std::fs::write(&path, "{\n  // comment\n  \"model\": \"test/m\"\n}").unwrap();
+        let config = load_jsonc_file(&path).unwrap();
+        assert_eq!(config.model, Some("test/m".into()));
+    }
+
+    #[test]
+    fn load_jsonc_file_missing_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.json");
+        assert!(load_jsonc_file(&path).is_err());
+    }
+
+    #[test]
+    fn load_project_no_file_returns_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = load_project(dir.path()).unwrap();
+        assert_eq!(config.model, None);
+        assert!(config.providers.is_empty());
+    }
+
+    #[test]
+    fn global_config_dir_returns_some() {
+        // On any platform with a home directory, this should return Some
+        let dir = global_config_dir();
+        assert!(dir.is_some(), "should resolve a config directory");
     }
 }

@@ -81,6 +81,59 @@ pub struct ModelCapabilities {
     pub reasoning: bool,
 }
 
+impl Config {
+    /// Merge a project config on top of this (global) config.
+    /// Project values take precedence over global values.
+    /// Providers merge by ID; models merge within providers.
+    pub fn merge(mut self, project: Config) -> Config {
+        // Detect whether the project config had meaningful content before moving fields.
+        // This prevents a default project Config from clobbering global auto_compact.
+        let project_has_content = !project.providers.is_empty()
+            || project.model.is_some()
+            || project.small_model.is_some();
+
+        // Scalar fields: project overrides global
+        if project.model.is_some() {
+            self.model = project.model;
+        }
+        if project.small_model.is_some() {
+            self.small_model = project.small_model;
+        }
+        if project_has_content {
+            self.auto_compact = project.auto_compact;
+        }
+
+        // Providers: deep merge by provider ID, then by model ID
+        for (provider_id, project_provider) in project.providers {
+            match self.providers.get_mut(&provider_id) {
+                Some(global_provider) => {
+                    global_provider.merge(project_provider);
+                }
+                None => {
+                    self.providers.insert(provider_id, project_provider);
+                }
+            }
+        }
+
+        self
+    }
+}
+
+impl ProviderConfig {
+    /// Merge a project provider on top of this (global) provider.
+    /// Project values override; models merge by model ID.
+    fn merge(&mut self, project: ProviderConfig) {
+        // Provider-level fields: project overrides
+        self.base_url = project.base_url;
+        self.api_key_env = project.api_key_env;
+
+        // Models: project overrides per model ID
+        for (model_id, project_model) in project.models {
+            self.models.insert(model_id, project_model);
+        }
+    }
+}
+
 fn default_context_window() -> u32 {
     128_000
 }
@@ -167,5 +220,170 @@ mod tests {
     fn empty_providers_is_valid() {
         let config: Config = serde_json::from_str(r#"{"model": "test/m"}"#).unwrap();
         assert!(config.providers.is_empty());
+    }
+
+    // -- Config::merge tests --
+
+    #[test]
+    fn merge_project_model_overrides_global() {
+        let global = Config {
+            model: Some("global/model".into()),
+            ..Default::default()
+        };
+        let project = Config {
+            model: Some("project/model".into()),
+            ..Default::default()
+        };
+        let merged = global.merge(project);
+        assert_eq!(merged.model, Some("project/model".into()));
+    }
+
+    #[test]
+    fn merge_project_none_keeps_global() {
+        let global = Config {
+            model: Some("global/model".into()),
+            small_model: Some("global/small".into()),
+            ..Default::default()
+        };
+        let project = Config::default();
+        let merged = global.merge(project);
+        assert_eq!(merged.model, Some("global/model".into()));
+        assert_eq!(merged.small_model, Some("global/small".into()));
+    }
+
+    #[test]
+    fn merge_providers_new_provider_added() {
+        let global = Config::default();
+        let mut project = Config::default();
+        project.providers.insert(
+            "openai".into(),
+            ProviderConfig {
+                base_url: "https://api.openai.com/v1".into(),
+                api_key_env: "OPENAI_API_KEY".into(),
+                models: HashMap::new(),
+            },
+        );
+        let merged = global.merge(project);
+        assert!(merged.providers.contains_key("openai"));
+    }
+
+    #[test]
+    fn merge_providers_deep_merge_models() {
+        let mut global = Config::default();
+        let mut global_models = HashMap::new();
+        global_models.insert(
+            "gpt-4o".into(),
+            ModelConfig {
+                id: "gpt-4o".into(),
+                name: "GPT-4o".into(),
+                context_window: 128_000,
+                max_output_tokens: None,
+                cost: None,
+                capabilities: ModelCapabilities::default(),
+            },
+        );
+        global.providers.insert(
+            "openai".into(),
+            ProviderConfig {
+                base_url: "https://api.openai.com/v1".into(),
+                api_key_env: "OPENAI_API_KEY".into(),
+                models: global_models,
+            },
+        );
+
+        let mut project = Config::default();
+        let mut project_models = HashMap::new();
+        project_models.insert(
+            "gpt-4o-mini".into(),
+            ModelConfig {
+                id: "gpt-4o-mini".into(),
+                name: "GPT-4o Mini".into(),
+                context_window: 128_000,
+                max_output_tokens: None,
+                cost: None,
+                capabilities: ModelCapabilities::default(),
+            },
+        );
+        project.providers.insert(
+            "openai".into(),
+            ProviderConfig {
+                base_url: "https://custom.proxy/v1".into(),
+                api_key_env: "CUSTOM_KEY".into(),
+                models: project_models,
+            },
+        );
+
+        let merged = global.merge(project);
+        let openai = &merged.providers["openai"];
+        // Provider-level fields come from project
+        assert_eq!(openai.base_url, "https://custom.proxy/v1");
+        assert_eq!(openai.api_key_env, "CUSTOM_KEY");
+        // Both models present
+        assert!(openai.models.contains_key("gpt-4o"), "global model preserved");
+        assert!(openai.models.contains_key("gpt-4o-mini"), "project model added");
+    }
+
+    #[test]
+    fn merge_project_model_overrides_global_model_same_id() {
+        let mut global = Config::default();
+        let mut global_models = HashMap::new();
+        global_models.insert(
+            "gpt-4o".into(),
+            ModelConfig {
+                id: "gpt-4o".into(),
+                name: "Global Name".into(),
+                context_window: 128_000,
+                max_output_tokens: None,
+                cost: None,
+                capabilities: ModelCapabilities::default(),
+            },
+        );
+        global.providers.insert(
+            "openai".into(),
+            ProviderConfig {
+                base_url: "https://api.openai.com/v1".into(),
+                api_key_env: "OPENAI_API_KEY".into(),
+                models: global_models,
+            },
+        );
+
+        let mut project = Config::default();
+        let mut project_models = HashMap::new();
+        project_models.insert(
+            "gpt-4o".into(),
+            ModelConfig {
+                id: "gpt-4o".into(),
+                name: "Project Override".into(),
+                context_window: 64_000,
+                max_output_tokens: Some(4096),
+                cost: None,
+                capabilities: ModelCapabilities::default(),
+            },
+        );
+        project.providers.insert(
+            "openai".into(),
+            ProviderConfig {
+                base_url: "https://api.openai.com/v1".into(),
+                api_key_env: "OPENAI_API_KEY".into(),
+                models: project_models,
+            },
+        );
+
+        let merged = global.merge(project);
+        let model = &merged.providers["openai"].models["gpt-4o"];
+        assert_eq!(model.name, "Project Override");
+        assert_eq!(model.context_window, 64_000);
+        assert_eq!(model.max_output_tokens, Some(4096));
+    }
+
+    #[test]
+    fn merge_both_empty_returns_default() {
+        let merged = Config::default().merge(Config::default());
+        assert_eq!(merged.model, None);
+        assert!(merged.providers.is_empty());
+        // Note: Config::default() gives auto_compact=false (bool default),
+        // while serde deserialization gives auto_compact=true via default_auto_compact().
+        // Merging two defaults preserves the global's value (false).
+        assert!(!merged.auto_compact);
     }
 }
