@@ -1,8 +1,19 @@
 //! Read tool — reads file contents with optional line range.
 
+use std::io::Read as _;
+use std::path::Path;
+
 use serde_json::Value;
 
 use super::{ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput};
+
+/// Check if a file is binary by looking for null bytes in the first 8KB.
+fn is_binary(path: &Path) -> anyhow::Result<bool> {
+    let mut file = std::fs::File::open(path)?;
+    let mut buf = [0u8; 8192];
+    let n = file.read(&mut buf)?;
+    Ok(buf[..n].contains(&0))
+}
 
 pub fn tool() -> ToolEntry {
     ToolEntry {
@@ -68,6 +79,18 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
         });
     }
 
+    // Detect binary files by checking for null bytes in the first 8KB
+    if is_binary(&path)? {
+        let size = std::fs::metadata(&path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        return Ok(ToolOutput {
+            title: format!("read {path_str}"),
+            output: format!("Binary file ({} bytes), not displayed.", size),
+            is_error: false,
+        });
+    }
+
     let content = std::fs::read_to_string(&path)
         .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
 
@@ -77,6 +100,14 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
         Some(n) => std::cmp::min(start + n, lines.len()),
         None => lines.len(),
     };
+
+    if lines.is_empty() {
+        return Ok(ToolOutput {
+            title: format!("read {path_str}"),
+            output: String::new(),
+            is_error: false,
+        });
+    }
 
     if start >= lines.len() {
         return Ok(ToolOutput {
@@ -221,5 +252,63 @@ mod tests {
 
         assert!(!result.output.contains("showing"));
         assert!(!result.output.contains("truncated"));
+    }
+
+    #[test]
+    fn read_binary_file_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("image.png");
+        // PNG header + null bytes
+        std::fs::write(&file, b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR").unwrap();
+
+        let args = serde_json::json!({"path": file.to_str().unwrap()});
+        let ctx = test_ctx(dir.path());
+        let result = execute(args, ctx).unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.output.contains("Binary file"));
+        assert!(result.output.contains("bytes"));
+    }
+
+    #[test]
+    fn read_text_file_not_detected_as_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hello.txt");
+        std::fs::write(&file, "Hello, world!\nLine two.\n").unwrap();
+
+        let args = serde_json::json!({"path": file.to_str().unwrap()});
+        let ctx = test_ctx(dir.path());
+        let result = execute(args, ctx).unwrap();
+
+        assert!(!result.is_error);
+        assert!(!result.output.contains("Binary file"));
+        assert!(result.output.contains("Hello, world!"));
+    }
+
+    #[test]
+    fn read_empty_file_not_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("empty.txt");
+        std::fs::write(&file, "").unwrap();
+
+        let args = serde_json::json!({"path": file.to_str().unwrap()});
+        let ctx = test_ctx(dir.path());
+        let result = execute(args, ctx).unwrap();
+
+        assert!(!result.is_error);
+        assert!(!result.output.contains("Binary file"));
+    }
+
+    #[test]
+    fn is_binary_detects_null_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let bin = dir.path().join("data.bin");
+        std::fs::write(&bin, b"hello\x00world").unwrap();
+        assert!(is_binary(&bin).unwrap());
+
+        let txt = dir.path().join("data.txt");
+        std::fs::write(&txt, b"hello world").unwrap();
+        assert!(!is_binary(&txt).unwrap());
     }
 }

@@ -34,7 +34,7 @@ impl Command {
         let arg = parts.get(1).map(|s| s.trim().to_string());
 
         match cmd {
-            "/exit" => Ok(Command::Exit),
+            "/exit" | "/quit" => Ok(Command::Exit),
             "/new" => Ok(Command::New),
             "/rename" => match arg {
                 Some(title) if !title.is_empty() => Ok(Command::Rename(title)),
@@ -72,6 +72,7 @@ impl Command {
             CommandInfo { name: "/init", description: "Create AGENTS.md" },
             CommandInfo { name: "/export-debug", description: "Export session with logs" },
             CommandInfo { name: "/help", description: "Show help" },
+            CommandInfo { name: "/quit", description: "Quit" },
             CommandInfo { name: "/exit", description: "Quit" },
         ]
     }
@@ -92,6 +93,7 @@ mod tests {
     #[test]
     fn parse_simple_commands() {
         assert_eq!(Command::parse("/exit").unwrap(), Command::Exit);
+        assert_eq!(Command::parse("/quit").unwrap(), Command::Exit);
         assert_eq!(Command::parse("/new").unwrap(), Command::New);
         assert_eq!(Command::parse("/init").unwrap(), Command::Init);
         assert_eq!(Command::parse("/compact").unwrap(), Command::Compact);
@@ -152,7 +154,8 @@ mod tests {
         assert!(names.contains(&"/sessions"));
         assert!(names.contains(&"/help"));
         assert!(names.contains(&"/export-debug"));
-        assert_eq!(cmds.len(), 10);
+        assert!(names.contains(&"/quit"));
+        assert_eq!(cmds.len(), 11);
     }
 
     #[test]
@@ -175,7 +178,7 @@ mod tests {
     #[test]
     fn filter_commands_slash_only() {
         let matches = Command::matching_commands("/");
-        assert_eq!(matches.len(), 10);
+        assert_eq!(matches.len(), 11);
     }
 
     #[test]

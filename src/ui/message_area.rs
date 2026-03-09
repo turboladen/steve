@@ -58,6 +58,11 @@ impl MessageAreaState {
         }
     }
 
+    /// Visible area height (for page-size scrolling).
+    pub fn visible_height(&self) -> u16 {
+        self.visible_height
+    }
+
     /// Jump to the bottom (newest content). Re-enables auto-scroll.
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = self.max_scroll();

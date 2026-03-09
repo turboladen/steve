@@ -965,6 +965,20 @@ impl App {
             (KeyCode::Down, KeyModifiers::NONE) if self.autocomplete_state.visible => {
                 self.autocomplete_state.next();
             }
+            (KeyCode::Up, KeyModifiers::NONE) => {
+                self.message_area_state.scroll_up(1);
+            }
+            (KeyCode::Down, KeyModifiers::NONE) => {
+                self.message_area_state.scroll_down(1);
+            }
+            (KeyCode::PageUp, KeyModifiers::NONE) => {
+                let page = self.message_area_state.visible_height().max(1);
+                self.message_area_state.scroll_up(page);
+            }
+            (KeyCode::PageDown, KeyModifiers::NONE) => {
+                let page = self.message_area_state.visible_height().max(1);
+                self.message_area_state.scroll_down(page);
+            }
             (KeyCode::Esc, KeyModifiers::NONE) if self.autocomplete_state.visible => {
                 self.autocomplete_state.hide();
             }
@@ -2405,6 +2419,35 @@ pub(crate) mod tests {
             state.scroll_offset > after_up,
             "scroll_down should increase offset"
         );
+    }
+
+    #[test]
+    fn keyboard_scroll_up_down() {
+        let mut state = crate::ui::message_area::MessageAreaState::default();
+        state.update_dimensions(500, 100);
+        state.scroll_to_bottom(); // offset = 400
+        assert!(state.auto_scroll);
+        state.scroll_up(1);
+        assert_eq!(state.scroll_offset, 399);
+        assert!(!state.auto_scroll, "scrolling up should disable auto_scroll");
+        state.scroll_down(1);
+        assert_eq!(state.scroll_offset, 400);
+        assert!(state.auto_scroll, "returning to bottom should re-enable auto_scroll");
+    }
+
+    #[test]
+    fn keyboard_page_scroll() {
+        let mut state = crate::ui::message_area::MessageAreaState::default();
+        state.update_dimensions(500, 100);
+        state.scroll_to_bottom(); // offset = 400
+        assert!(state.auto_scroll);
+        let page = state.visible_height(); // 100
+        state.scroll_up(page);
+        assert_eq!(state.scroll_offset, 300);
+        assert!(!state.auto_scroll, "page up should disable auto_scroll");
+        state.scroll_down(page);
+        assert_eq!(state.scroll_offset, 400);
+        assert!(state.auto_scroll, "page down to bottom should re-enable auto_scroll");
     }
 
     // -- strip_project_root tests --
