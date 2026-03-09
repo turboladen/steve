@@ -22,7 +22,7 @@ use crate::app::App;
 use layout::compute_layout;
 use message_area::render_message_blocks;
 use autocomplete::render_autocomplete;
-use input::{render_input, abbreviate_path, InputContext};
+use input::{render_input, abbreviate_path, InputContext, MIN_INPUT_HEIGHT, MAX_INPUT_PCT};
 use sidebar::render_sidebar;
 use status_line::Activity;
 
@@ -65,7 +65,9 @@ pub(crate) fn render_to_buffer(
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let show_sidebar = app.should_show_sidebar(area.width);
-    let layout = compute_layout(area, show_sidebar);
+    let max_input = ((area.height as u32 * MAX_INPUT_PCT as u32 / 100) as u16).max(MIN_INPUT_HEIGHT);
+    let input_height = app.input.desired_height(max_input);
+    let layout = compute_layout(area, show_sidebar, input_height);
 
     // Context pressure percentage — drives ambient border color shifts
     let pct = app.status_line_state.context_usage_pct();

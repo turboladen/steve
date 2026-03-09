@@ -11,17 +11,15 @@ pub struct AppLayout {
 
 const SIDEBAR_WIDTH: u16 = 40;
 const SIDEBAR_MIN_TERMINAL_WIDTH: u16 = 120;
-/// Input height: 1 border + 1 context line + 3 textarea rows = 5.
-const INPUT_HEIGHT: u16 = 5;
 
-/// Compute the layout given the full terminal area.
+/// Compute the layout given the full terminal area and dynamic input height.
 ///
 /// Layout order (top to bottom):
 /// - Message area (fills remaining space)
-/// - Input area (5 rows: 1 border + 1 context line + 3 textarea)
+/// - Input area (`input_height` rows)
 ///
 /// Sidebar (if shown) sits to the right of messages + input.
-pub fn compute_layout(area: Rect, show_sidebar: bool) -> AppLayout {
+pub fn compute_layout(area: Rect, show_sidebar: bool, input_height: u16) -> AppLayout {
     let sidebar_visible = show_sidebar && area.width >= SIDEBAR_MIN_TERMINAL_WIDTH;
 
     if sidebar_visible {
@@ -45,7 +43,7 @@ pub fn compute_layout(area: Rect, show_sidebar: bool) -> AppLayout {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(1),
-                Constraint::Length(INPUT_HEIGHT),
+                Constraint::Length(input_height),
             ])
             .split(content_area);
 
@@ -61,7 +59,7 @@ pub fn compute_layout(area: Rect, show_sidebar: bool) -> AppLayout {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(1),
-                Constraint::Length(INPUT_HEIGHT),
+                Constraint::Length(input_height),
             ])
             .split(area);
 
@@ -77,6 +75,7 @@ pub fn compute_layout(area: Rect, show_sidebar: bool) -> AppLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::input::MIN_INPUT_HEIGHT;
 
     fn rect(width: u16, height: u16) -> Rect {
         Rect::new(0, 0, width, height)
@@ -84,10 +83,10 @@ mod tests {
 
     #[test]
     fn layout_without_sidebar() {
-        let layout = compute_layout(rect(80, 24), false);
+        let layout = compute_layout(rect(80, 24), false, MIN_INPUT_HEIGHT);
         assert!(layout.sidebar.is_none());
         // Input at bottom, 5 rows (1 border + 1 context + 3 textarea)
-        assert_eq!(layout.input_area.height, INPUT_HEIGHT);
+        assert_eq!(layout.input_area.height, MIN_INPUT_HEIGHT);
         assert_eq!(layout.input_area.y, 19); // 24 - 5(input)
         // Messages fill the rest
         assert_eq!(layout.message_area.y, 0);
@@ -96,7 +95,7 @@ mod tests {
 
     #[test]
     fn layout_with_sidebar() {
-        let layout = compute_layout(rect(120, 24), true);
+        let layout = compute_layout(rect(120, 24), true, MIN_INPUT_HEIGHT);
         assert!(layout.sidebar.is_some());
         let sidebar = layout.sidebar.unwrap();
         assert_eq!(sidebar.width, SIDEBAR_WIDTH);
@@ -109,15 +108,23 @@ mod tests {
 
     #[test]
     fn layout_sidebar_not_shown_below_threshold() {
-        let layout = compute_layout(rect(119, 24), true);
+        let layout = compute_layout(rect(119, 24), true, MIN_INPUT_HEIGHT);
         assert!(layout.sidebar.is_none());
         assert!(layout.sidebar_separator.is_none());
     }
 
     #[test]
     fn layout_input_height_includes_context_line() {
-        let layout = compute_layout(rect(80, 24), false);
+        let layout = compute_layout(rect(80, 24), false, MIN_INPUT_HEIGHT);
         // 5 rows: 1 border + 1 context line + 3 textarea
         assert_eq!(layout.input_area.height, 5);
+    }
+
+    #[test]
+    fn layout_expanded_input_reduces_message_area() {
+        let layout = compute_layout(rect(80, 24), false, 10);
+        assert_eq!(layout.input_area.height, 10);
+        assert_eq!(layout.message_area.height, 14); // 24 - 10
+        assert_eq!(layout.input_area.y, 14);
     }
 }

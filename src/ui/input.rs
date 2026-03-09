@@ -12,6 +12,15 @@ use ratatui_textarea::TextArea;
 use super::status_line::format_tokens;
 use super::theme::Theme;
 
+/// Overhead rows above the textarea: 1 border + 1 context line.
+const INPUT_OVERHEAD: u16 = 2;
+/// Minimum textarea rows.
+const MIN_TEXTAREA_ROWS: u16 = 3;
+/// Minimum total input height: overhead + min textarea rows.
+pub const MIN_INPUT_HEIGHT: u16 = INPUT_OVERHEAD + MIN_TEXTAREA_ROWS; // 5
+/// Max percentage of terminal height the input can consume.
+pub const MAX_INPUT_PCT: u16 = 40;
+
 /// The current agent mode. Placeholder until agent module is built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentMode {
@@ -62,6 +71,16 @@ impl Default for InputState {
 }
 
 impl InputState {
+    /// Desired input area height based on current content.
+    /// Capped between `MIN_INPUT_HEIGHT` and `max_height`.
+    pub fn desired_height(&self, max_height: u16) -> u16 {
+        let cap = max_height.max(MIN_INPUT_HEIGHT);
+        let line_count = self.textarea.lines().len() as u16;
+        let textarea_rows = line_count.max(MIN_TEXTAREA_ROWS);
+        let total = INPUT_OVERHEAD + textarea_rows;
+        total.clamp(MIN_INPUT_HEIGHT, cap)
+    }
+
     /// Take the current text and clear the input.
     pub fn take_text(&mut self) -> String {
         let lines = self.textarea.lines().to_vec();
@@ -373,6 +392,63 @@ mod tests {
                 break;
             }
         }
+    }
+
+    // -- desired_height tests --
+
+    #[test]
+    fn desired_height_empty_textarea() {
+        let state = InputState::default();
+        assert_eq!(state.desired_height(20), MIN_INPUT_HEIGHT);
+    }
+
+    #[test]
+    fn desired_height_single_line() {
+        let mut state = InputState::default();
+        state.textarea.insert_str("hello");
+        assert_eq!(state.desired_height(20), MIN_INPUT_HEIGHT);
+    }
+
+    #[test]
+    fn desired_height_six_lines() {
+        let mut state = InputState::default();
+        // Insert 6 lines via newline-separated text
+        state.textarea.insert_str("1\n2\n3\n4\n5\n6");
+        assert_eq!(state.textarea.lines().len(), 6, "insert_str must split on newlines");
+        // 2 overhead + 6 lines = 8
+        assert_eq!(state.desired_height(20), 8);
+    }
+
+    #[test]
+    fn desired_height_clamped_to_max() {
+        let mut state = InputState::default();
+        // Insert 30 lines
+        let text = (1..=30).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
+        state.textarea.insert_str(&text);
+        // 2 + 30 = 32, but max_height is 12
+        assert_eq!(state.desired_height(12), 12);
+    }
+
+    #[test]
+    fn desired_height_max_equals_min() {
+        let state = InputState::default();
+        assert_eq!(state.desired_height(MIN_INPUT_HEIGHT), MIN_INPUT_HEIGHT);
+    }
+
+    #[test]
+    fn desired_height_max_below_min_does_not_panic() {
+        let state = InputState::default();
+        // max_height < MIN_INPUT_HEIGHT should return MIN_INPUT_HEIGHT, not panic
+        assert_eq!(state.desired_height(2), MIN_INPUT_HEIGHT);
+    }
+
+    #[test]
+    fn desired_height_after_take_text() {
+        let mut state = InputState::default();
+        state.textarea.insert_str("1\n2\n3\n4\n5\n6");
+        assert_eq!(state.desired_height(20), 8);
+        let _ = state.take_text();
+        assert_eq!(state.desired_height(20), MIN_INPUT_HEIGHT);
     }
 
     #[test]
