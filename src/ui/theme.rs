@@ -1,7 +1,8 @@
 use ratatui::style::Color;
 
 /// Color palette for the TUI — "Warm Terminal" identity.
-/// Amber/gold accent, warm grays, coral for write operations.
+/// Rich amber accent, warm grays, coral for write operations.
+/// User messages use a distinct blue tint for immediate visual separation.
 #[derive(Debug, PartialEq)]
 pub struct Theme {
     pub fg: Color,
@@ -22,6 +23,7 @@ pub struct Theme {
     pub permission: Color,
     pub code_bg: Color,
     pub context_amber: Color,
+    pub system_msg: Color,
 }
 
 impl Default for Theme {
@@ -54,24 +56,25 @@ impl Theme {
     /// Default dark theme with warm palette.
     pub fn dark() -> Self {
         Self {
-            fg: Color::White,
+            fg: Color::Rgb(230, 228, 222),             // Warm cream (softer than pure white)
             bg: Color::Reset,
-            accent: Color::Rgb(255, 170, 51),       // Amber/Gold
-            dim: Color::Rgb(100, 95, 85),            // Warm gray
-            error: Color::Rgb(255, 85, 85),          // Warm red
-            warning: Color::Rgb(255, 200, 60),       // Warm yellow
-            success: Color::Rgb(80, 200, 120),       // Warm green
-            user_msg: Color::Rgb(230, 225, 215),     // Soft warm white
-            assistant_msg: Color::Rgb(220, 218, 210), // Warm off-white
-            tool_read: Color::Rgb(120, 115, 105),    // Muted warm gray
-            tool_write: Color::Rgb(255, 120, 80),    // Coral/Orange
-            reasoning: Color::Rgb(150, 140, 170),    // Muted lavender
-            border: Color::Rgb(88, 88, 88),          // Warm gray
-            mode_build: Color::Rgb(255, 170, 51),    // Amber
-            mode_plan: Color::Rgb(100, 149, 237),    // Cornflower blue
-            permission: Color::Rgb(255, 200, 60),    // Warm yellow
-            code_bg: Color::Rgb(35, 33, 30),            // Warm dark tint for code blocks
-            context_amber: Color::Rgb(140, 120, 60),    // Amber-brown for 40-59% context pressure
+            accent: Color::Rgb(230, 165, 55),          // Rich amber (warmer, refined)
+            dim: Color::Rgb(110, 105, 95),             // Warm gray (readable secondary text)
+            error: Color::Rgb(235, 90, 90),            // Soft red (less harsh)
+            warning: Color::Rgb(240, 190, 60),         // Warm gold
+            success: Color::Rgb(85, 195, 120),         // Soft green
+            user_msg: Color::Rgb(145, 185, 225),       // Soft blue (distinct from assistant)
+            assistant_msg: Color::Rgb(225, 222, 215),   // Warm cream
+            tool_read: Color::Rgb(130, 125, 115),      // Warm mid-gray (brighter than dim)
+            tool_write: Color::Rgb(240, 120, 85),      // Warm coral (slightly softer)
+            reasoning: Color::Rgb(165, 150, 190),      // Richer lavender
+            border: Color::Rgb(65, 63, 60),            // Subtle dark border
+            mode_build: Color::Rgb(230, 165, 55),      // Match accent
+            mode_plan: Color::Rgb(110, 155, 230),      // Richer blue
+            permission: Color::Rgb(240, 190, 60),      // Match warning
+            code_bg: Color::Rgb(28, 26, 23),           // Darker code background
+            context_amber: Color::Rgb(150, 125, 55),   // Warm amber-brown
+            system_msg: Color::Rgb(130, 145, 160),     // Cool slate (distinct from dim)
         }
     }
 }
@@ -88,7 +91,7 @@ mod tests {
     #[test]
     fn accent_is_amber_rgb() {
         let t = Theme::dark();
-        assert!(matches!(t.accent, Color::Rgb(255, 170, 51)));
+        assert!(matches!(t.accent, Color::Rgb(230, 165, 55)));
     }
 
     #[test]
@@ -106,7 +109,7 @@ mod tests {
     #[test]
     fn code_bg_is_rgb() {
         let t = Theme::dark();
-        assert!(matches!(t.code_bg, Color::Rgb(35, 33, 30)));
+        assert!(matches!(t.code_bg, Color::Rgb(28, 26, 23)));
     }
 
     #[test]
@@ -151,5 +154,22 @@ mod tests {
         assert!(matches!(t.border, Color::Rgb(..)));
         assert!(matches!(t.tool_read, Color::Rgb(..)));
         assert!(matches!(t.code_bg, Color::Rgb(..)));
+        assert!(matches!(t.system_msg, Color::Rgb(..)));
+    }
+
+    #[test]
+    fn user_msg_is_blue_tint() {
+        let t = Theme::dark();
+        // User messages should be a distinct blue, not warm white
+        match t.user_msg {
+            Color::Rgb(r, _g, b) => assert!(b > r, "user_msg should have blue > red for blue tint"),
+            _ => panic!("user_msg should be Rgb"),
+        }
+    }
+
+    #[test]
+    fn system_msg_differs_from_dim() {
+        let t = Theme::dark();
+        assert_ne!(t.system_msg, t.dim, "system_msg should be distinct from dim");
     }
 }

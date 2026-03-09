@@ -100,7 +100,7 @@ pub fn render_message_blocks(
                 for text_line in text.lines() {
                     lines.push(Line::from(vec![
                         Span::styled(
-                            "> ",
+                            "│ ",
                             Style::default()
                                 .fg(theme.user_msg)
                                 .add_modifier(Modifier::BOLD),
@@ -227,7 +227,7 @@ pub fn render_message_blocks(
                     lines.push(Line::from(Span::styled(
                         text_line.to_string(),
                         Style::default()
-                            .fg(theme.dim)
+                            .fg(theme.system_msg)
                             .add_modifier(Modifier::ITALIC),
                     )));
                 }
@@ -823,7 +823,7 @@ mod tests {
             text: "Hello world".to_string(),
         }];
         let text = render_messages_to_string(60, 10, &messages, None);
-        assert!(text.contains("> Hello world"), "user message should have '> ' prefix, got:\n{text}");
+        assert!(text.contains("│ Hello world"), "user message should have '│ ' prefix, got:\n{text}");
     }
 
     #[test]
@@ -834,8 +834,8 @@ mod tests {
         }];
         let text = render_messages_to_string(60, 10, &messages, None);
         assert!(text.contains("Response text here"), "assistant text should appear, got:\n{text}");
-        // Should NOT have "> " prefix
-        assert!(!text.contains("> Response"), "assistant should not have user prefix");
+        // Should NOT have "│ " prefix
+        assert!(!text.contains("│ Response"), "assistant should not have user prefix");
     }
 
     #[test]
@@ -992,8 +992,8 @@ mod tests {
         ];
         let text = render_messages_to_string(60, 10, &messages, None);
         // Find positions — msg2 should not immediately follow msg1
-        let pos1 = text.find("> msg1").expect("msg1 not found");
-        let pos2 = text.find("> msg2").expect("msg2 not found");
+        let pos1 = text.find("│ msg1").expect("msg1 not found");
+        let pos2 = text.find("│ msg2").expect("msg2 not found");
         // There should be at least one blank line between them (newline + spaces + newline)
         let between = &text[pos1..pos2];
         let line_count = between.lines().count();
