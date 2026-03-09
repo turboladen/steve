@@ -7,25 +7,30 @@ use serde_json::Value;
 
 use super::{ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput};
 
+/// Maximum memory size in bytes. Older content is truncated when exceeded.
+const MAX_MEMORY_BYTES: usize = 4096;
+
 pub fn tool() -> ToolEntry {
     ToolEntry {
         def: ToolDef {
             name: ToolName::Memory,
             description: "Read or update the project memory — a persistent scratchpad for \
                 knowledge that should survive across sessions. Use this to record architectural \
-                decisions, file purposes, patterns discovered, and other project context."
+                decisions, file purposes, patterns discovered, and other project context. \
+                Memory is auto-loaded into your context at session start. Use 'replace' to \
+                consolidate when memory grows long."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["read", "append"],
-                        "description": "read: view current memory. append: add new content."
+                        "enum": ["read", "append", "replace"],
+                        "description": "read: view current memory. append: add new content. replace: overwrite entire memory with new content (use to consolidate/curate)."
                     },
                     "content": {
                         "type": "string",
-                        "description": "Content to append (required for append action). Use markdown."
+                        "description": "Content to write (required for append and replace actions). Use markdown."
                     }
                 },
                 "required": ["action"]
@@ -105,18 +110,84 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
             file.lock()?;
             write!(&file, "\n{content}\n")?;
             let _ = file.unlock();
+
+            // Prune if over size limit
+            let pruned = prune_if_needed(&path);
+
+            let msg = if pruned {
+                "Memory updated. (Oldest entries pruned to stay within size limit.)"
+            } else {
+                "Memory updated."
+            };
             Ok(ToolOutput {
                 title: "memory append".to_string(),
-                output: "Memory updated.".to_string(),
+                output: msg.to_string(),
+                is_error: false,
+            })
+        }
+        "replace" => {
+            let content = args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if content.is_empty() {
+                return Ok(ToolOutput {
+                    title: "memory replace".to_string(),
+                    output: "Error: content is required for replace action".to_string(),
+                    is_error: true,
+                });
+            }
+            // Ensure parent dir exists
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            // Write with exclusive lock
+            use std::io::Write;
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&path)?;
+            file.lock()?;
+            write!(&file, "{content}\n")?;
+            let _ = file.unlock();
+
+            Ok(ToolOutput {
+                title: "memory replace".to_string(),
+                output: format!("Memory replaced ({} bytes).", content.len()),
                 is_error: false,
             })
         }
         _ => Ok(ToolOutput {
             title: "memory".to_string(),
-            output: format!("Error: unknown action '{action}'. Use 'read' or 'append'."),
+            output: format!("Error: unknown action '{action}'. Use 'read', 'append', or 'replace'."),
             is_error: true,
         }),
     }
+}
+
+/// If the memory file exceeds MAX_MEMORY_BYTES, truncate from the beginning
+/// (removing oldest entries) to fit. Returns true if pruning occurred.
+fn prune_if_needed(path: &std::path::Path) -> bool {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    if content.len() <= MAX_MEMORY_BYTES {
+        return false;
+    }
+
+    // Find the first line boundary after the excess
+    let excess = content.len() - MAX_MEMORY_BYTES;
+    let start = content[excess..]
+        .find('\n')
+        .map(|i| excess + i + 1)
+        .unwrap_or(excess);
+
+    let truncated = &content[start..];
+    let _ = std::fs::write(path, truncated);
+    true
 }
 
 #[cfg(test)]
@@ -168,9 +239,59 @@ mod tests {
     fn unknown_action_errors() {
         let dir = tempfile::tempdir().unwrap();
         let result =
-            execute(serde_json::json!({"action": "delete"}), test_ctx(dir.path())).unwrap();
+            execute(serde_json::json!({"action": "badaction"}), test_ctx(dir.path())).unwrap();
         assert!(result.is_error);
         assert!(result.output.contains("unknown action"));
+    }
+
+    #[test]
+    fn replace_overwrites_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        execute(
+            serde_json::json!({"action": "append", "content": "old stuff"}),
+            ctx.clone(),
+        )
+        .unwrap();
+        execute(
+            serde_json::json!({"action": "replace", "content": "# Fresh\nNew content only"}),
+            ctx.clone(),
+        )
+        .unwrap();
+        let result = execute(serde_json::json!({"action": "read"}), ctx).unwrap();
+        assert!(!result.output.contains("old stuff"), "old content should be gone");
+        assert!(result.output.contains("New content only"));
+    }
+
+    #[test]
+    fn replace_empty_content_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = execute(
+            serde_json::json!({"action": "replace", "content": ""}),
+            test_ctx(dir.path()),
+        )
+        .unwrap();
+        assert!(result.is_error);
+    }
+
+    #[test]
+    fn prune_truncates_oversized_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.md");
+        // Write more than MAX_MEMORY_BYTES
+        let big_content = "x".repeat(MAX_MEMORY_BYTES + 500);
+        std::fs::write(&path, &big_content).unwrap();
+        assert!(prune_if_needed(&path));
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.len() <= MAX_MEMORY_BYTES, "should be pruned to fit");
+    }
+
+    #[test]
+    fn prune_does_nothing_when_small() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.md");
+        std::fs::write(&path, "small content").unwrap();
+        assert!(!prune_if_needed(&path));
     }
 
     #[test]
