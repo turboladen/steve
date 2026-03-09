@@ -202,11 +202,19 @@ pub fn render_sidebar(
         format!("  total: {}", format_tokens(state.total_tokens)),
         Style::default().fg(theme.dim),
     )));
-    if let Some(cost) = state.session_cost {
-        lines.push(Line::from(Span::styled(
-            format!("  cost: ${:.4}", cost),
-            Style::default().fg(theme.dim),
-        )));
+    match state.session_cost {
+        Some(cost) => {
+            lines.push(Line::from(Span::styled(
+                format!("  cost: ${:.4}", cost),
+                Style::default().fg(theme.dim),
+            )));
+        }
+        None => {
+            lines.push(Line::from(Span::styled(
+                "  cost: N/A",
+                Style::default().fg(theme.dim),
+            )));
+        }
     }
     lines.push(Line::from(""));
 
@@ -453,6 +461,16 @@ mod tests {
         };
         let text = render_sidebar_to_string(40, 20, &state);
         assert!(text.contains("cost: $0.0512"), "should show cost");
+    }
+
+    #[test]
+    fn buffer_sidebar_cost_na_when_not_configured() {
+        let state = SidebarState {
+            session_cost: None,
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(text.contains("cost: N/A"), "should show N/A when cost not configured");
     }
 
     #[test]

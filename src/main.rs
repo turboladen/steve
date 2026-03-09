@@ -16,10 +16,19 @@ mod tool;
 mod ui;
 
 use anyhow::Result;
+use clap::Parser;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+
+/// Steve — a TUI AI coding agent
+#[derive(Parser)]
+#[command(version = concat!(env!("CARGO_PKG_VERSION"), "-", env!("STEVE_GIT_REV")))]
+struct Cli {}
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Parse CLI args (handles --version, --help automatically)
+    Cli::parse();
+
     // Set up file-based tracing (TUI owns stdout, so we log to file)
     let log_dir = directories::ProjectDirs::from("", "", "steve")
         .map(|d| d.data_dir().join("logs"))

@@ -2873,6 +2873,7 @@ dependencies = [
  "async-trait",
  "base64",
  "chrono",
+ "clap",
  "crossterm",
  "directories",
  "fs2",
