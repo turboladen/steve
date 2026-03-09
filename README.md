@@ -16,12 +16,12 @@ Built with [ratatui](https://github.com/ratatui/ratatui) and inspired by [openco
 ```bash
 cargo build            # Debug build
 cargo build --release  # Release build
-cargo run              # Run (requires steve.json in project root)
+cargo run              # Run (requires .steve.jsonc or global config)
 ```
 
 ### Configuration
 
-Create a `steve.json` (or `steve.jsonc`) in the root of the project you want to work in. The config defines your LLM providers, models, and which environment variable holds each provider's API key.
+Create a `.steve.jsonc` in the root of the project you want to work in (or a global `~/.config/steve/config.jsonc`). The config defines your LLM providers, models, and which environment variable holds each provider's API key.
 
 **Minimal example — OpenAI:**
 

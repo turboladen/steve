@@ -21,7 +21,7 @@ fn permission_rules_config_round_trip() {
         ],
         "providers": {}
     }"#;
-    std::fs::write(dir.path().join("steve.json"), config_json).unwrap();
+    std::fs::write(dir.path().join(".steve.jsonc"), config_json).unwrap();
 
     let config = config::load(dir.path()).unwrap();
     assert_eq!(config.permission_rules.len(), 2);
@@ -34,7 +34,7 @@ fn permission_rules_config_round_trip() {
 fn persist_and_reload_tool_grant() {
     let dir = tempdir().unwrap();
     std::fs::write(
-        dir.path().join("steve.json"),
+        dir.path().join(".steve.jsonc"),
         r#"{"model": "openai/gpt-4o", "providers": {}}"#,
     ).unwrap();
 
@@ -51,7 +51,7 @@ fn persist_and_reload_tool_grant() {
 #[test]
 fn persist_multiple_grants_accumulates() {
     let dir = tempdir().unwrap();
-    std::fs::write(dir.path().join("steve.json"), "{}").unwrap();
+    std::fs::write(dir.path().join(".steve.jsonc"), "{}").unwrap();
 
     config::persist_allow_tool(dir.path(), "edit").unwrap();
     config::persist_allow_tool(dir.path(), "bash").unwrap();
@@ -101,7 +101,7 @@ fn merge_preserves_path_rules() {
 fn missing_permission_rules_defaults_to_empty() {
     let dir = tempdir().unwrap();
     std::fs::write(
-        dir.path().join("steve.json"),
+        dir.path().join(".steve.jsonc"),
         r#"{"model": "openai/gpt-4o"}"#,
     ).unwrap();
 

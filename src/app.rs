@@ -376,7 +376,7 @@ impl App {
         if config.providers.is_empty() {
             messages.push(MessageBlock::Assistant {
                 thinking: None,
-                parts: vec![AssistantPart::Text("No providers configured. Create a steve.json or steve.jsonc config file to get started.".to_string())],
+                parts: vec![AssistantPart::Text("No providers configured. Create a .steve.jsonc config file or a global ~/.config/steve/config.jsonc to get started.".to_string())],
             });
         } else if let Some(err) = provider_error {
             messages.push(MessageBlock::Assistant {
@@ -1139,14 +1139,14 @@ impl App {
         // Try to send to LLM
         let Some(registry) = &self.provider_registry else {
             self.messages.push(MessageBlock::Error {
-                text: "No provider configured. Add providers to steve.json.".to_string(),
+                text: "No provider configured. Add providers to .steve.jsonc or ~/.config/steve/config.jsonc.".to_string(),
             });
             return Ok(());
         };
 
         let Some(model_ref) = &self.current_model else {
             self.messages.push(MessageBlock::Error {
-                text: "No model selected. Set 'model' in steve.json.".to_string(),
+                text: "No model selected. Set 'model' in .steve.jsonc or ~/.config/steve/config.jsonc.".to_string(),
             });
             return Ok(());
         };

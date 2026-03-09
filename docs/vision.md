@@ -44,7 +44,7 @@ Edge cases, error handling, and data integrity — the things that make you trus
 
 - **Session resume** — reopen the app and continue a previous conversation. Messages reloaded from storage, context reconstructed.
 - **Error recovery** — network failures, API timeouts, malformed responses handled gracefully with retry or clear messaging. No silent failures.
-- **Config validation** — surface clear errors on bad `steve.json` instead of cryptic panics.
+- **Config validation** — surface clear errors on bad `.steve.jsonc` instead of cryptic panics.
 - **Token tracking single source of truth** — fix the sidebar vs. context line discrepancy; one authoritative token count.
 - **Cost tracking** — per-session cost calculation based on model pricing config. Historical usage persisted to storage.
 

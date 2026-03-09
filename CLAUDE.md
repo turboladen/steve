@@ -50,16 +50,16 @@ Logs are written to `{data_dir}/logs/steve.log` (daily rolling via `tracing-appe
 ## Configuration
 
 Steve loads config from two layers, merged at startup (`config/mod.rs`):
-1. **Global config**: `~/.config/steve/steve.jsonc` (platform config dir via `directories::ProjectDirs`)
-2. **Project config**: `steve.json` or `steve.jsonc` in the project root
+1. **Global config**: `~/.config/steve/config.jsonc` (platform config dir via `directories::ProjectDirs`)
+2. **Project config**: `.steve.jsonc` in the project root (dotfile — user-specific, not committed)
 
-Both are parsed through the JSONC parser regardless of extension. Project values override global values; providers deep-merge by provider ID, then by model ID within providers.
+Both are parsed through the JSONC parser. Project values override global values; providers deep-merge by provider ID, then by model ID within providers.
 
 Model references use `"provider_id/model_id"` format throughout (config, commands, internal types).
 
 Optional top-level fields: `small_model` (used for compaction/summarization, falls back to `model`), `auto_compact` (default `true` — auto-compacts at 80% context window usage), `permission_profile` (`"trust"`, `"standard"` default, or `"cautious"`), `allow_tools` (list of tool names to auto-allow regardless of profile).
 
-Example `steve.json`:
+Example `.steve.jsonc`:
 ```jsonc
 {
   "model": "openai/gpt-4o",
@@ -85,6 +85,8 @@ Example `steve.json`:
 ```
 
 **`Config::default()` vs serde defaults**: `Config::default()` gives `auto_compact=false` (Rust bool default), while serde deserialization gives `auto_compact=true` via `#[serde(default = "default_auto_compact")]`. The `merge()` method detects "empty" project configs (no providers, no model, no small_model) to avoid clobbering global `auto_compact` with the wrong default.
+
+**Config file naming**: One canonical name per level — `config.jsonc` (global) and `.steve.jsonc` (project). No json/jsonc fallback dance. The JSONC parser handles both pure JSON and JSONC content. `find_global_config_in()` is a testable helper that accepts an optional directory override.
 
 ## Commands & Keys
 
@@ -145,9 +147,9 @@ When a tool needs user permission, the stream task sends a `PermissionRequest` c
 
 The permission prompt handler matches `(key.code, key.modifiers)` tuples — `Ctrl+Y` is explicitly carved out before the bare `y`/`Y` arm so clipboard copy works even during permission prompts. When adding new `Ctrl+<key>` bindings, check whether the key conflicts with the permission prompt's letter handlers (`y`/`n`/`a`). `Ctrl+Y` clipboard copy is implemented in `App::copy_last_code_block_to_clipboard()` — called from both the permission-prompt branch and the main key handler. Handles OSC 52 I/O errors (shows `MessageBlock::Error` on failure).
 
-**Path-based permission rules**: `PermissionEngine::check()` accepts `path_hint: Option<&str>` for glob pattern matching against file paths. Rules with patterns other than `"*"` only match when a path is provided and the glob matches. Config: `permission_rules` array in steve.json with `{"tool": "edit", "pattern": "src/**", "action": "allow"}` objects. Priority: path rules > allow_tools overrides > profile defaults (first-match wins). Plan mode strips write-allow path rules. Invalid glob patterns are logged and skipped.
+**Path-based permission rules**: `PermissionEngine::check()` accepts `path_hint: Option<&str>` for glob pattern matching against file paths. Rules with patterns other than `"*"` only match when a path is provided and the glob matches. Config: `permission_rules` array in `.steve.jsonc` with `{"tool": "edit", "pattern": "src/**", "action": "allow"}` objects. Priority: path rules > allow_tools overrides > profile defaults (first-match wins). Plan mode strips write-allow path rules. Invalid glob patterns are logged and skipped.
 
-**Persistent grants**: When user presses `a` (AllowAlways), the tool is persisted to `allow_tools` in the project's steve.json via `config::persist_allow_tool()` (atomic tmp+rename write). In-memory config and permission rules are updated immediately. The persist runs on a background `std::thread` to avoid blocking the UI.
+**Persistent grants**: When user presses `a` (AllowAlways), the tool is persisted to `allow_tools` in the project's `.steve.jsonc` via `config::persist_allow_tool()` (atomic tmp+rename write). In-memory config and permission rules are updated immediately. The persist runs on a background `std::thread` to avoid blocking the UI.
 
 **Permission diff preview**: `MessageBlock::Permission` has a `diff_content: Option<DiffContent>` field. `PermissionRequest` carries `tool_args: Value` so the UI can extract and render inline diffs for edit/write/patch tools in the permission prompt card.
 

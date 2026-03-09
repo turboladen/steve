@@ -7,8 +7,8 @@ use anyhow::{Context, Result};
 use types::Config;
 
 /// Load configuration with global + project merge.
-/// Global config at `~/.config/steve/config.json` (or `.jsonc`) provides defaults;
-/// project-level `steve.json` overlays on top.
+/// Global config at `~/.config/steve/config.jsonc` provides defaults;
+/// project-level `.steve.jsonc` overlays on top.
 pub fn load(project_root: &Path) -> Result<Config> {
     let global = load_global();
     let project = load_project(project_root)?;
@@ -25,21 +25,14 @@ fn load_global() -> Config {
     load_jsonc_file(&path).unwrap_or_default()
 }
 
-/// Load project-level config from the project root.
-/// Looks for `steve.json` or `steve.jsonc`.
+/// Load project-level config from `.steve.jsonc` in the project root.
 fn load_project(project_root: &Path) -> Result<Config> {
-    let json_path = project_root.join("steve.json");
-    let jsonc_path = project_root.join("steve.jsonc");
-
-    let path = if json_path.exists() {
-        json_path
-    } else if jsonc_path.exists() {
-        jsonc_path
+    let path = project_root.join(".steve.jsonc");
+    if path.exists() {
+        load_jsonc_file(&path)
     } else {
-        return Ok(Config::default());
-    };
-
-    load_jsonc_file(&path)
+        Ok(Config::default())
+    }
 }
 
 /// Parse a JSONC file into a Config. Works for both `.json` and `.jsonc`.
@@ -57,20 +50,27 @@ fn load_jsonc_file(path: &Path) -> Result<Config> {
     }
 }
 
-/// Returns the path to the global config file, if the config directory can be determined.
-/// Checks for `config.json` first, then `config.jsonc`.
+/// Returns the path to the global `config.jsonc`, if it exists.
 fn global_config_path() -> Option<PathBuf> {
-    let dirs = directories::ProjectDirs::from("", "", "steve")?;
-    let config_dir = dirs.config_dir();
-    let json_path = config_dir.join("config.json");
-    if json_path.exists() {
-        return Some(json_path);
+    find_global_config_in(None)
+}
+
+/// Find the global `config.jsonc` file. Accepts an optional override directory
+/// for testing; when `None`, uses the platform config directory.
+fn find_global_config_in(dir_override: Option<&Path>) -> Option<PathBuf> {
+    let config_dir = match dir_override {
+        Some(d) => d.to_path_buf(),
+        None => {
+            let dirs = directories::ProjectDirs::from("", "", "steve")?;
+            dirs.config_dir().to_path_buf()
+        }
+    };
+    let path = config_dir.join("config.jsonc");
+    if path.exists() {
+        Some(path)
+    } else {
+        None
     }
-    let jsonc_path = config_dir.join("config.jsonc");
-    if jsonc_path.exists() {
-        return Some(jsonc_path);
-    }
-    None
 }
 
 /// Exposed for logging/diagnostics — returns the global config directory path.
@@ -79,23 +79,13 @@ pub fn global_config_dir() -> Option<PathBuf> {
         .map(|d| d.config_dir().to_path_buf())
 }
 
-/// Persist a tool name to the project config's `allow_tools` list.
+/// Persist a tool name to the project's `.steve.jsonc` `allow_tools` list.
 ///
-/// Reads the existing project config (or creates a minimal one), adds the tool
+/// Reads the existing config (or creates a minimal one), adds the tool
 /// to `allow_tools` if not already present, and writes back. Uses JSONC parser
 /// for reading but writes clean JSON (comments are not preserved).
 pub fn persist_allow_tool(project_root: &Path, tool_name: &str) -> Result<()> {
-    let json_path = project_root.join("steve.json");
-    let jsonc_path = project_root.join("steve.jsonc");
-
-    // Determine which config file to use (prefer existing, default to steve.json)
-    let config_path = if json_path.exists() {
-        json_path.clone()
-    } else if jsonc_path.exists() {
-        jsonc_path.clone()
-    } else {
-        json_path.clone() // Create steve.json if nothing exists
-    };
+    let config_path = project_root.join(".steve.jsonc");
 
     // Load existing config as a serde_json::Value to preserve all fields
     let mut value: serde_json::Value = if config_path.exists() {
@@ -122,27 +112,17 @@ pub fn persist_allow_tool(project_root: &Path, tool_name: &str) -> Result<()> {
         }
     }
 
-    // Write back as formatted JSON
-    // If the original was .jsonc, we write to .json instead (can't preserve comments)
-    let write_path = if config_path.extension().is_some_and(|ext| ext == "jsonc") && !json_path.exists() {
-        // Writing to .jsonc would lose comments; write to .json instead
-        // The .jsonc still exists but .json takes priority on next load
-        json_path
-    } else {
-        config_path
-    };
-
     let json_str = serde_json::to_string_pretty(&value)
         .context("failed to serialize config")?;
 
     // Atomic write: write to tmp file then rename to avoid partial writes on crash
-    let tmp_path = write_path.with_extension("json.tmp");
+    let tmp_path = config_path.with_extension("jsonc.tmp");
     std::fs::write(&tmp_path, json_str.as_bytes())
         .with_context(|| format!("failed to write {}", tmp_path.display()))?;
-    std::fs::rename(&tmp_path, &write_path)
-        .with_context(|| format!("failed to rename {} → {}", tmp_path.display(), write_path.display()))?;
+    std::fs::rename(&tmp_path, &config_path)
+        .with_context(|| format!("failed to rename {} → {}", tmp_path.display(), config_path.display()))?;
 
-    tracing::info!(tool = tool_name, path = %write_path.display(), "persisted tool to allow_tools");
+    tracing::info!(tool = tool_name, path = %config_path.display(), "persisted tool to allow_tools");
     Ok(())
 }
 
@@ -157,10 +137,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn load_steve_json() {
+    fn load_dotfile_jsonc() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join("steve.json"),
+            dir.path().join(".steve.jsonc"),
             r#"{"model": "openai/gpt-4o", "providers": {}}"#,
         )
         .unwrap();
@@ -169,32 +149,15 @@ mod tests {
     }
 
     #[test]
-    fn load_steve_jsonc_with_comments() {
+    fn load_dotfile_jsonc_with_comments() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join("steve.jsonc"),
+            dir.path().join(".steve.jsonc"),
             "{\n  // this is a comment\n  \"model\": \"openai/gpt-4o\",\n  \"providers\": {}\n}",
         )
         .unwrap();
         let config = load(dir.path()).unwrap();
         assert_eq!(config.model, Some("openai/gpt-4o".into()));
-    }
-
-    #[test]
-    fn json_takes_priority_over_jsonc() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("steve.json"),
-            r#"{"model": "openai/json-wins", "providers": {}}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path().join("steve.jsonc"),
-            r#"{"model": "openai/jsonc-loses", "providers": {}}"#,
-        )
-        .unwrap();
-        let config = load(dir.path()).unwrap();
-        assert_eq!(config.model, Some("openai/json-wins".into()));
     }
 
     #[test]
@@ -209,7 +172,7 @@ mod tests {
     #[test]
     fn invalid_json_returns_error() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("steve.json"), "{{invalid").unwrap();
+        std::fs::write(dir.path().join(".steve.jsonc"), "{{invalid").unwrap();
         assert!(load(dir.path()).is_err());
     }
 
@@ -231,7 +194,7 @@ mod tests {
     fn partial_config_uses_defaults() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join("steve.json"),
+            dir.path().join(".steve.jsonc"),
             r#"{"model": "test/m"}"#,
         )
         .unwrap();
@@ -280,6 +243,79 @@ mod tests {
         assert!(dir.is_some(), "should resolve a config directory");
     }
 
+    #[test]
+    fn global_config_finds_config_jsonc() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.jsonc"),
+            r#"{"model": "openai/gpt-4o", "providers": {}}"#,
+        ).unwrap();
+
+        let found = find_global_config_in(Some(dir.path()));
+        assert!(found.is_some(), "should find config.jsonc");
+        assert!(found.unwrap().ends_with("config.jsonc"));
+    }
+
+    #[test]
+    fn global_config_missing_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let found = find_global_config_in(Some(dir.path()));
+        assert!(found.is_none(), "should return None when no config file exists");
+    }
+
+    #[test]
+    fn global_config_ignores_old_config_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"model": "openai/gpt-4o"}"#,
+        ).unwrap();
+        let found = find_global_config_in(Some(dir.path()));
+        assert!(found.is_none(), "config.json (old name) should be ignored");
+    }
+
+    #[test]
+    fn old_project_filenames_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("steve.json"),
+            r#"{"model": "openai/gpt-4o"}"#,
+        ).unwrap();
+        let config = load(dir.path()).unwrap();
+        assert_eq!(config.model, None, "steve.json should not be loaded");
+
+        std::fs::write(
+            dir.path().join("steve.jsonc"),
+            r#"{"model": "openai/gpt-4o"}"#,
+        ).unwrap();
+        let config = load(dir.path()).unwrap();
+        assert_eq!(config.model, None, "steve.jsonc should not be loaded");
+    }
+
+    #[test]
+    fn global_merge_with_empty_project() {
+        // Simulate: global config has providers, empty project config
+        let dir = tempfile::tempdir().unwrap();
+        let global_dir = tempfile::tempdir().unwrap();
+
+        // Write global config
+        std::fs::write(
+            global_dir.path().join("config.jsonc"),
+            r#"{"model": "openai/gpt-4o", "providers": {"openai": {"base_url": "https://api.openai.com/v1", "api_key_env": "OPENAI_API_KEY", "models": {}}}}"#,
+        ).unwrap();
+
+        // Write empty project config
+        std::fs::write(dir.path().join(".steve.jsonc"), "{}").unwrap();
+
+        // Load and verify global providers are preserved
+        let global = load_jsonc_file(&global_dir.path().join("config.jsonc")).unwrap();
+        let project = load_project(dir.path()).unwrap();
+        let merged = global.merge(project);
+
+        assert_eq!(merged.model, Some("openai/gpt-4o".into()));
+        assert!(merged.providers.contains_key("openai"), "global providers preserved");
+    }
+
     // -- persist_allow_tool tests --
 
     #[test]
@@ -295,7 +331,7 @@ mod tests {
     fn persist_allow_tool_appends_to_existing() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join("steve.json"),
+            dir.path().join(".steve.jsonc"),
             r#"{"model": "openai/gpt-4o", "allow_tools": ["bash"]}"#,
         ).unwrap();
 
@@ -311,30 +347,26 @@ mod tests {
     fn persist_allow_tool_deduplicates() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join("steve.json"),
+            dir.path().join(".steve.jsonc"),
             r#"{"allow_tools": ["edit"]}"#,
         ).unwrap();
 
         persist_allow_tool(dir.path(), "edit").unwrap();
 
-        let content = std::fs::read_to_string(dir.path().join("steve.json")).unwrap();
+        let content = std::fs::read_to_string(dir.path().join(".steve.jsonc")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&content).unwrap();
         let arr = value["allow_tools"].as_array().unwrap();
         assert_eq!(arr.len(), 1, "should not duplicate");
     }
 
     #[test]
-    fn persist_allow_tool_with_jsonc_creates_json() {
+    fn persist_allow_tool_writes_to_dotfile() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("steve.jsonc"),
-            "{\n  // comment\n  \"model\": \"test/m\"\n}",
-        ).unwrap();
 
         persist_allow_tool(dir.path(), "bash").unwrap();
 
-        // Should create steve.json (since .jsonc comments can't be preserved)
-        assert!(dir.path().join("steve.json").exists());
+        // Should create .steve.jsonc
+        assert!(dir.path().join(".steve.jsonc").exists());
         let config = load(dir.path()).unwrap();
         assert!(config.allow_tools.contains(&"bash".to_string()));
     }
