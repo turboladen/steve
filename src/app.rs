@@ -910,10 +910,14 @@ impl App {
                 }
                 (KeyCode::Char('a'), _) | (KeyCode::Char('A'), _) => {
                     if let Some(perm) = self.pending_permission.take() {
+                        let tool_str = perm.tool_name.as_str().to_string();
                         let _ = perm.response_tx.send(PermissionReply::AllowAlways);
                         self.remove_last_permission_block();
                         self.status_line_state.activity = Activity::Thinking;
                         self.message_area_state.scroll_to_bottom();
+
+                        // Persist the grant to project config so it survives restarts
+                        self.persist_tool_grant(&tool_str);
                     }
                     return Ok(());
                 }
@@ -1433,6 +1437,25 @@ impl App {
         tokio::spawn(async move {
             let mut engine = engine.lock().await;
             engine.set_rules(rules);
+        });
+    }
+
+    /// Persist a tool grant to the project config and update in-memory config.
+    fn persist_tool_grant(&mut self, tool_name: &str) {
+        // Update in-memory config
+        if !self.config.allow_tools.contains(&tool_name.to_string()) {
+            self.config.allow_tools.push(tool_name.to_string());
+            // Re-sync permission rules with updated config
+            self.sync_permission_mode();
+        }
+
+        // Persist to disk (fire-and-forget — don't block the UI)
+        let project_root = self.project.root.clone();
+        let tool = tool_name.to_string();
+        std::thread::spawn(move || {
+            if let Err(e) = crate::config::persist_allow_tool(&project_root, &tool) {
+                tracing::warn!("failed to persist tool grant: {e}");
+            }
         });
     }
 

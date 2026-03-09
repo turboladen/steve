@@ -79,6 +79,68 @@ pub fn global_config_dir() -> Option<PathBuf> {
         .map(|d| d.config_dir().to_path_buf())
 }
 
+/// Persist a tool name to the project config's `allow_tools` list.
+///
+/// Reads the existing project config (or creates a minimal one), adds the tool
+/// to `allow_tools` if not already present, and writes back. Uses JSONC parser
+/// for reading but writes clean JSON (comments are not preserved).
+pub fn persist_allow_tool(project_root: &Path, tool_name: &str) -> Result<()> {
+    let json_path = project_root.join("steve.json");
+    let jsonc_path = project_root.join("steve.jsonc");
+
+    // Determine which config file to use (prefer existing, default to steve.json)
+    let config_path = if json_path.exists() {
+        json_path.clone()
+    } else if jsonc_path.exists() {
+        jsonc_path.clone()
+    } else {
+        json_path.clone() // Create steve.json if nothing exists
+    };
+
+    // Load existing config as a serde_json::Value to preserve all fields
+    let mut value: serde_json::Value = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)
+            .with_context(|| format!("failed to read {}", config_path.display()))?;
+        let parsed = jsonc_parser::parse_to_serde_value(&content, &Default::default())
+            .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", config_path.display()))?;
+        parsed.unwrap_or(serde_json::Value::Object(serde_json::Map::new()))
+    } else {
+        serde_json::Value::Object(serde_json::Map::new())
+    };
+
+    // Ensure allow_tools array exists and add the tool if not present
+    let obj = value.as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("config root is not an object"))?;
+
+    let allow_tools = obj.entry("allow_tools")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+
+    if let serde_json::Value::Array(arr) = allow_tools {
+        let tool_val = serde_json::Value::String(tool_name.to_string());
+        if !arr.contains(&tool_val) {
+            arr.push(tool_val);
+        }
+    }
+
+    // Write back as formatted JSON
+    // If the original was .jsonc, we write to .json instead (can't preserve comments)
+    let write_path = if config_path.extension().is_some_and(|ext| ext == "jsonc") && !json_path.exists() {
+        // Writing to .jsonc would lose comments; write to .json instead
+        // The .jsonc still exists but .json takes priority on next load
+        json_path
+    } else {
+        config_path
+    };
+
+    let json_str = serde_json::to_string_pretty(&value)
+        .context("failed to serialize config")?;
+    std::fs::write(&write_path, json_str.as_bytes())
+        .with_context(|| format!("failed to write {}", write_path.display()))?;
+
+    tracing::info!(tool = tool_name, path = %write_path.display(), "persisted tool to allow_tools");
+    Ok(())
+}
+
 /// Load the AGENTS.md file from the project root, if it exists.
 pub fn load_agents_md(project_root: &Path) -> Option<String> {
     let path = project_root.join("AGENTS.md");
@@ -211,5 +273,64 @@ mod tests {
         // On any platform with a home directory, this should return Some
         let dir = global_config_dir();
         assert!(dir.is_some(), "should resolve a config directory");
+    }
+
+    // -- persist_allow_tool tests --
+
+    #[test]
+    fn persist_allow_tool_creates_config_if_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        persist_allow_tool(dir.path(), "edit").unwrap();
+
+        let config = load(dir.path()).unwrap();
+        assert!(config.allow_tools.contains(&"edit".to_string()));
+    }
+
+    #[test]
+    fn persist_allow_tool_appends_to_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("steve.json"),
+            r#"{"model": "openai/gpt-4o", "allow_tools": ["bash"]}"#,
+        ).unwrap();
+
+        persist_allow_tool(dir.path(), "edit").unwrap();
+
+        let config = load(dir.path()).unwrap();
+        assert!(config.allow_tools.contains(&"bash".to_string()), "existing tool preserved");
+        assert!(config.allow_tools.contains(&"edit".to_string()), "new tool added");
+        assert_eq!(config.model, Some("openai/gpt-4o".into()), "other fields preserved");
+    }
+
+    #[test]
+    fn persist_allow_tool_deduplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("steve.json"),
+            r#"{"allow_tools": ["edit"]}"#,
+        ).unwrap();
+
+        persist_allow_tool(dir.path(), "edit").unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join("steve.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let arr = value["allow_tools"].as_array().unwrap();
+        assert_eq!(arr.len(), 1, "should not duplicate");
+    }
+
+    #[test]
+    fn persist_allow_tool_with_jsonc_creates_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("steve.jsonc"),
+            "{\n  // comment\n  \"model\": \"test/m\"\n}",
+        ).unwrap();
+
+        persist_allow_tool(dir.path(), "bash").unwrap();
+
+        // Should create steve.json (since .jsonc comments can't be preserved)
+        assert!(dir.path().join("steve.json").exists());
+        let config = load(dir.path()).unwrap();
+        assert!(config.allow_tools.contains(&"bash".to_string()));
     }
 }
