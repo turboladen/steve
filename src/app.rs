@@ -916,24 +916,39 @@ impl App {
                 }
             }
             (KeyCode::Enter, KeyModifiers::NONE) if self.autocomplete_state.visible => {
+                // Accept selection and execute immediately
                 if let Some(cmd_name) = self.autocomplete_state.selected_command() {
                     let cmd_name = cmd_name.to_string();
-                    let mut textarea = ratatui_textarea::TextArea::default();
-                    textarea.set_cursor_line_style(ratatui::style::Style::default());
-                    textarea.set_placeholder_text("Type a message...");
-                    textarea.insert_str(&cmd_name);
-                    self.input.textarea = textarea;
                     self.autocomplete_state.hide();
+                    self.input.take_text(); // clear input
+                    if !self.is_loading {
+                        self.handle_input(cmd_name).await?;
+                    }
                 }
+            }
+            (KeyCode::Tab, KeyModifiers::NONE) if self.autocomplete_state.visible => {
+                // Tab also accepts and executes (same as Enter)
+                if let Some(cmd_name) = self.autocomplete_state.selected_command() {
+                    let cmd_name = cmd_name.to_string();
+                    self.autocomplete_state.hide();
+                    self.input.take_text(); // clear input
+                    if !self.is_loading {
+                        self.handle_input(cmd_name).await?;
+                    }
+                }
+            }
+            (KeyCode::Up, KeyModifiers::NONE) if self.autocomplete_state.visible => {
+                self.autocomplete_state.prev();
+            }
+            (KeyCode::Down, KeyModifiers::NONE) if self.autocomplete_state.visible => {
+                self.autocomplete_state.next();
             }
             (KeyCode::Esc, KeyModifiers::NONE) if self.autocomplete_state.visible => {
                 self.autocomplete_state.hide();
             }
             (KeyCode::Tab, KeyModifiers::NONE) => {
                 let current_text = self.input.textarea.lines().join("\n");
-                if self.autocomplete_state.visible {
-                    self.autocomplete_state.next();
-                } else if current_text.starts_with('/') {
+                if current_text.starts_with('/') {
                     self.autocomplete_state.update(&current_text);
                 } else {
                     self.input.mode = self.input.mode.toggle();
@@ -1383,11 +1398,43 @@ impl App {
 
         let mut parts: Vec<String> = Vec::new();
 
-        parts.push(format!(
-            "You are a helpful AI coding assistant. You are working in the project at: {}\n\nThe current date and time is {}.",
+        // Identity and environment context
+        let model_name = self.current_model.as_deref().unwrap_or("unknown");
+        let git_branch = std::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(&self.project.root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string());
+        let mode_name = if self.input.mode == AgentMode::Plan { "Plan" } else { "Build" };
+
+        let mut identity = format!(
+            "You are Steve, a TUI AI coding agent. You help users understand, modify, and build software \
+            by reading files, searching code, making edits, and running commands — all within this terminal interface.\n\n\
+            ## Environment\n\
+            - **Project root**: {}\n\
+            - **Model**: {model_name}\n\
+            - **Mode**: {mode_name}\n\
+            - **Date**: {}",
             self.project.root.display(),
             chrono::Local::now().format("%A, %B %-d, %Y at %-I:%M %p")
-        ));
+        );
+        if let Some(branch) = git_branch {
+            identity.push_str(&format!("\n- **Git branch**: {branch}"));
+        }
+
+        identity.push_str("\n\n\
+            ## How You Work\n\
+            - You can only access files within the project root. All paths are resolved relative to it.\n\
+            - **Build mode**: Read tools are auto-approved. Write tools (edit, write, patch) and bash require user permission.\n\
+            - **Plan mode**: Read-only. Write tools are unavailable. Use this for analysis and planning.\n\
+            - The user sees your tool calls and results in the TUI. Be concise — tool output consumes context window space.\n\
+            - When context runs low, the conversation may be automatically compacted into a summary.\n\
+            - Use the `memory` tool to persist important discoveries across sessions.");
+
+        parts.push(identity);
 
         parts.push(TOOL_GUIDANCE.to_string());
 
@@ -2216,8 +2263,16 @@ pub(crate) mod tests {
             "should mention context efficiency"
         );
         assert!(
-            prompt.contains("current date and time is"),
-            "should contain current date and time"
+            prompt.contains("You are Steve"),
+            "should contain Steve identity"
+        );
+        assert!(
+            prompt.contains("Build mode"),
+            "should explain permission model"
+        );
+        assert!(
+            prompt.contains("Date"),
+            "should contain current date"
         );
     }
 
