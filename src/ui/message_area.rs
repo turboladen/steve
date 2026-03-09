@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use super::message_block::{AssistantPart, CodeFence, DiffContent, DiffLine, MessageBlock, ToolGroup, ToolGroupStatus};
+use super::syntax;
 use super::theme::Theme;
 use crate::tool::{IntentCategory, ToolName};
 
@@ -524,11 +525,15 @@ fn render_text_with_code_blocks(
 ) {
     let mut in_code_block = false;
     let mut last_header: Option<LastHeaderInfo> = None;
+    let mut highlighter: Option<syntect::easy::HighlightLines<'_>> = None;
 
     for text_line in text.lines() {
         match CodeFence::classify(text_line, in_code_block) {
             CodeFence::Open { lang } => {
                 let code_bg_style = Style::default().fg(theme.dim).bg(theme.code_bg);
+
+                // Try to initialize syntax highlighter for this language
+                highlighter = syntax::try_highlighter(&lang);
 
                 if !lang.is_empty() {
                     // Language label followed by space fill (background tint provides framing)
@@ -556,16 +561,31 @@ fn render_text_with_code_blocks(
             }
             CodeFence::Close => {
                 in_code_block = false;
+                highlighter = None;
             }
             CodeFence::NotFence if in_code_block => {
-                // Code line — tinted background
-                lines.push(
+                // Code line — try syntax highlighting, fall back to plain
+                let code_line = if let Some(ref mut h) = highlighter {
+                    if let Ok(regions) = h.highlight_line(text_line, syntax::syntax_set()) {
+                        let spans = syntax::syntect_to_spans(&regions, theme.code_bg);
+                        Line::from(spans).style(Style::default().bg(theme.code_bg))
+                    } else {
+                        // highlight_line failed — fall back to plain
+                        Line::from(Span::styled(
+                            text_line.to_string(),
+                            Style::default().fg(theme.assistant_msg).bg(theme.code_bg),
+                        ))
+                        .style(Style::default().bg(theme.code_bg))
+                    }
+                } else {
+                    // No highlighter (unknown/bare language) — plain rendering
                     Line::from(Span::styled(
                         text_line.to_string(),
                         Style::default().fg(theme.assistant_msg).bg(theme.code_bg),
                     ))
-                    .style(Style::default().bg(theme.code_bg)),
-                );
+                    .style(Style::default().bg(theme.code_bg))
+                };
+                lines.push(code_line);
             }
             CodeFence::NotFence => {
                 // Normal prose line
@@ -1760,6 +1780,54 @@ mod tests {
         assert_eq!(lines.len(), 3, "expected 3 lines, got {}", lines.len());
         let header: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(header.ends_with(COPY_HINT), "last block's lang header should have copy hint");
+    }
+
+    // -- Syntax highlighting tests --
+
+    #[test]
+    fn code_block_with_known_lang_has_multiple_spans() {
+        let theme = Theme::default();
+        let text = "```rust\nfn main() { let x = 42; }\n```";
+        let mut lines: Vec<Line> = Vec::new();
+        render_text_with_code_blocks(text, &mut lines, &theme, 80, false);
+        // lines: header, code line = 2 output lines
+        assert_eq!(lines.len(), 2, "expected 2 lines, got {}", lines.len());
+        // The code line (index 1) should have multiple spans from syntax highlighting
+        assert!(
+            lines[1].spans.len() > 1,
+            "highlighted code should produce >1 span, got {} spans: {:?}",
+            lines[1].spans.len(),
+            lines[1].spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>()
+        );
+        // All spans should have code_bg background
+        for span in &lines[1].spans {
+            assert_eq!(
+                span.style.bg,
+                Some(theme.code_bg),
+                "highlighted span should have code_bg background"
+            );
+        }
+    }
+
+    #[test]
+    fn code_block_unknown_lang_single_span() {
+        let theme = Theme::default();
+        let text = "```nonexistent_gibberish_42\nsome code here\n```";
+        let mut lines: Vec<Line> = Vec::new();
+        render_text_with_code_blocks(text, &mut lines, &theme, 80, false);
+        // lines: header, code line = 2 output lines
+        assert_eq!(lines.len(), 2, "expected 2 lines, got {}", lines.len());
+        // Unknown lang falls back to plain rendering — 1 span with assistant_msg fg
+        assert_eq!(
+            lines[1].spans.len(),
+            1,
+            "unknown lang should produce 1 span (plain fallback)"
+        );
+        assert_eq!(
+            lines[1].spans[0].style.fg,
+            Some(theme.assistant_msg),
+            "fallback span should use assistant_msg foreground"
+        );
     }
 
     // -- Integration test: full render pipeline --

@@ -5,6 +5,7 @@ pub mod message_area;
 pub mod message_block;
 pub mod sidebar;
 pub mod status_line;
+pub mod syntax;
 pub mod theme;
 
 use std::io::{self, Stdout};
