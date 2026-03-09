@@ -97,14 +97,15 @@ Example `steve.json`:
 | `/export-debug` | Export session as structured markdown for debugging (includes filtered logs) |
 | `/init` | Create AGENTS.md in project root |
 | `/help` | Show help |
-| `/exit` | Quit |
+| `/quit` or `/exit` | Quit |
 
 | Key | Action |
 |-----|--------|
 | Enter | Send message |
 | Shift+Enter | Insert newline |
 | Tab | Accept & execute autocomplete selection / toggle Build–Plan mode (when no autocomplete) |
-| Up/Down | Navigate autocomplete list |
+| Up/Down | Navigate autocomplete list (when visible) / scroll messages one line |
+| PageUp/PageDown | Scroll messages one page |
 | Ctrl+C | Cancel stream (first press) / quit (second press) |
 | Ctrl+B | Toggle sidebar (auto → hide → show → auto) |
 | Ctrl+Y | Copy last code block to clipboard (OSC 52) |
@@ -171,7 +172,7 @@ Reduces LLM API token usage via two subsystems in `src/context/`:
 
 **Critical invariant**: Write tools (`edit`, `write`, `patch`, `move`, `copy`, `delete`, `mkdir`) and the `memory` tool (which writes to disk) must never run in the parallel execution phase — they must go through the sequential phase for proper cache invalidation, even if they have `AllowAlways` permission.
 
-The compressor also runs an aggressive pruning pass (compressing ALL tool results including current iteration) when estimated token usage exceeds 60% of the context window. The `read` tool enforces a 2000-line default cap (`max_lines` parameter), `bash` uses head+tail truncation at 20KB, and `grep` truncates individual match lines to 200 chars. A 60% context warning is shown to the user before auto-compact triggers at 80%.
+The compressor also runs an aggressive pruning pass (compressing ALL tool results including current iteration) when estimated token usage exceeds 60% of the context window. The `read` tool detects binary files (null bytes in first 8KB) and returns `"Binary file (N bytes), not displayed."` instead of garbled content. It also enforces a 2000-line default cap (`max_lines` parameter), `bash` uses head+tail truncation at 20KB, and `grep` truncates individual match lines to 200 chars. A 60% context warning is shown to the user before auto-compact triggers at 80%.
 
 ### Token Pipeline
 
