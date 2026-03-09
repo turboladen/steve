@@ -251,6 +251,7 @@ pub fn render_message_blocks(
             MessageBlock::Permission {
                 tool_name,
                 args_summary,
+                diff_content,
             } => {
                 // Top rule
                 lines.push(Line::from(Span::styled(
@@ -278,6 +279,10 @@ pub fn render_message_blocks(
                             .add_modifier(Modifier::BOLD),
                     ),
                 ]));
+                // Inline diff preview if available
+                if let Some(diff) = diff_content {
+                    render_diff_lines(&mut lines, diff, None, theme, context_pct);
+                }
                 // Options line with highlighted key letters
                 lines.push(Line::from(vec![
                     Span::raw("  ["),
@@ -973,6 +978,7 @@ mod tests {
         let messages = vec![MessageBlock::Permission {
             tool_name: "bash".to_string(),
             args_summary: "rm -rf".to_string(),
+            diff_content: None,
         }];
         let text = render_messages_to_string(60, 10, &messages, None);
         assert!(text.contains("Allow"), "permission should show 'Allow'");
@@ -981,6 +987,28 @@ mod tests {
         assert!(text.contains("]es"), "should show [y]es option");
         assert!(text.contains("]o"), "should show [n]o option");
         assert!(text.contains("]lways"), "should show [a]lways option");
+    }
+
+    #[test]
+    fn buffer_permission_prompt_with_diff_preview() {
+        use crate::ui::message_block::{DiffContent, DiffLine};
+        let messages = vec![MessageBlock::Permission {
+            tool_name: "edit".to_string(),
+            args_summary: "Edit file: src/main.rs".to_string(),
+            diff_content: Some(DiffContent::EditDiff {
+                lines: vec![
+                    DiffLine::Removal("old code".into()),
+                    DiffLine::Addition("new code".into()),
+                ],
+            }),
+        }];
+        let text = render_messages_to_string(60, 20, &messages, None);
+        assert!(text.contains("Allow"), "should show Allow prompt");
+        assert!(text.contains("edit"), "should show tool name");
+        // Diff content should appear between the title and options
+        assert!(text.contains("old code"), "should show removed line");
+        assert!(text.contains("new code"), "should show added line");
+        assert!(text.contains("]es"), "should show [y]es option");
     }
 
     #[test]

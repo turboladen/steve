@@ -889,6 +889,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                         call_id: tc.id.clone(),
                         tool_name: tc.tool_name,
                         arguments_summary: summary,
+                        tool_args: tc.args.clone(),
                         response_tx,
                     }));
 

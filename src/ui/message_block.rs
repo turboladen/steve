@@ -65,6 +65,8 @@ pub enum MessageBlock {
     Permission {
         tool_name: String,
         args_summary: String,
+        /// Optional diff content extracted from tool arguments for inline preview.
+        diff_content: Option<DiffContent>,
     },
 }
 
@@ -544,11 +546,32 @@ mod tests {
         let block = MessageBlock::Permission {
             tool_name: "bash".into(),
             args_summary: "ls -la".into(),
+            diff_content: None,
         };
         match &block {
-            MessageBlock::Permission { tool_name, args_summary } => {
+            MessageBlock::Permission { tool_name, args_summary, .. } => {
                 assert_eq!(tool_name, "bash");
                 assert_eq!(args_summary, "ls -la");
+            }
+            _ => panic!("expected Permission block"),
+        }
+    }
+
+    #[test]
+    fn permission_block_with_diff() {
+        let block = MessageBlock::Permission {
+            tool_name: "edit".into(),
+            args_summary: "Edit file: src/main.rs".into(),
+            diff_content: Some(DiffContent::EditDiff {
+                lines: vec![
+                    DiffLine::Removal("old line".into()),
+                    DiffLine::Addition("new line".into()),
+                ],
+            }),
+        };
+        match &block {
+            MessageBlock::Permission { diff_content, .. } => {
+                assert!(diff_content.is_some());
             }
             _ => panic!("expected Permission block"),
         }
@@ -559,6 +582,7 @@ mod tests {
         let block = MessageBlock::Permission {
             tool_name: "bash".into(),
             args_summary: "ls".into(),
+            diff_content: None,
         };
         assert!(!block.is_assistant());
         assert!(!block.is_empty_assistant());

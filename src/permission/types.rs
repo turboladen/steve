@@ -90,6 +90,8 @@ pub struct PermissionRequest {
     pub call_id: String,
     pub tool_name: ToolName,
     pub arguments_summary: String,
+    /// Full tool call arguments for diff preview in the permission prompt.
+    pub tool_args: serde_json::Value,
     pub response_tx: tokio::sync::oneshot::Sender<PermissionReply>,
 }
 
