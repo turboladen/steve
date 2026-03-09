@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::ui::terminal_detect::ThemePreference;
+
 /// Top-level configuration for steve.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -31,6 +33,10 @@ pub struct Config {
     /// More specific path rules should come before general rules (first-match wins).
     #[serde(default)]
     pub permission_rules: Vec<crate::permission::types::PermissionRule>,
+
+    /// Theme preference: "auto" (default), "dark", or "light".
+    #[serde(default)]
+    pub theme: ThemePreference,
 
     /// Provider definitions keyed by provider ID.
     #[serde(default)]
@@ -125,6 +131,9 @@ impl Config {
         }
         if project_has_content {
             self.auto_compact = project.auto_compact;
+        }
+        if project.theme != ThemePreference::Auto {
+            self.theme = project.theme;
         }
 
         // Providers: deep merge by provider ID, then by model ID
@@ -398,6 +407,45 @@ mod tests {
         assert_eq!(model.name, "Project Override");
         assert_eq!(model.context_window, 64_000);
         assert_eq!(model.max_output_tokens, Some(4096));
+    }
+
+    #[test]
+    fn default_theme_is_auto() {
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.theme, crate::ui::terminal_detect::ThemePreference::Auto);
+    }
+
+    #[test]
+    fn theme_dark_light_parse() {
+        let config: Config = serde_json::from_str(r#"{"theme": "dark"}"#).unwrap();
+        assert_eq!(config.theme, crate::ui::terminal_detect::ThemePreference::Dark);
+
+        let config: Config = serde_json::from_str(r#"{"theme": "light"}"#).unwrap();
+        assert_eq!(config.theme, crate::ui::terminal_detect::ThemePreference::Light);
+    }
+
+    #[test]
+    fn merge_preserves_global_theme_when_project_empty() {
+        let mut global = Config::default();
+        global.theme = crate::ui::terminal_detect::ThemePreference::Dark;
+        let project = Config::default();
+        let merged = global.merge(project);
+        // Project has Auto (default) theme, so global Dark should be preserved
+        assert_eq!(merged.theme, crate::ui::terminal_detect::ThemePreference::Dark);
+    }
+
+    #[test]
+    fn merge_theme_only_project_overrides_global() {
+        // A project config with only "theme": "dark" and no providers/model
+        // should still override the global theme
+        let global = Config {
+            theme: crate::ui::terminal_detect::ThemePreference::Auto,
+            ..Default::default()
+        };
+        let mut project = Config::default();
+        project.theme = crate::ui::terminal_detect::ThemePreference::Dark;
+        let merged = global.merge(project);
+        assert_eq!(merged.theme, crate::ui::terminal_detect::ThemePreference::Dark);
     }
 
     #[test]

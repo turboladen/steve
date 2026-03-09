@@ -77,6 +77,32 @@ impl Theme {
             system_msg: Color::Rgb(130, 145, 160),     // Cool slate (distinct from dim)
         }
     }
+
+    /// Light theme — dark text on light backgrounds.
+    /// All RGB values shifted for readability against white/light terminal backgrounds.
+    pub fn light() -> Self {
+        Self {
+            fg: Color::Rgb(30, 30, 30),                  // Near-black (dark text on light bg)
+            bg: Color::Reset,                             // Terminal provides background
+            accent: Color::Rgb(180, 110, 0),              // Dark amber (visible on white)
+            dim: Color::Rgb(120, 115, 110),               // Slightly lighter warm gray
+            error: Color::Rgb(200, 40, 40),               // Dark red
+            warning: Color::Rgb(180, 130, 0),             // Dark gold
+            success: Color::Rgb(30, 140, 60),             // Dark green
+            user_msg: Color::Rgb(40, 90, 160),            // Dark blue
+            assistant_msg: Color::Rgb(40, 38, 35),        // Near-black
+            tool_read: Color::Rgb(100, 95, 90),           // Darker gray
+            tool_write: Color::Rgb(190, 60, 30),          // Dark coral
+            reasoning: Color::Rgb(100, 75, 140),          // Dark lavender
+            border: Color::Rgb(190, 188, 185),            // Light gray (subtle on light bg)
+            mode_build: Color::Rgb(180, 110, 0),          // Match accent
+            mode_plan: Color::Rgb(40, 90, 170),           // Dark blue
+            permission: Color::Rgb(180, 130, 0),          // Match warning
+            code_bg: Color::Rgb(240, 238, 235),           // Off-white (slight tint from bg)
+            context_amber: Color::Rgb(160, 120, 40),      // Darker amber for light bg
+            system_msg: Color::Rgb(70, 90, 110),          // Dark slate
+        }
+    }
 }
 
 #[cfg(test)]
@@ -171,5 +197,44 @@ mod tests {
     fn system_msg_differs_from_dim() {
         let t = Theme::dark();
         assert_ne!(t.system_msg, t.dim, "system_msg should be distinct from dim");
+    }
+
+    // -- Light theme tests --
+
+    #[test]
+    fn light_fg_is_dark() {
+        let t = Theme::light();
+        match t.fg {
+            Color::Rgb(r, g, b) => {
+                assert!(r < 80, "light fg red channel should be dark");
+                assert!(g < 80, "light fg green channel should be dark");
+                assert!(b < 80, "light fg blue channel should be dark");
+            }
+            _ => panic!("light fg should be Rgb"),
+        }
+    }
+
+    #[test]
+    fn light_bg_is_reset() {
+        let t = Theme::light();
+        assert_eq!(t.bg, Color::Reset, "light bg should be Reset (terminal provides it)");
+    }
+
+    #[test]
+    fn light_differs_from_dark_on_fg() {
+        assert_ne!(Theme::light().fg, Theme::dark().fg);
+    }
+
+    #[test]
+    fn light_border_color_pressure_thresholds() {
+        let t = Theme::light();
+        assert_eq!(t.border_color(0), t.border);
+        assert_eq!(t.border_color(39), t.border);
+        assert_eq!(t.border_color(40), t.context_amber);
+        assert_eq!(t.border_color(59), t.context_amber);
+        assert_eq!(t.border_color(60), t.warning);
+        assert_eq!(t.border_color(79), t.warning);
+        assert_eq!(t.border_color(80), t.error);
+        assert_eq!(t.border_color(100), t.error);
     }
 }

@@ -425,7 +425,8 @@ impl App {
         // Try to resume the last session
         self.resume_or_new_session();
 
-        let mut terminal = ui::setup_terminal()?;
+        let (mut terminal, detected) = ui::detect_and_setup_terminal()?;
+        self.theme = ui::terminal_detect::resolve_theme(self.config.theme, detected);
         let mut crossterm_events = crossterm::event::EventStream::new();
         let mut tick_interval = tokio::time::interval(Duration::from_millis(100));
 

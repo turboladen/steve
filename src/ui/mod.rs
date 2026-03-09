@@ -6,6 +6,7 @@ pub mod message_block;
 pub mod sidebar;
 pub mod status_line;
 pub mod syntax;
+pub mod terminal_detect;
 pub mod theme;
 
 use std::io::{self, Stdout};
@@ -35,6 +36,22 @@ pub fn setup_terminal() -> Result<Tui> {
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
+}
+
+/// Set up the terminal with OSC 11 background detection.
+///
+/// Enables raw mode first (required for reading the OSC response), then
+/// probes the terminal background before entering the alternate screen
+/// (which would hide the response).
+pub fn detect_and_setup_terminal() -> Result<(Tui, terminal_detect::DetectedBackground)> {
+    enable_raw_mode()?;
+    let detected = terminal_detect::detect_background();
+    tracing::info!(?detected, "terminal background detected");
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
+    let backend = CrosstermBackend::new(stdout);
+    let terminal = Terminal::new(backend)?;
+    Ok((terminal, detected))
 }
 
 pub fn restore_terminal(terminal: &mut Tui) -> Result<()> {
