@@ -363,7 +363,7 @@ impl App {
             .filter_map(|s| s.parse::<ToolName>().ok())
             .collect();
         let permission_engine = Arc::new(tokio::sync::Mutex::new(PermissionEngine::new(
-            crate::permission::profile_plan_rules(profile, &allow_overrides),
+            crate::permission::profile_plan_rules(profile, &allow_overrides, &config.permission_rules),
         )));
 
         // Build tool result cache (session-scoped, shared across stream tasks)
@@ -1422,9 +1422,10 @@ impl App {
             .filter_map(|s| s.parse::<ToolName>().ok())
             .collect();
 
+        let path_rules = &self.config.permission_rules;
         let rules = match self.input.mode {
-            AgentMode::Build => profile_build_rules(profile, &allow_overrides),
-            AgentMode::Plan => profile_plan_rules(profile, &allow_overrides),
+            AgentMode::Build => profile_build_rules(profile, &allow_overrides, path_rules),
+            AgentMode::Plan => profile_plan_rules(profile, &allow_overrides, path_rules),
         };
 
         // Spawn a task to update the engine since it requires async lock

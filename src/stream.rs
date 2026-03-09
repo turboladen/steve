@@ -680,9 +680,10 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 }
             };
 
+            let path_hint = extract_tool_path(tool_name, &args);
             let action = if let Some(ref engine) = permission_engine {
                 let engine = engine.lock().await;
-                engine.check(tool_name, None)
+                engine.check(tool_name, path_hint.as_deref())
             } else {
                 PermissionAction::Allow
             };
@@ -1058,6 +1059,38 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         }
 
         // Loop back to send the messages (with tool results) to the LLM again
+    }
+}
+
+/// Extract the primary file path from tool arguments for path-based permission checks.
+///
+/// Returns `None` for tools that don't operate on file paths (bash, question, todo).
+fn extract_tool_path(tool_name: ToolName, args: &Value) -> Option<String> {
+    match tool_name {
+        ToolName::Read | ToolName::Edit | ToolName::Write | ToolName::Patch | ToolName::List => {
+            args.get("file_path").or_else(|| args.get("path"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        }
+        ToolName::Grep | ToolName::Glob => {
+            args.get("path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        }
+        ToolName::Move | ToolName::Copy => {
+            // Use the destination path for permission checking (the write target)
+            args.get("to_path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        }
+        ToolName::Delete | ToolName::Mkdir => {
+            args.get("path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        }
+        // Tools without file paths
+        ToolName::Bash | ToolName::Question | ToolName::Todo
+        | ToolName::Webfetch | ToolName::Memory => None,
     }
 }
 

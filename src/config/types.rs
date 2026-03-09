@@ -26,6 +26,12 @@ pub struct Config {
     #[serde(default)]
     pub allow_tools: Vec<String>,
 
+    /// Path-based permission rules.
+    /// e.g., `[{"tool": "edit", "pattern": "src/**", "action": "allow"}]`
+    /// More specific path rules should come before general rules (first-match wins).
+    #[serde(default)]
+    pub permission_rules: Vec<crate::permission::types::PermissionRule>,
+
     /// Provider definitions keyed by provider ID.
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
@@ -113,6 +119,9 @@ impl Config {
         }
         if !project.allow_tools.is_empty() {
             self.allow_tools = project.allow_tools;
+        }
+        if !project.permission_rules.is_empty() {
+            self.permission_rules = project.permission_rules;
         }
         if project_has_content {
             self.auto_compact = project.auto_compact;

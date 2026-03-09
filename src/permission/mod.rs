@@ -23,7 +23,11 @@ impl PermissionEngine {
     }
 
     /// Check whether a tool call should be allowed, denied, or needs user approval.
-    pub fn check(&self, tool_name: ToolName, _path_hint: Option<&str>) -> PermissionAction {
+    ///
+    /// `path_hint` is the primary file path from the tool arguments (if applicable).
+    /// Path-specific rules use glob matching against this hint. Tools without paths
+    /// (bash, question, todo) pass `None` and skip path-specific rules.
+    pub fn check(&self, tool_name: ToolName, path_hint: Option<&str>) -> PermissionAction {
         // If there's a session-level grant, allow immediately
         if self.session_grants.contains(&tool_name) {
             return PermissionAction::Allow;
@@ -32,6 +36,22 @@ impl PermissionEngine {
         // Find the first matching rule for this tool
         for rule in &self.rules {
             if rule.tool.matches(tool_name) {
+                // If the rule has a path pattern (not "*"), only match when we have a path
+                if rule.pattern != "*" {
+                    if let Some(path) = path_hint {
+                        if let Ok(pat) = glob::Pattern::new(&rule.pattern) {
+                            if pat.matches(path) {
+                                return rule.action.clone().into();
+                            }
+                        }
+                        // Pattern didn't match — keep looking for another rule
+                        continue;
+                    } else {
+                        // Rule has a path pattern but tool has no path — skip this rule
+                        continue;
+                    }
+                }
+                // Wildcard "*" pattern always matches
                 return rule.action.clone().into();
             }
         }
@@ -46,10 +66,12 @@ impl PermissionEngine {
     }
 
     /// Check if a tool should be completely excluded from the LLM's available tools.
-    /// Tools with Deny on all patterns should not be sent to the LLM at all.
+    /// Only excludes tools that have a wildcard Deny rule (all paths denied).
+    /// Path-specific deny rules don't exclude the tool — the LLM still needs
+    /// access, and individual calls are denied at check() time.
     pub fn is_tool_denied(&self, tool_name: ToolName) -> bool {
         for rule in &self.rules {
-            if rule.tool.matches(tool_name) {
+            if rule.tool.matches(tool_name) && rule.pattern == "*" {
                 return matches!(
                     PermissionAction::from(rule.action.clone()),
                     PermissionAction::Deny
@@ -116,11 +138,19 @@ impl<'de> serde::Deserialize<'de> for PermissionProfile {
 /// Build Build-mode permission rules from a profile, with optional per-tool overrides.
 ///
 /// `allow_overrides` are tool names that should be auto-allowed regardless of profile.
-/// These are prepended as `Allow` rules (first-match wins).
-pub fn profile_build_rules(profile: PermissionProfile, allow_overrides: &[ToolName]) -> Vec<PermissionRule> {
+/// `path_rules` are user-configured path-based rules from config.
+/// Priority order: path-based rules > per-tool overrides > profile defaults (first-match wins).
+pub fn profile_build_rules(
+    profile: PermissionProfile,
+    allow_overrides: &[ToolName],
+    path_rules: &[PermissionRule],
+) -> Vec<PermissionRule> {
     let mut rules = Vec::new();
 
-    // Per-tool overrides come first (highest priority)
+    // Path-based rules come first (highest priority — most specific)
+    rules.extend(path_rules.iter().cloned());
+
+    // Per-tool overrides come next
     for &tool in allow_overrides {
         rules.push(PermissionRule {
             tool: ToolMatcher::Specific(tool),
@@ -142,8 +172,25 @@ pub fn profile_build_rules(profile: PermissionProfile, allow_overrides: &[ToolNa
 /// Build Plan-mode permission rules from a profile, with optional per-tool overrides.
 ///
 /// Plan mode always denies write tools regardless of profile or overrides.
-pub fn profile_plan_rules(profile: PermissionProfile, allow_overrides: &[ToolName]) -> Vec<PermissionRule> {
+/// Path-based rules that allow writes are also stripped in Plan mode.
+pub fn profile_plan_rules(
+    _profile: PermissionProfile,
+    allow_overrides: &[ToolName],
+    path_rules: &[PermissionRule],
+) -> Vec<PermissionRule> {
     let mut rules = Vec::new();
+
+    // Path-based rules, but strip write-tool allow rules in Plan mode
+    for rule in path_rules {
+        let is_write = match &rule.tool {
+            ToolMatcher::Specific(tool) => tool.is_write_tool(),
+            ToolMatcher::All => false, // wildcard rules pass through (deny still works)
+        };
+        if is_write && matches!(rule.action, types::PermissionActionSerde::Allow) {
+            continue; // Don't allow writes in Plan mode
+        }
+        rules.push(rule.clone());
+    }
 
     // Per-tool overrides, but only for non-write tools in Plan mode
     // (write tools are always denied in Plan mode)
@@ -335,7 +382,7 @@ mod tests {
 
     #[test]
     fn trust_profile_allows_everything() {
-        let engine = PermissionEngine::new(profile_build_rules(PermissionProfile::Trust, &[]));
+        let engine = PermissionEngine::new(profile_build_rules(PermissionProfile::Trust, &[], &[]));
         assert_eq!(engine.check(ToolName::Edit, None), PermissionAction::Allow);
         assert_eq!(engine.check(ToolName::Bash, None), PermissionAction::Allow);
         assert_eq!(engine.check(ToolName::Read, None), PermissionAction::Allow);
@@ -344,7 +391,7 @@ mod tests {
 
     #[test]
     fn standard_profile_matches_build_mode() {
-        let standard = PermissionEngine::new(profile_build_rules(PermissionProfile::Standard, &[]));
+        let standard = PermissionEngine::new(profile_build_rules(PermissionProfile::Standard, &[], &[]));
         let build = PermissionEngine::new(build_mode_rules());
         assert_eq!(standard.check(ToolName::Read, None), build.check(ToolName::Read, None));
         assert_eq!(standard.check(ToolName::Edit, None), build.check(ToolName::Edit, None));
@@ -353,7 +400,7 @@ mod tests {
 
     #[test]
     fn cautious_profile_asks_for_reads() {
-        let engine = PermissionEngine::new(profile_build_rules(PermissionProfile::Cautious, &[]));
+        let engine = PermissionEngine::new(profile_build_rules(PermissionProfile::Cautious, &[], &[]));
         assert_eq!(engine.check(ToolName::Read, None), PermissionAction::Ask);
         assert_eq!(engine.check(ToolName::Grep, None), PermissionAction::Ask);
         assert_eq!(engine.check(ToolName::Edit, None), PermissionAction::Ask);
@@ -365,7 +412,7 @@ mod tests {
     #[test]
     fn allow_overrides_prepend_to_profile() {
         let engine = PermissionEngine::new(
-            profile_build_rules(PermissionProfile::Standard, &[ToolName::Edit, ToolName::Bash]),
+            profile_build_rules(PermissionProfile::Standard, &[ToolName::Edit, ToolName::Bash], &[]),
         );
         // Overridden tools should be auto-allowed
         assert_eq!(engine.check(ToolName::Edit, None), PermissionAction::Allow);
@@ -377,7 +424,7 @@ mod tests {
     #[test]
     fn plan_mode_ignores_write_overrides() {
         let engine = PermissionEngine::new(
-            profile_plan_rules(PermissionProfile::Standard, &[ToolName::Edit, ToolName::Bash]),
+            profile_plan_rules(PermissionProfile::Standard, &[ToolName::Edit, ToolName::Bash], &[]),
         );
         // Write tool override is stripped in Plan mode
         assert_eq!(engine.check(ToolName::Edit, None), PermissionAction::Deny);
@@ -409,5 +456,143 @@ mod tests {
         assert_eq!(json, "\"trust\"");
         let parsed: PermissionProfile = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, profile);
+    }
+
+    // -- Path-based permission rule tests --
+
+    #[test]
+    fn path_rule_allows_edit_in_src() {
+        let path_rules = vec![
+            PermissionRule {
+                tool: ToolMatcher::Specific(ToolName::Edit),
+                pattern: "src/**".into(),
+                action: types::PermissionActionSerde::Allow,
+            },
+        ];
+        let engine = PermissionEngine::new(
+            profile_build_rules(PermissionProfile::Standard, &[], &path_rules),
+        );
+        // Edit in src/ is allowed by path rule
+        assert_eq!(engine.check(ToolName::Edit, Some("src/main.rs")), PermissionAction::Allow);
+        // Edit outside src/ falls through to profile default (Ask)
+        assert_eq!(engine.check(ToolName::Edit, Some("config/app.toml")), PermissionAction::Ask);
+        // Edit with no path falls through to profile default (Ask)
+        assert_eq!(engine.check(ToolName::Edit, None), PermissionAction::Ask);
+    }
+
+    #[test]
+    fn path_rule_denies_edit_outside_project() {
+        let path_rules = vec![
+            PermissionRule {
+                tool: ToolMatcher::Specific(ToolName::Edit),
+                pattern: "/etc/**".into(),
+                action: types::PermissionActionSerde::Deny,
+            },
+        ];
+        let engine = PermissionEngine::new(
+            profile_build_rules(PermissionProfile::Standard, &[], &path_rules),
+        );
+        assert_eq!(engine.check(ToolName::Edit, Some("/etc/passwd")), PermissionAction::Deny);
+        // Normal edits still go through standard rules (Ask)
+        assert_eq!(engine.check(ToolName::Edit, Some("src/main.rs")), PermissionAction::Ask);
+    }
+
+    #[test]
+    fn path_rules_take_priority_over_allow_overrides() {
+        let path_rules = vec![
+            PermissionRule {
+                tool: ToolMatcher::Specific(ToolName::Edit),
+                pattern: "Cargo.toml".into(),
+                action: types::PermissionActionSerde::Ask,
+            },
+        ];
+        // allow_overrides says "always allow edit", but path rule says "ask for Cargo.toml"
+        let engine = PermissionEngine::new(
+            profile_build_rules(PermissionProfile::Standard, &[ToolName::Edit], &path_rules),
+        );
+        // Cargo.toml matches the path rule (Ask), which is higher priority
+        assert_eq!(engine.check(ToolName::Edit, Some("Cargo.toml")), PermissionAction::Ask);
+        // Other files fall through to the allow_override (Allow)
+        assert_eq!(engine.check(ToolName::Edit, Some("src/main.rs")), PermissionAction::Allow);
+    }
+
+    #[test]
+    fn path_rules_dont_affect_unrelated_tools() {
+        let path_rules = vec![
+            PermissionRule {
+                tool: ToolMatcher::Specific(ToolName::Edit),
+                pattern: "src/**".into(),
+                action: types::PermissionActionSerde::Allow,
+            },
+        ];
+        let engine = PermissionEngine::new(
+            profile_build_rules(PermissionProfile::Standard, &[], &path_rules),
+        );
+        // Read tool unaffected (already allowed by profile)
+        assert_eq!(engine.check(ToolName::Read, Some("src/main.rs")), PermissionAction::Allow);
+        // Bash unaffected (no path rule for it)
+        assert_eq!(engine.check(ToolName::Bash, None), PermissionAction::Ask);
+    }
+
+    #[test]
+    fn plan_mode_strips_write_path_rules() {
+        let path_rules = vec![
+            PermissionRule {
+                tool: ToolMatcher::Specific(ToolName::Edit),
+                pattern: "src/**".into(),
+                action: types::PermissionActionSerde::Allow,
+            },
+        ];
+        let engine = PermissionEngine::new(
+            profile_plan_rules(PermissionProfile::Standard, &[], &path_rules),
+        );
+        // Path rule for edit is stripped in Plan mode — edit is denied
+        assert_eq!(engine.check(ToolName::Edit, Some("src/main.rs")), PermissionAction::Deny);
+    }
+
+    #[test]
+    fn session_grant_overrides_path_deny() {
+        let path_rules = vec![
+            PermissionRule {
+                tool: ToolMatcher::Specific(ToolName::Edit),
+                pattern: "/etc/**".into(),
+                action: types::PermissionActionSerde::Deny,
+            },
+        ];
+        let mut engine = PermissionEngine::new(
+            profile_build_rules(PermissionProfile::Standard, &[], &path_rules),
+        );
+        engine.grant_session(ToolName::Edit);
+        // Session grant overrides everything (including path deny)
+        assert_eq!(engine.check(ToolName::Edit, Some("/etc/passwd")), PermissionAction::Allow);
+    }
+
+    #[test]
+    fn is_tool_denied_only_for_wildcard_deny() {
+        let path_rules = vec![
+            PermissionRule {
+                tool: ToolMatcher::Specific(ToolName::Edit),
+                pattern: "/etc/**".into(),
+                action: types::PermissionActionSerde::Deny,
+            },
+        ];
+        let engine = PermissionEngine::new(
+            profile_build_rules(PermissionProfile::Standard, &[], &path_rules),
+        );
+        // Path-specific deny doesn't exclude the tool from LLM
+        assert!(!engine.is_tool_denied(ToolName::Edit));
+    }
+
+    #[test]
+    fn path_rule_config_serde_roundtrip() {
+        let rule = PermissionRule {
+            tool: ToolMatcher::Specific(ToolName::Edit),
+            pattern: "src/**".into(),
+            action: types::PermissionActionSerde::Allow,
+        };
+        let json = serde_json::to_string(&rule).unwrap();
+        let parsed: PermissionRule = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.tool, rule.tool);
+        assert_eq!(parsed.pattern, rule.pattern);
     }
 }
