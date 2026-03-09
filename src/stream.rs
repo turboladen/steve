@@ -1092,6 +1092,19 @@ fn build_permission_summary(tool_name: ToolName, args: &Value) -> String {
                 .unwrap_or("(unknown file)");
             format!("Patch file: {file}")
         }
+        ToolName::Move | ToolName::Copy => {
+            let from = args.get("from_path").and_then(|v| v.as_str()).unwrap_or("(unknown)");
+            let to = args.get("to_path").and_then(|v| v.as_str()).unwrap_or("(unknown)");
+            format!("{tool_name}: {from} \u{2192} {to}")
+        }
+        ToolName::Delete => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("(unknown)");
+            format!("Delete: {path}")
+        }
+        ToolName::Mkdir => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("(unknown)");
+            format!("Create directory: {path}")
+        }
         ToolName::Read | ToolName::Grep | ToolName::Glob | ToolName::List
         | ToolName::Question | ToolName::Todo | ToolName::Webfetch | ToolName::Memory => {
             format!("{tool_name}: {}", serde_json::to_string(args).unwrap_or_default())

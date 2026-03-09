@@ -85,6 +85,10 @@ pub fn build_mode_rules() -> Vec<PermissionRule> {
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Edit), pattern: "*".into(), action: Ask },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Write), pattern: "*".into(), action: Ask },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Patch), pattern: "*".into(), action: Ask },
+        PermissionRule { tool: ToolMatcher::Specific(ToolName::Move), pattern: "*".into(), action: Ask },
+        PermissionRule { tool: ToolMatcher::Specific(ToolName::Copy), pattern: "*".into(), action: Ask },
+        PermissionRule { tool: ToolMatcher::Specific(ToolName::Delete), pattern: "*".into(), action: Ask },
+        PermissionRule { tool: ToolMatcher::Specific(ToolName::Mkdir), pattern: "*".into(), action: Ask },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Bash), pattern: "*".into(), action: Ask },
     ]
 }
@@ -108,6 +112,10 @@ pub fn plan_mode_rules() -> Vec<PermissionRule> {
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Edit), pattern: "*".into(), action: Deny },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Write), pattern: "*".into(), action: Deny },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Patch), pattern: "*".into(), action: Deny },
+        PermissionRule { tool: ToolMatcher::Specific(ToolName::Move), pattern: "*".into(), action: Deny },
+        PermissionRule { tool: ToolMatcher::Specific(ToolName::Copy), pattern: "*".into(), action: Deny },
+        PermissionRule { tool: ToolMatcher::Specific(ToolName::Delete), pattern: "*".into(), action: Deny },
+        PermissionRule { tool: ToolMatcher::Specific(ToolName::Mkdir), pattern: "*".into(), action: Deny },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Bash), pattern: "*".into(), action: Ask },
     ]
 }

@@ -270,6 +270,7 @@ impl ToolResultCache {
             }
             // Don't cache tools with side effects or dynamic content
             ToolName::Bash | ToolName::Edit | ToolName::Write | ToolName::Patch
+            | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
             | ToolName::Question | ToolName::Todo | ToolName::Webfetch | ToolName::Memory => None,
         }
     }
@@ -282,7 +283,8 @@ impl ToolResultCache {
                 Some(self.normalize_path(path))
             }
             ToolName::Grep | ToolName::Glob | ToolName::Edit | ToolName::Write
-            | ToolName::Patch | ToolName::Bash | ToolName::Question | ToolName::Todo
+            | ToolName::Patch | ToolName::Move | ToolName::Copy | ToolName::Delete
+            | ToolName::Mkdir | ToolName::Bash | ToolName::Question | ToolName::Todo
             | ToolName::Webfetch | ToolName::Memory => None,
         }
     }

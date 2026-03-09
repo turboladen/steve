@@ -184,6 +184,16 @@ fn extract_tool_summary(tool_name: ToolName, input: &serde_json::Value) -> Strin
             .and_then(|v| v.as_str())
             .unwrap_or("(no path)")
             .to_string(),
+        ToolName::Move | ToolName::Copy => {
+            let from = input.get("from_path").and_then(|v| v.as_str()).unwrap_or("(no path)");
+            let to = input.get("to_path").and_then(|v| v.as_str()).unwrap_or("(no path)");
+            format!("{from} \u{2192} {to}")
+        }
+        ToolName::Delete | ToolName::Mkdir => input
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(no path)")
+            .to_string(),
         ToolName::Bash => {
             let cmd = input
                 .get("command")

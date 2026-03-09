@@ -87,6 +87,16 @@ fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
+        ToolName::Move | ToolName::Copy => {
+            let from = args.get("from_path").and_then(|v| v.as_str()).unwrap_or("");
+            let to = args.get("to_path").and_then(|v| v.as_str()).unwrap_or("");
+            format!("{from} \u{2192} {to}")
+        }
+        ToolName::Delete | ToolName::Mkdir => args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         ToolName::Bash => {
             let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
             if cmd.chars().count() > 40 {
@@ -173,7 +183,11 @@ fn extract_diff_content(tool_name: ToolName, args: &Value) -> Option<DiffContent
         | ToolName::Question
         | ToolName::Todo
         | ToolName::Webfetch
-        | ToolName::Memory => None,
+        | ToolName::Memory
+        | ToolName::Move
+        | ToolName::Copy
+        | ToolName::Delete
+        | ToolName::Mkdir => None,
     }
 }
 

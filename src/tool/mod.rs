@@ -1,9 +1,13 @@
 pub mod bash;
+pub mod copy;
+pub mod delete;
 pub mod edit;
 pub mod glob;
 pub mod grep;
 pub mod list;
 pub mod memory;
+pub mod mkdir;
+pub mod move_;
 pub mod patch;
 pub mod question;
 pub mod read;
@@ -48,6 +52,12 @@ pub enum ToolName {
     Edit,
     Write,
     Patch,
+    #[strum(serialize = "move")]
+    #[serde(rename = "move")]
+    Move,
+    Copy,
+    Delete,
+    Mkdir,
     Bash,
     Question,
     Todo,
@@ -61,9 +71,13 @@ impl ToolName {
         self.into()
     }
 
-    /// Whether this is a write tool that modifies files (edit, write, patch).
+    /// Whether this is a write tool that modifies files.
     pub fn is_write_tool(self) -> bool {
-        matches!(self, ToolName::Edit | ToolName::Write | ToolName::Patch)
+        matches!(
+            self,
+            ToolName::Edit | ToolName::Write | ToolName::Patch
+            | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
+        )
     }
 
     /// Whether this is a read-only tool (read, grep, glob, list).
@@ -95,6 +109,7 @@ impl ToolName {
             ToolName::Read | ToolName::Grep | ToolName::Glob
             | ToolName::List | ToolName::Webfetch => IntentCategory::Exploring,
             ToolName::Edit | ToolName::Write | ToolName::Patch
+            | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
             | ToolName::Memory => IntentCategory::Editing,
             ToolName::Bash => IntentCategory::Executing,
             ToolName::Question | ToolName::Todo => IntentCategory::Asking,
@@ -111,6 +126,7 @@ impl ToolName {
             ToolName::Read | ToolName::Grep | ToolName::Glob
             | ToolName::List | ToolName::Webfetch => "\u{00b7}",       // ·
             ToolName::Edit | ToolName::Write | ToolName::Patch
+            | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
             | ToolName::Memory => "\u{270e}",                           // ✎
             ToolName::Bash => "$",
             ToolName::Question | ToolName::Todo => "\u{26a1}",          // ⚡
@@ -182,6 +198,10 @@ impl ToolRegistry {
         registry.register(edit::tool());
         registry.register(write::tool());
         registry.register(patch::tool());
+        registry.register(move_::tool());
+        registry.register(copy::tool());
+        registry.register(delete::tool());
+        registry.register(mkdir::tool());
         registry.register(bash::tool());
 
         // Register utility tools
@@ -281,7 +301,10 @@ mod tests {
 
     #[test]
     fn is_write_tool_correct() {
-        let write_tools = [ToolName::Edit, ToolName::Write, ToolName::Patch];
+        let write_tools = [
+            ToolName::Edit, ToolName::Write, ToolName::Patch,
+            ToolName::Move, ToolName::Copy, ToolName::Delete, ToolName::Mkdir,
+        ];
         let non_write = [
             ToolName::Read,
             ToolName::Grep,
@@ -308,6 +331,10 @@ mod tests {
             ToolName::Edit,
             ToolName::Write,
             ToolName::Patch,
+            ToolName::Move,
+            ToolName::Copy,
+            ToolName::Delete,
+            ToolName::Mkdir,
             ToolName::Bash,
             ToolName::Question,
             ToolName::Todo,
@@ -329,6 +356,10 @@ mod tests {
             ToolName::Edit,
             ToolName::Write,
             ToolName::Patch,
+            ToolName::Move,
+            ToolName::Copy,
+            ToolName::Delete,
+            ToolName::Mkdir,
             ToolName::Bash,
             ToolName::Question,
             ToolName::Todo,
@@ -357,7 +388,11 @@ mod tests {
         }
 
         // Write tools get ✎
-        for t in [ToolName::Edit, ToolName::Write, ToolName::Patch, ToolName::Memory] {
+        for t in [
+            ToolName::Edit, ToolName::Write, ToolName::Patch,
+            ToolName::Move, ToolName::Copy, ToolName::Delete, ToolName::Mkdir,
+            ToolName::Memory,
+        ] {
             assert_eq!(t.tool_marker(), "\u{270e}", "{t} should have write marker ✎");
         }
 

@@ -189,7 +189,8 @@ pub fn render_message_blocks(
                                         ToolName::Read | ToolName::Grep | ToolName::Glob
                                         | ToolName::List | ToolName::Webfetch => theme.tool_read,
                                         ToolName::Edit | ToolName::Write | ToolName::Patch
-                                        | ToolName::Memory => theme.tool_write,
+                                        | ToolName::Move | ToolName::Copy | ToolName::Delete
+                                        | ToolName::Mkdir | ToolName::Memory => theme.tool_write,
                                         ToolName::Bash | ToolName::Question | ToolName::Todo => theme.accent,
                                     }
                                 };
