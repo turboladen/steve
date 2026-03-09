@@ -1,20 +1,3 @@
-#![allow(dead_code)]
-
-mod app;
-mod command;
-mod config;
-mod context;
-mod event;
-mod export;
-mod permission;
-mod project;
-mod provider;
-mod session;
-mod storage;
-mod stream;
-mod tool;
-mod ui;
-
 use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -56,24 +39,24 @@ async fn main() -> Result<()> {
     tracing::info!("steve starting up");
 
     // Detect project root
-    let project_info = project::detect_or_cwd();
+    let project_info = steve::project::detect_or_cwd();
     tracing::info!(root = %project_info.root.display(), id = %project_info.id, "project detected");
 
     // Load config
-    let cfg = config::load(&project_info.root)?;
+    let cfg = steve::config::load(&project_info.root)?;
     tracing::info!(providers = cfg.providers.len(), "config loaded");
 
     // Initialize storage
-    let store = storage::Storage::new(&project_info.id)?;
+    let store = steve::storage::Storage::new(&project_info.id)?;
 
     // Load AGENTS.md (if present)
-    let agents_md = config::load_agents_md(&project_info.root);
+    let agents_md = steve::config::load_agents_md(&project_info.root);
     if agents_md.is_some() {
         tracing::info!("AGENTS.md loaded");
     }
 
     // Build provider registry (may fail if env vars not set)
-    let (provider_registry, provider_error) = match provider::ProviderRegistry::from_config(&cfg) {
+    let (provider_registry, provider_error) = match steve::provider::ProviderRegistry::from_config(&cfg) {
         Ok(registry) => {
             tracing::info!("provider registry initialized");
             (Some(registry), None)
@@ -84,7 +67,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    let mut app = app::App::new(project_info, cfg, store, agents_md, provider_registry, provider_error);
+    let mut app = steve::app::App::new(project_info, cfg, store, agents_md, provider_registry, provider_error);
     app.run().await?;
 
     tracing::info!("steve shutting down");
