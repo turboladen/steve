@@ -39,10 +39,18 @@ impl PermissionEngine {
                 // If the rule has a path pattern (not "*"), only match when we have a path
                 if rule.pattern != "*" {
                     if let Some(path) = path_hint {
-                        if let Ok(pat) = glob::Pattern::new(&rule.pattern) {
-                            if pat.matches(path) {
+                        match glob::Pattern::new(&rule.pattern) {
+                            Ok(pat) if pat.matches(path) => {
                                 return rule.action.clone().into();
                             }
+                            Err(e) => {
+                                tracing::warn!(
+                                    pattern = %rule.pattern,
+                                    error = %e,
+                                    "invalid glob pattern in permission rule — skipping"
+                                );
+                            }
+                            _ => {} // valid pattern but didn't match
                         }
                         // Pattern didn't match — keep looking for another rule
                         continue;
@@ -256,6 +264,8 @@ pub fn build_mode_rules() -> Vec<PermissionRule> {
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Delete), pattern: "*".into(), action: Ask },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Mkdir), pattern: "*".into(), action: Ask },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Bash), pattern: "*".into(), action: Ask },
+        // Network tools: require permission (external side effects)
+        PermissionRule { tool: ToolMatcher::Specific(ToolName::Webfetch), pattern: "*".into(), action: Ask },
     ]
 }
 
@@ -283,6 +293,8 @@ pub fn plan_mode_rules() -> Vec<PermissionRule> {
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Delete), pattern: "*".into(), action: Deny },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Mkdir), pattern: "*".into(), action: Deny },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Bash), pattern: "*".into(), action: Ask },
+        // Network tools: require permission (external side effects)
+        PermissionRule { tool: ToolMatcher::Specific(ToolName::Webfetch), pattern: "*".into(), action: Ask },
     ]
 }
 
@@ -355,9 +367,29 @@ mod tests {
     }
 
     #[test]
-    fn unmatched_tool_defaults_to_ask() {
+    fn webfetch_requires_permission() {
         let engine = PermissionEngine::new(build_mode_rules());
         assert_eq!(engine.check(ToolName::Webfetch, None), PermissionAction::Ask);
+    }
+
+    #[test]
+    fn all_tools_have_explicit_rule_in_build_mode() {
+        use strum::IntoEnumIterator;
+        let rules = build_mode_rules();
+        for tool in ToolName::iter() {
+            let has_rule = rules.iter().any(|r| r.tool.matches(tool));
+            assert!(has_rule, "{tool} should have an explicit rule in build_mode_rules");
+        }
+    }
+
+    #[test]
+    fn all_tools_have_explicit_rule_in_plan_mode() {
+        use strum::IntoEnumIterator;
+        let rules = plan_mode_rules();
+        for tool in ToolName::iter() {
+            let has_rule = rules.iter().any(|r| r.tool.matches(tool));
+            assert!(has_rule, "{tool} should have an explicit rule in plan_mode_rules");
+        }
     }
 
     #[test]

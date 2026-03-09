@@ -120,21 +120,9 @@ mod tests {
 
     #[test]
     fn tool_matcher_all_matches_everything() {
+        use strum::IntoEnumIterator;
         let matcher = ToolMatcher::All;
-        let all = [
-            ToolName::Read,
-            ToolName::Grep,
-            ToolName::Glob,
-            ToolName::List,
-            ToolName::Edit,
-            ToolName::Write,
-            ToolName::Patch,
-            ToolName::Bash,
-            ToolName::Question,
-            ToolName::Todo,
-            ToolName::Webfetch,
-        ];
-        for t in all {
+        for t in ToolName::iter() {
             assert!(matcher.matches(t), "All should match {t}");
         }
     }

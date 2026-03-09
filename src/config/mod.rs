@@ -134,8 +134,13 @@ pub fn persist_allow_tool(project_root: &Path, tool_name: &str) -> Result<()> {
 
     let json_str = serde_json::to_string_pretty(&value)
         .context("failed to serialize config")?;
-    std::fs::write(&write_path, json_str.as_bytes())
-        .with_context(|| format!("failed to write {}", write_path.display()))?;
+
+    // Atomic write: write to tmp file then rename to avoid partial writes on crash
+    let tmp_path = write_path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, json_str.as_bytes())
+        .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, &write_path)
+        .with_context(|| format!("failed to rename {} → {}", tmp_path.display(), write_path.display()))?;
 
     tracing::info!(tool = tool_name, path = %write_path.display(), "persisted tool to allow_tools");
     Ok(())
