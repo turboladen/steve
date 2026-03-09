@@ -17,6 +17,15 @@ pub struct Config {
     #[serde(default = "default_auto_compact")]
     pub auto_compact: bool,
 
+    /// Permission profile: "trust", "standard" (default), or "cautious".
+    #[serde(default)]
+    pub permission_profile: Option<crate::permission::PermissionProfile>,
+
+    /// Tools to auto-allow regardless of permission profile.
+    /// e.g., `["edit", "bash"]` to skip permission prompts for those tools.
+    #[serde(default)]
+    pub allow_tools: Vec<String>,
+
     /// Provider definitions keyed by provider ID.
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
@@ -98,6 +107,12 @@ impl Config {
         }
         if project.small_model.is_some() {
             self.small_model = project.small_model;
+        }
+        if project.permission_profile.is_some() {
+            self.permission_profile = project.permission_profile;
+        }
+        if !project.allow_tools.is_empty() {
+            self.allow_tools = project.allow_tools;
         }
         if project_has_content {
             self.auto_compact = project.auto_compact;

@@ -353,9 +353,14 @@ impl App {
         // Build tool registry
         let tool_registry = Arc::new(ToolRegistry::new(project.root.clone()));
 
-        // Build permission engine with Plan mode rules (default)
+        // Build permission engine with Plan mode rules (default start mode)
+        // Profile-aware rules will be set on first sync_permission_mode call
+        let profile = config.permission_profile.unwrap_or(crate::permission::PermissionProfile::Standard);
+        let allow_overrides: Vec<ToolName> = config.allow_tools.iter()
+            .filter_map(|s| s.parse::<ToolName>().ok())
+            .collect();
         let permission_engine = Arc::new(tokio::sync::Mutex::new(PermissionEngine::new(
-            crate::permission::plan_mode_rules(),
+            crate::permission::profile_plan_rules(profile, &allow_overrides),
         )));
 
         // Build tool result cache (session-scoped, shared across stream tasks)
@@ -1393,10 +1398,16 @@ impl App {
     /// Sync the permission engine rules with the current agent mode.
     fn sync_permission_mode(&self) {
         use crate::ui::input::AgentMode;
+        use crate::permission::{PermissionProfile, profile_build_rules, profile_plan_rules};
+
+        let profile = self.config.permission_profile.unwrap_or(PermissionProfile::Standard);
+        let allow_overrides: Vec<ToolName> = self.config.allow_tools.iter()
+            .filter_map(|s| s.parse::<ToolName>().ok())
+            .collect();
 
         let rules = match self.input.mode {
-            AgentMode::Build => crate::permission::build_mode_rules(),
-            AgentMode::Plan => crate::permission::plan_mode_rules(),
+            AgentMode::Build => profile_build_rules(profile, &allow_overrides),
+            AgentMode::Plan => profile_plan_rules(profile, &allow_overrides),
         };
 
         // Spawn a task to update the engine since it requires async lock
