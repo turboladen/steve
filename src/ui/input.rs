@@ -55,12 +55,42 @@ pub struct InputContext {
     pub context_usage_pct: u8,
 }
 
+/// A multi-line paste that has been visually collapsed into a summary.
+///
+/// The textarea shows a compact `[N lines; Mb pasted]` string while
+/// `full_text` preserves the original content for submission.
+#[derive(Debug, Clone)]
+pub struct CollapsedPaste {
+    pub full_text: String,
+    pub summary: String,
+}
+
+impl CollapsedPaste {
+    pub fn new(full_text: String) -> Self {
+        // split('\n') counts trailing newlines correctly (unlike lines())
+        let line_count = full_text.split('\n').count();
+        let byte_count = full_text.len();
+        let summary = if byte_count >= 1024 {
+            format!(
+                "[{} lines; {:.1}kb pasted]",
+                line_count,
+                byte_count as f64 / 1024.0
+            )
+        } else {
+            format!("[{} lines; {}b pasted]", line_count, byte_count)
+        };
+        Self { full_text, summary }
+    }
+}
+
 /// State for the input area.
 pub struct InputState {
     pub textarea: TextArea<'static>,
     pub mode: AgentMode,
     /// Vertical scroll offset for the wrapped textarea rendering.
     pub scroll_offset: u16,
+    /// When set, the textarea shows a summary instead of raw pasted text.
+    pub collapsed_paste: Option<CollapsedPaste>,
 }
 
 impl Default for InputState {
@@ -72,6 +102,7 @@ impl Default for InputState {
             textarea,
             mode: AgentMode::Plan,
             scroll_offset: 0,
+            collapsed_paste: None,
         }
     }
 }
@@ -291,6 +322,7 @@ impl InputState {
 
     /// Replace the current text in the textarea (for autocomplete insertion).
     pub fn set_text(&mut self, text: &str) {
+        self.collapsed_paste = None;
         let mut textarea = TextArea::default();
         textarea.set_cursor_line_style(Style::default());
         textarea.set_placeholder_text("Type a message...");
@@ -301,9 +333,16 @@ impl InputState {
     }
 
     /// Take the current text and clear the input.
+    ///
+    /// If a collapsed paste is active, returns the full pasted content
+    /// (combined with any text that preceded the paste).
     pub fn take_text(&mut self) -> String {
-        let lines = self.textarea.lines().to_vec();
-        let text = lines.join("\n");
+        let text = if let Some(paste) = self.collapsed_paste.take() {
+            paste.full_text
+        } else {
+            let lines = self.textarea.lines().to_vec();
+            lines.join("\n")
+        };
         // Clear by replacing with a fresh textarea
         let mut textarea = TextArea::default();
         textarea.set_cursor_line_style(Style::default());
@@ -311,6 +350,58 @@ impl InputState {
         self.textarea = textarea;
         self.scroll_offset = 0;
         text
+    }
+
+    /// Whether a collapsed paste is currently active.
+    pub fn is_collapsed(&self) -> bool {
+        self.collapsed_paste.is_some()
+    }
+
+    /// Collapse a multi-line paste into a summary displayed in the textarea.
+    ///
+    /// Single-line pastes (< 2 lines) are inserted normally. Multi-line pastes
+    /// replace the textarea content with a compact summary while preserving the
+    /// full text for submission.
+    pub fn collapse_paste(&mut self, pasted_text: &str) {
+        let line_count = pasted_text.split('\n').count();
+        if line_count < 2 {
+            self.textarea.insert_str(pasted_text);
+            return;
+        }
+
+        // If already collapsed, expand first to restore real content
+        if self.collapsed_paste.is_some() {
+            self.expand_paste();
+        }
+
+        // Insert the pasted text to combine with existing content
+        self.textarea.insert_str(pasted_text);
+
+        // Snapshot the full content, then replace textarea with summary
+        let full_text = self.textarea.lines().to_vec().join("\n");
+        let collapsed = CollapsedPaste::new(full_text);
+        let summary = collapsed.summary.clone();
+        self.collapsed_paste = Some(collapsed);
+
+        // Replace textarea with summary
+        let mut textarea = TextArea::default();
+        textarea.set_cursor_line_style(Style::default());
+        textarea.set_placeholder_text("Type a message...");
+        textarea.insert_str(&summary);
+        self.textarea = textarea;
+        self.scroll_offset = 0;
+    }
+
+    /// Restore the full pasted text to the textarea, clearing collapsed state.
+    pub fn expand_paste(&mut self) {
+        if let Some(paste) = self.collapsed_paste.take() {
+            let mut textarea = TextArea::default();
+            textarea.set_cursor_line_style(Style::default());
+            textarea.set_placeholder_text("Type a message...");
+            textarea.insert_str(&paste.full_text);
+            self.textarea = textarea;
+            self.scroll_offset = 0;
+        }
     }
 }
 
@@ -339,7 +430,11 @@ fn render_wrapped_textarea(
     let lines = state.textarea.lines();
     let (cursor_row, cursor_col) = state.textarea.cursor();
 
-    let normal_style = Style::default().fg(theme.fg);
+    let normal_style = if state.is_collapsed() {
+        Style::default().fg(theme.dim)
+    } else {
+        Style::default().fg(theme.fg)
+    };
     let cursor_style = Style::default().fg(theme.bg).bg(theme.fg);
 
     // Check if textarea is empty (single empty line)
@@ -878,6 +973,110 @@ mod tests {
         state.textarea.insert_str("line1\nline2\nline3");
         let text = state.take_text();
         assert_eq!(text, "line1\nline2\nline3");
+    }
+
+    // -- CollapsedPaste tests --
+
+    #[test]
+    fn collapsed_paste_summary_format_small() {
+        let paste = CollapsedPaste::new("line1\nline2\nline3\nline4".to_string());
+        assert_eq!(paste.summary, "[4 lines; 23b pasted]");
+        // Trailing newline counts the extra line correctly
+        let paste2 = CollapsedPaste::new("line1\nline2\n".to_string());
+        assert_eq!(paste2.summary, "[3 lines; 12b pasted]");
+    }
+
+    #[test]
+    fn collapsed_paste_summary_format_large() {
+        let text = "x".repeat(1024) + "\nsecond line";
+        let paste = CollapsedPaste::new(text);
+        assert!(paste.summary.contains("2 lines"));
+        assert!(paste.summary.contains("kb pasted]"));
+    }
+
+    #[test]
+    fn collapse_paste_multiline_sets_state() {
+        let mut state = InputState::default();
+        state.collapse_paste("a\nb\nc\nd");
+        assert!(state.is_collapsed());
+        let textarea_text = state.textarea.lines().join("\n");
+        assert!(textarea_text.contains("4 lines"), "textarea should show summary, got: {textarea_text}");
+    }
+
+    #[test]
+    fn collapse_paste_single_line_no_collapse() {
+        let mut state = InputState::default();
+        state.collapse_paste("just one line");
+        assert!(!state.is_collapsed());
+        assert_eq!(state.textarea.lines().join(""), "just one line");
+    }
+
+    #[test]
+    fn take_text_returns_full_when_collapsed() {
+        let mut state = InputState::default();
+        state.collapse_paste("line1\nline2\nline3");
+        let text = state.take_text();
+        assert_eq!(text, "line1\nline2\nline3");
+    }
+
+    #[test]
+    fn take_text_clears_collapsed() {
+        let mut state = InputState::default();
+        state.collapse_paste("a\nb\nc");
+        let _ = state.take_text();
+        assert!(!state.is_collapsed());
+    }
+
+    #[test]
+    fn expand_paste_restores_full_text() {
+        let mut state = InputState::default();
+        state.collapse_paste("one\ntwo\nthree");
+        assert!(state.is_collapsed());
+        state.expand_paste();
+        assert!(!state.is_collapsed());
+        let text = state.textarea.lines().join("\n");
+        assert_eq!(text, "one\ntwo\nthree");
+    }
+
+    #[test]
+    fn expand_paste_noop_when_not_collapsed() {
+        let mut state = InputState::default();
+        state.textarea.insert_str("hello");
+        state.expand_paste(); // should not panic or change anything
+        assert_eq!(state.textarea.lines().join(""), "hello");
+    }
+
+    #[test]
+    fn collapse_paste_with_existing_text() {
+        let mut state = InputState::default();
+        state.textarea.insert_str("prefix: ");
+        state.collapse_paste("a\nb\nc");
+        assert!(state.is_collapsed());
+        let text = state.take_text();
+        assert!(text.starts_with("prefix: "), "should preserve existing text, got: {text}");
+        assert!(text.contains("a\nb\nc"), "should contain pasted content, got: {text}");
+    }
+
+    #[test]
+    fn double_paste_recollapse() {
+        let mut state = InputState::default();
+        state.collapse_paste("first\npaste");
+        assert!(state.is_collapsed());
+        state.collapse_paste("second\npaste");
+        assert!(state.is_collapsed());
+        let text = state.take_text();
+        assert!(text.contains("first\npaste"), "should contain first paste, got: {text}");
+        assert!(text.contains("second\npaste"), "should contain second paste, got: {text}");
+    }
+
+    #[test]
+    fn set_text_clears_collapsed() {
+        let mut state = InputState::default();
+        state.collapse_paste("a\nb\nc");
+        assert!(state.is_collapsed());
+        state.set_text("/help");
+        assert!(!state.is_collapsed());
+        assert_eq!(state.textarea.lines().join(""), "/help");
     }
 
     #[test]

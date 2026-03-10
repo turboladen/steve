@@ -632,7 +632,7 @@ impl App {
             }
             AppEvent::Input(Event::Paste(text)) => {
                 if self.pending_permission.is_none() {
-                    self.input.textarea.insert_str(&text);
+                    self.input.collapse_paste(&text);
                     let current_text = self.input.textarea.lines().join("\n");
                     self.autocomplete_state.update(&current_text);
                 }
@@ -1125,6 +1125,7 @@ impl App {
             }
             (KeyCode::Enter, KeyModifiers::SHIFT) => {
                 // Shift+Enter: insert newline in textarea (forward as plain Enter)
+                self.input.expand_paste();
                 self.input
                     .textarea
                     .input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -1141,6 +1142,15 @@ impl App {
                 }
             }
             _ => {
+                // Only expand collapsed paste for keys that modify text content,
+                // not navigation keys (arrows, Home, End, F-keys, etc.)
+                let is_editing_key = matches!(
+                    key.code,
+                    KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete
+                );
+                if is_editing_key {
+                    self.input.expand_paste();
+                }
                 self.input.textarea.input(key);
                 let current_text = self.input.textarea.lines().join("\n");
                 self.ensure_file_index();
