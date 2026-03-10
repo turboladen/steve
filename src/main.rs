@@ -1,16 +1,25 @@
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 /// Steve — a TUI AI coding agent
 #[derive(Parser)]
 #[command(version = concat!(env!("CARGO_PKG_VERSION"), "-", env!("STEVE_GIT_REV")))]
-struct Cli {}
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Browse usage data and cost analytics
+    Data,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Parse CLI args (handles --version, --help automatically)
-    Cli::parse();
+    let cli = Cli::parse();
 
     // Set up file-based tracing (TUI owns stdout, so we log to file)
     let log_dir = directories::ProjectDirs::from("", "", "steve")
@@ -37,6 +46,15 @@ async fn main() -> Result<()> {
         .init();
 
     tracing::info!("steve starting up");
+
+    // Handle subcommands that don't need the full chat TUI setup
+    if let Some(Commands::Data) = cli.command {
+        let data_dir = directories::ProjectDirs::from("", "", "steve")
+            .map(|d| d.data_dir().to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp/steve-data"));
+        let db_path = data_dir.join("usage.db");
+        return steve::data::run(&db_path);
+    }
 
     // Detect project root
     let project_info = steve::project::detect_or_cwd();

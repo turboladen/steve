@@ -3,7 +3,10 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 
-use super::types::{ApiCallRecord, ProjectRecord, SessionRecord};
+use super::types::{
+    ApiCallDetail, ApiCallRecord, ProjectInfo, ProjectRecord, SessionFilter, SessionRecord,
+    SessionSummary, UsageStats,
+};
 
 /// Current schema version.
 const SCHEMA_VERSION: i64 = 1;
@@ -177,6 +180,213 @@ pub fn update_session_title(conn: &Connection, session_id: &str, title: &str) ->
         rusqlite::params![title, session_id],
     )?;
     Ok(())
+}
+
+// ── Read-side queries (used by `steve data` TUI) ────────────
+
+/// Build a WHERE clause and params from a SessionFilter.
+///
+/// Returns (clause_string, params_vec) where clause_string is either
+/// empty or starts with " WHERE ...".
+fn build_filter_clause(filter: &SessionFilter) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
+    let mut conditions: Vec<String> = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    if let Some(ref pid) = filter.project_id {
+        conditions.push(format!("s.project_id = ?{}", params.len() + 1));
+        params.push(Box::new(pid.clone()));
+    }
+    if let Some(ref model) = filter.model_ref {
+        conditions.push(format!("a.model_ref = ?{}", params.len() + 1));
+        params.push(Box::new(model.clone()));
+    }
+    if let Some(ref from) = filter.date_from {
+        conditions.push(format!("s.created_at >= ?{}", params.len() + 1));
+        params.push(Box::new(from.clone()));
+    }
+    if let Some(ref to) = filter.date_to {
+        conditions.push(format!("s.created_at <= ?{}", params.len() + 1));
+        params.push(Box::new(to.clone()));
+    }
+
+    let clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    };
+
+    (clause, params)
+}
+
+/// Query sessions with aggregated API call stats, applying optional filters.
+pub fn query_sessions(conn: &Connection, filter: &SessionFilter) -> Result<Vec<SessionSummary>> {
+    let (where_clause, params) = build_filter_clause(filter);
+
+    let sql = format!(
+        "SELECT s.session_id, s.project_id, p.display_name, s.title, s.model_ref, s.created_at, \
+         COUNT(a.id) as call_count, \
+         COALESCE(SUM(a.prompt_tokens), 0) as total_prompt, \
+         COALESCE(SUM(a.completion_tokens), 0) as total_completion, \
+         COALESCE(SUM(a.total_tokens), 0) as total_tokens, \
+         SUM(a.cost) as total_cost, \
+         COALESCE(SUM(a.duration_ms), 0) as total_duration \
+         FROM sessions s \
+         JOIN projects p ON s.project_id = p.project_id \
+         LEFT JOIN api_calls a ON s.session_id = a.session_id \
+         {where_clause} \
+         GROUP BY s.session_id \
+         ORDER BY s.created_at DESC"
+    );
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(param_refs.as_slice(), |row| {
+        Ok(SessionSummary {
+            session_id: row.get(0)?,
+            project_id: row.get(1)?,
+            project_name: row.get(2)?,
+            title: row.get(3)?,
+            model_ref: row.get(4)?,
+            created_at: row.get(5)?,
+            call_count: row.get::<_, i64>(6)? as u32,
+            total_prompt_tokens: row.get::<_, i64>(7)? as u64,
+            total_completion_tokens: row.get::<_, i64>(8)? as u64,
+            total_tokens: row.get::<_, i64>(9)? as u64,
+            total_cost: row.get(10)?,
+            total_duration_ms: row.get::<_, i64>(11)? as u64,
+        })
+    })?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
+/// Query all API calls for a session, ordered by timestamp.
+pub fn query_api_calls(conn: &Connection, session_id: &str) -> Result<Vec<ApiCallDetail>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, timestamp, model_ref, prompt_tokens, completion_tokens, total_tokens, \
+         cost, duration_ms, iteration \
+         FROM api_calls WHERE session_id = ?1 ORDER BY timestamp ASC, id ASC",
+    )?;
+
+    let rows = stmt.query_map([session_id], |row| {
+        Ok(ApiCallDetail {
+            id: row.get(0)?,
+            timestamp: row.get(1)?,
+            model_ref: row.get(2)?,
+            prompt_tokens: row.get::<_, i64>(3)? as u32,
+            completion_tokens: row.get::<_, i64>(4)? as u32,
+            total_tokens: row.get::<_, i64>(5)? as u32,
+            cost: row.get(6)?,
+            duration_ms: row.get::<_, i64>(7)? as u64,
+            iteration: row.get::<_, i64>(8)? as u32,
+        })
+    })?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
+/// Aggregate usage stats matching the current filter.
+pub fn query_usage_stats(conn: &Connection, filter: &SessionFilter) -> Result<UsageStats> {
+    let (where_clause, params) = build_filter_clause(filter);
+
+    let sql = format!(
+        "SELECT COUNT(DISTINCT s.session_id), COUNT(a.id), \
+         COALESCE(SUM(a.total_tokens), 0), COALESCE(SUM(a.cost), 0.0) \
+         FROM sessions s \
+         JOIN projects p ON s.project_id = p.project_id \
+         LEFT JOIN api_calls a ON s.session_id = a.session_id \
+         {where_clause}"
+    );
+
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let (session_count, call_count, total_tokens, total_cost): (i64, i64, i64, f64) =
+        conn.query_row(&sql, param_refs.as_slice(), |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?;
+
+    // Query distinct models matching the same filter (not global)
+    let models_sql = format!(
+        "SELECT DISTINCT a.model_ref FROM api_calls a \
+         JOIN sessions s ON a.session_id = s.session_id \
+         JOIN projects p ON s.project_id = p.project_id \
+         {where_clause} \
+         ORDER BY a.model_ref ASC"
+    );
+    let (_, model_params) = build_filter_clause(filter);
+    let model_param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        model_params.iter().map(|p| p.as_ref()).collect();
+    let mut model_stmt = conn.prepare(&models_sql)?;
+    let model_rows = model_stmt.query_map(model_param_refs.as_slice(), |row| row.get(0))?;
+    let mut models = Vec::new();
+    for row in model_rows {
+        models.push(row?);
+    }
+
+    Ok(UsageStats {
+        session_count: session_count as u32,
+        call_count: call_count as u32,
+        total_tokens: total_tokens as u64,
+        total_cost,
+        models_used: models,
+    })
+}
+
+/// All projects with session counts for filter UI.
+pub fn query_projects(conn: &Connection) -> Result<Vec<ProjectInfo>> {
+    let mut stmt = conn.prepare(
+        "SELECT p.project_id, p.display_name, COUNT(s.session_id) as session_count \
+         FROM projects p \
+         LEFT JOIN sessions s ON p.project_id = s.project_id \
+         GROUP BY p.project_id \
+         ORDER BY p.display_name ASC",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(ProjectInfo {
+            project_id: row.get(0)?,
+            display_name: row.get(1)?,
+            session_count: row.get::<_, i64>(2)? as u32,
+        })
+    })?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
+/// Distinct model_ref values for the filter UI.
+pub fn query_distinct_models(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT model_ref FROM api_calls ORDER BY model_ref ASC",
+    )?;
+
+    let rows = stmt.query_map([], |row| row.get(0))?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+    Ok(results)
+}
+
+/// Open a database in read-only mode (for the data TUI).
+pub fn open_readonly(path: &Path) -> Result<Connection> {
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("failed to open usage database: {}", path.display()))?;
+    Ok(conn)
 }
 
 #[cfg(test)]
@@ -455,5 +665,190 @@ mod tests {
             .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, 1);
+    }
+
+    // ── Query function tests ────────────────────────────────
+
+    /// Seed a second project + session for multi-project tests.
+    fn setup_second_project_and_session(conn: &Connection) {
+        upsert_project(
+            conn,
+            &ProjectRecord {
+                project_id: "proj-2".into(),
+                display_name: "Second Project".into(),
+                root_path: "/tmp/second".into(),
+            },
+        )
+        .unwrap();
+        upsert_session(
+            conn,
+            &SessionRecord {
+                session_id: "sess-2".into(),
+                project_id: "proj-2".into(),
+                title: "Second Session".into(),
+                model_ref: "anthropic/claude-3".into(),
+                created_at: Utc::now(),
+            },
+        )
+        .unwrap();
+    }
+
+    /// Insert N api calls for a session with predictable values.
+    fn seed_api_calls(conn: &Connection, session_id: &str, project_id: &str, model: &str, n: u32) {
+        for i in 0..n {
+            insert_api_call(
+                conn,
+                &ApiCallRecord {
+                    timestamp: Utc::now(),
+                    project_id: project_id.into(),
+                    session_id: session_id.into(),
+                    model_ref: model.into(),
+                    prompt_tokens: 1000 + i * 100,
+                    completion_tokens: 200 + i * 10,
+                    total_tokens: 1200 + i * 110,
+                    cost: Some(0.01 * (i + 1) as f64),
+                    duration_ms: 500 + i as u64 * 100,
+                    iteration: i,
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn query_sessions_returns_all_with_empty_filter() {
+        let conn = open_in_memory().unwrap();
+        setup_test_session(&conn);
+        seed_api_calls(&conn, "sess-1", "proj-1", "openai/gpt-4o", 3);
+
+        let filter = SessionFilter::default();
+        let sessions = query_sessions(&conn, &filter).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "sess-1");
+        assert_eq!(sessions[0].call_count, 3);
+        assert_eq!(sessions[0].project_name, "Test Project");
+        assert!(sessions[0].total_tokens > 0);
+        assert!(sessions[0].total_cost.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn query_sessions_filters_by_project() {
+        let conn = open_in_memory().unwrap();
+        setup_test_session(&conn);
+        setup_second_project_and_session(&conn);
+        seed_api_calls(&conn, "sess-1", "proj-1", "openai/gpt-4o", 2);
+        seed_api_calls(&conn, "sess-2", "proj-2", "anthropic/claude-3", 3);
+
+        let filter = SessionFilter {
+            project_id: Some("proj-2".into()),
+            ..Default::default()
+        };
+        let sessions = query_sessions(&conn, &filter).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].project_id, "proj-2");
+        assert_eq!(sessions[0].call_count, 3);
+    }
+
+    #[test]
+    fn query_sessions_filters_by_model() {
+        let conn = open_in_memory().unwrap();
+        setup_test_session(&conn);
+        setup_second_project_and_session(&conn);
+        seed_api_calls(&conn, "sess-1", "proj-1", "openai/gpt-4o", 2);
+        seed_api_calls(&conn, "sess-2", "proj-2", "anthropic/claude-3", 1);
+
+        let filter = SessionFilter {
+            model_ref: Some("anthropic/claude-3".into()),
+            ..Default::default()
+        };
+        let sessions = query_sessions(&conn, &filter).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "sess-2");
+    }
+
+    #[test]
+    fn query_sessions_with_no_api_calls() {
+        let conn = open_in_memory().unwrap();
+        setup_test_session(&conn);
+        // No api_calls seeded
+
+        let sessions = query_sessions(&conn, &SessionFilter::default()).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].call_count, 0);
+        assert_eq!(sessions[0].total_tokens, 0);
+        assert!(sessions[0].total_cost.is_none());
+    }
+
+    #[test]
+    fn query_api_calls_returns_ordered() {
+        let conn = open_in_memory().unwrap();
+        setup_test_session(&conn);
+        seed_api_calls(&conn, "sess-1", "proj-1", "openai/gpt-4o", 5);
+
+        let calls = query_api_calls(&conn, "sess-1").unwrap();
+        assert_eq!(calls.len(), 5);
+        // Iterations should be in order
+        for (i, call) in calls.iter().enumerate() {
+            assert_eq!(call.iteration, i as u32);
+        }
+    }
+
+    #[test]
+    fn query_api_calls_empty_for_unknown_session() {
+        let conn = open_in_memory().unwrap();
+        let calls = query_api_calls(&conn, "nonexistent").unwrap();
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn query_usage_stats_aggregates_correctly() {
+        let conn = open_in_memory().unwrap();
+        setup_test_session(&conn);
+        setup_second_project_and_session(&conn);
+        seed_api_calls(&conn, "sess-1", "proj-1", "openai/gpt-4o", 3);
+        seed_api_calls(&conn, "sess-2", "proj-2", "anthropic/claude-3", 2);
+
+        let stats = query_usage_stats(&conn, &SessionFilter::default()).unwrap();
+        assert_eq!(stats.session_count, 2);
+        assert_eq!(stats.call_count, 5);
+        assert!(stats.total_tokens > 0);
+        assert!(stats.total_cost > 0.0);
+        assert_eq!(stats.models_used.len(), 2);
+    }
+
+    #[test]
+    fn query_projects_returns_all() {
+        let conn = open_in_memory().unwrap();
+        setup_test_session(&conn);
+        setup_second_project_and_session(&conn);
+
+        let projects = query_projects(&conn).unwrap();
+        assert_eq!(projects.len(), 2);
+        // Ordered by display_name ASC
+        assert_eq!(projects[0].display_name, "Second Project");
+        assert_eq!(projects[1].display_name, "Test Project");
+        assert_eq!(projects[0].session_count, 1);
+        assert_eq!(projects[1].session_count, 1);
+    }
+
+    #[test]
+    fn query_distinct_models_returns_unique() {
+        let conn = open_in_memory().unwrap();
+        setup_test_session(&conn);
+        setup_second_project_and_session(&conn);
+        seed_api_calls(&conn, "sess-1", "proj-1", "openai/gpt-4o", 3);
+        seed_api_calls(&conn, "sess-2", "proj-2", "anthropic/claude-3", 2);
+
+        let models = query_distinct_models(&conn).unwrap();
+        assert_eq!(models.len(), 2);
+        assert!(models.contains(&"openai/gpt-4o".to_string()));
+        assert!(models.contains(&"anthropic/claude-3".to_string()));
+    }
+
+    #[test]
+    fn query_distinct_models_empty_when_no_calls() {
+        let conn = open_in_memory().unwrap();
+        let models = query_distinct_models(&conn).unwrap();
+        assert!(models.is_empty());
     }
 }
