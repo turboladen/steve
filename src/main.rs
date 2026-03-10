@@ -67,9 +67,24 @@ async fn main() -> Result<()> {
         }
     };
 
-    let mut app = steve::app::App::new(project_info, cfg, store, agents_md, provider_registry, provider_error, config_warnings);
+    // Initialize usage analytics (SQLite background writer)
+    let data_dir = directories::ProjectDirs::from("", "", "steve")
+        .map(|d| d.data_dir().to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/steve-data"));
+    std::fs::create_dir_all(&data_dir)?;
+    let usage_handle = steve::usage::spawn_usage_writer(&data_dir.join("usage.db"))?;
+    usage_handle.writer.upsert_project(steve::usage::types::ProjectRecord {
+        project_id: project_info.id.clone(),
+        display_name: project_info.root.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| project_info.id.clone()),
+        root_path: project_info.root.display().to_string(),
+    });
+
+    let mut app = steve::app::App::new(project_info, cfg, store, agents_md, provider_registry, provider_error, config_warnings, usage_handle.writer.clone());
     app.run().await?;
 
+    usage_handle.shutdown_and_wait();
     tracing::info!("steve shutting down");
     Ok(())
 }

@@ -41,7 +41,8 @@ fn make_test_app() -> App {
     };
     let config = Config::default();
     let storage = Storage::new("test-ui-integration").expect("test storage");
-    App::new(project, config, storage, None, None, None, Vec::new())
+    let usage_writer = steve::usage::test_usage_writer();
+    App::new(project, config, storage, None, None, None, Vec::new(), usage_writer)
 }
 
 /// Render a draw closure into a headless test buffer.

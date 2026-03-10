@@ -30,11 +30,14 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::config::types::ModelCost;
 use crate::context::cache::ToolResultCache;
 use crate::event::{AppEvent, StreamUsage};
 use crate::permission::PermissionEngine;
 use crate::permission::types::{PermissionAction, PermissionReply, PermissionRequest};
 use crate::tool::{ToolContext, ToolName, ToolRegistry};
+use crate::usage::UsageWriter;
+use crate::usage::types::ApiCallRecord;
 
 /// Abstraction over LLM stream creation — enables mock testing of the tool loop.
 #[async_trait]
@@ -84,6 +87,14 @@ pub struct StreamRequest {
     pub context_window: Option<u64>,
     /// Channel for receiving user interjections mid-tool-loop.
     pub interjection_rx: mpsc::UnboundedReceiver<String>,
+    /// Usage analytics writer (fire-and-forget to background SQLite thread).
+    pub usage_writer: UsageWriter,
+    /// Project ID for usage recording.
+    pub usage_project_id: String,
+    /// Session ID for usage recording.
+    pub usage_session_id: String,
+    /// Model cost config for per-call cost calculation (None if no pricing configured).
+    pub usage_model_cost: Option<ModelCost>,
 }
 
 /// Spawn a tokio task that streams the LLM response and sends events.
@@ -119,6 +130,10 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         cancel_token,
         context_window,
         mut interjection_rx,
+        usage_writer,
+        usage_project_id,
+        usage_session_id,
+        usage_model_cost,
     } = req;
 
     tracing::info!(model = %model, "starting LLM stream");
@@ -207,6 +222,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         total_iteration_count += 1;
         iteration_count += 1;
         let mut user_interacted_this_iteration = false;
+        let call_start = std::time::Instant::now();
         if iteration_count > MAX_TOOL_ITERATIONS {
             tracing::error!(
                 iterations = iteration_count,
@@ -410,6 +426,25 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                                         completion_tokens: u.completion_tokens,
                                         total_tokens: u.total_tokens,
                                     },
+                                });
+
+                                // Record per-call usage to SQLite
+                                let cost = usage_model_cost.as_ref().map(|mc| {
+                                    u.prompt_tokens as f64 * mc.input_per_million / 1_000_000.0
+                                        + u.completion_tokens as f64 * mc.output_per_million
+                                            / 1_000_000.0
+                                });
+                                usage_writer.record_api_call(ApiCallRecord {
+                                    timestamp: chrono::Utc::now(),
+                                    project_id: usage_project_id.clone(),
+                                    session_id: usage_session_id.clone(),
+                                    model_ref: model.clone(),
+                                    prompt_tokens: u.prompt_tokens,
+                                    completion_tokens: u.completion_tokens,
+                                    total_tokens: u.total_tokens,
+                                    cost,
+                                    duration_ms: call_start.elapsed().as_millis() as u64,
+                                    iteration: total_iteration_count.saturating_sub(1),
                                 });
                             }
 
@@ -1655,6 +1690,10 @@ mod tests {
             cancel_token: CancellationToken::new(),
             context_window: None,
             interjection_rx,
+            usage_writer: crate::usage::test_usage_writer(),
+            usage_project_id: "test-project".to_string(),
+            usage_session_id: "test-session".to_string(),
+            usage_model_cost: None,
         }
     }
 
@@ -1909,6 +1948,10 @@ mod tests {
             cancel_token: CancellationToken::new(),
             context_window: None,
             interjection_rx,
+            usage_writer: crate::usage::test_usage_writer(),
+            usage_project_id: "test-project".to_string(),
+            usage_session_id: "test-session".to_string(),
+            usage_model_cost: None,
         };
 
         run_stream(req).await.expect("cache hit stream should succeed");

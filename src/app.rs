@@ -28,6 +28,8 @@ use crate::session::types::SessionInfo;
 use crate::storage::Storage;
 use crate::stream::{self, StreamRequest};
 use crate::tool::{ToolContext, ToolName, ToolRegistry};
+use crate::usage::UsageWriter;
+use crate::usage::types::SessionRecord;
 use crate::ui;
 use crate::ui::autocomplete::{AutocompleteMode, AutocompleteState, apply_file_completion};
 use crate::ui::input::InputState;
@@ -324,6 +326,9 @@ pub struct App {
     /// Message area rect from last render (for mouse hit-testing).
     pub last_message_area: ratatui::layout::Rect,
 
+    /// Usage analytics writer (SQLite background thread).
+    usage_writer: UsageWriter,
+
     // Runtime
     event_tx: mpsc::UnboundedSender<AppEvent>,
     event_rx: mpsc::UnboundedReceiver<AppEvent>,
@@ -339,6 +344,7 @@ impl App {
         provider_registry: Option<ProviderRegistry>,
         provider_error: Option<String>,
         config_warnings: Vec<String>,
+        usage_writer: UsageWriter,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
@@ -348,14 +354,14 @@ impl App {
         // Build tool registry
         let tool_registry = Arc::new(ToolRegistry::new(project.root.clone()));
 
-        // Build permission engine with Plan mode rules (default start mode)
+        // Build permission engine with Build mode rules (default start mode)
         // Profile-aware rules will be set on first sync_permission_mode call
         let profile = config.permission_profile.unwrap_or(crate::permission::PermissionProfile::Standard);
         let allow_overrides: Vec<ToolName> = config.allow_tools.iter()
             .filter_map(|s| s.parse::<ToolName>().ok())
             .collect();
         let permission_engine = Arc::new(tokio::sync::Mutex::new(PermissionEngine::new(
-            crate::permission::profile_plan_rules(profile, &allow_overrides, &config.permission_rules),
+            crate::permission::profile_build_rules(profile, &allow_overrides, &config.permission_rules),
         )));
 
         // Build tool result cache (session-scoped, shared across stream tasks)
@@ -421,6 +427,7 @@ impl App {
             model_picker: ModelPickerState::default(),
             selection_state: SelectionState::default(),
             last_message_area: ratatui::layout::Rect::default(),
+            usage_writer,
             event_tx,
             event_rx,
             should_quit: false,
@@ -511,6 +518,13 @@ impl App {
             // Restore model from session, falling back to config if the saved
             // model_ref is no longer valid (e.g. config was updated after save).
             self.current_model = Some(self.validated_model_ref(&session.model_ref));
+            self.usage_writer.upsert_session(SessionRecord {
+                session_id: session.id.clone(),
+                project_id: self.project.id.clone(),
+                title: session.title.clone(),
+                model_ref: session.model_ref.clone(),
+                created_at: session.created_at,
+            });
             self.current_session = Some(session);
         }
 
@@ -574,6 +588,13 @@ impl App {
         let _ = mgr.save_project_meta(&meta);
 
         self.current_model = Some(self.validated_model_ref(&session.model_ref));
+        self.usage_writer.upsert_session(SessionRecord {
+            session_id: session.id.clone(),
+            project_id: self.project.id.clone(),
+            title: session.title.clone(),
+            model_ref: session.model_ref.clone(),
+            created_at: session.created_at,
+        });
         self.current_session = Some(session.clone());
         self.sidebar_state.changes.clear();
         self.refresh_git_info();
@@ -591,6 +612,10 @@ impl App {
             AppEvent::Input(Event::Key(key)) => self.handle_key(key).await?,
             AppEvent::Input(Event::Mouse(mouse)) => {
                 use crossterm::event::MouseButton;
+                // Block mouse events in the message area when an overlay is active
+                if self.model_picker.visible || self.pending_question.is_some() {
+                    return Ok(());
+                }
                 match mouse.kind {
                     MouseEventKind::ScrollDown => self.message_area_state.scroll_down(3),
                     MouseEventKind::ScrollUp => self.message_area_state.scroll_up(3),
@@ -1672,6 +1697,10 @@ impl App {
                 None
             },
             interjection_rx,
+            usage_writer: self.usage_writer.clone(),
+            usage_project_id: self.project.id.clone(),
+            usage_session_id: session_id.clone(),
+            usage_model_cost: resolved.config.cost.clone(),
         });
 
         Ok(())
@@ -1710,6 +1739,13 @@ impl App {
         match mgr.create_session(&model_ref) {
             Ok(session) => {
                 tracing::info!(session_id = %session.id, "new session created");
+                self.usage_writer.upsert_session(SessionRecord {
+                    session_id: session.id.clone(),
+                    project_id: self.project.id.clone(),
+                    title: session.title.clone(),
+                    model_ref: session.model_ref.clone(),
+                    created_at: session.created_at,
+                });
                 self.current_session = Some(session);
             }
             Err(_) => {
@@ -1831,6 +1867,7 @@ impl App {
         if let Err(e) = mgr.rename_session(&mut session, title) {
             tracing::error!(error = %e, "failed to rename session");
         }
+        self.usage_writer.update_session_title(&session.id, title);
         self.current_session = Some(session);
         self.update_sidebar();
     }
@@ -2268,6 +2305,7 @@ impl App {
                 self.selection_state.clear();
                 self.pending_question = None;
                 self.model_picker.close();
+                self.autocomplete_state.hide();
                 self.ensure_session();
                 self.refresh_git_info();
                 self.sync_sidebar_tokens();
@@ -2284,6 +2322,7 @@ impl App {
                     if let Err(e) = mgr.rename_session(&mut session, &title) {
                         tracing::error!(error = %e, "failed to rename session");
                     }
+                    self.usage_writer.update_session_title(&session.id, &title);
                     self.current_session = Some(session);
                     self.messages.push(MessageBlock::System {
                         text: format!("Session renamed to: {title}"),
@@ -3151,7 +3190,8 @@ pub(crate) mod tests {
         };
         let config = Config::default();
         let storage = Storage::new("test-sidebar").expect("test storage");
-        App::new(project, config, storage, None, None, None, Vec::new())
+        let usage_writer = crate::usage::test_usage_writer();
+        App::new(project, config, storage, None, None, None, Vec::new(), usage_writer)
     }
 
     // -- interjection tests --
@@ -3358,7 +3398,8 @@ pub(crate) mod tests {
             id: "test-title".to_string(),
         };
         let config = Config::default();
-        let app = App::new(project, config, storage, None, None, None, Vec::new());
+        let usage_writer = crate::usage::test_usage_writer();
+        let app = App::new(project, config, storage, None, None, None, Vec::new(), usage_writer);
         (app, dir)
     }
 
