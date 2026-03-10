@@ -1,6 +1,7 @@
 pub mod autocomplete;
 pub mod input;
 pub mod layout;
+pub mod markdown;
 pub mod message_area;
 pub mod message_block;
 pub mod selection;

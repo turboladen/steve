@@ -25,6 +25,9 @@ pub struct Theme {
     pub context_amber: Color,
     pub system_msg: Color,
     pub selection_bg: Color,
+    pub heading: Color,
+    pub inline_code_bg: Color,
+    pub link: Color,
 }
 
 impl Default for Theme {
@@ -77,6 +80,9 @@ impl Theme {
             context_amber: Color::Rgb(150, 125, 55),   // Warm amber-brown
             system_msg: Color::Rgb(130, 145, 160),     // Cool slate (distinct from dim)
             selection_bg: Color::Rgb(60, 60, 80),       // Subtle blue-gray selection tint
+            heading: Color::Rgb(230, 180, 80),            // Warm gold for headers
+            inline_code_bg: Color::Rgb(45, 42, 38),      // Subtle bg tint for inline code
+            link: Color::Rgb(130, 170, 210),              // Soft blue for link text
         }
     }
 
@@ -104,6 +110,9 @@ impl Theme {
             context_amber: Color::Rgb(160, 120, 40),      // Darker amber for light bg
             system_msg: Color::Rgb(70, 90, 110),          // Dark slate
             selection_bg: Color::Rgb(180, 210, 240),       // Light blue selection tint
+            heading: Color::Rgb(160, 100, 0),                // Dark gold for headers
+            inline_code_bg: Color::Rgb(230, 228, 225),      // Subtle bg tint for inline code
+            link: Color::Rgb(30, 80, 150),                   // Dark blue for links
         }
     }
 }
@@ -148,6 +157,12 @@ mod tests {
     }
 
     #[test]
+    fn inline_code_bg_differs_from_code_bg() {
+        let t = Theme::dark();
+        assert_ne!(t.inline_code_bg, t.code_bg);
+    }
+
+    #[test]
     fn border_color_below_40_returns_border() {
         let t = Theme::dark();
         assert_eq!(t.border_color(0), t.border);
@@ -184,6 +199,9 @@ mod tests {
         assert!(matches!(t.tool_read, Color::Rgb(..)));
         assert!(matches!(t.code_bg, Color::Rgb(..)));
         assert!(matches!(t.system_msg, Color::Rgb(..)));
+        assert!(matches!(t.heading, Color::Rgb(..)));
+        assert!(matches!(t.inline_code_bg, Color::Rgb(..)));
+        assert!(matches!(t.link, Color::Rgb(..)));
     }
 
     #[test]

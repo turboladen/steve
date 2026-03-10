@@ -6,6 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
+use super::markdown::{MarkdownLine, render_markdown_line};
 use super::message_block::{AssistantPart, CodeFence, DiffContent, DiffLine, MessageBlock, ToolGroup, ToolGroupStatus};
 use super::selection::{ContentMap, ContentPos, SelectionState};
 use super::syntax;
@@ -285,9 +286,10 @@ pub fn render_message_blocks(
                 for part in parts.iter() {
                     match part {
                         AssistantPart::Text(text) => {
-                            let mut text_lines: Vec<Line> = Vec::new();
-                            render_text_with_code_blocks(text, &mut text_lines, theme, content_width);
-                            glines.extend(text_lines, GutterMark::Empty);
+                            let md_lines = render_text_with_code_blocks(text, theme, content_width);
+                            for ml in md_lines {
+                                glines.push_with_text(ml.styled, GutterMark::Empty, ml.plain);
+                            }
                             last_intent = None;
                         }
                         AssistantPart::ToolGroup(group) => {
@@ -694,10 +696,10 @@ fn render_intent_line(category: IntentCategory, width: usize, theme: &Theme) -> 
 /// language label; closing fences are consumed. Code lines get `code_bg` background.
 fn render_text_with_code_blocks(
     text: &str,
-    lines: &mut Vec<Line<'_>>,
     theme: &Theme,
     available_width: usize,
-) {
+) -> Vec<MarkdownLine<'static>> {
+    let mut result: Vec<MarkdownLine<'static>> = Vec::new();
     let mut in_code_block = false;
     let mut highlighter: Option<syntect::easy::HighlightLines<'_>> = None;
 
@@ -714,13 +716,15 @@ fn render_text_with_code_blocks(
                     let label = format!("{lang} ");
                     let fill_len = available_width.saturating_sub(label.chars().count());
                     let fill = " ".repeat(fill_len);
-                    lines.push(
-                        Line::from(vec![
-                            Span::styled(label, code_bg_style),
-                            Span::styled(fill, code_bg_style),
-                        ])
-                        .style(Style::default().bg(theme.code_bg)),
-                    );
+                    let line = Line::from(vec![
+                        Span::styled(label.clone(), code_bg_style),
+                        Span::styled(fill, code_bg_style),
+                    ])
+                    .style(Style::default().bg(theme.code_bg));
+                    result.push(MarkdownLine {
+                        plain: label.trim().to_string(),
+                        styled: line,
+                    });
                 }
                 // No language: skip header entirely — code_bg on code lines
                 // provides framing. An all-space header would be invisible.
@@ -737,7 +741,6 @@ fn render_text_with_code_blocks(
                         let spans = syntax::syntect_to_spans(&regions, theme.code_bg);
                         Line::from(spans).style(Style::default().bg(theme.code_bg))
                     } else {
-                        // highlight_line failed — fall back to plain
                         Line::from(Span::styled(
                             text_line.to_string(),
                             Style::default().fg(theme.assistant_msg).bg(theme.code_bg),
@@ -745,25 +748,25 @@ fn render_text_with_code_blocks(
                         .style(Style::default().bg(theme.code_bg))
                     }
                 } else {
-                    // No highlighter (unknown/bare language) — plain rendering
                     Line::from(Span::styled(
                         text_line.to_string(),
                         Style::default().fg(theme.assistant_msg).bg(theme.code_bg),
                     ))
                     .style(Style::default().bg(theme.code_bg))
                 };
-                lines.push(code_line);
+                result.push(MarkdownLine {
+                    plain: text_line.to_string(),
+                    styled: code_line,
+                });
             }
             CodeFence::NotFence => {
-                // Normal prose line
-                lines.push(Line::from(Span::styled(
-                    text_line.to_string(),
-                    Style::default().fg(theme.assistant_msg),
-                )));
+                // Normal prose line — apply markdown formatting
+                result.push(render_markdown_line(text_line, theme, available_width));
             }
         }
     }
 
+    result
 }
 
 /// Split a text line into spans, highlighting `@file` and `@!file` references with accent color.
@@ -1746,12 +1749,11 @@ mod tests {
     fn code_block_renders_with_header() {
         let theme = Theme::default();
         let text = "before\n```rust\nfn main() {}\n```\nafter";
-        let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40);
+        let ml = render_text_with_code_blocks(text, &theme, 40);
         // 5 input lines → "before", header, "fn main() {}", (closing consumed), "after" = 4 output lines
-        assert_eq!(lines.len(), 4, "expected 4 lines, got {}", lines.len());
+        assert_eq!(ml.len(), 4, "expected 4 lines, got {}", ml.len());
         // Header should contain language label
-        let header_text: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        let header_text: String = ml[1].styled.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(header_text.starts_with("rust "), "header should start with 'rust ', got: {header_text}");
         // Fill after label should be all spaces (copy-text constraint: no box-drawing chars)
         assert!(header_text["rust ".len()..].chars().all(|c| c == ' '),
@@ -1762,27 +1764,25 @@ mod tests {
     fn code_block_no_language_skips_header() {
         let theme = Theme::default();
         let text = "```\ncode\n```";
-        let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 30);
+        let ml = render_text_with_code_blocks(text, &theme, 30);
         // No header for bare fences — just the code line (closing consumed)
-        assert_eq!(lines.len(), 1);
-        let code_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(ml.len(), 1);
+        let code_text: String = ml[0].styled.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(code_text, "code");
-        assert_eq!(lines[0].style.bg, Some(theme.code_bg), "code line should have code_bg");
+        assert_eq!(ml[0].styled.style.bg, Some(theme.code_bg), "code line should have code_bg");
     }
 
     #[test]
     fn unclosed_code_block_tints_remaining() {
         let theme = Theme::default();
         let text = "before\n```python\nline1\nline2";
-        let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40);
+        let ml = render_text_with_code_blocks(text, &theme, 40);
         // "before", header, "line1", "line2" = 4 lines
-        assert_eq!(lines.len(), 4);
+        assert_eq!(ml.len(), 4);
         // Lines 2 and 3 (code lines) should have code_bg background on Line.style
         for i in 2..4 {
             assert_eq!(
-                lines[i].style.bg, Some(theme.code_bg),
+                ml[i].styled.style.bg, Some(theme.code_bg),
                 "unclosed code line {i} should have code_bg"
             );
         }
@@ -1792,61 +1792,56 @@ mod tests {
     fn empty_code_block() {
         let theme = Theme::default();
         let text = "```\n```";
-        let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 20);
+        let ml = render_text_with_code_blocks(text, &theme, 20);
         // No header for bare fences, no code content — nothing to render
-        assert_eq!(lines.len(), 0);
+        assert_eq!(ml.len(), 0);
     }
 
     #[test]
     fn inline_backticks_not_treated_as_fence() {
         let theme = Theme::default();
         let text = "use `foo` and ``bar``";
-        let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40);
-        assert_eq!(lines.len(), 1);
-        // Should have no code_bg
-        assert_eq!(lines[0].style.bg, None, "inline backticks should not trigger code block");
+        let ml = render_text_with_code_blocks(text, &theme, 40);
+        assert_eq!(ml.len(), 1);
+        // Should have no code_bg on the Line.style (inline code bg is on individual spans)
+        assert_eq!(ml[0].styled.style.bg, None, "inline backticks should not trigger code block");
     }
 
     #[test]
     fn multiple_code_blocks() {
         let theme = Theme::default();
         let text = "text1\n```rust\nfn a() {}\n```\ntext2\n```go\nfunc b() {}\n```\ntext3";
-        let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40);
+        let ml = render_text_with_code_blocks(text, &theme, 40);
         // text1, header1, "fn a() {}", text2, header2, "func b() {}", text3 = 7 lines
-        assert_eq!(lines.len(), 7, "expected 7 lines, got {}", lines.len());
+        assert_eq!(ml.len(), 7, "expected 7 lines, got {}", ml.len());
         // Normal text lines should NOT have code_bg
-        assert_eq!(lines[0].style.bg, None, "text1 should not have bg");
-        assert_eq!(lines[3].style.bg, None, "text2 should not have bg");
-        assert_eq!(lines[6].style.bg, None, "text3 should not have bg");
+        assert_eq!(ml[0].styled.style.bg, None, "text1 should not have bg");
+        assert_eq!(ml[3].styled.style.bg, None, "text2 should not have bg");
+        assert_eq!(ml[6].styled.style.bg, None, "text3 should not have bg");
         // Code lines should have code_bg
-        assert_eq!(lines[2].style.bg, Some(theme.code_bg), "code line 1 should have bg");
-        assert_eq!(lines[5].style.bg, Some(theme.code_bg), "code line 2 should have bg");
+        assert_eq!(ml[2].styled.style.bg, Some(theme.code_bg), "code line 1 should have bg");
+        assert_eq!(ml[5].styled.style.bg, Some(theme.code_bg), "code line 2 should have bg");
     }
 
     #[test]
     fn deeply_indented_fence_ignored() {
         let theme = Theme::default();
         let text = "    ```rust\nstill normal";
-        let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40);
+        let ml = render_text_with_code_blocks(text, &theme, 40);
         // 4 spaces = not a fence, both lines rendered as normal text
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].style.bg, None, "4-space indented fence should be normal text");
-        assert_eq!(lines[1].style.bg, None, "following line should be normal text");
+        assert_eq!(ml.len(), 2);
+        assert_eq!(ml[0].styled.style.bg, None, "4-space indented fence should be normal text");
+        assert_eq!(ml[1].styled.style.bg, None, "following line should be normal text");
     }
 
     #[test]
     fn code_block_header_has_bg() {
         let theme = Theme::default();
         let text = "```js\nconsole.log();\n```";
-        let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40);
+        let ml = render_text_with_code_blocks(text, &theme, 40);
         // Header line should have code_bg on Line.style
         assert_eq!(
-            lines[0].style.bg,
+            ml[0].styled.style.bg,
             Some(theme.code_bg),
             "header line should have code_bg background"
         );
@@ -1856,24 +1851,22 @@ mod tests {
     fn fence_closes_code_block() {
         let theme = Theme::default();
         let text = "```\ncode\n```\nafter";
-        let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40);
+        let ml = render_text_with_code_blocks(text, &theme, 40);
         // No header for bare fence, "code" + "after" = 2 lines (closing fence consumed)
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].style.bg, Some(theme.code_bg), "code line should have code_bg");
-        assert_eq!(lines[1].style.bg, None, "line after closing fence should be normal text");
+        assert_eq!(ml.len(), 2);
+        assert_eq!(ml[0].styled.style.bg, Some(theme.code_bg), "code line should have code_bg");
+        assert_eq!(ml[1].styled.style.bg, None, "line after closing fence should be normal text");
     }
 
     #[test]
     fn tab_indented_fence_ignored() {
         let theme = Theme::default();
         let text = "\t```rust\nstill normal";
-        let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40);
+        let ml = render_text_with_code_blocks(text, &theme, 40);
         // Tab is not a space — fence should not be recognized
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].style.bg, None, "tab-indented fence should be normal text");
-        assert_eq!(lines[1].style.bg, None, "following line should be normal text");
+        assert_eq!(ml.len(), 2);
+        assert_eq!(ml[0].styled.style.bg, None, "tab-indented fence should be normal text");
+        assert_eq!(ml[1].styled.style.bg, None, "following line should be normal text");
     }
 
     #[test]
@@ -1903,19 +1896,18 @@ mod tests {
     fn code_block_with_known_lang_has_multiple_spans() {
         let theme = Theme::default();
         let text = "```rust\nfn main() { let x = 42; }\n```";
-        let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 80);
+        let ml = render_text_with_code_blocks(text, &theme, 80);
         // lines: header, code line = 2 output lines
-        assert_eq!(lines.len(), 2, "expected 2 lines, got {}", lines.len());
+        assert_eq!(ml.len(), 2, "expected 2 lines, got {}", ml.len());
         // The code line (index 1) should have multiple spans from syntax highlighting
         assert!(
-            lines[1].spans.len() > 1,
+            ml[1].styled.spans.len() > 1,
             "highlighted code should produce >1 span, got {} spans: {:?}",
-            lines[1].spans.len(),
-            lines[1].spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>()
+            ml[1].styled.spans.len(),
+            ml[1].styled.spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>()
         );
         // All spans should have code_bg background
-        for span in &lines[1].spans {
+        for span in &ml[1].styled.spans {
             assert_eq!(
                 span.style.bg,
                 Some(theme.code_bg),
@@ -1928,18 +1920,17 @@ mod tests {
     fn code_block_unknown_lang_single_span() {
         let theme = Theme::default();
         let text = "```nonexistent_gibberish_42\nsome code here\n```";
-        let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 80);
+        let ml = render_text_with_code_blocks(text, &theme, 80);
         // lines: header, code line = 2 output lines
-        assert_eq!(lines.len(), 2, "expected 2 lines, got {}", lines.len());
+        assert_eq!(ml.len(), 2, "expected 2 lines, got {}", ml.len());
         // Unknown lang falls back to plain rendering — 1 span with assistant_msg fg
         assert_eq!(
-            lines[1].spans.len(),
+            ml[1].styled.spans.len(),
             1,
             "unknown lang should produce 1 span (plain fallback)"
         );
         assert_eq!(
-            lines[1].spans[0].style.fg,
+            ml[1].styled.spans[0].style.fg,
             Some(theme.assistant_msg),
             "fallback span should use assistant_msg foreground"
         );
