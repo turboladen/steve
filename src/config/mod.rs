@@ -16,13 +16,24 @@ pub fn load(project_root: &Path) -> Result<Config> {
     Ok(global.merge(project))
 }
 
-/// Load global config from the platform config directory.
+/// Load global config from `~/.config/steve/config.jsonc`.
 /// Returns `Config::default()` if no global config exists.
 fn load_global() -> Config {
     let Some(path) = global_config_path() else {
+        tracing::debug!(
+            dir = ?global_config_dir(),
+            "no global config.jsonc found"
+        );
         return Config::default();
     };
-    load_jsonc_file(&path).unwrap_or_default()
+    tracing::info!(path = %path.display(), "loading global config");
+    match load_jsonc_file(&path) {
+        Ok(config) => config,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "failed to load global config, using defaults");
+            Config::default()
+        }
+    }
 }
 
 /// Load project-level config from `.steve.jsonc` in the project root.
