@@ -82,6 +82,40 @@ fn hash_path(path: &Path) -> u64 {
     hasher.finish()
 }
 
+/// Get the current git branch name for the repo at `repo_root`.
+/// Returns `None` if not a git repo or the command fails.
+pub fn git_branch(repo_root: &Path) -> Option<String> {
+    Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Check whether the repo at `repo_root` has uncommitted changes.
+/// Returns `Some(true)` if dirty, `Some(false)` if clean, `None` on failure.
+pub fn git_is_dirty(repo_root: &Path) -> Option<bool> {
+    Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(repo_root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| !o.stdout.is_empty())
+}
+
+/// Extract the repository name from the repo root path (last component).
+pub fn git_repo_name(repo_root: &Path) -> Option<String> {
+    repo_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +200,73 @@ mod tests {
         // Different paths produce different hashes
         let h3 = hash_path(Path::new("/other/path"));
         assert_ne!(h1, h3, "different paths should produce different hashes");
+    }
+
+    // -- git_branch tests --
+
+    #[test]
+    fn git_branch_in_git_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        let branch = git_branch(tmp.path());
+        // After `git init` + commit, should be on a default branch
+        assert!(branch.is_some(), "should detect branch in git repo");
+        let name = branch.unwrap();
+        assert!(!name.is_empty());
+        // Typically "main" or "master" depending on git config
+        assert!(
+            name == "main" || name == "master",
+            "expected default branch, got: {name}"
+        );
+    }
+
+    #[test]
+    fn git_branch_non_git_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(git_branch(tmp.path()), None);
+    }
+
+    // -- git_is_dirty tests --
+
+    #[test]
+    fn git_is_dirty_clean_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        assert_eq!(git_is_dirty(tmp.path()), Some(false));
+    }
+
+    #[test]
+    fn git_is_dirty_with_untracked_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        fs::write(tmp.path().join("new_file.txt"), "content").unwrap();
+        assert_eq!(git_is_dirty(tmp.path()), Some(true));
+    }
+
+    #[test]
+    fn git_is_dirty_non_git_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(git_is_dirty(tmp.path()), None);
+    }
+
+    // -- git_repo_name tests --
+
+    #[test]
+    fn git_repo_name_extracts_last_component() {
+        let path = Path::new("/home/user/projects/my-app");
+        assert_eq!(git_repo_name(path), Some("my-app".to_string()));
+    }
+
+    #[test]
+    fn git_repo_name_root_path() {
+        // Root path has no file_name
+        let path = Path::new("/");
+        assert_eq!(git_repo_name(path), None);
+    }
+
+    #[test]
+    fn git_repo_name_single_component() {
+        let path = Path::new("my-repo");
+        assert_eq!(git_repo_name(path), Some("my-repo".to_string()));
     }
 }

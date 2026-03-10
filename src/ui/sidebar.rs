@@ -33,6 +33,16 @@ pub struct SidebarState {
     pub todos: Vec<TodoItem>,
     /// Accumulated file changes from write tools this session.
     pub changes: Vec<FileChange>,
+    /// Current git branch name (None if not in a git repo).
+    pub git_branch: Option<String>,
+    /// Whether the repo has uncommitted changes (None if not in a git repo).
+    pub git_dirty: Option<bool>,
+    /// Repository name (last path component of repo root).
+    pub git_repo_name: Option<String>,
+    /// Context window size for the current model.
+    pub context_window: u64,
+    /// Last-reported prompt tokens (per-call context pressure).
+    pub last_prompt_tokens: u64,
 }
 
 /// A todo item displayed in the sidebar.
@@ -53,6 +63,11 @@ impl Default for SidebarState {
             session_cost: None,
             todos: Vec::new(),
             changes: Vec::new(),
+            git_branch: None,
+            git_dirty: None,
+            git_repo_name: None,
+            context_window: 0,
+            last_prompt_tokens: 0,
         }
     }
 }
@@ -104,6 +119,9 @@ impl SidebarState {
     }
 }
 
+/// Maximum visible characters for branch name (sidebar is ~40 cols, indent + status suffix).
+const MAX_BRANCH_DISPLAY: usize = 28;
+
 /// Render the sidebar into the given area.
 pub fn render_sidebar(
     frame: &mut Frame,
@@ -112,6 +130,43 @@ pub fn render_sidebar(
     theme: &Theme,
 ) {
     let mut lines: Vec<Line> = Vec::new();
+
+    // -- Git section (only when branch is known) --
+    if let Some(branch) = &state.git_branch {
+        lines.push(Line::from(Span::styled(
+            "Git",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+        if let Some(repo_name) = &state.git_repo_name {
+            lines.push(Line::from(Span::styled(
+                format!("  {repo_name}"),
+                Style::default().fg(theme.dim),
+            )));
+        }
+        let truncated_branch = if branch.chars().count() > MAX_BRANCH_DISPLAY {
+            let s: String = branch.chars().take(MAX_BRANCH_DISPLAY - 1).collect();
+            format!("{s}…")
+        } else {
+            branch.clone()
+        };
+        let status_text = match state.git_dirty {
+            Some(true) => " · dirty",
+            Some(false) => " · clean",
+            None => "",
+        };
+        let status_color = match state.git_dirty {
+            Some(true) => theme.warning,
+            Some(false) => theme.success,
+            None => theme.dim,
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {truncated_branch}"), Style::default().fg(theme.fg)),
+            Span::styled(status_text, Style::default().fg(status_color)),
+        ]));
+        lines.push(Line::from(""));
+    }
 
     // -- Changes section (if any files were modified) --
     if !state.changes.is_empty() {
@@ -164,7 +219,7 @@ pub fn render_sidebar(
         lines.push(Line::from(""));
     }
 
-    // -- Session section --
+    // -- Session section (compact redesign) --
     lines.push(Line::from(Span::styled(
         "Session",
         Style::default()
@@ -189,29 +244,35 @@ pub fn render_sidebar(
         format!("  {model}"),
         Style::default().fg(theme.fg),
     )));
-    // Cumulative token usage (complementary to input bar's per-call context pressure)
-    lines.push(Line::from(Span::styled(
-        format!(
-            "  in: {}  out: {}",
-            format_tokens(state.prompt_tokens),
-            format_tokens(state.completion_tokens),
-        ),
-        Style::default().fg(theme.dim),
-    )));
-    lines.push(Line::from(Span::styled(
-        format!("  total: {}", format_tokens(state.total_tokens)),
-        Style::default().fg(theme.dim),
-    )));
+    // Context pressure: Ctx: X/Y (Z%) — replaces verbose in/out/total lines
+    if state.context_window > 0 {
+        let pct = (state.last_prompt_tokens * 100).checked_div(state.context_window).unwrap_or(0);
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  Ctx: {}/{} ({}%)",
+                format_tokens(state.last_prompt_tokens),
+                format_tokens(state.context_window),
+                pct,
+            ),
+            Style::default().fg(theme.dim),
+        )));
+    } else {
+        // Fallback when context_window is unknown
+        lines.push(Line::from(Span::styled(
+            format!("  Tokens: {}", format_tokens(state.total_tokens)),
+            Style::default().fg(theme.dim),
+        )));
+    }
     match state.session_cost {
         Some(cost) => {
             lines.push(Line::from(Span::styled(
-                format!("  cost: ${:.4}", cost),
+                format!("  Cost: ${:.4}", cost),
                 Style::default().fg(theme.dim),
             )));
         }
         None => {
             lines.push(Line::from(Span::styled(
-                "  cost: N/A",
+                "  Cost: N/A",
                 Style::default().fg(theme.dim),
             )));
         }
@@ -440,17 +501,15 @@ mod tests {
     }
 
     #[test]
-    fn buffer_sidebar_token_display() {
+    fn buffer_sidebar_token_display_ctx_format() {
         let state = SidebarState {
-            prompt_tokens: 12800,
-            completion_tokens: 3200,
-            total_tokens: 16000,
+            last_prompt_tokens: 23400,
+            context_window: 128000,
+            total_tokens: 30000,
             ..Default::default()
         };
         let text = render_sidebar_to_string(40, 20, &state);
-        assert!(text.contains("in: 12.8k"), "should show formatted prompt tokens");
-        assert!(text.contains("out: 3.2k"), "should show formatted completion tokens");
-        assert!(text.contains("total: 16.0k"), "should show formatted total tokens");
+        assert!(text.contains("Ctx: 23.4k/128.0k (18%)"), "should show Ctx: format, got:\n{text}");
     }
 
     #[test]
@@ -460,7 +519,7 @@ mod tests {
             ..Default::default()
         };
         let text = render_sidebar_to_string(40, 20, &state);
-        assert!(text.contains("cost: $0.0512"), "should show cost");
+        assert!(text.contains("Cost: $0.0512"), "should show cost");
     }
 
     #[test]
@@ -470,7 +529,7 @@ mod tests {
             ..Default::default()
         };
         let text = render_sidebar_to_string(40, 20, &state);
-        assert!(text.contains("cost: N/A"), "should show N/A when cost not configured");
+        assert!(text.contains("Cost: N/A"), "should show N/A when cost not configured");
     }
 
     #[test]
@@ -554,6 +613,99 @@ mod tests {
         let title_pos = text.find("My Session").expect("title not found");
         let model_pos = text.find("gpt-4o").expect("model not found");
         assert!(title_pos < model_pos, "title should render before model");
+    }
+
+    // -- Git section tests --
+
+    #[test]
+    fn buffer_sidebar_git_section_shows_branch() {
+        let state = SidebarState {
+            git_branch: Some("main".to_string()),
+            git_repo_name: Some("steve".to_string()),
+            git_dirty: Some(false),
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(text.contains("Git"), "should show 'Git' header");
+        assert!(text.contains("main"), "should show branch name");
+        assert!(text.contains("steve"), "should show repo name");
+    }
+
+    #[test]
+    fn buffer_sidebar_git_dirty_shows_dirty() {
+        let state = SidebarState {
+            git_branch: Some("feature/xyz".to_string()),
+            git_dirty: Some(true),
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(text.contains("dirty"), "should show 'dirty' status");
+    }
+
+    #[test]
+    fn buffer_sidebar_git_clean_shows_clean() {
+        let state = SidebarState {
+            git_branch: Some("main".to_string()),
+            git_dirty: Some(false),
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(text.contains("clean"), "should show 'clean' status");
+    }
+
+    #[test]
+    fn buffer_sidebar_no_git_no_section() {
+        let state = SidebarState::default();
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(!text.contains("Git"), "no git = no 'Git' header");
+    }
+
+    #[test]
+    fn buffer_sidebar_git_renders_above_changes() {
+        let mut state = SidebarState {
+            git_branch: Some("main".to_string()),
+            git_dirty: Some(false),
+            ..Default::default()
+        };
+        state.record_file_change("file.rs".into(), 1, 0);
+        let text = render_sidebar_to_string(40, 25, &state);
+        let git_pos = text.find("Git").expect("Git header not found");
+        let changes_pos = text.find("Changes").expect("Changes header not found");
+        assert!(git_pos < changes_pos, "Git should render above Changes");
+    }
+
+    #[test]
+    fn buffer_sidebar_context_display() {
+        let state = SidebarState {
+            last_prompt_tokens: 50000,
+            context_window: 128000,
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(text.contains("Ctx:"), "should show Ctx: prefix");
+        assert!(text.contains("39%"), "should show percentage");
+    }
+
+    #[test]
+    fn buffer_sidebar_context_zero_window_fallback() {
+        let state = SidebarState {
+            total_tokens: 5000,
+            context_window: 0,
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(text.contains("Tokens:"), "should fall back to Tokens: format");
+        assert!(text.contains("5.0k"), "should show total tokens");
+    }
+
+    #[test]
+    fn default_sidebar_state_has_no_git_info() {
+        let state = SidebarState::default();
+        assert!(state.git_branch.is_none());
+        assert!(state.git_dirty.is_none());
+        assert!(state.git_repo_name.is_none());
+        assert_eq!(state.context_window, 0);
+        assert_eq!(state.last_prompt_tokens, 0);
     }
 }
 

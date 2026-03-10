@@ -489,6 +489,7 @@ impl App {
             self.current_session = Some(session);
         }
 
+        self.refresh_git_info();
         self.sync_sidebar_tokens();
         self.update_sidebar();
     }
@@ -548,6 +549,7 @@ impl App {
         self.current_model = Some(self.validated_model_ref(&session.model_ref));
         self.current_session = Some(session.clone());
         self.sidebar_state.changes.clear();
+        self.refresh_git_info();
         self.sync_sidebar_tokens();
         self.messages.push(MessageBlock::System {
             text: format!("Switched to: {}", session.title),
@@ -742,6 +744,11 @@ impl App {
                     }
                 }
 
+                // Refresh git dirty status after write tools or bash (may have committed, etc.)
+                if (tool_name.is_write_tool() || tool_name == ToolName::Bash) && !output.is_error {
+                    self.refresh_git_info();
+                }
+
                 self.update_sidebar();
                 self.message_area_state.scroll_to_bottom();
             }
@@ -809,6 +816,9 @@ impl App {
                 self.sidebar_state.completion_tokens += usage.completion_tokens as u64;
                 self.sidebar_state.total_tokens +=
                     (usage.prompt_tokens + usage.completion_tokens) as u64;
+                // Sync context pressure to sidebar for live Ctx: display
+                self.sidebar_state.context_window = self.status_line_state.context_window;
+                self.sidebar_state.last_prompt_tokens = self.status_line_state.last_prompt_tokens;
                 self.check_context_warning();
             }
             AppEvent::LlmRetry {
@@ -1600,6 +1610,17 @@ impl App {
             self.sidebar_state.completion_tokens = 0;
             self.sidebar_state.total_tokens = 0;
         }
+        // Sync context pressure fields so sidebar can show Ctx: X/Y (Z%)
+        self.sidebar_state.context_window = self.status_line_state.context_window;
+        self.sidebar_state.last_prompt_tokens = self.status_line_state.last_prompt_tokens;
+    }
+
+    /// Refresh git information in the sidebar state.
+    fn refresh_git_info(&mut self) {
+        use crate::project::{git_branch, git_is_dirty, git_repo_name};
+        self.sidebar_state.git_branch = git_branch(&self.project.root);
+        self.sidebar_state.git_dirty = git_is_dirty(&self.project.root);
+        self.sidebar_state.git_repo_name = git_repo_name(&self.project.root);
     }
 
     /// Find the most recently completed tool call with the given name in the last
@@ -1691,14 +1712,7 @@ impl App {
 
         // Identity and environment context
         let model_name = self.current_model.as_deref().unwrap_or("unknown");
-        let git_branch = std::process::Command::new("git")
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .current_dir(&self.project.root)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string());
+        let git_branch = self.sidebar_state.git_branch.clone();
         let mode_name = if self.input.mode == AgentMode::Plan { "Plan" } else { "Build" };
 
         let mut identity = format!(
@@ -1924,6 +1938,7 @@ impl App {
                 crate::tool::todo::clear_todos();
                 self.selection_state.clear();
                 self.ensure_session();
+                self.refresh_git_info();
                 self.sync_sidebar_tokens();
                 self.message_area_state.scroll_to_bottom();
                 self.messages.push(MessageBlock::System {
