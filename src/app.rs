@@ -32,6 +32,7 @@ use crate::ui;
 use crate::ui::autocomplete::{AutocompleteMode, AutocompleteState, apply_file_completion};
 use crate::ui::input::InputState;
 use crate::ui::message_area::MessageAreaState;
+use crate::ui::model_picker::ModelPickerState;
 use crate::ui::message_block::{
     AssistantPart, DiffContent, DiffLine, MessageBlock, ToolCall,
 };
@@ -314,6 +315,9 @@ pub struct App {
     /// Lazily populated file index for `@` autocomplete.
     file_index: Option<Vec<String>>,
 
+    /// Model picker overlay state.
+    pub model_picker: ModelPickerState,
+
     /// Text selection state for copy-on-select.
     pub selection_state: SelectionState,
 
@@ -414,6 +418,7 @@ impl App {
             last_prompt_tokens: 0,
             sidebar_override: None,
             file_index: None,
+            model_picker: ModelPickerState::default(),
             selection_state: SelectionState::default(),
             last_message_area: ratatui::layout::Rect::default(),
             event_tx,
@@ -538,6 +543,7 @@ impl App {
         self.exchange_count = 0;
         self.pending_permission = None;
         self.pending_question = None;
+        self.model_picker.close();
         *self.tool_cache.lock().unwrap() = ToolResultCache::new(self.project.root.clone());
 
         // Load messages
@@ -1189,6 +1195,42 @@ impl App {
                     return Ok(());
                 }
             }
+        }
+
+        // If the model picker overlay is open, intercept keystrokes
+        if self.model_picker.visible {
+            match (key.code, key.modifiers) {
+                (KeyCode::Esc, _) => {
+                    self.model_picker.close();
+                }
+                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
+                    self.model_picker.close();
+                    // Also cancel any active stream (unlikely but possible)
+                    if self.is_loading || self.streaming_active {
+                        self.cancel_stream();
+                    }
+                }
+                (KeyCode::Up, _) => {
+                    self.model_picker.prev();
+                }
+                (KeyCode::Down, _) => {
+                    self.model_picker.next();
+                }
+                (KeyCode::Enter, _) => {
+                    if let Some(model_ref) = self.model_picker.selected_ref().map(|s| s.to_string()) {
+                        self.model_picker.close();
+                        self.handle_input(format!("/model {model_ref}")).await?;
+                    }
+                }
+                (KeyCode::Backspace, _) => {
+                    self.model_picker.backspace();
+                }
+                (KeyCode::Char(c), _) => {
+                    self.model_picker.type_char(c);
+                }
+                _ => {}
+            }
+            return Ok(());
         }
 
         match (key.code, key.modifiers) {
@@ -2225,6 +2267,7 @@ impl App {
                 crate::tool::todo::clear_todos();
                 self.selection_state.clear();
                 self.pending_question = None;
+                self.model_picker.close();
                 self.ensure_session();
                 self.refresh_git_info();
                 self.sync_sidebar_tokens();
@@ -2278,26 +2321,12 @@ impl App {
                             text: "No models configured.".to_string(),
                         });
                     } else {
-                        let list = models
+                        let picker_models: Vec<(String, String)> = models
                             .iter()
-                            .map(|m| {
-                                let current = self
-                                    .current_model
-                                    .as_ref()
-                                    .is_some_and(|c| c == &m.display_ref());
-                                let marker = if current { " \u{25cf}" } else { "" };
-                                format!(
-                                    "  {} \u{2014} {}{}",
-                                    m.display_ref(),
-                                    m.config.name,
-                                    marker
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        self.messages.push(MessageBlock::System {
-                            text: format!("Models (use /model <ref> to switch):\n{list}"),
-                        });
+                            .map(|m| (m.display_ref(), m.config.name.clone()))
+                            .collect();
+                        let current = self.current_model.as_deref();
+                        self.model_picker.open(&picker_models, current);
                     }
                 } else {
                     self.messages.push(MessageBlock::Error {
@@ -3445,6 +3474,64 @@ pub(crate) mod tests {
         assert_eq!(
             app.current_session.as_ref().unwrap().title,
             "User Chose This"
+        );
+    }
+
+    // ─── Model picker integration tests ───
+
+    #[test]
+    fn model_picker_open_populates_state() {
+        let mut app = make_test_app();
+        let models = vec![
+            ("openai/gpt-4o".into(), "GPT-4o".into()),
+            ("anthropic/claude".into(), "Claude".into()),
+        ];
+        app.model_picker.open(&models, Some("openai/gpt-4o"));
+
+        assert!(app.model_picker.visible);
+        assert_eq!(app.model_picker.filtered_models().len(), 2);
+    }
+
+    #[test]
+    fn model_picker_close_on_new() {
+        let mut app = make_test_app();
+        let models = vec![("openai/gpt-4o".into(), "GPT-4o".into())];
+        app.model_picker.open(&models, None);
+        assert!(app.model_picker.visible);
+
+        // Simulate the relevant part of Command::New handler
+        app.model_picker.close();
+        assert!(!app.model_picker.visible);
+    }
+
+    #[test]
+    fn model_picker_renders_in_full_app() {
+        let mut app = make_test_app();
+        let models = vec![
+            ("openai/gpt-4o".into(), "GPT-4o".into()),
+            ("anthropic/claude".into(), "Claude".into()),
+        ];
+        app.model_picker.open(&models, Some("openai/gpt-4o"));
+
+        let buf = crate::ui::render_to_buffer(80, 24, |frame| {
+            crate::ui::render(frame, &mut app);
+        });
+
+        let mut text = String::new();
+        for y in 0..24 {
+            for x in 0..80 {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+
+        assert!(
+            text.contains("Switch Model"),
+            "overlay title should be visible, got:\n{text}"
+        );
+        assert!(
+            text.contains("openai/gpt-4o"),
+            "model ref should be visible, got:\n{text}"
         );
     }
 }

@@ -4,6 +4,7 @@ pub mod layout;
 pub mod markdown;
 pub mod message_area;
 pub mod message_block;
+pub mod model_picker;
 pub mod selection;
 pub mod sidebar;
 pub mod status_line;
@@ -26,6 +27,7 @@ use layout::compute_layout;
 use message_area::render_message_blocks;
 use autocomplete::render_autocomplete;
 use input::{render_input, abbreviate_path, InputContext, MIN_INPUT_HEIGHT, MAX_INPUT_PCT, CHEVRON_WIDTH};
+use model_picker::render_model_picker;
 use sidebar::render_sidebar;
 use status_line::Activity;
 
@@ -158,6 +160,14 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         frame,
         layout.input_area,
         &app.autocomplete_state,
+        &app.theme,
+        pct,
+    );
+
+    render_model_picker(
+        frame,
+        layout.message_area,
+        &app.model_picker,
         &app.theme,
         pct,
     );
