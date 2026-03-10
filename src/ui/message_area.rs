@@ -208,18 +208,16 @@ pub fn render_message_blocks(
         match msg {
             MessageBlock::User { text } => {
                 for text_line in text.lines() {
-                    glines.push(Line::from(vec![
+                    let mut spans = vec![
                         Span::styled(
                             "│ ",
                             Style::default()
                                 .fg(theme.user_msg)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(
-                            text_line.to_string(),
-                            Style::default().fg(theme.user_msg),
-                        ),
-                    ]), GutterMark::Empty);
+                    ];
+                    spans.extend(style_file_refs(text_line, theme));
+                    glines.push(Line::from(spans), GutterMark::Empty);
                 }
             }
 
@@ -744,6 +742,48 @@ fn render_text_with_code_blocks(
             }
         }
     }
+}
+
+/// Split a text line into spans, highlighting `@file` and `@!file` references with accent color.
+fn style_file_refs<'a>(line: &str, theme: &Theme) -> Vec<Span<'a>> {
+    let refs = crate::file_ref::parse_refs(line);
+    if refs.is_empty() {
+        return vec![Span::styled(
+            line.to_string(),
+            Style::default().fg(theme.user_msg),
+        )];
+    }
+
+    let mut spans = Vec::new();
+    let mut last_end = 0;
+
+    for r in &refs {
+        // Text before this ref
+        if r.start > last_end {
+            spans.push(Span::styled(
+                line[last_end..r.start].to_string(),
+                Style::default().fg(theme.user_msg),
+            ));
+        }
+        // The ref itself — highlighted
+        spans.push(Span::styled(
+            line[r.start..r.end].to_string(),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+        last_end = r.end;
+    }
+
+    // Trailing text after last ref
+    if last_end < line.len() {
+        spans.push(Span::styled(
+            line[last_end..].to_string(),
+            Style::default().fg(theme.user_msg),
+        ));
+    }
+
+    spans
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ pub mod config;
 pub mod context;
 pub mod event;
 pub mod export;
+pub mod file_ref;
 pub mod permission;
 pub mod project;
 pub mod provider;

@@ -17,6 +17,7 @@ use async_openai::types::chat::{
 use crate::config::types::Config;
 use crate::context::cache::ToolResultCache;
 use crate::event::AppEvent;
+use crate::file_ref;
 use crate::permission::PermissionEngine;
 use crate::permission::types::PermissionReply;
 use crate::project::ProjectInfo;
@@ -28,7 +29,7 @@ use crate::storage::Storage;
 use crate::stream::{self, StreamRequest};
 use crate::tool::{ToolContext, ToolName, ToolRegistry};
 use crate::ui;
-use crate::ui::autocomplete::AutocompleteState;
+use crate::ui::autocomplete::{AutocompleteMode, AutocompleteState, apply_file_completion};
 use crate::ui::input::InputState;
 use crate::ui::message_area::MessageAreaState;
 use crate::ui::message_block::{
@@ -335,6 +336,9 @@ pub struct App {
     /// User override for sidebar visibility: None = auto, Some(true) = show, Some(false) = hide.
     pub sidebar_override: Option<bool>,
 
+    /// Lazily populated file index for `@` autocomplete.
+    file_index: Option<Vec<String>>,
+
     // Runtime
     event_tx: mpsc::UnboundedSender<AppEvent>,
     event_rx: mpsc::UnboundedReceiver<AppEvent>,
@@ -426,6 +430,7 @@ impl App {
             context_warned: false,
             last_prompt_tokens: 0,
             sidebar_override: None,
+            file_index: None,
             event_tx,
             event_rx,
             should_quit: false,
@@ -681,6 +686,11 @@ impl App {
                         output.output.clone(),
                         output.is_error,
                     );
+                }
+
+                // Invalidate file index on successful write tool completion
+                if tool_name.is_write_tool() && !output.is_error {
+                    self.invalidate_file_index();
                 }
 
                 // Record changeset on successful write tool completion
@@ -962,24 +972,48 @@ impl App {
                 }
             }
             (KeyCode::Enter, KeyModifiers::NONE) if self.autocomplete_state.visible => {
-                // Accept selection and execute immediately
-                if let Some(cmd_name) = self.autocomplete_state.selected_command() {
-                    let cmd_name = cmd_name.to_string();
-                    self.autocomplete_state.hide();
-                    self.input.take_text(); // clear input
-                    if !self.is_loading {
-                        self.handle_input(cmd_name).await?;
+                match self.autocomplete_state.mode {
+                    AutocompleteMode::Command => {
+                        if let Some(cmd_name) = self.autocomplete_state.selected_command() {
+                            let cmd_name = cmd_name.to_string();
+                            self.autocomplete_state.hide();
+                            self.input.take_text(); // clear input
+                            if !self.is_loading {
+                                self.handle_input(cmd_name).await?;
+                            }
+                        }
+                    }
+                    AutocompleteMode::FileRef => {
+                        if let Some(path) = self.autocomplete_state.selected_file() {
+                            let path = path.to_string();
+                            let current = self.input.textarea.lines().join("\n");
+                            let new_text = apply_file_completion(&current, &path);
+                            self.input.set_text(&new_text);
+                            self.autocomplete_state.hide();
+                        }
                     }
                 }
             }
             (KeyCode::Tab, KeyModifiers::NONE) if self.autocomplete_state.visible => {
-                // Tab also accepts and executes (same as Enter)
-                if let Some(cmd_name) = self.autocomplete_state.selected_command() {
-                    let cmd_name = cmd_name.to_string();
-                    self.autocomplete_state.hide();
-                    self.input.take_text(); // clear input
-                    if !self.is_loading {
-                        self.handle_input(cmd_name).await?;
+                match self.autocomplete_state.mode {
+                    AutocompleteMode::Command => {
+                        if let Some(cmd_name) = self.autocomplete_state.selected_command() {
+                            let cmd_name = cmd_name.to_string();
+                            self.autocomplete_state.hide();
+                            self.input.take_text(); // clear input
+                            if !self.is_loading {
+                                self.handle_input(cmd_name).await?;
+                            }
+                        }
+                    }
+                    AutocompleteMode::FileRef => {
+                        if let Some(path) = self.autocomplete_state.selected_file() {
+                            let path = path.to_string();
+                            let current = self.input.textarea.lines().join("\n");
+                            let new_text = apply_file_completion(&current, &path);
+                            self.input.set_text(&new_text);
+                            self.autocomplete_state.hide();
+                        }
                     }
                 }
             }
@@ -1044,7 +1078,9 @@ impl App {
             _ => {
                 self.input.textarea.input(key);
                 let current_text = self.input.textarea.lines().join("\n");
-                self.autocomplete_state.update(&current_text);
+                self.ensure_file_index();
+                let file_index = self.file_index.clone().unwrap_or_default();
+                self.autocomplete_state.update_with_files(&current_text, &file_index);
             }
         }
         Ok(())
@@ -1068,6 +1104,19 @@ impl App {
         {
             self.messages.remove(pos);
         }
+    }
+
+    /// Lazily build the file index for `@` autocomplete.
+    fn ensure_file_index(&mut self) -> &[String] {
+        if self.file_index.is_none() {
+            self.file_index = Some(file_ref::build_file_index(&self.project.root));
+        }
+        self.file_index.as_ref().unwrap()
+    }
+
+    /// Invalidate the file index (called after write tools complete).
+    fn invalidate_file_index(&mut self) {
+        self.file_index = None;
     }
 
     /// Cancel the current streaming task.
@@ -1142,15 +1191,37 @@ impl App {
             .map(|s| s.id.clone())
             .unwrap_or_default();
 
+        // Parse and resolve @ file references
+        let refs = file_ref::parse_refs(&text);
+        let resolved: Vec<_> = refs
+            .iter()
+            .filter_map(|r| file_ref::resolve_ref(r, &self.project.root))
+            .collect();
+
+        // Show errors for unresolved refs
+        for r in &refs {
+            if !resolved.iter().any(|rr| rr.file_ref.path == r.path) {
+                self.messages.push(MessageBlock::System {
+                    text: format!("Could not resolve file: {}", r.path),
+                });
+            }
+        }
+
+        let (display_text, api_text) = if resolved.is_empty() {
+            (text.clone(), text.clone())
+        } else {
+            file_ref::augment_message(&text, &resolved)
+        };
+
         // Create and save user message
-        let user_msg = Message::user(&session_id, &text);
+        let user_msg = Message::user(&session_id, &api_text);
         let mgr = SessionManager::new(&self.storage, &self.project.id);
         let _ = mgr.save_message(&user_msg);
         self.stored_messages.push(user_msg);
 
         // Add user message to display
         self.messages
-            .push(MessageBlock::User { text: text.clone() });
+            .push(MessageBlock::User { text: display_text });
         self.message_area_state.scroll_to_bottom();
 
         // Try to send to LLM
@@ -1220,7 +1291,7 @@ impl App {
             model: resolved.api_model_id().to_string(),
             system_prompt,
             history,
-            user_message: text,
+            user_message: api_text,
             event_tx: self.event_tx.clone(),
             tool_registry: Some(self.tool_registry.clone()),
             tool_context: Some(ToolContext {

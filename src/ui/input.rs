@@ -289,6 +289,17 @@ impl InputState {
         total.clamp(MIN_INPUT_HEIGHT, cap)
     }
 
+    /// Replace the current text in the textarea (for autocomplete insertion).
+    pub fn set_text(&mut self, text: &str) {
+        let mut textarea = TextArea::default();
+        textarea.set_cursor_line_style(Style::default());
+        textarea.set_placeholder_text("Type a message...");
+        // Insert the new text
+        textarea.insert_str(text);
+        self.textarea = textarea;
+        self.scroll_offset = 0;
+    }
+
     /// Take the current text and clear the input.
     pub fn take_text(&mut self) -> String {
         let lines = self.textarea.lines().to_vec();

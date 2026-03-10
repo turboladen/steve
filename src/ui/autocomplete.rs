@@ -1,4 +1,4 @@
-//! Command autocomplete popup state and rendering.
+//! Command and file reference autocomplete popup state and rendering.
 
 use ratatui::{
     Frame,
@@ -11,12 +11,23 @@ use ratatui::{
 use crate::command::Command;
 use super::theme::Theme;
 
-/// State for the command autocomplete popup.
+/// Which kind of autocomplete is active.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutocompleteMode {
+    Command,
+    FileRef,
+}
+
+/// State for the autocomplete popup (commands and file references).
 pub struct AutocompleteState {
     /// Whether the popup is currently visible.
     pub visible: bool,
-    /// Matching command names and descriptions.
+    /// Current mode.
+    pub mode: AutocompleteMode,
+    /// Matching command names and descriptions (Command mode).
     matches: Vec<(&'static str, &'static str)>,
+    /// Matching file paths (FileRef mode).
+    file_matches: Vec<String>,
     /// Currently selected index.
     pub selected: usize,
 }
@@ -25,20 +36,24 @@ impl Default for AutocompleteState {
     fn default() -> Self {
         Self {
             visible: false,
+            mode: AutocompleteMode::Command,
             matches: vec![],
+            file_matches: vec![],
             selected: 0,
         }
     }
 }
 
 impl AutocompleteState {
-    /// Update matches based on current input prefix.
+    /// Update matches based on current input prefix (command mode only).
     pub fn update(&mut self, input: &str) {
         if input.starts_with('/') && !input.contains(' ') {
+            self.mode = AutocompleteMode::Command;
             self.matches = Command::matching_commands(input)
                 .into_iter()
                 .map(|c| (c.name, c.description))
                 .collect();
+            self.file_matches.clear();
             self.visible = !self.matches.is_empty();
             if self.selected >= self.matches.len() {
                 self.selected = 0;
@@ -48,35 +63,166 @@ impl AutocompleteState {
         }
     }
 
+    /// Update matches considering both commands and file references.
+    /// Falls through to command autocomplete if no active `@` reference is found.
+    pub fn update_with_files(&mut self, input: &str, file_index: &[String]) {
+        // Check if we're typing a file reference at the cursor position.
+        // Find the last `@` token that might be an active reference.
+        if let Some(active) = find_active_file_ref(input) {
+            let prefix = &active;
+            self.mode = AutocompleteMode::FileRef;
+            self.matches.clear();
+            self.file_matches = file_index
+                .iter()
+                .filter(|f| {
+                    // Match by prefix or substring on the filename
+                    f.starts_with(prefix.as_str())
+                        || f.contains(prefix.as_str())
+                        || f.rsplit('/')
+                            .next()
+                            .is_some_and(|name| name.starts_with(prefix.as_str()))
+                })
+                .take(20) // cap results
+                .cloned()
+                .collect();
+            self.visible = !self.file_matches.is_empty();
+            if self.selected >= self.file_matches.len() {
+                self.selected = 0;
+            }
+        } else {
+            // Fall through to command autocomplete
+            self.update(input);
+        }
+    }
+
     /// Hide the popup.
     pub fn hide(&mut self) {
         self.visible = false;
         self.matches.clear();
+        self.file_matches.clear();
         self.selected = 0;
     }
 
     /// Move selection down (wraps).
     pub fn next(&mut self) {
-        if !self.matches.is_empty() {
-            self.selected = (self.selected + 1) % self.matches.len();
+        let len = self.total_matches();
+        if len > 0 {
+            self.selected = (self.selected + 1) % len;
         }
     }
 
     /// Move selection up (wraps).
     pub fn prev(&mut self) {
-        if !self.matches.is_empty() {
+        let len = self.total_matches();
+        if len > 0 {
             self.selected = if self.selected == 0 {
-                self.matches.len() - 1
+                len - 1
             } else {
                 self.selected - 1
             };
         }
     }
 
-    /// Get the selected command name.
+    /// Get the selected command name (Command mode).
     pub fn selected_command(&self) -> Option<&str> {
-        self.matches.get(self.selected).map(|(name, _)| *name)
+        if self.mode == AutocompleteMode::Command {
+            self.matches.get(self.selected).map(|(name, _)| *name)
+        } else {
+            None
+        }
     }
+
+    /// Get the selected file path (FileRef mode).
+    pub fn selected_file(&self) -> Option<&str> {
+        if self.mode == AutocompleteMode::FileRef {
+            self.file_matches.get(self.selected).map(|s| s.as_str())
+        } else {
+            None
+        }
+    }
+
+    fn total_matches(&self) -> usize {
+        match self.mode {
+            AutocompleteMode::Command => self.matches.len(),
+            AutocompleteMode::FileRef => self.file_matches.len(),
+        }
+    }
+}
+
+/// Find the active `@` file reference being typed at the end of the input.
+/// Returns the path portion after `@` or `@!` if one is in progress.
+fn find_active_file_ref(input: &str) -> Option<String> {
+    // Walk backwards from the end to find the last `@` that could be a file ref
+    let bytes = input.as_bytes();
+    let mut i = bytes.len();
+
+    // Skip trailing whitespace — if there's whitespace after the @token, it's complete
+    // We only want to trigger when the cursor is still in the token
+    if i > 0 && bytes[i - 1].is_ascii_whitespace() {
+        return None;
+    }
+
+    // Find the last @ sign
+    while i > 0 {
+        i -= 1;
+        if bytes[i] == b'@' {
+            // Skip if preceded by alphanumeric
+            if i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
+                return None;
+            }
+
+            let mut path_start = i + 1;
+            // Skip '!' for inject mode
+            if path_start < bytes.len() && bytes[path_start] == b'!' {
+                path_start += 1;
+            }
+
+            if path_start >= bytes.len() {
+                // Just "@" with nothing after — not enough for matching
+                return None;
+            }
+
+            // Skip if starts with digit
+            if bytes[path_start].is_ascii_digit() {
+                return None;
+            }
+
+            let path = &input[path_start..];
+            // Must have at least 1 char
+            if !path.is_empty() {
+                return Some(path.to_string());
+            }
+            return None;
+        }
+        // If we hit whitespace while scanning back, the @ is in an earlier token
+        if bytes[i].is_ascii_whitespace() {
+            return None;
+        }
+    }
+    None
+}
+
+/// Apply file ref autocomplete: replace the `@prefix` at the end of input with the selected path.
+pub fn apply_file_completion(input: &str, selected_path: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut i = bytes.len();
+
+    // Find the start of the current @-token
+    while i > 0 {
+        i -= 1;
+        if bytes[i] == b'@' {
+            // Keep @ (and @! if present)
+            let inject = i + 1 < bytes.len() && bytes[i + 1] == b'!';
+            let prefix = if inject { "@!" } else { "@" };
+            let before = &input[..i];
+            return format!("{before}{prefix}{selected_path}");
+        }
+        if bytes[i].is_ascii_whitespace() {
+            break;
+        }
+    }
+    // Fallback: shouldn't happen, but return input unchanged
+    input.to_string()
 }
 
 /// Render the autocomplete popup as an overlay above the input area.
@@ -87,7 +233,24 @@ pub fn render_autocomplete(
     theme: &Theme,
     context_pct: u8,
 ) {
-    if !state.visible || state.matches.is_empty() {
+    if !state.visible {
+        return;
+    }
+
+    match state.mode {
+        AutocompleteMode::Command => render_command_popup(frame, input_area, state, theme, context_pct),
+        AutocompleteMode::FileRef => render_file_popup(frame, input_area, state, theme, context_pct),
+    }
+}
+
+fn render_command_popup(
+    frame: &mut Frame,
+    input_area: Rect,
+    state: &AutocompleteState,
+    theme: &Theme,
+    context_pct: u8,
+) {
+    if state.matches.is_empty() {
         return;
     }
 
@@ -117,6 +280,48 @@ pub fn render_autocomplete(
             Span::styled(format!("{:<12}", name), style),
             Span::styled(*desc, Style::default().fg(theme.dim)),
         ]))
+    }).collect();
+
+    let list = List::new(items)
+        .block(Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.border_color(context_pct)))
+        );
+
+    frame.render_widget(list, popup_area);
+}
+
+fn render_file_popup(
+    frame: &mut Frame,
+    input_area: Rect,
+    state: &AutocompleteState,
+    theme: &Theme,
+    context_pct: u8,
+) {
+    if state.file_matches.is_empty() {
+        return;
+    }
+
+    let item_count = state.file_matches.len().min(10) as u16;
+    let popup_height = item_count + 2; // +2 for borders
+    let popup_width = 60u16.min(input_area.width); // wider for file paths
+
+    let popup_area = Rect {
+        x: input_area.x + 2,
+        y: input_area.y.saturating_sub(popup_height),
+        width: popup_width,
+        height: popup_height,
+    };
+
+    frame.render_widget(Clear, popup_area);
+
+    let items: Vec<ListItem> = state.file_matches.iter().enumerate().map(|(i, path)| {
+        let style = if i == state.selected {
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.fg)
+        };
+        ListItem::new(Line::from(Span::styled(path.as_str(), style)))
     }).collect();
 
     let list = List::new(items)
@@ -196,6 +401,128 @@ mod tests {
         assert!(!state.visible);
         assert!(state.matches.is_empty());
         assert_eq!(state.selected, 0);
+    }
+
+    // ─── FileRef mode ───
+
+    #[test]
+    fn file_ref_mode_basic() {
+        let files = vec![
+            "src/main.rs".into(),
+            "src/lib.rs".into(),
+            "Cargo.toml".into(),
+        ];
+        let mut state = AutocompleteState::default();
+        state.update_with_files("explain @src/ma", &files);
+        assert!(state.visible);
+        assert_eq!(state.mode, AutocompleteMode::FileRef);
+        assert!(state.file_matches.contains(&"src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn file_ref_inject_mode() {
+        let files = vec!["src/main.rs".into(), "src/lib.rs".into()];
+        let mut state = AutocompleteState::default();
+        state.update_with_files("show @!src/li", &files);
+        assert!(state.visible);
+        assert_eq!(state.mode, AutocompleteMode::FileRef);
+        assert!(state.file_matches.contains(&"src/lib.rs".to_string()));
+    }
+
+    #[test]
+    fn file_ref_falls_through_to_command() {
+        let files = vec!["src/main.rs".into()];
+        let mut state = AutocompleteState::default();
+        state.update_with_files("/mod", &files);
+        assert!(state.visible);
+        assert_eq!(state.mode, AutocompleteMode::Command);
+    }
+
+    #[test]
+    fn file_ref_no_match_hides() {
+        let files = vec!["src/main.rs".into()];
+        let mut state = AutocompleteState::default();
+        state.update_with_files("tell me about @zzz", &files);
+        assert!(!state.visible);
+    }
+
+    #[test]
+    fn file_ref_basename_match() {
+        let files = vec![
+            "src/tool/read.rs".into(),
+            "src/tool/write.rs".into(),
+        ];
+        let mut state = AutocompleteState::default();
+        state.update_with_files("look at @read", &files);
+        assert!(state.visible);
+        assert!(state.file_matches.contains(&"src/tool/read.rs".to_string()));
+    }
+
+    #[test]
+    fn selected_file_returns_path() {
+        let files = vec!["src/main.rs".into(), "src/lib.rs".into()];
+        let mut state = AutocompleteState::default();
+        state.update_with_files("@src/m", &files);
+        assert_eq!(state.selected_file(), Some("src/main.rs"));
+    }
+
+    #[test]
+    fn selected_file_none_in_command_mode() {
+        let mut state = AutocompleteState::default();
+        state.update("/m");
+        assert_eq!(state.selected_file(), None);
+    }
+
+    // ─── find_active_file_ref ───
+
+    #[test]
+    fn find_active_ref_basic() {
+        assert_eq!(find_active_file_ref("look at @src/ma"), Some("src/ma".into()));
+    }
+
+    #[test]
+    fn find_active_ref_inject() {
+        assert_eq!(find_active_file_ref("show @!lib"), Some("lib".into()));
+    }
+
+    #[test]
+    fn find_active_ref_trailing_space_none() {
+        assert_eq!(find_active_file_ref("look at @src/main.rs "), None);
+    }
+
+    #[test]
+    fn find_active_ref_email_none() {
+        assert_eq!(find_active_file_ref("user@host"), None);
+    }
+
+    #[test]
+    fn find_active_ref_no_at_none() {
+        assert_eq!(find_active_file_ref("just text"), None);
+    }
+
+    #[test]
+    fn find_active_ref_bare_at_none() {
+        assert_eq!(find_active_file_ref("text @"), None);
+    }
+
+    // ─── apply_file_completion ───
+
+    #[test]
+    fn apply_completion_basic() {
+        let result = apply_file_completion("look at @src/ma", "src/main.rs");
+        assert_eq!(result, "look at @src/main.rs");
+    }
+
+    #[test]
+    fn apply_completion_inject() {
+        let result = apply_file_completion("show @!li", "src/lib.rs");
+        assert_eq!(result, "show @!src/lib.rs");
+    }
+
+    #[test]
+    fn apply_completion_at_start() {
+        let result = apply_file_completion("@Car", "Cargo.toml");
+        assert_eq!(result, "@Cargo.toml");
     }
 
     // -- Buffer rendering tests --
@@ -294,5 +621,19 @@ mod tests {
             if found_content_above { break; }
         }
         assert!(found_content_above, "autocomplete popup should be positioned above the input area");
+    }
+
+    #[test]
+    fn buffer_file_ref_popup_shows_paths() {
+        let files = vec![
+            "src/main.rs".into(),
+            "src/lib.rs".into(),
+        ];
+        let mut state = AutocompleteState::default();
+        state.update_with_files("@src/", &files);
+        assert!(state.visible);
+        let input_area = Rect::new(0, 20, 80, 5);
+        let text = render_autocomplete_to_string(80, 25, &state, input_area);
+        assert!(text.contains("src/main.rs"), "file popup should show paths, got:\n{text}");
     }
 }
