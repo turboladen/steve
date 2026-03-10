@@ -82,6 +82,8 @@ pub struct StreamRequest {
     pub cancel_token: CancellationToken,
     /// Context window size for the current model (used for pre-call pruning).
     pub context_window: Option<u64>,
+    /// Channel for receiving user interjections mid-tool-loop.
+    pub interjection_rx: mpsc::UnboundedReceiver<String>,
 }
 
 /// Spawn a tokio task that streams the LLM response and sends events.
@@ -116,6 +118,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         tool_cache,
         cancel_token,
         context_window,
+        mut interjection_rx,
     } = req;
 
     tracing::info!(model = %model, "starting LLM stream");
@@ -187,6 +190,18 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 usage: Some(total_usage),
             });
             return Ok(());
+        }
+
+        // Drain pending user interjections before the next LLM call
+        while let Ok(text) = interjection_rx.try_recv() {
+            tracing::info!("user interjection received: {} chars", text.len());
+            messages.push(ChatCompletionRequestMessage::User(
+                ChatCompletionRequestUserMessage {
+                    content: ChatCompletionRequestUserMessageContent::Text(text),
+                    name: None,
+                },
+            ));
+            iteration_count = 0; // User interaction resets safety counter
         }
 
         total_iteration_count += 1;
@@ -1555,6 +1570,7 @@ mod tests {
         mock: Arc<dyn ChatStreamProvider>,
         event_tx: mpsc::UnboundedSender<AppEvent>,
     ) -> StreamRequest {
+        let (_interjection_tx, interjection_rx) = mpsc::unbounded_channel();
         StreamRequest {
             stream_provider: mock,
             model: "test-model".to_string(),
@@ -1570,6 +1586,7 @@ mod tests {
             )),
             cancel_token: CancellationToken::new(),
             context_window: None,
+            interjection_rx,
         }
     }
 
@@ -1804,6 +1821,7 @@ mod tests {
             ],
         ]));
         let (tx, rx) = mpsc::unbounded_channel();
+        let (_interjection_tx, interjection_rx) = mpsc::unbounded_channel();
         let req = StreamRequest {
             stream_provider: mock,
             model: "test-model".to_string(),
@@ -1822,6 +1840,7 @@ mod tests {
             tool_cache: cache,
             cancel_token: CancellationToken::new(),
             context_window: None,
+            interjection_rx,
         };
 
         run_stream(req).await.expect("cache hit stream should succeed");
@@ -1971,5 +1990,163 @@ mod tests {
             .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
             .collect();
         assert_eq!(finishes.len(), 1, "should get LlmFinish even after exhausted retries");
+    }
+
+    #[tokio::test]
+    async fn interjection_injected_as_user_message() {
+        // Stream: tool call -> (interjection injected) -> text response
+        let mock = Arc::new(MockChatStream::new(vec![
+            vec![
+                Ok(tool_call_chunk(0, Some("call_1"), Some("glob"), Some(r#"{"pattern":"*.rs"}"#))),
+                Ok(finish_chunk(FinishReason::ToolCalls, 50, 20)),
+            ],
+            vec![
+                Ok(text_delta("I see your message.")),
+                Ok(finish_chunk(FinishReason::Stop, 100, 10)),
+            ],
+        ]));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (interjection_tx, interjection_rx) = mpsc::unbounded_channel();
+
+        // Pre-load the interjection before running the stream
+        interjection_tx.send("focus on tests instead".to_string()).unwrap();
+
+        let mut req = mock_stream_request(mock, tx);
+        req.interjection_rx = interjection_rx;
+        req.tool_registry = Some(Arc::new(ToolRegistry::new(std::path::PathBuf::from("/tmp/test"))));
+        req.tool_context = Some(ToolContext {
+            project_root: std::path::PathBuf::from("/tmp/test"),
+            storage_dir: None,
+        });
+        req.permission_engine = Some(Arc::new(tokio::sync::Mutex::new(
+            crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
+        )));
+
+        run_stream(req).await.expect("interjection stream should succeed");
+        let events = collect_events(rx).await;
+
+        // Should complete successfully
+        let finishes: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmFinish { .. })).collect();
+        assert_eq!(finishes.len(), 1, "should get LlmFinish");
+
+        // Should have text deltas from the second call
+        let deltas: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmDelta { .. })).collect();
+        assert!(!deltas.is_empty(), "should have text deltas");
+    }
+
+    #[tokio::test]
+    async fn multiple_interjections_all_consumed() {
+        let mock = Arc::new(MockChatStream::new(vec![
+            vec![
+                Ok(tool_call_chunk(0, Some("call_1"), Some("glob"), Some(r#"{"pattern":"*.rs"}"#))),
+                Ok(finish_chunk(FinishReason::ToolCalls, 50, 20)),
+            ],
+            vec![
+                Ok(text_delta("OK")),
+                Ok(finish_chunk(FinishReason::Stop, 100, 10)),
+            ],
+        ]));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (interjection_tx, interjection_rx) = mpsc::unbounded_channel();
+
+        // Send multiple interjections
+        interjection_tx.send("first message".to_string()).unwrap();
+        interjection_tx.send("second message".to_string()).unwrap();
+        interjection_tx.send("third message".to_string()).unwrap();
+
+        let mut req = mock_stream_request(mock, tx);
+        req.interjection_rx = interjection_rx;
+        req.tool_registry = Some(Arc::new(ToolRegistry::new(std::path::PathBuf::from("/tmp/test"))));
+        req.tool_context = Some(ToolContext {
+            project_root: std::path::PathBuf::from("/tmp/test"),
+            storage_dir: None,
+        });
+        req.permission_engine = Some(Arc::new(tokio::sync::Mutex::new(
+            crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
+        )));
+
+        run_stream(req).await.expect("multi-interjection stream should succeed");
+        let events = collect_events(rx).await;
+
+        // Should complete with LlmFinish (not error)
+        let finishes: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmFinish { .. })).collect();
+        assert_eq!(finishes.len(), 1);
+        let errors: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmError { .. })).collect();
+        assert!(errors.is_empty(), "should have no errors");
+    }
+
+    #[tokio::test]
+    async fn empty_interjection_channel_is_noop() {
+        // Basic text response with no interjections — existing behavior unchanged
+        let mock = Arc::new(MockChatStream::new(vec![
+            vec![
+                Ok(text_delta("Hello")),
+                Ok(finish_chunk(FinishReason::Stop, 50, 10)),
+            ],
+        ]));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let req = mock_stream_request(mock, tx);
+
+        run_stream(req).await.expect("empty interjection channel should be fine");
+        let events = collect_events(rx).await;
+
+        let finishes: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmFinish { .. })).collect();
+        assert_eq!(finishes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn interjection_coexists_with_tool_loop() {
+        // Verify that an interjection drained at loop start doesn't interfere
+        // with normal tool call execution. Counter reset is meaningful in
+        // production (mid-loop arrival) but can't be tested with synchronous mocks.
+        let mut streams = Vec::new();
+        for i in 0..5 {
+            streams.push(vec![
+                Ok(tool_call_chunk(
+                    0,
+                    Some(&format!("call_{i}")),
+                    Some("glob"),
+                    Some(r#"{"pattern":"*.rs"}"#),
+                )),
+                Ok(finish_chunk(FinishReason::ToolCalls, 50, 20)),
+            ]);
+        }
+        streams.push(vec![
+            Ok(text_delta("Done")),
+            Ok(finish_chunk(FinishReason::Stop, 50, 10)),
+        ]);
+
+        let mock = Arc::new(MockChatStream::new(streams));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (interjection_tx, interjection_rx) = mpsc::unbounded_channel();
+
+        interjection_tx.send("keep going".to_string()).unwrap();
+
+        let mut req = mock_stream_request(mock, tx);
+        req.interjection_rx = interjection_rx;
+        req.tool_registry = Some(Arc::new(ToolRegistry::new(std::path::PathBuf::from("/tmp/test"))));
+        req.tool_context = Some(ToolContext {
+            project_root: std::path::PathBuf::from("/tmp/test"),
+            storage_dir: None,
+        });
+        req.permission_engine = Some(Arc::new(tokio::sync::Mutex::new(
+            crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
+        )));
+
+        run_stream(req).await.expect("interjection with tool calls should succeed");
+        let events = collect_events(rx).await;
+
+        // Should complete without errors
+        let errors: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmError { .. }))
+            .collect();
+        assert!(errors.is_empty(), "should have no errors: {:?}", errors);
+
+        let finishes: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
+            .collect();
+        assert_eq!(finishes.len(), 1);
     }
 }

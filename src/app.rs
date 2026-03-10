@@ -277,6 +277,9 @@ pub struct App {
     /// Cancellation token for the current stream task.
     stream_cancel: Option<CancellationToken>,
 
+    /// Channel for sending user interjections to the active stream task.
+    interjection_tx: Option<mpsc::UnboundedSender<String>>,
+
     /// Whether auto-compact has failed in this session (suppresses retries).
     auto_compact_failed: bool,
 
@@ -385,6 +388,7 @@ impl App {
             pending_permission: None,
             session_browse_list: None,
             stream_cancel: None,
+            interjection_tx: None,
             auto_compact_failed: false,
             context_warned: false,
             last_prompt_tokens: 0,
@@ -746,6 +750,7 @@ impl App {
                 self.is_loading = false;
                 self.streaming_active = false;
                 self.stream_cancel = None;
+                self.interjection_tx = None;
                 self.status_line_state.activity = Activity::Idle;
 
                 // Remove trailing empty assistant message if present
@@ -822,6 +827,7 @@ impl App {
                 self.is_loading = false;
                 self.streaming_active = false;
                 self.stream_cancel = None;
+                self.interjection_tx = None;
                 self.streaming_message = None;
                 self.messages.push(MessageBlock::Error { text: error });
                 self.status_line_state.activity = Activity::Idle;
@@ -1114,10 +1120,12 @@ impl App {
                     .input(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
             }
             (KeyCode::Enter, KeyModifiers::NONE) => {
-                if !self.is_loading {
-                    let text = self.input.take_text();
-                    let trimmed = text.trim().to_string();
-                    if !trimmed.is_empty() {
+                let text = self.input.take_text();
+                let trimmed = text.trim().to_string();
+                if !trimmed.is_empty() {
+                    if self.is_loading {
+                        self.handle_interjection(trimmed);
+                    } else {
                         self.handle_input(trimmed).await?;
                     }
                 }
@@ -1182,6 +1190,7 @@ impl App {
 
         self.is_loading = false;
         self.streaming_active = false;
+        self.interjection_tx = None;
         self.streaming_message = None;
 
         // Remove trailing empty assistant message
@@ -1194,6 +1203,61 @@ impl App {
             text: "cancelled".to_string(),
         });
         self.status_line_state.activity = Activity::Idle;
+        self.message_area_state.scroll_to_bottom();
+    }
+
+    /// Inject a user message into the active tool loop without cancelling it.
+    /// The message is sent via the interjection channel to the stream task,
+    /// which drains it before the next LLM API call.
+    fn handle_interjection(&mut self, text: String) {
+        // Silently reject slash commands during interjection
+        if text.starts_with('/') {
+            return;
+        }
+
+        let Some(tx) = &self.interjection_tx else {
+            return;
+        };
+
+        // Parse and resolve @ file references
+        let refs = file_ref::parse_refs(&text);
+        let resolved: Vec<_> = refs
+            .iter()
+            .filter_map(|r| file_ref::resolve_ref(r, &self.project.root))
+            .collect();
+
+        // Show errors for unresolved refs
+        for r in &refs {
+            if !resolved.iter().any(|rr| rr.file_ref.path == r.path) {
+                self.messages.push(MessageBlock::System {
+                    text: format!("Could not resolve file: {}", r.path),
+                });
+            }
+        }
+
+        let (display_text, api_text) = if resolved.is_empty() {
+            (text.clone(), text.clone())
+        } else {
+            file_ref::augment_message(&text, &resolved)
+        };
+
+        // Send augmented text to stream task via interjection channel
+        if tx.send(api_text.clone()).is_err() {
+            // Channel closed — stream already finished
+            return;
+        }
+
+        // Persist to storage
+        if let Some(session) = &self.current_session {
+            let user_msg = Message::user(&session.id, &api_text);
+            let mgr = SessionManager::new(&self.storage, &self.project.id);
+            let _ = mgr.save_message(&user_msg);
+            self.stored_messages.push(user_msg);
+        }
+
+        // Add to display
+        self.messages
+            .push(MessageBlock::User { text: display_text });
         self.message_area_state.scroll_to_bottom();
     }
 
@@ -1326,6 +1390,10 @@ impl App {
         let cancel_token = CancellationToken::new();
         self.stream_cancel = Some(cancel_token.clone());
 
+        // Create interjection channel for mid-loop user messages
+        let (interjection_tx, interjection_rx) = mpsc::unbounded_channel();
+        self.interjection_tx = Some(interjection_tx);
+
         // Build conversation history from stored messages (all except the last user message,
         // which will be passed as user_message separately)
         let history = self.build_api_history();
@@ -1353,6 +1421,7 @@ impl App {
             } else {
                 None
             },
+            interjection_rx,
         });
 
         Ok(())
@@ -2695,5 +2764,50 @@ pub(crate) mod tests {
         let config = Config::default();
         let storage = Storage::new("test-sidebar").expect("test storage");
         App::new(project, config, storage, None, None, None, Vec::new())
+    }
+
+    // -- interjection tests --
+
+    #[test]
+    fn handle_interjection_adds_user_message() {
+        let mut app = make_test_app();
+        let (interjection_tx, _rx) = mpsc::unbounded_channel();
+        app.interjection_tx = Some(interjection_tx);
+
+        let initial_count = app.messages.len();
+        app.handle_interjection("focus on tests".to_string());
+
+        assert_eq!(app.messages.len(), initial_count + 1);
+        match &app.messages[initial_count] {
+            MessageBlock::User { text } => {
+                assert_eq!(text, "focus on tests");
+            }
+            other => panic!("expected User message, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn handle_interjection_rejects_commands() {
+        let mut app = make_test_app();
+        let (interjection_tx, _rx) = mpsc::unbounded_channel();
+        app.interjection_tx = Some(interjection_tx);
+
+        let initial_count = app.messages.len();
+        app.handle_interjection("/compact".to_string());
+
+        // No message should be added
+        assert_eq!(app.messages.len(), initial_count);
+    }
+
+    #[test]
+    fn handle_interjection_noop_when_no_sender() {
+        let mut app = make_test_app();
+        assert!(app.interjection_tx.is_none());
+
+        let initial_count = app.messages.len();
+        app.handle_interjection("hello".to_string());
+
+        // Should silently do nothing
+        assert_eq!(app.messages.len(), initial_count);
     }
 }
