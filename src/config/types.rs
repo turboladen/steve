@@ -86,7 +86,9 @@ pub struct ModelConfig {
 /// Pricing per million tokens.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCost {
+    #[serde(alias = "input")]
     pub input_per_million: f64,
+    #[serde(alias = "output")]
     pub output_per_million: f64,
 }
 
@@ -457,5 +459,21 @@ mod tests {
         // while serde deserialization gives auto_compact=true via default_auto_compact().
         // Merging two defaults preserves the global's value (false).
         assert!(!merged.auto_compact);
+    }
+
+    #[test]
+    fn model_cost_accepts_short_field_names() {
+        let cost: ModelCost = serde_json::from_str(r#"{"input": 3.0, "output": 15.0}"#).unwrap();
+        assert!((cost.input_per_million - 3.0).abs() < f64::EPSILON);
+        assert!((cost.output_per_million - 15.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn model_cost_accepts_full_field_names() {
+        let cost: ModelCost =
+            serde_json::from_str(r#"{"input_per_million": 3.0, "output_per_million": 15.0}"#)
+                .unwrap();
+        assert!((cost.input_per_million - 3.0).abs() < f64::EPSILON);
+        assert!((cost.output_per_million - 15.0).abs() < f64::EPSILON);
     }
 }
