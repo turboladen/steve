@@ -30,7 +30,7 @@ fn load_global() -> Config {
     match load_jsonc_file(&path) {
         Ok(config) => config,
         Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "failed to load global config, using defaults");
+            tracing::warn!(path = %path.display(), error = ?e, "failed to load global config, using defaults");
             Config::default()
         }
     }
