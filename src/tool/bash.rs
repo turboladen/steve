@@ -28,7 +28,7 @@ pub fn definition() -> Value {
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "Execute a bash command in the project directory. Use this to run builds, tests, git commands, or other shell operations. The command runs with the project root as the working directory.",
+            "description": "Execute a bash command in the project directory. Use this for builds, tests, git commands, installing packages, or other shell operations that have no dedicated tool. IMPORTANT: Do NOT use bash for reading files (use `read`), searching file contents (use `grep`), finding files (use `glob` or `list`), or modifying files (use `edit`, `write`, or `patch`). The command runs with the project root as the working directory.",
             "parameters": {
                 "type": "object",
                 "properties": {
