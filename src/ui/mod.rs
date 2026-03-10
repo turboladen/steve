@@ -23,7 +23,7 @@ use crate::app::App;
 use layout::compute_layout;
 use message_area::render_message_blocks;
 use autocomplete::render_autocomplete;
-use input::{render_input, abbreviate_path, InputContext, MIN_INPUT_HEIGHT, MAX_INPUT_PCT};
+use input::{render_input, abbreviate_path, InputContext, MIN_INPUT_HEIGHT, MAX_INPUT_PCT, CHEVRON_WIDTH};
 use sidebar::render_sidebar;
 use status_line::Activity;
 
@@ -83,7 +83,14 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let show_sidebar = app.should_show_sidebar(area.width);
     let max_input = ((area.height as u32 * MAX_INPUT_PCT as u32 / 100) as u16).max(MIN_INPUT_HEIGHT);
-    let input_height = app.input.desired_height(max_input);
+    // Compute textarea width accounting for sidebar and chevron
+    let content_width = if show_sidebar && area.width >= 120 {
+        area.width.saturating_sub(1 + 40) // separator + sidebar
+    } else {
+        area.width
+    };
+    let textarea_width = content_width.saturating_sub(CHEVRON_WIDTH);
+    let input_height = app.input.desired_height(max_input, textarea_width);
     let layout = compute_layout(area, show_sidebar, input_height);
 
     // Context pressure percentage — drives ambient border color shifts

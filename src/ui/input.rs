@@ -8,6 +8,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 use ratatui_textarea::TextArea;
+use unicode_width::UnicodeWidthChar;
 
 use super::status_line::format_tokens;
 use super::theme::Theme;
@@ -20,6 +21,8 @@ const MIN_TEXTAREA_ROWS: u16 = 3;
 pub const MIN_INPUT_HEIGHT: u16 = INPUT_OVERHEAD + MIN_TEXTAREA_ROWS; // 5
 /// Max percentage of terminal height the input can consume.
 pub const MAX_INPUT_PCT: u16 = 40;
+/// Width of the chevron prompt ("> ").
+pub const CHEVRON_WIDTH: u16 = 2;
 
 /// The current agent mode. Placeholder until agent module is built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +59,8 @@ pub struct InputContext {
 pub struct InputState {
     pub textarea: TextArea<'static>,
     pub mode: AgentMode,
+    /// Vertical scroll offset for the wrapped textarea rendering.
+    pub scroll_offset: u16,
 }
 
 impl Default for InputState {
@@ -66,17 +71,197 @@ impl Default for InputState {
         Self {
             textarea,
             mode: AgentMode::Plan,
+            scroll_offset: 0,
         }
     }
+}
+
+/// Count the total visual lines needed to display `lines` at the given `width`.
+///
+/// Each logical line wraps at character boundaries based on unicode display width.
+/// Empty lines count as 1 visual row.
+pub fn count_visual_lines(lines: &[String], width: usize) -> u16 {
+    if width == 0 {
+        return lines.len().max(1) as u16;
+    }
+    let total: u32 = lines
+        .iter()
+        .map(|line| {
+            let line_width: usize = line.chars().map(|c| UnicodeWidthChar::width(c).unwrap_or(0)).sum();
+            if line_width == 0 {
+                1u32
+            } else {
+                ((line_width + width - 1) / width) as u32
+            }
+        })
+        .sum();
+    total.min(u16::MAX as u32).max(1) as u16
+}
+
+/// Result of wrapping a single logical line for rendering.
+struct WrappedLine {
+    /// The visual lines (ratatui `Line`s) produced by wrapping.
+    visual_lines: Vec<Line<'static>>,
+    /// If cursor was on this logical line, the visual row within `visual_lines`.
+    cursor_visual_row: Option<usize>,
+}
+
+/// Wrap a logical line into visual lines at character boundaries,
+/// rendering a cursor at the given column if `cursor_col` is `Some`.
+fn wrap_line_with_cursor(
+    line: &str,
+    width: usize,
+    cursor_col: Option<usize>,
+    normal_style: Style,
+    cursor_style: Style,
+) -> WrappedLine {
+    if width == 0 {
+        // Degenerate case: render the whole line as one visual line
+        let spans = if let Some(col) = cursor_col {
+            build_cursor_spans(line, col, normal_style, cursor_style)
+        } else {
+            vec![Span::styled(line.to_string(), normal_style)]
+        };
+        return WrappedLine {
+            visual_lines: vec![Line::from(spans)],
+            cursor_visual_row: cursor_col.map(|_| 0),
+        };
+    }
+
+    let mut visual_lines: Vec<Line<'static>> = Vec::new();
+    let mut current_chars: Vec<char> = Vec::new();
+    let mut current_width: usize = 0;
+    let char_count = line.chars().count();
+    let mut cursor_visual_row: Option<usize> = None;
+    // Track which visual row each char index starts on and its column
+    let mut char_visual_positions: Vec<(usize, usize)> = Vec::new(); // (visual_row, visual_col)
+
+    for ch in line.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+
+        // Check if adding this char would exceed width
+        if current_width + ch_width > width && !current_chars.is_empty() {
+            // Flush current visual line
+            let text: String = current_chars.drain(..).collect();
+            visual_lines.push(Line::from(Span::styled(text, normal_style)));
+            current_width = 0;
+        }
+
+        char_visual_positions.push((visual_lines.len(), current_width));
+        current_chars.push(ch);
+        current_width += ch_width;
+    }
+
+    // Flush remaining chars
+    if !current_chars.is_empty() {
+        let text: String = current_chars.into_iter().collect();
+        visual_lines.push(Line::from(Span::styled(text, normal_style)));
+    }
+
+    // Handle empty line
+    if visual_lines.is_empty() {
+        visual_lines.push(Line::from(Span::styled("", normal_style)));
+    }
+
+    // Now handle cursor rendering
+    if let Some(col) = cursor_col {
+        if col >= char_count {
+            // Cursor at EOL
+            let last_row = visual_lines.len() - 1;
+            let last_line_text: String = visual_lines[last_row]
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+            let last_line_width: usize = last_line_text
+                .chars()
+                .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+                .sum();
+
+            if last_line_width >= width {
+                // Cursor wraps to a new visual line
+                visual_lines.push(Line::from(Span::styled(" ", cursor_style)));
+                cursor_visual_row = Some(visual_lines.len() - 1);
+            } else {
+                // Append cursor space to last line
+                let mut spans = vec![Span::styled(last_line_text, normal_style)];
+                spans.push(Span::styled(" ", cursor_style));
+                visual_lines[last_row] = Line::from(spans);
+                cursor_visual_row = Some(last_row);
+            }
+        } else {
+            // Cursor within text
+            let (vis_row, _vis_col) = char_visual_positions[col];
+            cursor_visual_row = Some(vis_row);
+
+            // Re-render just that visual line with cursor highlighting
+            let line_text: String = visual_lines[vis_row]
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+
+            // Find the char offset within this visual line
+            let line_start_char = if vis_row == 0 {
+                0
+            } else {
+                // Index of first char on this visual row within the logical line
+                char_visual_positions
+                    .iter()
+                    .position(|(r, _)| *r == vis_row)
+                    .unwrap_or(0)
+            };
+            let col_in_line = col - line_start_char;
+
+            let spans = build_cursor_spans(&line_text, col_in_line, normal_style, cursor_style);
+            visual_lines[vis_row] = Line::from(spans);
+        }
+    }
+
+    WrappedLine {
+        visual_lines,
+        cursor_visual_row,
+    }
+}
+
+/// Build spans for a line with an inverted cursor at `cursor_col`.
+fn build_cursor_spans(
+    text: &str,
+    cursor_col: usize,
+    normal_style: Style,
+    cursor_style: Style,
+) -> Vec<Span<'static>> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut spans = Vec::new();
+
+    if cursor_col > 0 {
+        let before: String = chars[..cursor_col].iter().collect();
+        spans.push(Span::styled(before, normal_style));
+    }
+
+    if cursor_col < chars.len() {
+        spans.push(Span::styled(chars[cursor_col].to_string(), cursor_style));
+        if cursor_col + 1 < chars.len() {
+            let after: String = chars[cursor_col + 1..].iter().collect();
+            spans.push(Span::styled(after, normal_style));
+        }
+    } else {
+        // Cursor past end — show cursor as space
+        spans.push(Span::styled(" ", cursor_style));
+    }
+
+    spans
 }
 
 impl InputState {
     /// Desired input area height based on current content.
     /// Capped between `MIN_INPUT_HEIGHT` and `max_height`.
-    pub fn desired_height(&self, max_height: u16) -> u16 {
+    /// `available_width` is the textarea column width for wrapping calculations.
+    pub fn desired_height(&self, max_height: u16, available_width: u16) -> u16 {
         let cap = max_height.max(MIN_INPUT_HEIGHT);
-        let line_count = self.textarea.lines().len() as u16;
-        let textarea_rows = line_count.max(MIN_TEXTAREA_ROWS);
+        let lines: Vec<String> = self.textarea.lines().iter().map(|s| s.to_string()).collect();
+        let visual_rows = count_visual_lines(&lines, available_width as usize);
+        let textarea_rows = visual_rows.max(MIN_TEXTAREA_ROWS);
         let total = INPUT_OVERHEAD + textarea_rows;
         total.clamp(MIN_INPUT_HEIGHT, cap)
     }
@@ -90,6 +275,7 @@ impl InputState {
         textarea.set_cursor_line_style(Style::default());
         textarea.set_placeholder_text("Type a message...");
         self.textarea = textarea;
+        self.scroll_offset = 0;
         text
     }
 }
@@ -103,6 +289,74 @@ pub fn abbreviate_path(path: &Path) -> String {
         }
     }
     path.display().to_string()
+}
+
+/// Render the textarea with custom line wrapping and cursor.
+///
+/// Replaces `TextArea`'s built-in rendering with a pre-wrapped `Paragraph`
+/// so that long lines wrap visually instead of scrolling horizontally.
+fn render_wrapped_textarea(
+    frame: &mut Frame,
+    area: Rect,
+    state: &mut InputState,
+    theme: &Theme,
+) {
+    let width = area.width as usize;
+    let lines = state.textarea.lines();
+    let (cursor_row, cursor_col) = state.textarea.cursor();
+
+    let normal_style = Style::default().fg(theme.fg);
+    let cursor_style = Style::default().fg(theme.bg).bg(theme.fg);
+
+    // Check if textarea is empty (single empty line)
+    if lines.len() == 1 && lines[0].is_empty() {
+        let placeholder_style = Style::default().fg(theme.dim);
+        let mut all_lines: Vec<Line<'static>> = vec![Line::from(vec![
+            Span::styled("Type a message...", placeholder_style),
+        ])];
+        // Show cursor at position 0
+        all_lines[0] = Line::from(vec![
+            Span::styled(" ", cursor_style),
+            Span::styled("ype a message...", placeholder_style),
+        ]);
+        let para = Paragraph::new(all_lines);
+        frame.render_widget(para, area);
+        state.scroll_offset = 0;
+        return;
+    }
+
+    let mut all_visual_lines: Vec<Line<'static>> = Vec::new();
+    let mut cursor_visual_row: u16 = 0;
+
+    for (i, line) in lines.iter().enumerate() {
+        let cur_col = if i == cursor_row {
+            Some(cursor_col)
+        } else {
+            None
+        };
+
+        let wrapped = wrap_line_with_cursor(line, width, cur_col, normal_style, cursor_style);
+
+        if i == cursor_row {
+            if let Some(row_in_wrapped) = wrapped.cursor_visual_row {
+                cursor_visual_row = all_visual_lines.len() as u16 + row_in_wrapped as u16;
+            }
+        }
+
+        all_visual_lines.extend(wrapped.visual_lines);
+    }
+
+    // Adjust scroll to keep cursor visible
+    let visible_rows = area.height;
+    if cursor_visual_row < state.scroll_offset {
+        state.scroll_offset = cursor_visual_row;
+    }
+    if visible_rows > 0 && cursor_visual_row >= state.scroll_offset.saturating_add(visible_rows) {
+        state.scroll_offset = cursor_visual_row - visible_rows + 1;
+    }
+
+    let para = Paragraph::new(all_visual_lines).scroll((state.scroll_offset, 0));
+    frame.render_widget(para, area);
 }
 
 /// Render the input area as a 2-line starship-style prompt.
@@ -202,8 +456,8 @@ pub fn render_input(
     let input_horizontal = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(2), // "> "
-            Constraint::Min(1),   // textarea
+            Constraint::Length(CHEVRON_WIDTH), // "> "
+            Constraint::Min(1),               // textarea
         ])
         .split(textarea_area);
 
@@ -215,9 +469,7 @@ pub fn render_input(
     ));
     frame.render_widget(chevron, input_horizontal[0]);
 
-    let input_block = Block::default().borders(Borders::NONE);
-    state.textarea.set_block(input_block);
-    frame.render_widget(&state.textarea, input_horizontal[1]);
+    render_wrapped_textarea(frame, input_horizontal[1], state, theme);
 }
 
 #[cfg(test)]
@@ -399,14 +651,14 @@ mod tests {
     #[test]
     fn desired_height_empty_textarea() {
         let state = InputState::default();
-        assert_eq!(state.desired_height(20), MIN_INPUT_HEIGHT);
+        assert_eq!(state.desired_height(20, 80), MIN_INPUT_HEIGHT);
     }
 
     #[test]
     fn desired_height_single_line() {
         let mut state = InputState::default();
         state.textarea.insert_str("hello");
-        assert_eq!(state.desired_height(20), MIN_INPUT_HEIGHT);
+        assert_eq!(state.desired_height(20, 80), MIN_INPUT_HEIGHT);
     }
 
     #[test]
@@ -416,7 +668,7 @@ mod tests {
         state.textarea.insert_str("1\n2\n3\n4\n5\n6");
         assert_eq!(state.textarea.lines().len(), 6, "insert_str must split on newlines");
         // 2 overhead + 6 lines = 8
-        assert_eq!(state.desired_height(20), 8);
+        assert_eq!(state.desired_height(20, 80), 8);
     }
 
     #[test]
@@ -426,29 +678,148 @@ mod tests {
         let text = (1..=30).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
         state.textarea.insert_str(&text);
         // 2 + 30 = 32, but max_height is 12
-        assert_eq!(state.desired_height(12), 12);
+        assert_eq!(state.desired_height(12, 80), 12);
     }
 
     #[test]
     fn desired_height_max_equals_min() {
         let state = InputState::default();
-        assert_eq!(state.desired_height(MIN_INPUT_HEIGHT), MIN_INPUT_HEIGHT);
+        assert_eq!(state.desired_height(MIN_INPUT_HEIGHT, 80), MIN_INPUT_HEIGHT);
     }
 
     #[test]
     fn desired_height_max_below_min_does_not_panic() {
         let state = InputState::default();
         // max_height < MIN_INPUT_HEIGHT should return MIN_INPUT_HEIGHT, not panic
-        assert_eq!(state.desired_height(2), MIN_INPUT_HEIGHT);
+        assert_eq!(state.desired_height(2, 80), MIN_INPUT_HEIGHT);
     }
 
     #[test]
     fn desired_height_after_take_text() {
         let mut state = InputState::default();
         state.textarea.insert_str("1\n2\n3\n4\n5\n6");
-        assert_eq!(state.desired_height(20), 8);
+        assert_eq!(state.desired_height(20, 80), 8);
         let _ = state.take_text();
-        assert_eq!(state.desired_height(20), MIN_INPUT_HEIGHT);
+        assert_eq!(state.desired_height(20, 80), MIN_INPUT_HEIGHT);
+    }
+
+    #[test]
+    fn desired_height_wraps_long_line() {
+        let mut state = InputState::default();
+        // 100-char line at width 50 → 2 visual rows
+        state.textarea.insert_str(&"x".repeat(100));
+        // 2 overhead + max(2, 3 MIN_TEXTAREA_ROWS) = 5
+        assert_eq!(state.desired_height(20, 50), MIN_INPUT_HEIGHT);
+        // 200-char line at width 50 → 4 visual rows
+        let mut state2 = InputState::default();
+        state2.textarea.insert_str(&"x".repeat(200));
+        // 2 overhead + 4 visual rows = 6
+        assert_eq!(state2.desired_height(20, 50), 6);
+    }
+
+    #[test]
+    fn desired_height_width_zero_no_panic() {
+        let mut state = InputState::default();
+        state.textarea.insert_str("hello");
+        // Should not panic with width 0
+        let h = state.desired_height(20, 0);
+        assert!(h >= MIN_INPUT_HEIGHT);
+    }
+
+    // -- count_visual_lines tests --
+
+    #[test]
+    fn count_visual_lines_empty() {
+        let lines = vec!["".to_string()];
+        assert_eq!(count_visual_lines(&lines, 80), 1);
+    }
+
+    #[test]
+    fn count_visual_lines_short_lines() {
+        let lines = vec!["hello".to_string(), "world".to_string()];
+        assert_eq!(count_visual_lines(&lines, 80), 2);
+    }
+
+    #[test]
+    fn count_visual_lines_exact_width() {
+        let lines = vec!["x".repeat(50)];
+        assert_eq!(count_visual_lines(&lines, 50), 1);
+    }
+
+    #[test]
+    fn count_visual_lines_wraps() {
+        let lines = vec!["x".repeat(120)];
+        assert_eq!(count_visual_lines(&lines, 50), 3); // ceil(120/50) = 3
+    }
+
+    #[test]
+    fn count_visual_lines_width_zero() {
+        let lines = vec!["hello".to_string(), "world".to_string()];
+        assert_eq!(count_visual_lines(&lines, 0), 2);
+    }
+
+    // -- wrap_line_with_cursor tests --
+
+    #[test]
+    fn wrap_line_no_cursor_short() {
+        let normal = Style::default();
+        let cursor = Style::default().add_modifier(Modifier::REVERSED);
+        let result = wrap_line_with_cursor("hello", 80, None, normal, cursor);
+        assert_eq!(result.visual_lines.len(), 1);
+        assert!(result.cursor_visual_row.is_none());
+    }
+
+    #[test]
+    fn wrap_line_cursor_at_start() {
+        let normal = Style::default();
+        let cursor = Style::default().add_modifier(Modifier::REVERSED);
+        let result = wrap_line_with_cursor("hello", 80, Some(0), normal, cursor);
+        assert_eq!(result.visual_lines.len(), 1);
+        assert_eq!(result.cursor_visual_row, Some(0));
+        // First span should be the cursor char 'h'
+        assert_eq!(result.visual_lines[0].spans[0].content.as_ref(), "h");
+        assert_eq!(result.visual_lines[0].spans[0].style, cursor);
+    }
+
+    #[test]
+    fn wrap_line_cursor_at_eol() {
+        let normal = Style::default();
+        let cursor = Style::default().add_modifier(Modifier::REVERSED);
+        let result = wrap_line_with_cursor("hi", 80, Some(2), normal, cursor);
+        assert_eq!(result.visual_lines.len(), 1);
+        assert_eq!(result.cursor_visual_row, Some(0));
+        // Should have normal "hi" + cursor space
+        assert_eq!(result.visual_lines[0].spans.len(), 2);
+        assert_eq!(result.visual_lines[0].spans[1].content.as_ref(), " ");
+        assert_eq!(result.visual_lines[0].spans[1].style, cursor);
+    }
+
+    #[test]
+    fn wrap_line_wraps_at_width() {
+        let normal = Style::default();
+        let cursor = Style::default().add_modifier(Modifier::REVERSED);
+        // 10 chars at width 5 → 2 visual lines
+        let result = wrap_line_with_cursor("abcdefghij", 5, None, normal, cursor);
+        assert_eq!(result.visual_lines.len(), 2);
+    }
+
+    #[test]
+    fn wrap_line_cursor_on_second_visual_line() {
+        let normal = Style::default();
+        let cursor = Style::default().add_modifier(Modifier::REVERSED);
+        // "abcdefghij" at width 5, cursor at col 7 ('h') → visual row 1
+        let result = wrap_line_with_cursor("abcdefghij", 5, Some(7), normal, cursor);
+        assert_eq!(result.cursor_visual_row, Some(1));
+    }
+
+    #[test]
+    fn wrap_line_eol_cursor_wraps_to_new_line() {
+        let normal = Style::default();
+        let cursor = Style::default().add_modifier(Modifier::REVERSED);
+        // Exactly 5 chars at width 5, cursor at col 5 (EOL) → wraps to row 1
+        let result = wrap_line_with_cursor("abcde", 5, Some(5), normal, cursor);
+        assert_eq!(result.visual_lines.len(), 2);
+        assert_eq!(result.cursor_visual_row, Some(1));
     }
 
     #[test]
