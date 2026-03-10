@@ -166,15 +166,12 @@ fn wrap_line_with_cursor(
     // Now handle cursor rendering
     if let Some(col) = cursor_col {
         if col >= char_count {
-            // Cursor at EOL
+            // Cursor at EOL — compute the display width of the last visual line
             let last_row = visual_lines.len() - 1;
-            let last_line_text: String = visual_lines[last_row]
+            let last_line_width: usize = visual_lines[last_row]
                 .spans
                 .iter()
-                .map(|s| s.content.as_ref())
-                .collect();
-            let last_line_width: usize = last_line_text
-                .chars()
+                .flat_map(|s| s.content.chars())
                 .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
                 .sum();
 
@@ -184,6 +181,11 @@ fn wrap_line_with_cursor(
                 cursor_visual_row = Some(visual_lines.len() - 1);
             } else {
                 // Append cursor space to last line
+                let last_line_text: String = visual_lines[last_row]
+                    .spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect();
                 let mut spans = vec![Span::styled(last_line_text, normal_style)];
                 spans.push(Span::styled(" ", cursor_style));
                 visual_lines[last_row] = Line::from(spans);
@@ -260,7 +262,28 @@ impl InputState {
     pub fn desired_height(&self, max_height: u16, available_width: u16) -> u16 {
         let cap = max_height.max(MIN_INPUT_HEIGHT);
         let lines: Vec<String> = self.textarea.lines().iter().map(|s| s.to_string()).collect();
-        let visual_rows = count_visual_lines(&lines, available_width as usize);
+        let width = available_width as usize;
+        let mut visual_rows = count_visual_lines(&lines, width);
+
+        // Account for EOL cursor overflow: when the cursor is at the end of a
+        // line that exactly fills the available width, the cursor wraps to a new
+        // visual row. Reserve that extra row so the input box doesn't scroll.
+        if width > 0 {
+            let (cursor_row, cursor_col) = self.textarea.cursor();
+            if let Some(cursor_line) = lines.get(cursor_row) {
+                let char_count = cursor_line.chars().count();
+                if cursor_col >= char_count {
+                    let line_width: usize = cursor_line
+                        .chars()
+                        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+                        .sum();
+                    if line_width > 0 && line_width % width == 0 {
+                        visual_rows = visual_rows.saturating_add(1);
+                    }
+                }
+            }
+        }
+
         let textarea_rows = visual_rows.max(MIN_TEXTAREA_ROWS);
         let total = INPUT_OVERHEAD + textarea_rows;
         total.clamp(MIN_INPUT_HEIGHT, cap)
@@ -710,11 +733,11 @@ mod tests {
         state.textarea.insert_str(&"x".repeat(100));
         // 2 overhead + max(2, 3 MIN_TEXTAREA_ROWS) = 5
         assert_eq!(state.desired_height(20, 50), MIN_INPUT_HEIGHT);
-        // 200-char line at width 50 → 4 visual rows
+        // 200-char line at width 50 → 4 visual rows + 1 EOL cursor overflow = 5
         let mut state2 = InputState::default();
         state2.textarea.insert_str(&"x".repeat(200));
-        // 2 overhead + 4 visual rows = 6
-        assert_eq!(state2.desired_height(20, 50), 6);
+        // 2 overhead + 5 visual rows = 7
+        assert_eq!(state2.desired_height(20, 50), 7);
     }
 
     #[test]
@@ -820,6 +843,30 @@ mod tests {
         let result = wrap_line_with_cursor("abcde", 5, Some(5), normal, cursor);
         assert_eq!(result.visual_lines.len(), 2);
         assert_eq!(result.cursor_visual_row, Some(1));
+    }
+
+    #[test]
+    fn desired_height_eol_cursor_overflow_reserves_extra_row() {
+        let mut state = InputState::default();
+        // Insert exactly 50 chars at width 50 — line fills exactly.
+        // Cursor is at EOL (col 50), so it overflows to a new visual row.
+        state.textarea.insert_str(&"x".repeat(50));
+        // Without the fix: count_visual_lines gives 1, desired_height = 2 + max(1, 3) = 5
+        // With the fix: 1 + 1 = 2 visual rows, desired_height = 2 + max(2, 3) = 5
+        // Need more than MIN_TEXTAREA_ROWS to see the effect:
+        // 200 chars at width 50 = 4 visual rows, cursor at EOL = 5 visual rows
+        let mut state2 = InputState::default();
+        state2.textarea.insert_str(&"x".repeat(200));
+        // cursor at col 200 (EOL), line_width=200, 200%50=0 → overflow row
+        assert_eq!(state2.desired_height(20, 50), 7); // 2 + 5 = 7
+    }
+
+    #[test]
+    fn take_text_multiline_round_trip() {
+        let mut state = InputState::default();
+        state.textarea.insert_str("line1\nline2\nline3");
+        let text = state.take_text();
+        assert_eq!(text, "line1\nline2\nline3");
     }
 
     #[test]
