@@ -33,8 +33,9 @@ use crate::ui::autocomplete::{AutocompleteMode, AutocompleteState, apply_file_co
 use crate::ui::input::InputState;
 use crate::ui::message_area::MessageAreaState;
 use crate::ui::message_block::{
-    AssistantPart, CodeFence, DiffContent, DiffLine, MessageBlock, ToolCall,
+    AssistantPart, DiffContent, DiffLine, MessageBlock, ToolCall,
 };
+use crate::ui::selection::SelectionState;
 use crate::ui::sidebar::{SidebarState, count_diff_lines};
 use crate::ui::status_line::{Activity, StatusLineState};
 use crate::ui::theme::Theme;
@@ -221,54 +222,6 @@ fn parse_unified_diff_lines(patch: &str) -> Vec<DiffLine> {
     lines
 }
 
-// Extract the last fenced code block from conversation messages.
-//
-// Scans messages backwards for `MessageBlock::Assistant` blocks, then scans
-// their text parts for CommonMark fenced code blocks (at least three backticks
-// with ≤3 leading spaces). Returns the content of the last code block found,
-// or `None` if there are no code blocks.
-fn extract_last_code_block(messages: &[MessageBlock]) -> Option<String> {
-    for msg in messages.iter().rev() {
-        if let MessageBlock::Assistant { parts, .. } = msg {
-            // Scan parts backwards — we want the last code block in the most recent assistant message
-            for part in parts.iter().rev() {
-                if let AssistantPart::Text(text) = part {
-                    let mut in_code_block = false;
-                    let mut current_block = Vec::new();
-                    let mut last_block: Option<String> = None;
-
-                    for line in text.lines() {
-                        match CodeFence::classify(line, in_code_block) {
-                            CodeFence::Open { .. } => {
-                                in_code_block = true;
-                                current_block.clear();
-                            }
-                            CodeFence::Close => {
-                                last_block = Some(current_block.join("\n"));
-                                in_code_block = false;
-                                current_block.clear();
-                            }
-                            CodeFence::NotFence if in_code_block => {
-                                current_block.push(line);
-                            }
-                            CodeFence::NotFence => {}
-                        }
-                    }
-                    // Unclosed code block — still capture it
-                    if in_code_block && !current_block.is_empty() {
-                        last_block = Some(current_block.join("\n"));
-                    }
-
-                    if last_block.is_some() {
-                        return last_block;
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
 pub struct App {
     // Core state
     pub project: ProjectInfo,
@@ -338,6 +291,12 @@ pub struct App {
 
     /// Lazily populated file index for `@` autocomplete.
     file_index: Option<Vec<String>>,
+
+    /// Text selection state for copy-on-select.
+    pub selection_state: SelectionState,
+
+    /// Message area rect from last render (for mouse hit-testing).
+    pub last_message_area: ratatui::layout::Rect,
 
     // Runtime
     event_tx: mpsc::UnboundedSender<AppEvent>,
@@ -431,6 +390,8 @@ impl App {
             last_prompt_tokens: 0,
             sidebar_override: None,
             file_index: None,
+            selection_state: SelectionState::default(),
+            last_message_area: ratatui::layout::Rect::default(),
             event_tx,
             event_rx,
             should_quit: false,
@@ -595,11 +556,74 @@ impl App {
     async fn handle_event(&mut self, event: AppEvent) -> Result<()> {
         match event {
             AppEvent::Input(Event::Key(key)) => self.handle_key(key).await?,
-            AppEvent::Input(Event::Mouse(mouse)) => match mouse.kind {
-                MouseEventKind::ScrollDown => self.message_area_state.scroll_down(3),
-                MouseEventKind::ScrollUp => self.message_area_state.scroll_up(3),
-                _ => {}
-            },
+            AppEvent::Input(Event::Mouse(mouse)) => {
+                use crossterm::event::MouseButton;
+                match mouse.kind {
+                    MouseEventKind::ScrollDown => self.message_area_state.scroll_down(3),
+                    MouseEventKind::ScrollUp => self.message_area_state.scroll_up(3),
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        let area = self.last_message_area;
+                        if mouse.row >= area.y
+                            && mouse.row < area.y + area.height
+                            && mouse.column >= area.x
+                            && mouse.column < area.x + area.width
+                        {
+                            // Clear any previous selection and start a new drag
+                            self.selection_state.clear();
+                            if let Some(map) = &self.message_area_state.content_map {
+                                if let Some(pos) = map.screen_to_content(
+                                    mouse.row,
+                                    mouse.column,
+                                    self.message_area_state.scroll_offset,
+                                    area.y,
+                                    area.x,
+                                ) {
+                                    self.selection_state.anchor = Some(pos);
+                                    self.selection_state.cursor = Some(pos);
+                                    self.selection_state.dragging = true;
+                                }
+                            }
+                        }
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        if self.selection_state.dragging {
+                            let area = self.last_message_area;
+                            // Scroll-to-select: scroll when dragging past edges
+                            if mouse.row < area.y {
+                                self.message_area_state.scroll_up(1);
+                            } else if mouse.row >= area.y + area.height {
+                                self.message_area_state.scroll_down(1);
+                            }
+                            if let Some(map) = &self.message_area_state.content_map {
+                                if let Some(pos) = map.screen_to_content(
+                                    mouse.row,
+                                    mouse.column,
+                                    self.message_area_state.scroll_offset,
+                                    area.y,
+                                    area.x,
+                                ) {
+                                    self.selection_state.cursor = Some(pos);
+                                }
+                            }
+                        }
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        if self.selection_state.dragging {
+                            self.selection_state.dragging = false;
+                            // If we have a valid selection range, copy to clipboard
+                            if let Some((start, end)) = self.selection_state.ordered_range() {
+                                if let Some(map) = &self.message_area_state.content_map {
+                                    let text = map.extract_text(&start, &end);
+                                    if !text.is_empty() {
+                                        self.copy_to_clipboard(&text);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
             AppEvent::Input(Event::Paste(text)) => {
                 if self.pending_permission.is_none() {
                     self.input.textarea.insert_str(&text);
@@ -610,6 +634,12 @@ impl App {
             AppEvent::Input(Event::Resize(_, _)) => {}
             AppEvent::Tick => {
                 self.status_line_state.tick();
+                // Clear expired "Copied!" flash
+                if let Some(t) = self.selection_state.copied_flash {
+                    if t.elapsed().as_secs() >= 1 {
+                        self.selection_state.copied_flash = None;
+                    }
+                }
             }
 
             // -- Streaming events --
@@ -872,51 +902,71 @@ impl App {
         Ok(())
     }
 
-    /// Copy the last code block to the system clipboard via OSC 52.
-    /// Pushes a system message indicating success or failure.
-    fn copy_last_code_block_to_clipboard(&mut self) {
-        match extract_last_code_block(&self.messages) {
-            Some(content) => {
-                use base64::Engine;
-                let encoded = base64::engine::general_purpose::STANDARD.encode(&content);
-                let mut stdout = std::io::stdout();
-                let write_result = std::io::Write::write_fmt(
-                    &mut stdout,
-                    format_args!("\x1b]52;c;{encoded}\x07"),
-                );
-                let result = write_result.and_then(|_| std::io::Write::flush(&mut stdout));
-                let n = content.lines().count();
-                match result {
-                    Ok(()) => {
-                        self.messages.push(MessageBlock::System {
-                            text: format!("Copied {n} lines to clipboard"),
-                        });
-                    }
-                    Err(err) => {
-                        self.messages.push(MessageBlock::Error {
-                            text: format!("Failed to copy to clipboard via OSC 52: {err}"),
-                        });
-                    }
+    /// Copy text to the system clipboard.
+    /// Tries pbcopy (macOS), xclip (Linux), then falls back to OSC 52.
+    fn copy_to_clipboard(&mut self, text: &str) {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        // Try pbcopy (macOS)
+        let ok = Command::new("pbcopy")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .and_then(|mut child| {
+                if let Some(stdin) = child.stdin.as_mut() {
+                    stdin.write_all(text.as_bytes())?;
                 }
-            }
-            None => {
-                self.messages.push(MessageBlock::System {
-                    text: "No code block to copy".to_string(),
-                });
-            }
+                child.wait()
+            })
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            self.selection_state.copied_flash = Some(std::time::Instant::now());
+            return;
         }
-        self.message_area_state.scroll_to_bottom();
+
+        // Try xclip (Linux)
+        let ok = Command::new("xclip")
+            .args(["-selection", "clipboard"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .and_then(|mut child| {
+                if let Some(stdin) = child.stdin.as_mut() {
+                    stdin.write_all(text.as_bytes())?;
+                }
+                child.wait()
+            })
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            self.selection_state.copied_flash = Some(std::time::Instant::now());
+            return;
+        }
+
+        // Fallback: OSC 52
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+        let mut stdout = std::io::stdout();
+        let write_result = std::io::Write::write_fmt(
+            &mut stdout,
+            format_args!("\x1b]52;c;{encoded}\x07"),
+        );
+        let result = write_result.and_then(|_| std::io::Write::flush(&mut stdout));
+        if result.is_ok() {
+            self.selection_state.copied_flash = Some(std::time::Instant::now());
+        } else {
+            tracing::error!("failed to copy to clipboard via any method");
+        }
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         // If there's a pending permission prompt, intercept keystrokes
         if self.pending_permission.is_some() {
             match (key.code, key.modifiers) {
-                (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
-                    // Ctrl+Y: copy last code block to clipboard (even during permission prompt)
-                    self.copy_last_code_block_to_clipboard();
-                    return Ok(());
-                }
                 (KeyCode::Char('y'), _) | (KeyCode::Char('Y'), _) => {
                     if let Some(perm) = self.pending_permission.take() {
                         let _ = perm.response_tx.send(PermissionReply::AllowOnce);
@@ -1056,9 +1106,6 @@ impl App {
                     Some(false) => Some(true), // hidden -> show
                     Some(true) => None,        // forced visible -> auto
                 };
-            }
-            (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
-                self.copy_last_code_block_to_clipboard();
             }
             (KeyCode::Enter, KeyModifiers::SHIFT) => {
                 // Shift+Enter: insert newline in textarea (forward as plain Enter)
@@ -1803,9 +1850,10 @@ impl App {
                 self.session_browse_list = None;
                 // Reset tool result cache for the new session
                 *self.tool_cache.lock().unwrap() = ToolResultCache::new(self.project.root.clone());
-                // Clear changeset tracking, todos, and reset token counters
+                // Clear changeset tracking, todos, selection, and reset token counters
                 self.sidebar_state.changes.clear();
                 crate::tool::todo::clear_todos();
+                self.selection_state.clear();
                 self.ensure_session();
                 self.sync_sidebar_tokens();
                 self.message_area_state.scroll_to_bottom();
@@ -2078,7 +2126,7 @@ impl App {
             }
             Command::Help => {
                 self.messages.push(MessageBlock::System {
-                    text: "Commands:\n  /new            \u{2014} Start a new session\n  /rename <t>     \u{2014} Rename current session\n  /models         \u{2014} List available models\n  /model <r>      \u{2014} Switch to a model\n  /compact        \u{2014} Compact conversation into a summary\n  /sessions       \u{2014} Browse sessions\n  /export-debug   \u{2014} Export session with logs\n  /init           \u{2014} Create AGENTS.md in project root\n  /help           \u{2014} Show this help\n  /exit           \u{2014} Quit\n\nKeys:\n  Enter       \u{2014} Send message\n  Shift+Enter \u{2014} Insert newline\n  Tab         \u{2014} Accept autocomplete / toggle Build\u{2013}Plan mode\n  Up/Down     \u{2014} Navigate autocomplete list\n  Ctrl+C      \u{2014} Cancel stream / quit\n  Ctrl+B      \u{2014} Toggle sidebar\n  Ctrl+Y      \u{2014} Copy last code block to clipboard (OSC 52)\n  Mouse wheel \u{2014} Scroll messages\n\nTips:\n  Shift+click/drag \u{2014} Select text for copy (terminal feature)".to_string(),
+                    text: "Commands:\n  /new            \u{2014} Start a new session\n  /rename <t>     \u{2014} Rename current session\n  /models         \u{2014} List available models\n  /model <r>      \u{2014} Switch to a model\n  /compact        \u{2014} Compact conversation into a summary\n  /sessions       \u{2014} Browse sessions\n  /export-debug   \u{2014} Export session with logs\n  /init           \u{2014} Create AGENTS.md in project root\n  /help           \u{2014} Show this help\n  /exit           \u{2014} Quit\n\nKeys:\n  Enter       \u{2014} Send message\n  Shift+Enter \u{2014} Insert newline\n  Tab         \u{2014} Accept autocomplete / toggle Build\u{2013}Plan mode\n  Up/Down     \u{2014} Navigate autocomplete list\n  Ctrl+C      \u{2014} Cancel stream / quit\n  Ctrl+B      \u{2014} Toggle sidebar\n  Mouse wheel \u{2014} Scroll messages\n  Click+drag  \u{2014} Select text (auto-copies to clipboard)".to_string(),
                 });
             }
         }
@@ -2628,117 +2676,6 @@ pub(crate) mod tests {
             app.strip_project_root("/tmp/test-backup/file.rs"),
             "/tmp/test-backup/file.rs"
         );
-    }
-
-    // --- extract_last_code_block tests ---
-
-    fn assistant_text(text: &str) -> MessageBlock {
-        MessageBlock::Assistant {
-            thinking: None,
-            parts: vec![AssistantPart::Text(text.to_string())],
-        }
-    }
-
-    #[test]
-    fn extract_last_code_block_no_messages() {
-        assert_eq!(extract_last_code_block(&[]), None);
-    }
-
-    #[test]
-    fn extract_last_code_block_no_code_blocks() {
-        let msgs = vec![assistant_text("Just some text without any code.")];
-        assert_eq!(extract_last_code_block(&msgs), None);
-    }
-
-    #[test]
-    fn extract_last_code_block_single_block() {
-        let msgs = vec![assistant_text("Here:\n```\nfoo\nbar\n```\nDone.")];
-        assert_eq!(extract_last_code_block(&msgs), Some("foo\nbar".to_string()));
-    }
-
-    #[test]
-    fn extract_last_code_block_multiple_blocks_returns_last() {
-        let msgs = vec![assistant_text(
-            "First:\n```\nalpha\n```\nSecond:\n```\nbeta\n```",
-        )];
-        assert_eq!(extract_last_code_block(&msgs), Some("beta".to_string()));
-    }
-
-    #[test]
-    fn extract_last_code_block_with_language_label() {
-        let msgs = vec![assistant_text("```rust\nfn main() {}\n```")];
-        assert_eq!(
-            extract_last_code_block(&msgs),
-            Some("fn main() {}".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_last_code_block_indented_backticks_not_fence() {
-        // >3 leading spaces means it's NOT a fence — treated as code content
-        let msgs = vec![assistant_text("```\n    ```\nreal content\n```")];
-        let result = extract_last_code_block(&msgs).unwrap();
-        assert!(result.contains("    ```"));
-        assert!(result.contains("real content"));
-    }
-
-    #[test]
-    fn extract_last_code_block_three_spaces_is_fence() {
-        // Exactly 3 leading spaces is still a valid fence
-        let msgs = vec![assistant_text("   ```\nindented fence\n   ```")];
-        assert_eq!(
-            extract_last_code_block(&msgs),
-            Some("indented fence".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_last_code_block_multiple_assistant_messages() {
-        let msgs = vec![
-            assistant_text("Old:\n```\nold code\n```"),
-            MessageBlock::User {
-                text: "continue".to_string(),
-            },
-            assistant_text("New:\n```\nnew code\n```"),
-        ];
-        // Should find the block in the most recent assistant message
-        assert_eq!(extract_last_code_block(&msgs), Some("new code".to_string()));
-    }
-
-    #[test]
-    fn extract_last_code_block_skips_non_assistant() {
-        let msgs = vec![
-            MessageBlock::User {
-                text: "```\nnot this\n```".to_string(),
-            },
-            MessageBlock::System {
-                text: "```\nor this\n```".to_string(),
-            },
-        ];
-        assert_eq!(extract_last_code_block(&msgs), None);
-    }
-
-    #[test]
-    fn extract_last_code_block_unclosed_block() {
-        // Unclosed code block should still be captured
-        let msgs = vec![assistant_text("```\nunclosed content")];
-        assert_eq!(
-            extract_last_code_block(&msgs),
-            Some("unclosed content".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_last_code_block_scans_parts_backwards() {
-        // Multiple text parts in one assistant message — should find the last one's block
-        let msg = MessageBlock::Assistant {
-            thinking: None,
-            parts: vec![
-                AssistantPart::Text("```\nearly\n```".to_string()),
-                AssistantPart::Text("```\nlater\n```".to_string()),
-            ],
-        };
-        assert_eq!(extract_last_code_block(&[msg]), Some("later".to_string()));
     }
 
     /// Create a minimal App for testing (without real storage/config).

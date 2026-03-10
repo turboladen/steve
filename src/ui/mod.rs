@@ -3,6 +3,7 @@ pub mod input;
 pub mod layout;
 pub mod message_area;
 pub mod message_block;
+pub mod selection;
 pub mod sidebar;
 pub mod status_line;
 pub mod syntax;
@@ -108,6 +109,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         None
     };
 
+    // Store message area rect for mouse event hit-testing
+    app.last_message_area = layout.message_area;
+
     render_message_blocks(
         frame,
         layout.message_area,
@@ -116,6 +120,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         &app.theme,
         activity,
         pct,
+        &app.selection_state,
     );
 
     if let Some(sep_area) = layout.sidebar_separator {

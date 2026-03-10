@@ -24,6 +24,7 @@ pub struct Theme {
     pub code_bg: Color,
     pub context_amber: Color,
     pub system_msg: Color,
+    pub selection_bg: Color,
 }
 
 impl Default for Theme {
@@ -75,6 +76,7 @@ impl Theme {
             code_bg: Color::Rgb(28, 26, 23),           // Darker code background
             context_amber: Color::Rgb(150, 125, 55),   // Warm amber-brown
             system_msg: Color::Rgb(130, 145, 160),     // Cool slate (distinct from dim)
+            selection_bg: Color::Rgb(60, 60, 80),       // Subtle blue-gray selection tint
         }
     }
 
@@ -101,6 +103,7 @@ impl Theme {
             code_bg: Color::Rgb(240, 238, 235),           // Off-white (slight tint from bg)
             context_amber: Color::Rgb(160, 120, 40),      // Darker amber for light bg
             system_msg: Color::Rgb(70, 90, 110),          // Dark slate
+            selection_bg: Color::Rgb(180, 210, 240),       // Light blue selection tint
         }
     }
 }

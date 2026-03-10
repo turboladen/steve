@@ -251,8 +251,7 @@ impl MessageBlock {
 /// Classification of a text line as a CommonMark fenced code block delimiter.
 ///
 /// A fence is at least three backticks (`` ``` ``) with ≤3 leading ASCII spaces per the CommonMark spec.
-/// Used by `render_text_with_code_blocks()` and `extract_last_code_block()` as the single
-/// source of truth for fence detection.
+/// Used by `render_text_with_code_blocks()` as the single source of truth for fence detection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodeFence {
     /// Not a fence — regular text line.

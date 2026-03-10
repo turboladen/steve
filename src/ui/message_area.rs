@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use super::message_block::{AssistantPart, CodeFence, DiffContent, DiffLine, MessageBlock, ToolGroup, ToolGroupStatus};
+use super::selection::{ContentMap, ContentPos, SelectionState};
 use super::syntax;
 use super::theme::Theme;
 use crate::tool::{IntentCategory, ToolName};
@@ -25,6 +26,8 @@ pub struct MessageAreaState {
     content_height: u16,
     /// Visible area height from last render.
     visible_height: u16,
+    /// Content map built during last render (for coordinate mapping).
+    pub content_map: Option<ContentMap>,
 }
 
 impl Default for MessageAreaState {
@@ -34,6 +37,7 @@ impl Default for MessageAreaState {
             auto_scroll: true,
             content_height: 0,
             visible_height: 0,
+            content_map: None,
         }
     }
 }
@@ -160,31 +164,55 @@ fn prepend_gutter<'a>(line: Line<'a>, mark: GutterMark, theme: &Theme) -> Line<'
     Line::from(spans).style(line.style)
 }
 
-/// Wrapper around `Vec<Line>` that auto-prepends gutter marks to every line.
+/// Wrapper around `Vec<Line>` that auto-prepends gutter marks to every line
+/// and tracks parallel plain text for ContentMap building.
 struct GutteredLines<'a> {
     lines: Vec<Line<'a>>,
+    /// Plain text for each line (gutter-stripped), parallel to `lines`.
+    texts: Vec<String>,
     theme: &'a Theme,
 }
 
 impl<'a> GutteredLines<'a> {
     fn new(theme: &'a Theme) -> Self {
-        Self { lines: Vec::new(), theme }
+        Self { lines: Vec::new(), texts: Vec::new(), theme }
     }
 
     fn push(&mut self, line: Line<'a>, mark: GutterMark) {
+        let plain = extract_plain_text(&line);
         self.lines.push(prepend_gutter(line, mark, self.theme));
+        self.texts.push(plain);
+    }
+
+    /// Push a line with an explicit plain text override.
+    /// Use when the line contains decoration spans (e.g. `│ `) that shouldn't
+    /// appear in clipboard text.
+    fn push_with_text(&mut self, line: Line<'a>, mark: GutterMark, plain: String) {
+        self.lines.push(prepend_gutter(line, mark, self.theme));
+        self.texts.push(plain);
     }
 
     /// Extend with lines from a helper function, applying the same mark to all.
     fn extend(&mut self, new_lines: Vec<Line<'a>>, mark: GutterMark) {
         for line in new_lines {
+            let plain = extract_plain_text(&line);
             self.lines.push(prepend_gutter(line, mark, self.theme));
+            self.texts.push(plain);
         }
     }
 
-    fn into_lines(self) -> Vec<Line<'a>> {
-        self.lines
+    fn into_lines_and_texts(self) -> (Vec<Line<'a>>, Vec<String>) {
+        (self.lines, self.texts)
     }
+}
+
+/// Extract plain text content from a Line's spans (before gutter prepend).
+fn extract_plain_text(line: &Line<'_>) -> String {
+    let mut text = String::new();
+    for span in &line.spans {
+        text.push_str(&span.content);
+    }
+    text
 }
 
 /// Render structured message blocks into the given area.
@@ -196,15 +224,13 @@ pub fn render_message_blocks(
     theme: &Theme,
     activity: Option<(char, String)>,
     context_pct: u8,
+    selection: &SelectionState,
 ) {
     let mut glines = GutteredLines::new(theme);
     let available_width = area.width.max(1) as usize;
     let content_width = available_width.saturating_sub(GUTTER_WIDTH);
 
-    // Pre-scan: identify which (msg_idx, part_idx) has the last code block
-    let last_code_pos = find_last_code_block_position(messages);
-
-    for (msg_idx, msg) in messages.iter().enumerate() {
+    for msg in messages.iter() {
         match msg {
             MessageBlock::User { text } => {
                 for text_line in text.lines() {
@@ -217,7 +243,8 @@ pub fn render_message_blocks(
                         ),
                     ];
                     spans.extend(style_file_refs(text_line, theme));
-                    glines.push(Line::from(spans), GutterMark::Empty);
+                    // Use push_with_text to exclude the "│ " decoration from clipboard text
+                    glines.push_with_text(Line::from(spans), GutterMark::Empty, text_line.to_string());
                 }
             }
 
@@ -255,12 +282,11 @@ pub fn render_message_blocks(
                 // consecutive same-category tool groups (e.g. 3 reads in a row).
                 // Text between groups resets tracking so the label reappears.
                 let mut last_intent: Option<IntentCategory> = None;
-                for (part_idx, part) in parts.iter().enumerate() {
+                for part in parts.iter() {
                     match part {
                         AssistantPart::Text(text) => {
-                            let show_copy_hint = last_code_pos == Some((msg_idx, part_idx));
                             let mut text_lines: Vec<Line> = Vec::new();
-                            render_text_with_code_blocks(text, &mut text_lines, theme, content_width, show_copy_hint);
+                            render_text_with_code_blocks(text, &mut text_lines, theme, content_width);
                             glines.extend(text_lines, GutterMark::Empty);
                             last_intent = None;
                         }
@@ -430,7 +456,16 @@ pub fn render_message_blocks(
         glines.push(Line::from(""), GutterMark::Empty);
     }
 
-    let lines = glines.into_lines();
+    let (mut lines, texts) = glines.into_lines_and_texts();
+
+    // Build content map for coordinate mapping (used by mouse selection)
+    let content_map = ContentMap::build(texts, available_width);
+    state.content_map = Some(content_map);
+
+    // Apply selection highlighting
+    if let Some((sel_start, sel_end)) = selection.ordered_range() {
+        apply_selection_highlight(&mut lines, &sel_start, &sel_end, available_width, theme);
+    }
 
     // Compute content height with wrapping
     let content_height_u32: u32 = lines
@@ -459,6 +494,89 @@ pub fn render_message_blocks(
         .scroll((state.scroll_offset, 0));
 
     frame.render_widget(paragraph, area);
+
+    // "Copied!" flash overlay
+    if let Some(flash_time) = selection.copied_flash {
+        if flash_time.elapsed().as_millis() < 1000 {
+            let flash_text = " Copied! ";
+            let flash_width = flash_text.len() as u16;
+            if area.width >= flash_width + 2 {
+                let flash_area = Rect::new(
+                    area.x + area.width - flash_width - 1,
+                    area.y,
+                    flash_width,
+                    1,
+                );
+                let flash = Paragraph::new(Line::from(Span::styled(
+                    flash_text,
+                    Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
+                )));
+                frame.render_widget(flash, flash_area);
+            }
+        }
+    }
+}
+
+/// Apply selection highlighting to lines between `start` and `end` content positions.
+///
+/// Modifies span background colors on affected lines. The gutter occupies the first
+/// `GUTTER_WIDTH` characters of each line — selection only highlights content spans.
+fn apply_selection_highlight(
+    lines: &mut [Line<'_>],
+    start: &ContentPos,
+    end: &ContentPos,
+    _available_width: usize,
+    theme: &Theme,
+) {
+    for line_idx in start.line..=end.line.min(lines.len().saturating_sub(1)) {
+        if line_idx >= lines.len() {
+            break;
+        }
+
+        // Determine the character range to highlight within this line's content (after gutter)
+        let line_start = if line_idx == start.line { start.char_offset } else { 0 };
+        let line_end = if line_idx == end.line {
+            end.char_offset
+        } else {
+            // Select to end of line — use a large number, clamping happens below
+            usize::MAX
+        };
+
+        if line_start >= line_end && line_idx == start.line && line_idx == end.line {
+            continue;
+        }
+
+        // Walk through spans, skipping gutter spans and highlighting content spans
+        let mut char_pos: usize = 0;
+        let mut in_gutter = true;
+        let mut gutter_chars = 0;
+
+        let line = &mut lines[line_idx];
+        for span in &mut line.spans {
+            let span_len = span.content.chars().count();
+
+            if in_gutter {
+                gutter_chars += span_len;
+                if gutter_chars >= GUTTER_WIDTH {
+                    in_gutter = false;
+                }
+                continue;
+            }
+
+            let span_start = char_pos;
+            let span_end = char_pos + span_len;
+
+            // Check if this span overlaps the selection range
+            if span_start < line_end && span_end > line_start {
+                // Full or partial overlap — for simplicity, highlight the entire span
+                // if it overlaps at all. True character-level splitting would require
+                // reconstructing spans, which is complex for marginal benefit.
+                span.style = span.style.bg(theme.selection_bg);
+            }
+
+            char_pos += span_len;
+        }
+    }
 }
 
 /// Render diff content into styled lines with box-drawing frame.
@@ -569,66 +687,18 @@ fn render_intent_line(category: IntentCategory, width: usize, theme: &Theme) -> 
     Line::from(Span::styled(full, Style::default().fg(color)))
 }
 
-/// Find the `(msg_idx, part_idx)` of the last assistant text part that contains
-/// a code block. Scans messages backward, mirroring `extract_last_code_block()`
-/// in app.rs. Returns `None` if no code blocks exist.
-fn find_last_code_block_position(messages: &[MessageBlock]) -> Option<(usize, usize)> {
-    for (msg_idx, msg) in messages.iter().enumerate().rev() {
-        if let MessageBlock::Assistant { parts, .. } = msg {
-            for (part_idx, part) in parts.iter().enumerate().rev() {
-                if let AssistantPart::Text(text) = part {
-                    let mut in_code_block = false;
-                    let mut found = false;
-                    for line in text.lines() {
-                        match CodeFence::classify(line, in_code_block) {
-                            CodeFence::Open { .. } => {
-                                in_code_block = true;
-                                found = true;
-                            }
-                            CodeFence::Close => {
-                                in_code_block = false;
-                            }
-                            CodeFence::NotFence => {}
-                        }
-                    }
-                    if found {
-                        return Some((msg_idx, part_idx));
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Tracks the last code block header position within a `render_text_with_code_blocks` call
-/// so we can post-patch it with the copy hint.
-enum LastHeaderInfo {
-    /// A rendered header line (language label) — index into the `lines` vec.
-    Rendered(usize),
-    /// A bare fence (no language) that produced no header — insertion point in `lines` vec.
-    BareAt(usize),
-}
-
 /// Detect fenced code blocks in assistant text and render with tinted background.
 ///
 /// Uses a stateless line-by-line scanner: lines starting with ` ``` ` (≤3 leading
 /// spaces) toggle code block mode. Opening fences emit a header line with optional
 /// language label; closing fences are consumed. Code lines get `code_bg` background.
-///
-/// When `show_copy_hint` is true, the last code block's header line gets a
-/// right-aligned copy hint (dim text on code_bg) to indicate the copy-to-clipboard
-/// keybinding. Bare fences that normally produce no header get a minimal header
-/// inserted just for the hint.
 fn render_text_with_code_blocks(
     text: &str,
     lines: &mut Vec<Line<'_>>,
     theme: &Theme,
     available_width: usize,
-    show_copy_hint: bool,
 ) {
     let mut in_code_block = false;
-    let mut last_header: Option<LastHeaderInfo> = None;
     let mut highlighter: Option<syntect::easy::HighlightLines<'_>> = None;
 
     for text_line in text.lines() {
@@ -644,7 +714,6 @@ fn render_text_with_code_blocks(
                     let label = format!("{lang} ");
                     let fill_len = available_width.saturating_sub(label.chars().count());
                     let fill = " ".repeat(fill_len);
-                    let header_idx = lines.len();
                     lines.push(
                         Line::from(vec![
                             Span::styled(label, code_bg_style),
@@ -652,14 +721,8 @@ fn render_text_with_code_blocks(
                         ])
                         .style(Style::default().bg(theme.code_bg)),
                     );
-                    if show_copy_hint {
-                        last_header = Some(LastHeaderInfo::Rendered(header_idx));
-                    }
-                } else if show_copy_hint {
-                    // Bare fence — record insertion point for potential minimal header
-                    last_header = Some(LastHeaderInfo::BareAt(lines.len()));
                 }
-                // No language without hint: skip header entirely — code_bg on code lines
+                // No language: skip header entirely — code_bg on code lines
                 // provides framing. An all-space header would be invisible.
                 in_code_block = true;
             }
@@ -701,47 +764,6 @@ fn render_text_with_code_blocks(
         }
     }
 
-    // Post-patch: add right-aligned copy hint to the last code block's header
-    if show_copy_hint {
-        if let Some(header_info) = last_header {
-            let code_bg_style = Style::default().fg(theme.dim).bg(theme.code_bg);
-            let hint = "(press ctrl-y to copy)";
-            let hint_len = hint.len(); // all ASCII
-
-            match header_info {
-                LastHeaderInfo::Rendered(idx) => {
-                    // Replace the existing header line with one that includes the hint.
-                    // Original: [label_span, fill_span] — we rebuild with label + gap + hint.
-                    let existing = &lines[idx];
-                    let label_text: String = existing.spans.first()
-                        .map(|s| s.content.as_ref().to_string())
-                        .unwrap_or_default();
-                    let label_len = label_text.chars().count();
-                    let gap_len = available_width.saturating_sub(label_len + hint_len);
-                    let gap = " ".repeat(gap_len);
-                    lines[idx] = Line::from(vec![
-                        Span::styled(label_text, code_bg_style),
-                        Span::styled(gap, code_bg_style),
-                        Span::styled(hint.to_string(), code_bg_style),
-                    ])
-                    .style(Style::default().bg(theme.code_bg));
-                }
-                LastHeaderInfo::BareAt(idx) => {
-                    // Insert a minimal header with just the copy hint right-aligned.
-                    let gap_len = available_width.saturating_sub(hint_len);
-                    let gap = " ".repeat(gap_len);
-                    lines.insert(
-                        idx,
-                        Line::from(vec![
-                            Span::styled(gap, code_bg_style),
-                            Span::styled(hint.to_string(), code_bg_style),
-                        ])
-                        .style(Style::default().bg(theme.code_bg)),
-                    );
-                }
-            }
-        }
-    }
 }
 
 /// Split a text line into spans, highlighting `@file` and `@!file` references with accent color.
@@ -1106,6 +1128,7 @@ mod tests {
                 &theme,
                 activity,
                 0, // context_pct: no pressure in tests
+                &SelectionState::default(),
             );
         });
         // Collect all cells into a string, row by row
@@ -1724,7 +1747,7 @@ mod tests {
         let theme = Theme::default();
         let text = "before\n```rust\nfn main() {}\n```\nafter";
         let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40, false);
+        render_text_with_code_blocks(text, &mut lines, &theme, 40);
         // 5 input lines → "before", header, "fn main() {}", (closing consumed), "after" = 4 output lines
         assert_eq!(lines.len(), 4, "expected 4 lines, got {}", lines.len());
         // Header should contain language label
@@ -1740,7 +1763,7 @@ mod tests {
         let theme = Theme::default();
         let text = "```\ncode\n```";
         let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 30, false);
+        render_text_with_code_blocks(text, &mut lines, &theme, 30);
         // No header for bare fences — just the code line (closing consumed)
         assert_eq!(lines.len(), 1);
         let code_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
@@ -1753,7 +1776,7 @@ mod tests {
         let theme = Theme::default();
         let text = "before\n```python\nline1\nline2";
         let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40, false);
+        render_text_with_code_blocks(text, &mut lines, &theme, 40);
         // "before", header, "line1", "line2" = 4 lines
         assert_eq!(lines.len(), 4);
         // Lines 2 and 3 (code lines) should have code_bg background on Line.style
@@ -1770,7 +1793,7 @@ mod tests {
         let theme = Theme::default();
         let text = "```\n```";
         let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 20, false);
+        render_text_with_code_blocks(text, &mut lines, &theme, 20);
         // No header for bare fences, no code content — nothing to render
         assert_eq!(lines.len(), 0);
     }
@@ -1780,7 +1803,7 @@ mod tests {
         let theme = Theme::default();
         let text = "use `foo` and ``bar``";
         let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40, false);
+        render_text_with_code_blocks(text, &mut lines, &theme, 40);
         assert_eq!(lines.len(), 1);
         // Should have no code_bg
         assert_eq!(lines[0].style.bg, None, "inline backticks should not trigger code block");
@@ -1791,7 +1814,7 @@ mod tests {
         let theme = Theme::default();
         let text = "text1\n```rust\nfn a() {}\n```\ntext2\n```go\nfunc b() {}\n```\ntext3";
         let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40, false);
+        render_text_with_code_blocks(text, &mut lines, &theme, 40);
         // text1, header1, "fn a() {}", text2, header2, "func b() {}", text3 = 7 lines
         assert_eq!(lines.len(), 7, "expected 7 lines, got {}", lines.len());
         // Normal text lines should NOT have code_bg
@@ -1808,7 +1831,7 @@ mod tests {
         let theme = Theme::default();
         let text = "    ```rust\nstill normal";
         let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40, false);
+        render_text_with_code_blocks(text, &mut lines, &theme, 40);
         // 4 spaces = not a fence, both lines rendered as normal text
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].style.bg, None, "4-space indented fence should be normal text");
@@ -1820,7 +1843,7 @@ mod tests {
         let theme = Theme::default();
         let text = "```js\nconsole.log();\n```";
         let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40, false);
+        render_text_with_code_blocks(text, &mut lines, &theme, 40);
         // Header line should have code_bg on Line.style
         assert_eq!(
             lines[0].style.bg,
@@ -1834,7 +1857,7 @@ mod tests {
         let theme = Theme::default();
         let text = "```\ncode\n```\nafter";
         let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40, false);
+        render_text_with_code_blocks(text, &mut lines, &theme, 40);
         // No header for bare fence, "code" + "after" = 2 lines (closing fence consumed)
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].style.bg, Some(theme.code_bg), "code line should have code_bg");
@@ -1846,7 +1869,7 @@ mod tests {
         let theme = Theme::default();
         let text = "\t```rust\nstill normal";
         let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40, false);
+        render_text_with_code_blocks(text, &mut lines, &theme, 40);
         // Tab is not a space — fence should not be recognized
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].style.bg, None, "tab-indented fence should be normal text");
@@ -1874,187 +1897,6 @@ mod tests {
         assert!(text.contains("Done."), "text after block should appear");
     }
 
-    // -- find_last_code_block_position tests --
-
-    #[test]
-    fn find_last_code_block_position_empty_messages() {
-        assert_eq!(find_last_code_block_position(&[]), None);
-    }
-
-    #[test]
-    fn find_last_code_block_position_no_code_blocks() {
-        let messages = vec![
-            MessageBlock::Assistant {
-                thinking: None,
-                parts: vec![AssistantPart::Text("no code here".into())],
-            },
-        ];
-        assert_eq!(find_last_code_block_position(&messages), None);
-    }
-
-    #[test]
-    fn find_last_code_block_position_single_assistant() {
-        let messages = vec![
-            MessageBlock::Assistant {
-                thinking: None,
-                parts: vec![AssistantPart::Text("```rust\nfn main() {}\n```".into())],
-            },
-        ];
-        assert_eq!(find_last_code_block_position(&messages), Some((0, 0)));
-    }
-
-    #[test]
-    fn find_last_code_block_position_multiple_messages() {
-        let messages = vec![
-            MessageBlock::Assistant {
-                thinking: None,
-                parts: vec![AssistantPart::Text("```\ncode1\n```".into())],
-            },
-            MessageBlock::User { text: "next".into() },
-            MessageBlock::Assistant {
-                thinking: None,
-                parts: vec![AssistantPart::Text("```\ncode2\n```".into())],
-            },
-        ];
-        assert_eq!(find_last_code_block_position(&messages), Some((2, 0)));
-    }
-
-    #[test]
-    fn find_last_code_block_position_multiple_parts() {
-        let messages = vec![
-            MessageBlock::Assistant {
-                thinking: None,
-                parts: vec![
-                    AssistantPart::Text("```\nfirst\n```".into()),
-                    AssistantPart::ToolGroup(ToolGroup {
-                        calls: vec![],
-                        status: ToolGroupStatus::Complete,
-                    }),
-                    AssistantPart::Text("```\nsecond\n```".into()),
-                ],
-            },
-        ];
-        assert_eq!(find_last_code_block_position(&messages), Some((0, 2)));
-    }
-
-    #[test]
-    fn find_last_code_block_position_skips_non_assistant() {
-        let messages = vec![
-            MessageBlock::Assistant {
-                thinking: None,
-                parts: vec![AssistantPart::Text("```\ncode\n```".into())],
-            },
-            MessageBlock::User { text: "```\nnot counted\n```".into() },
-            MessageBlock::System { text: "```\nalso not counted\n```".into() },
-        ];
-        assert_eq!(find_last_code_block_position(&messages), Some((0, 0)));
-    }
-
-    #[test]
-    fn find_last_code_block_position_unclosed_block() {
-        let messages = vec![
-            MessageBlock::Assistant {
-                thinking: None,
-                parts: vec![AssistantPart::Text("```python\nstill typing...".into())],
-            },
-        ];
-        assert_eq!(find_last_code_block_position(&messages), Some((0, 0)));
-    }
-
-    // -- render_text_with_code_blocks copy hint tests --
-
-    /// The hint text used in copy hint assertions.
-    const COPY_HINT: &str = "(press ctrl-y to copy)";
-
-    #[test]
-    fn copy_hint_with_language_label() {
-        let theme = Theme::default();
-        let text = "```rust\nfn main() {}\n```";
-        let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40, true);
-        // Header + code line = 2 lines
-        assert_eq!(lines.len(), 2);
-        let header_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(header_text.starts_with("rust "), "header should start with lang label");
-        assert!(header_text.ends_with(COPY_HINT), "header should end with copy hint, got: {header_text}");
-    }
-
-    #[test]
-    fn copy_hint_bare_fence_gets_minimal_header() {
-        let theme = Theme::default();
-        let text = "```\ncode\n```";
-        let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40, true);
-        // Minimal header inserted + code line = 2 lines (vs 1 without hint)
-        assert_eq!(lines.len(), 2, "bare fence with hint should get a header line");
-        let header_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(header_text.ends_with(COPY_HINT), "minimal header should end with copy hint, got: {header_text}");
-        assert_eq!(header_text.chars().count(), 40, "header should fill available width");
-    }
-
-    #[test]
-    fn copy_hint_only_on_last_block() {
-        let theme = Theme::default();
-        let text = "```rust\nfirst\n```\n```go\nsecond\n```";
-        let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 60, true);
-        // header1 + code1 + header2 + code2 = 4 lines
-        assert_eq!(lines.len(), 4);
-        let header1: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        let header2: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(!header1.contains(COPY_HINT), "first block header should NOT have copy hint");
-        assert!(header2.ends_with(COPY_HINT), "last block header should have copy hint");
-    }
-
-    #[test]
-    fn copy_hint_false_no_hint() {
-        let theme = Theme::default();
-        let text = "```rust\ncode\n```";
-        let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40, false);
-        let header_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(!header_text.contains(COPY_HINT), "show_copy_hint=false should not add hint");
-    }
-
-    #[test]
-    fn copy_hint_no_code_blocks_no_crash() {
-        let theme = Theme::default();
-        let text = "just plain text, no fences";
-        let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40, true);
-        assert_eq!(lines.len(), 1);
-        let line_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(!line_text.contains(COPY_HINT), "no code blocks means no copy hint");
-    }
-
-    #[test]
-    fn copy_hint_bare_last_language_first() {
-        let theme = Theme::default();
-        // First block has language, second is bare — hint goes on bare (last)
-        let text = "```rust\nfirst\n```\n```\nsecond\n```";
-        let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40, true);
-        // header1 + code1 + bare_header + code2 = 4 lines
-        assert_eq!(lines.len(), 4, "expected 4 lines, got {}", lines.len());
-        let header1: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        let bare_header: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(!header1.contains(COPY_HINT), "first header should not have copy hint");
-        assert!(bare_header.ends_with(COPY_HINT), "bare last header should have copy hint");
-    }
-
-    #[test]
-    fn copy_hint_language_last_bare_first() {
-        let theme = Theme::default();
-        // First block is bare, second has language — hint goes on language (last)
-        let text = "```\nfirst\n```\n```rust\nsecond\n```";
-        let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 40, true);
-        // code1 (bare, no header since not last) + header2 + code2 = 3 lines
-        assert_eq!(lines.len(), 3, "expected 3 lines, got {}", lines.len());
-        let header: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(header.ends_with(COPY_HINT), "last block's lang header should have copy hint");
-    }
-
     // -- Syntax highlighting tests --
 
     #[test]
@@ -2062,7 +1904,7 @@ mod tests {
         let theme = Theme::default();
         let text = "```rust\nfn main() { let x = 42; }\n```";
         let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 80, false);
+        render_text_with_code_blocks(text, &mut lines, &theme, 80);
         // lines: header, code line = 2 output lines
         assert_eq!(lines.len(), 2, "expected 2 lines, got {}", lines.len());
         // The code line (index 1) should have multiple spans from syntax highlighting
@@ -2087,7 +1929,7 @@ mod tests {
         let theme = Theme::default();
         let text = "```nonexistent_gibberish_42\nsome code here\n```";
         let mut lines: Vec<Line> = Vec::new();
-        render_text_with_code_blocks(text, &mut lines, &theme, 80, false);
+        render_text_with_code_blocks(text, &mut lines, &theme, 80);
         // lines: header, code line = 2 output lines
         assert_eq!(lines.len(), 2, "expected 2 lines, got {}", lines.len());
         // Unknown lang falls back to plain rendering — 1 span with assistant_msg fg
@@ -2105,20 +1947,4 @@ mod tests {
 
     // -- Integration test: full render pipeline --
 
-    #[test]
-    fn buffer_code_block_copy_hint_visible() {
-        let messages = vec![
-            MessageBlock::User { text: "Show me code".into() },
-            MessageBlock::Assistant {
-                thinking: None,
-                parts: vec![AssistantPart::Text(
-                    "Here:\n```rust\nfn main() {}\n```".to_string(),
-                )],
-            },
-        ];
-        let text = render_messages_to_string(60, 15, &messages, None);
-        // Copy hint should appear exactly once in the rendered output
-        let count = text.matches("ctrl-y to copy").count();
-        assert_eq!(count, 1, "expected exactly 1 copy hint, found {count} in:\n{text}");
-    }
 }
