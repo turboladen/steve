@@ -88,6 +88,10 @@ Example `.steve.jsonc`:
 
 **Config file naming**: One canonical name per level — `config.jsonc` (global) and `.steve.jsonc` (project). No json/jsonc fallback dance. The JSONC parser handles both pure JSON and JSONC content. `find_global_config_in()` is a testable helper that accepts an optional directory override.
 
+**`config::load()` returns `Result<(Config, Vec<String>)>`** — the second element carries non-fatal config warnings (parse errors from files that exist but failed to deserialize). Callers must destructure the tuple. `App::new()` accepts `config_warnings: Vec<String>` and displays them as `MessageBlock::Error` blocks at startup.
+
+**Serde aliases**: `ModelCost` fields accept both short (`input`/`output`) and full (`input_per_million`/`output_per_million`) names via `#[serde(alias)]`. Aliases deserialize both forms but serialize the canonical name.
+
 ## Commands & Keys
 
 | Command | Action |
@@ -264,7 +268,7 @@ Auto-scroll calculates content height using wrapped line widths (not `lines.len(
 - **html2text v0.16** `from_read()` returns `Result<String, Error>`, not `String`
 - **tracing** outputs to file appender, never stdout (TUI owns stdout)
 - **No `unreachable!()` in stream tasks** — panics in the stream tokio task crash silently. Use graceful error handling with `tracing::error!` instead
-- **No `dirs` crate** — use `std::env::var("HOME")` for home directory detection, or `directories::ProjectDirs` for app data paths
+- **No `dirs` crate** — use `std::env::var("HOME")` for home directory detection, or `directories::ProjectDirs` for app data paths. Global config dir uses `$HOME/.config/steve/` directly (not `ProjectDirs::config_dir()` which gives `~/Library/Application Support/` on macOS — wrong for terminal tools)
 - **async-trait 0.1** enables `#[async_trait]` for `ChatStreamProvider` trait in `stream.rs` (required for `async fn` in `dyn` trait objects)
 - **`Storage::new(project_id: &str)`** returns `Result<Self>` — takes a project ID string (not a path). For isolated tests: `Storage::with_base(tempdir().path().to_path_buf())`. For UI tests where no writes happen: `Storage::new("test-name").expect("test storage")`
 - `AGENTS.md` in the project root is optional — if present, it's loaded at startup and injected as part of the system prompt. Create one with `/init`
