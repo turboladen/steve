@@ -53,6 +53,7 @@ Add one todo item per step, then work through them one at a time — complete ea
 This keeps you focused and shows the user your progress in the sidebar.\n\n\
 ## Tool Usage Guidelines\n\n\
 - **Use native tools, not bash**: NEVER use `bash` to read files (`cat`, `head`, `tail`), search content (`grep`, `rg`), find files (`find`, `ls`), or write files (`sed`, `awk`, `tee`). Use the dedicated `read`, `grep`, `glob`, `list`, `edit`, `write`, and `patch` tools instead — they are faster, cached, and context-efficient.\n\
+- **Verify CLI tools before recommending**: When suggesting an external CLI tool (e.g., `pdftotext`, `jq`, `ffmpeg`), first check if it's installed by running `command -v <tool>` via `bash`. If it's not available, say so explicitly and suggest how to install it (e.g., `brew install poppler` on macOS). Never assume a tool is on the user's PATH.\n\
 - **Search before reading**: Use `grep` to find relevant code, then `read` with specific line ranges. Avoid reading entire large files.\n\
 - **Use line ranges**: The `read` tool supports `offset` and `limit` parameters. For files over 200 lines, read only the relevant section.\n\
 - **Be context-efficient**: Each tool result consumes context window space. Prefer targeted searches over broad reads.\n\
