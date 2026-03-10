@@ -192,6 +192,10 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
     let mut iteration_count: u32 = 0;
     let mut total_iteration_count: u32 = 0;
 
+    // Bitmask tracks which escalating warnings have fired this cycle
+    // (resets with iteration_count on user interaction).
+    let mut warnings_sent: u8 = 0;
+
     // Mid-stream error retry limit (separate from stream creation retries).
     const MAX_STREAM_RETRIES: u32 = 2;
     let mut stream_retry_count: u32 = 0;
@@ -217,6 +221,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 },
             ));
             iteration_count = 0; // User interaction resets safety counter
+            warnings_sent = 0;
         }
 
         total_iteration_count += 1;
@@ -1175,9 +1180,84 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 "resetting iteration counter (user granted permission)"
             );
             iteration_count = 0;
+            warnings_sent = 0;
+        }
+
+        // Escalating warnings: append a nudge to the last tool result message
+        // so the LLM sees iteration pressure as contextual feedback.
+        if let Some(text) = check_iteration_warning(
+            iteration_count, MAX_TOOL_ITERATIONS, &mut warnings_sent,
+        ) {
+            // Append warning to the last Tool message in the conversation
+            for msg in messages.iter_mut().rev() {
+                if let ChatCompletionRequestMessage::Tool(tool_msg) = msg {
+                    if let ChatCompletionRequestToolMessageContent::Text(content) = &mut tool_msg.content {
+                        content.push_str(&text);
+                    }
+                    break;
+                }
+            }
+            // Also notify the TUI so the user sees why the LLM might wrap up
+            let display_text = text.trim().trim_start_matches('[').trim_end_matches(']');
+            let _ = event_tx.send(AppEvent::StreamNotice {
+                text: display_text.to_string(),
+            });
+            tracing::info!(
+                iteration_count,
+                total_iteration_count,
+                "tool loop warning injected"
+            );
         }
 
         // Loop back to send the messages (with tool results) to the LLM again
+    }
+}
+
+/// Warning thresholds as percentages of the max iteration limit.
+const WARN_NUDGE_PCT: u32 = 33;
+const WARN_WARNING_PCT: u32 = 67;
+const WARN_CRITICAL_PCT: u32 = 87;
+
+/// Bitmask flags for tracking which warnings have been sent.
+const WARN_NUDGE_BIT: u8 = 0b001;
+const WARN_WARNING_BIT: u8 = 0b010;
+const WARN_CRITICAL_BIT: u8 = 0b100;
+
+/// Check whether an escalating warning should be emitted at the current iteration count.
+/// Returns the warning text to append to the last tool result, if any, and updates the
+/// bitmask to prevent re-firing the same threshold.
+fn check_iteration_warning(
+    iteration_count: u32,
+    max_iterations: u32,
+    warnings_sent: &mut u8,
+) -> Option<String> {
+    let critical_at = max_iterations * WARN_CRITICAL_PCT / 100;
+    let warning_at = max_iterations * WARN_WARNING_PCT / 100;
+    let nudge_at = max_iterations * WARN_NUDGE_PCT / 100;
+
+    if iteration_count >= critical_at && (*warnings_sent & WARN_CRITICAL_BIT) == 0 {
+        *warnings_sent |= WARN_CRITICAL_BIT;
+        let remaining = max_iterations.saturating_sub(iteration_count);
+        Some(format!(
+            "\n\n[CRITICAL: {remaining} tool calls remaining before forced termination. \
+             Respond to the user NOW with your findings. Do NOT make any more tool calls \
+             unless absolutely necessary.]"
+        ))
+    } else if iteration_count >= warning_at && (*warnings_sent & WARN_WARNING_BIT) == 0 {
+        *warnings_sent |= WARN_WARNING_BIT;
+        Some(format!(
+            "\n\n[Warning: {iteration_count} of {max_iterations} tool calls used. \
+             You MUST finish within the next few calls. Do not re-read files — work with \
+             what you have.]"
+        ))
+    } else if iteration_count >= nudge_at && (*warnings_sent & WARN_NUDGE_BIT) == 0 {
+        *warnings_sent |= WARN_NUDGE_BIT;
+        Some(format!(
+            "\n\n[Note: You have made {iteration_count} tool calls on this response. \
+             Begin wrapping up your analysis.]"
+        ))
+    } else {
+        None
     }
 }
 
@@ -2259,5 +2339,83 @@ mod tests {
             .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
             .collect();
         assert_eq!(finishes.len(), 1);
+    }
+
+    // -- check_iteration_warning tests --
+
+    #[test]
+    fn warning_nudge_fires_at_33_percent() {
+        let mut sent = 0u8;
+        // At 75 max, nudge_at = 75 * 33 / 100 = 24
+        assert!(check_iteration_warning(23, 75, &mut sent).is_none());
+        let text = check_iteration_warning(24, 75, &mut sent);
+        assert!(text.is_some());
+        assert!(text.unwrap().contains("24 tool calls"));
+        assert_eq!(sent, WARN_NUDGE_BIT);
+    }
+
+    #[test]
+    fn warning_does_not_repeat() {
+        let mut sent = 0u8;
+        let first = check_iteration_warning(25, 75, &mut sent);
+        assert!(first.is_some());
+        let second = check_iteration_warning(26, 75, &mut sent);
+        assert!(second.is_none(), "nudge should not fire twice");
+    }
+
+    #[test]
+    fn warning_escalates_through_all_levels() {
+        let mut sent = 0u8;
+        // Nudge at 33%
+        let nudge = check_iteration_warning(25, 75, &mut sent);
+        assert!(nudge.is_some());
+        assert!(nudge.unwrap().contains("Note:"));
+        // Warning at 67% (75 * 67 / 100 = 50)
+        let warn = check_iteration_warning(50, 75, &mut sent);
+        assert!(warn.is_some());
+        assert!(warn.unwrap().contains("Warning:"));
+        // Critical at 87% (75 * 87 / 100 = 65)
+        let crit = check_iteration_warning(65, 75, &mut sent);
+        assert!(crit.is_some());
+        assert!(crit.unwrap().contains("CRITICAL:"));
+        // All bits set
+        assert_eq!(sent, WARN_NUDGE_BIT | WARN_WARNING_BIT | WARN_CRITICAL_BIT);
+    }
+
+    #[test]
+    fn warning_critical_shows_remaining_count() {
+        let mut sent = 0u8;
+        // Jump straight to critical — should skip nudge/warning and fire critical
+        let text = check_iteration_warning(65, 75, &mut sent).unwrap();
+        assert!(text.contains("10 tool calls remaining"));
+    }
+
+    #[test]
+    fn warning_reset_allows_refiring() {
+        let mut sent = 0u8;
+        check_iteration_warning(24, 75, &mut sent);
+        assert_ne!(sent, 0);
+        // Simulate reset (user granted permission)
+        sent = 0;
+        let text = check_iteration_warning(24, 75, &mut sent);
+        assert!(text.is_some(), "should fire again after reset");
+    }
+
+    #[test]
+    fn warning_below_all_thresholds_returns_none() {
+        let mut sent = 0u8;
+        assert!(check_iteration_warning(1, 75, &mut sent).is_none());
+        assert!(check_iteration_warning(10, 75, &mut sent).is_none());
+        assert!(check_iteration_warning(23, 75, &mut sent).is_none());
+        assert_eq!(sent, 0);
+    }
+
+    #[test]
+    fn warning_highest_level_wins_on_jump() {
+        let mut sent = 0u8;
+        // Jump from 0 to 70 — should fire critical (highest), not nudge
+        let text = check_iteration_warning(70, 75, &mut sent).unwrap();
+        assert!(text.contains("CRITICAL:"));
+        assert_eq!(sent & WARN_CRITICAL_BIT, WARN_CRITICAL_BIT);
     }
 }

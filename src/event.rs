@@ -62,6 +62,9 @@ pub enum AppEvent {
     LlmRetry { attempt: u32, max_attempts: u32, error: String },
     /// LLM error (stream failure or API error).
     LlmError { error: String },
+    /// System-level notification from the stream task (e.g., tool loop warnings).
+    /// Displayed as a MessageBlock::System in the TUI.
+    StreamNotice { text: String },
 
     // -- Permission events --
 

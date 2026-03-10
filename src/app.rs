@@ -895,6 +895,10 @@ impl App {
                 self.status_line_state.activity = Activity::Idle;
                 self.message_area_state.scroll_to_bottom();
             }
+            AppEvent::StreamNotice { text } => {
+                self.messages.push(MessageBlock::System { text });
+                self.message_area_state.scroll_to_bottom();
+            }
             AppEvent::PermissionRequest(req) => {
                 // Show permission prompt to user, with diff preview if available
                 let diff_content = extract_diff_content(req.tool_name, &req.tool_args);
