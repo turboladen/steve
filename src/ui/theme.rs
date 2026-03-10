@@ -28,6 +28,7 @@ pub struct Theme {
     pub heading: Color,
     pub inline_code_bg: Color,
     pub link: Color,
+    pub question: Color,
 }
 
 impl Default for Theme {
@@ -83,6 +84,7 @@ impl Theme {
             heading: Color::Rgb(230, 180, 80),            // Warm gold for headers
             inline_code_bg: Color::Rgb(45, 42, 38),      // Subtle bg tint for inline code
             link: Color::Rgb(130, 170, 210),              // Soft blue for link text
+            question: Color::Rgb(90, 185, 180),              // Soft teal
         }
     }
 
@@ -113,6 +115,7 @@ impl Theme {
             heading: Color::Rgb(160, 100, 0),                // Dark gold for headers
             inline_code_bg: Color::Rgb(230, 228, 225),      // Subtle bg tint for inline code
             link: Color::Rgb(30, 80, 150),                   // Dark blue for links
+            question: Color::Rgb(0, 130, 120),                 // Dark teal
         }
     }
 }
@@ -202,6 +205,18 @@ mod tests {
         assert!(matches!(t.heading, Color::Rgb(..)));
         assert!(matches!(t.inline_code_bg, Color::Rgb(..)));
         assert!(matches!(t.link, Color::Rgb(..)));
+    }
+
+    #[test]
+    fn question_differs_from_permission() {
+        let t = Theme::dark();
+        assert_ne!(t.question, t.permission);
+    }
+
+    #[test]
+    fn question_is_rgb() {
+        let t = Theme::dark();
+        assert!(matches!(t.question, Color::Rgb(..)));
     }
 
     #[test]

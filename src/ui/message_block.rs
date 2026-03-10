@@ -68,6 +68,15 @@ pub enum MessageBlock {
         /// Optional diff content extracted from tool arguments for inline preview.
         diff_content: Option<DiffContent>,
     },
+
+    /// Interactive question from the LLM requiring user input.
+    Question {
+        question: String,
+        options: Vec<String>,
+        selected: Option<usize>,
+        free_text: String,
+        answered: Option<String>,
+    },
 }
 
 /// Reasoning/thinking content from the model, collapsed by default.

@@ -4,6 +4,24 @@ use serde_json::Value;
 use crate::permission::types::PermissionRequest;
 use crate::tool::{ToolName, ToolOutput};
 
+pub struct QuestionRequest {
+    pub call_id: String,
+    pub question: String,
+    pub options: Vec<String>,
+    pub response_tx: tokio::sync::oneshot::Sender<String>,
+}
+
+impl std::fmt::Debug for QuestionRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuestionRequest")
+            .field("call_id", &self.call_id)
+            .field("question", &self.question)
+            .field("options", &self.options)
+            .field("response_tx", &"<oneshot::Sender>")
+            .finish()
+    }
+}
+
 #[derive(Debug)]
 pub enum AppEvent {
     /// Terminal input event (keyboard, mouse, resize)
@@ -49,6 +67,9 @@ pub enum AppEvent {
 
     /// A tool call needs user permission before executing.
     PermissionRequest(PermissionRequest),
+
+    /// The question tool needs user input.
+    QuestionRequest(QuestionRequest),
 
     // -- Compact events --
 

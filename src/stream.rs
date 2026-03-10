@@ -721,6 +721,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 matches!(tc.action, PermissionAction::Allow)
                     && !tc.tool_name.is_write_tool()
                     && !tc.tool_name.is_memory()
+                    && !matches!(tc.tool_name, ToolName::Question)
             });
 
         // Log partition results for diagnostics
@@ -865,6 +866,73 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                     usage: Some(total_usage),
                 });
                 return Ok(());
+            }
+
+            // Question tool: special interactive flow (bypass permission)
+            if matches!(tc.tool_name, ToolName::Question) {
+                let question = tc.args.get("question")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(no question provided)")
+                    .to_string();
+                let options: Vec<String> = tc.args.get("options")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+
+                // Emit LlmToolCall so the UI shows this in the tool group
+                let _ = event_tx.send(AppEvent::LlmToolCall {
+                    call_id: tc.id.clone(),
+                    tool_name: tc.tool_name,
+                    arguments: tc.args.clone(),
+                });
+
+                // Create oneshot channel for the user's response
+                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+                let _ = event_tx.send(AppEvent::QuestionRequest(crate::event::QuestionRequest {
+                    call_id: tc.id.clone(),
+                    question,
+                    options,
+                    response_tx,
+                }));
+
+                // Wait for user response or cancellation
+                let answer = tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        tracing::info!("stream cancelled while waiting for question answer");
+                        let _ = event_tx.send(AppEvent::LlmFinish {
+                            usage: Some(total_usage),
+                        });
+                        return Ok(());
+                    }
+                    reply = response_rx => {
+                        match reply {
+                            Ok(answer) => answer,
+                            Err(_) => "User declined to answer.".to_string(),
+                        }
+                    }
+                };
+
+                let output = crate::tool::ToolOutput {
+                    title: "Question".to_string(),
+                    output: answer,
+                    is_error: false,
+                };
+
+                let _ = event_tx.send(AppEvent::ToolResult {
+                    call_id: tc.id.clone(),
+                    tool_name: tc.tool_name,
+                    output: output.clone(),
+                });
+
+                messages.push(ChatCompletionRequestMessage::Tool(
+                    ChatCompletionRequestToolMessage {
+                        content: ChatCompletionRequestToolMessageContent::Text(output.output),
+                        tool_call_id: tc.id.clone(),
+                    },
+                ));
+                current_iteration_tool_count += 1;
+                continue;
             }
 
             match tc.action {

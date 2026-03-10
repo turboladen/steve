@@ -207,7 +207,7 @@ fn extract_tool_summary(tool_name: ToolName, input: &serde_json::Value) -> Strin
             }
         }
         ToolName::Question => input
-            .get("text")
+            .get("question")
             .and_then(|v| v.as_str())
             .map(|s| {
                 if s.chars().count() > 40 {

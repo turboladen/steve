@@ -81,6 +81,17 @@ struct PendingPermission {
     response_tx: tokio::sync::oneshot::Sender<PermissionReply>,
 }
 
+/// A question prompt from the LLM waiting for user input.
+struct PendingQuestion {
+    call_id: String,
+    #[allow(dead_code)]
+    question: String,
+    options: Vec<String>,
+    selected: Option<usize>,
+    free_text: String,
+    response_tx: tokio::sync::oneshot::Sender<String>,
+}
+
 /// Extract a compact argument summary for display in tool call lines.
 fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
     match tool_name {
@@ -119,7 +130,7 @@ fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
             }
         }
         ToolName::Question => args
-            .get("text")
+            .get("question")
             .and_then(|v| v.as_str())
             .map(|s| {
                 if s.chars().count() > 30 {
@@ -276,6 +287,9 @@ pub struct App {
     /// Active permission prompt awaiting user response.
     pending_permission: Option<PendingPermission>,
 
+    /// Active question prompt awaiting user input.
+    pending_question: Option<PendingQuestion>,
+
     /// Active session browser list (populated by /sessions, cleared on selection or dismiss).
     session_browse_list: Option<Vec<SessionInfo>>,
 
@@ -391,6 +405,7 @@ impl App {
             streaming_message: None,
             exchange_count: 0,
             pending_permission: None,
+            pending_question: None,
             session_browse_list: None,
             stream_cancel: None,
             interjection_tx: None,
@@ -522,6 +537,7 @@ impl App {
         self.last_prompt_tokens = 0;
         self.exchange_count = 0;
         self.pending_permission = None;
+        self.pending_question = None;
         *self.tool_cache.lock().unwrap() = ToolResultCache::new(self.project.root.clone());
 
         // Load messages
@@ -636,7 +652,7 @@ impl App {
                 }
             }
             AppEvent::Input(Event::Paste(text)) => {
-                if self.pending_permission.is_none() {
+                if self.pending_permission.is_none() && self.pending_question.is_none() {
                     self.input.collapse_paste(&text);
                     let current_text = self.input.textarea.lines().join("\n");
                     self.autocomplete_state.update(&current_text);
@@ -864,6 +880,26 @@ impl App {
                     response_tx: req.response_tx,
                 });
             }
+            AppEvent::QuestionRequest(req) => {
+                let has_options = !req.options.is_empty();
+                self.messages.push(MessageBlock::Question {
+                    question: req.question.clone(),
+                    options: req.options.clone(),
+                    selected: if has_options { Some(0) } else { None },
+                    free_text: String::new(),
+                    answered: None,
+                });
+                self.status_line_state.activity = Activity::WaitingForQuestion;
+                self.message_area_state.scroll_to_bottom();
+                self.pending_question = Some(PendingQuestion {
+                    call_id: req.call_id,
+                    question: req.question,
+                    options: req.options,
+                    selected: if has_options { Some(0) } else { None },
+                    free_text: String::new(),
+                    response_tx: req.response_tx,
+                });
+            }
             AppEvent::CompactFinish { summary } => {
                 self.is_loading = false;
 
@@ -1043,6 +1079,118 @@ impl App {
             }
         }
 
+        // If there's a pending question prompt, intercept keystrokes
+        if self.pending_question.is_some() {
+            match (key.code, key.modifiers) {
+                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
+                    // Cancel the stream entirely
+                    if let Some(q) = self.pending_question.take() {
+                        let _ = q.response_tx.send("User cancelled.".to_string());
+                    }
+                    self.cancel_stream();
+                    return Ok(());
+                }
+                (KeyCode::Enter, _) => {
+                    if let Some(q) = self.pending_question.take() {
+                        let answer = if let Some(idx) = q.selected {
+                            q.options.get(idx).cloned().unwrap_or_default()
+                        } else if q.free_text.is_empty() {
+                            "User declined to answer.".to_string()
+                        } else {
+                            q.free_text.clone()
+                        };
+                        let display_answer = answer.clone();
+                        let _ = q.response_tx.send(answer);
+                        // Mark the question block as answered
+                        self.mark_question_answered(&display_answer);
+                        self.status_line_state.activity = Activity::Thinking;
+                        self.message_area_state.scroll_to_bottom();
+                    }
+                    return Ok(());
+                }
+                (KeyCode::Esc, _) => {
+                    if let Some(q) = self.pending_question.take() {
+                        let _ = q.response_tx.send("User declined to answer.".to_string());
+                        self.mark_question_answered("(skipped)");
+                        self.status_line_state.activity = Activity::Thinking;
+                        self.message_area_state.scroll_to_bottom();
+                    }
+                    return Ok(());
+                }
+                (KeyCode::Char(c @ '1'..='9'), _) => {
+                    if let Some(q) = self.pending_question.as_mut() {
+                        let idx = (c as usize) - ('1' as usize);
+                        if idx < q.options.len() {
+                            q.selected = Some(idx);
+                            self.sync_question_block();
+                        }
+                    }
+                    return Ok(());
+                }
+                (KeyCode::Up, _) => {
+                    if let Some(q) = self.pending_question.as_mut() {
+                        if let Some(sel) = q.selected {
+                            if sel > 0 {
+                                q.selected = Some(sel - 1);
+                                self.sync_question_block();
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+                (KeyCode::Down, _) => {
+                    if let Some(q) = self.pending_question.as_mut() {
+                        if let Some(sel) = q.selected {
+                            if sel + 1 < q.options.len() {
+                                q.selected = Some(sel + 1);
+                                self.sync_question_block();
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+                (KeyCode::Tab, _) => {
+                    if let Some(q) = self.pending_question.as_mut() {
+                        if q.options.is_empty() {
+                            // No options — already in free-text mode, ignore
+                        } else if q.selected.is_some() {
+                            // Switch to free-text mode
+                            q.selected = None;
+                            self.sync_question_block();
+                        } else {
+                            // Switch back to options mode
+                            q.selected = Some(0);
+                            self.sync_question_block();
+                        }
+                    }
+                    return Ok(());
+                }
+                (KeyCode::Char(c), _) => {
+                    if let Some(q) = self.pending_question.as_mut() {
+                        if q.selected.is_none() {
+                            // Free-text mode
+                            q.free_text.push(c);
+                            self.sync_question_block();
+                        }
+                    }
+                    return Ok(());
+                }
+                (KeyCode::Backspace, _) => {
+                    if let Some(q) = self.pending_question.as_mut() {
+                        if q.selected.is_none() {
+                            q.free_text.pop();
+                            self.sync_question_block();
+                        }
+                    }
+                    return Ok(());
+                }
+                _ => {
+                    // Swallow other keys
+                    return Ok(());
+                }
+            }
+        }
+
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 if self.is_loading || self.streaming_active {
@@ -1195,6 +1343,27 @@ impl App {
         }
     }
 
+    /// Update the last Question block to reflect current PendingQuestion state.
+    fn sync_question_block(&mut self) {
+        if let Some(q) = &self.pending_question {
+            if let Some(block) = self.messages.iter_mut().rev().find(|m| matches!(m, MessageBlock::Question { answered: None, .. })) {
+                if let MessageBlock::Question { selected, free_text, .. } = block {
+                    *selected = q.selected;
+                    *free_text = q.free_text.clone();
+                }
+            }
+        }
+    }
+
+    /// Mark the last unanswered Question block as answered.
+    fn mark_question_answered(&mut self, answer: &str) {
+        if let Some(block) = self.messages.iter_mut().rev().find(|m| matches!(m, MessageBlock::Question { answered: None, .. })) {
+            if let MessageBlock::Question { answered, .. } = block {
+                *answered = Some(answer.to_string());
+            }
+        }
+    }
+
     /// Lazily build the file index for `@` autocomplete.
     fn ensure_file_index(&mut self) -> &[String] {
         if self.file_index.is_none() {
@@ -1220,6 +1389,11 @@ impl App {
         // Also dismiss any pending permission prompt
         if let Some(perm) = self.pending_permission.take() {
             let _ = perm.response_tx.send(PermissionReply::Deny);
+        }
+
+        // Also dismiss any pending question prompt
+        if let Some(q) = self.pending_question.take() {
+            let _ = q.response_tx.send("User cancelled.".to_string());
         }
 
         self.is_loading = false;
@@ -2050,6 +2224,7 @@ impl App {
                 self.sidebar_state.changes.clear();
                 crate::tool::todo::clear_todos();
                 self.selection_state.clear();
+                self.pending_question = None;
                 self.ensure_session();
                 self.refresh_git_info();
                 self.sync_sidebar_tokens();
@@ -2461,7 +2636,7 @@ pub(crate) mod tests {
 
     #[test]
     fn extract_args_summary_question_short() {
-        let args = json!({"text": "What is this?"});
+        let args = json!({"question": "What is this?"});
         assert_eq!(
             extract_args_summary(ToolName::Question, &args),
             "What is this?"
@@ -2471,7 +2646,7 @@ pub(crate) mod tests {
     #[test]
     fn extract_args_summary_question_long_truncates() {
         let long_text = "a".repeat(40);
-        let args = json!({"text": long_text});
+        let args = json!({"question": long_text});
         let result = extract_args_summary(ToolName::Question, &args);
         assert_eq!(result.chars().count(), 30); // 27 + "..."
         assert!(result.ends_with("..."));

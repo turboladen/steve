@@ -21,6 +21,8 @@ pub enum Activity {
     WaitingForPermission,
     /// Compaction is in progress.
     Compacting,
+    /// Waiting for the user to answer an interactive question.
+    WaitingForQuestion,
 }
 
 /// State for the status/activity display.
@@ -84,6 +86,7 @@ impl StatusLineState {
             }
             Activity::WaitingForPermission => "Waiting for permission...".to_string(),
             Activity::Compacting => "Compacting...".to_string(),
+            Activity::WaitingForQuestion => "Waiting for answer...".to_string(),
         }
     }
 
@@ -205,6 +208,21 @@ mod tests {
             .activity_text(),
             "Compacting..."
         );
+        assert_eq!(
+            StatusLineState {
+                activity: Activity::WaitingForQuestion,
+                ..Default::default()
+            }
+            .activity_text(),
+            "Waiting for answer..."
+        );
+    }
+
+    #[test]
+    fn spinner_char_some_when_waiting_for_question() {
+        let mut state = StatusLineState::default();
+        state.activity = Activity::WaitingForQuestion;
+        assert!(state.spinner_char().is_some());
     }
 
     #[test]

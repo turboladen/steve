@@ -443,6 +443,103 @@ pub fn render_message_blocks(
                     Style::default().fg(theme.permission),
                 )), GutterMark::Empty);
             }
+
+            MessageBlock::Question {
+                question,
+                options,
+                selected,
+                free_text,
+                answered,
+            } => {
+                // Top rule
+                glines.push(Line::from(Span::styled(
+                    "\u{2500}".repeat(40),
+                    Style::default().fg(theme.question),
+                )), GutterMark::Empty);
+                // Question line
+                glines.push(Line::from(vec![
+                    Span::styled(
+                        "? ",
+                        Style::default()
+                            .fg(theme.question)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        question.to_string(),
+                        Style::default()
+                            .fg(theme.fg)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]), GutterMark::Empty);
+
+                if let Some(answer) = answered {
+                    // Answered state — show the answer
+                    glines.push(Line::from(Span::styled(
+                        format!("  \u{2192} {answer}"),
+                        Style::default().fg(theme.success),
+                    )), GutterMark::Empty);
+                } else {
+                    // Active state — show options or free-text input
+                    for (i, option) in options.iter().enumerate() {
+                        let is_selected = *selected == Some(i);
+                        let prefix = if is_selected { "  \u{25b8} " } else { "    " };
+                        let label = format!("{prefix}{}. {option}", i + 1);
+                        let style = if is_selected {
+                            Style::default()
+                                .fg(theme.question)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(theme.fg)
+                        };
+                        glines.push(Line::from(Span::styled(label, style)), GutterMark::Empty);
+                    }
+
+                    // Free-text input (when no options or Tab toggled to free-text)
+                    if selected.is_none() {
+                        glines.push(Line::from(Span::styled(
+                            format!("  > {free_text}\u{258f}"),
+                            Style::default().fg(theme.fg),
+                        )), GutterMark::Empty);
+                    }
+
+                    // Help line
+                    let mut help_spans = Vec::new();
+                    if !options.is_empty() {
+                        help_spans.push(Span::raw("  ["));
+                        help_spans.push(Span::styled(
+                            "1-9",
+                            Style::default().fg(theme.question).add_modifier(Modifier::BOLD),
+                        ));
+                        help_spans.push(Span::raw("] select  ["));
+                        help_spans.push(Span::styled(
+                            "Tab",
+                            Style::default().fg(theme.question).add_modifier(Modifier::BOLD),
+                        ));
+                        let tab_label = if selected.is_some() { "] free text  " } else { "] options  " };
+                        help_spans.push(Span::raw(tab_label));
+                    } else {
+                        help_spans.push(Span::raw("  "));
+                    }
+                    help_spans.push(Span::raw("["));
+                    help_spans.push(Span::styled(
+                        "Enter",
+                        Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
+                    ));
+                    help_spans.push(Span::raw("] confirm  ["));
+                    help_spans.push(Span::styled(
+                        "Esc",
+                        Style::default().fg(theme.error).add_modifier(Modifier::BOLD),
+                    ));
+                    help_spans.push(Span::raw("] skip"));
+                    glines.push(Line::from(help_spans), GutterMark::Empty);
+                }
+
+                // Bottom rule
+                glines.push(Line::from(Span::styled(
+                    "\u{2500}".repeat(40),
+                    Style::default().fg(theme.question),
+                )), GutterMark::Empty);
+            }
         }
 
         // Blank line between messages
@@ -1937,5 +2034,54 @@ mod tests {
     }
 
     // -- Integration test: full render pipeline --
+
+    // -- Question block rendering tests --
+
+    #[test]
+    fn buffer_question_with_options_active() {
+        let messages = vec![MessageBlock::Question {
+            question: "What approach?".to_string(),
+            options: vec!["Option A".to_string(), "Option B".to_string()],
+            selected: Some(0),
+            free_text: String::new(),
+            answered: None,
+        }];
+        let text = render_messages_to_string(80, 15, &messages, None);
+        assert!(text.contains("? What approach?"), "should show question, got:\n{text}");
+        assert!(text.contains("1. Option A"), "should show option 1, got:\n{text}");
+        assert!(text.contains("2. Option B"), "should show option 2, got:\n{text}");
+        assert!(text.contains("Enter"), "should show Enter key hint, got:\n{text}");
+        assert!(text.contains("Esc"), "should show Esc key hint, got:\n{text}");
+    }
+
+    #[test]
+    fn buffer_question_answered() {
+        let messages = vec![MessageBlock::Question {
+            question: "What approach?".to_string(),
+            options: vec!["Option A".to_string()],
+            selected: Some(0),
+            free_text: String::new(),
+            answered: Some("Option A".to_string()),
+        }];
+        let text = render_messages_to_string(80, 15, &messages, None);
+        assert!(text.contains("? What approach?"), "should show question, got:\n{text}");
+        assert!(text.contains("Option A"), "should show answer, got:\n{text}");
+        // Should NOT show the help line when answered
+        assert!(!text.contains("Enter"), "should not show key hints when answered, got:\n{text}");
+    }
+
+    #[test]
+    fn buffer_question_free_text_mode() {
+        let messages = vec![MessageBlock::Question {
+            question: "What do you think?".to_string(),
+            options: vec![],
+            selected: None,
+            free_text: "my answer".to_string(),
+            answered: None,
+        }];
+        let text = render_messages_to_string(80, 15, &messages, None);
+        assert!(text.contains("? What do you think?"), "should show question, got:\n{text}");
+        assert!(text.contains("my answer"), "should show free text input, got:\n{text}");
+    }
 
 }
