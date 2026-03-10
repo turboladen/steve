@@ -468,6 +468,9 @@ impl App {
             }
         }
 
+        // Prune the session if the user never sent a message
+        self.prune_empty_session();
+
         ui::restore_terminal(&mut terminal)?;
         Ok(())
     }
@@ -528,6 +531,9 @@ impl App {
         if let Some(token) = self.stream_cancel.take() {
             token.cancel();
         }
+
+        // Prune the old session if empty before switching away
+        self.prune_empty_session();
 
         // Clear current state
         self.messages.clear();
@@ -1234,6 +1240,24 @@ impl App {
         Ok(())
     }
 
+    /// If the current session has zero user messages, delete it from storage.
+    /// Called before `/new`, `switch_to_session`, and on exit to avoid
+    /// accumulating empty sessions. Callers must cancel the active stream
+    /// first (if any) and are responsible for clearing `self.current_session`
+    /// afterward if continuing to a new session.
+    fn prune_empty_session(&self) {
+        if self.exchange_count == 0 && self.stored_messages.is_empty() {
+            if let Some(session) = &self.current_session {
+                let mgr = SessionManager::new(&self.storage, &self.project.id);
+                if let Err(e) = mgr.delete_session(&session.id) {
+                    tracing::warn!(error = %e, "failed to prune empty session");
+                } else {
+                    tracing::info!(session_id = %session.id, "pruned empty session");
+                }
+            }
+        }
+    }
+
     /// Ensure there's an active session. Creates one if needed.
     fn ensure_session(&mut self) {
         if self.current_session.is_some() {
@@ -1690,6 +1714,10 @@ impl App {
                 self.should_quit = true;
             }
             Command::New => {
+                // Cancel any active stream before pruning/resetting
+                self.cancel_stream();
+                // Prune the old session if it had no user messages
+                self.prune_empty_session();
                 // Create a fresh session
                 self.messages.clear();
                 self.stored_messages.clear();
