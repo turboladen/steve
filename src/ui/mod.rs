@@ -138,6 +138,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             sidebar_area,
             &app.sidebar_state,
             &app.theme,
+            pct,
         );
     }
 

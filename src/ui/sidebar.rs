@@ -128,15 +128,17 @@ pub fn render_sidebar(
     area: Rect,
     state: &SidebarState,
     theme: &Theme,
+    context_pct: u8,
 ) {
     let mut lines: Vec<Line> = Vec::new();
+    let header_color = theme.border_color(context_pct);
 
     // -- Git section (only when branch is known) --
     if let Some(branch) = &state.git_branch {
         lines.push(Line::from(Span::styled(
             "Git",
             Style::default()
-                .fg(theme.accent)
+                .fg(header_color)
                 .add_modifier(Modifier::BOLD),
         )));
         if let Some(repo_name) = &state.git_repo_name {
@@ -173,7 +175,7 @@ pub fn render_sidebar(
         lines.push(Line::from(Span::styled(
             "Changes",
             Style::default()
-                .fg(theme.accent)
+                .fg(header_color)
                 .add_modifier(Modifier::BOLD),
         )));
         for change in &state.changes {
@@ -223,7 +225,7 @@ pub fn render_sidebar(
     lines.push(Line::from(Span::styled(
         "Session",
         Style::default()
-            .fg(theme.accent)
+            .fg(header_color)
             .add_modifier(Modifier::BOLD),
     )));
     let title = if state.session_title.is_empty() {
@@ -284,7 +286,7 @@ pub fn render_sidebar(
         lines.push(Line::from(Span::styled(
             "Todos",
             Style::default()
-                .fg(theme.accent)
+                .fg(header_color)
                 .add_modifier(Modifier::BOLD),
         )));
         for todo in &state.todos {
@@ -476,7 +478,7 @@ mod tests {
     fn render_sidebar_to_string(width: u16, height: u16, state: &SidebarState) -> String {
         let theme = Theme::default();
         let buf = super::super::render_to_buffer(width, height, |frame| {
-            render_sidebar(frame, Rect::new(0, 0, width, height), state, &theme);
+            render_sidebar(frame, Rect::new(0, 0, width, height), state, &theme, 0);
         });
         let mut text = String::new();
         for y in 0..height {
