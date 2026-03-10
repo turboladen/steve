@@ -56,6 +56,19 @@ pub enum AppEvent {
     CompactFinish { summary: String },
     /// Compaction failed.
     CompactError { error: String },
+
+    // -- Title generation events --
+
+    /// Async LLM title generation completed.
+    TitleGenerated {
+        session_id: String,
+        title: String,
+    },
+    /// Async LLM title generation failed; carry pre-computed fallback title.
+    TitleError {
+        session_id: String,
+        fallback_title: String,
+    },
 }
 
 /// Token usage reported at the end of a streaming response.

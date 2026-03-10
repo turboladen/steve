@@ -57,13 +57,13 @@ Both are parsed through the JSONC parser. Project values override global values;
 
 Model references use `"provider_id/model_id"` format throughout (config, commands, internal types).
 
-Optional top-level fields: `small_model` (used for compaction/summarization, falls back to `model`), `auto_compact` (default `true` — auto-compacts at 80% context window usage), `permission_profile` (`"trust"`, `"standard"` default, or `"cautious"`), `allow_tools` (list of tool names to auto-allow regardless of profile).
+Optional top-level fields: `small_model` (used for async session title generation and compaction — title gen only uses `small_model` directly, compaction falls back to `model`), `auto_compact` (default `true` — auto-compacts at 80% context window usage), `permission_profile` (`"trust"`, `"standard"` default, or `"cautious"`), `allow_tools` (list of tool names to auto-allow regardless of profile).
 
 Example `.steve.jsonc`:
 ```jsonc
 {
   "model": "openai/gpt-4o",
-  // "small_model": "openai/gpt-4o-mini",  // optional: used for /compact
+  // "small_model": "openai/gpt-4o-mini",  // optional: used for title gen + /compact
   // "auto_compact": true,                  // optional: default true
   // "permission_profile": "standard",      // optional: trust/standard/cautious
   // "allow_tools": ["edit", "bash"],        // optional: per-tool overrides
@@ -176,6 +176,16 @@ Per-tool `allow_tools` overrides insert `Allow` rules before profile defaults (f
 ### Compaction (`/compact`)
 
 Summarizes the conversation into a single message to reclaim context window space. Uses a non-streaming `LlmClient::simple_chat()` call in a background tokio task, communicating results back via `AppEvent::CompactFinish` / `AppEvent::CompactError`. Uses `small_model` if configured, otherwise falls back to the main model. On completion, old messages are deleted from storage and replaced with a single assistant message containing the summary. Auto-compact triggers after `LlmFinish` when `last_prompt_tokens >= context_window * 0.80` (controlled by `auto_compact` config). If compaction fails (`CompactError`), `auto_compact_failed` is set to suppress retries for the rest of the session (reset on `/new`). Manual `/compact` still works.
+
+### Session Title Generation
+
+Auto-titles sessions after the first completed LLM exchange (`exchange_count == 1`). Two paths:
+- **Async LLM path** (when `small_model` configured): Spawns a `tokio::spawn` background task calling `simple_chat()` with `TITLE_SYSTEM_PROMPT`. Result arrives as `AppEvent::TitleGenerated`/`TitleError`. `sanitize_title()` strips quotes, preamble prefixes ("Title:"), and enforces 60-char cap. Empty sanitized titles trigger `TitleError` with sync fallback. Does **not** fall back to the main model — uses `config.small_model` directly (not `compact_model_ref()`).
+- **Sync fallback** (no `small_model`): `title_fallback()` takes first non-empty line of first user message, truncates to 60 chars.
+
+Guards prevent re-titling: `maybe_generate_title()` returns early if `session.title != "New session"` (protects after `/rename` and after compaction resets `exchange_count`). `apply_title_if_current()` checks both `session_id` (stale event from previous session) and title sentinel. `apply_session_title()` rejects empty strings and logs `rename_session` errors (no silent `let _ =`).
+
+Both `title_fallback()` and `sanitize_title()` delegate to `truncate_title()` for the 60-char cap — single source for truncation constants.
 
 ### Context Management (`context/`)
 

@@ -47,6 +47,11 @@ what was done, what is currently being worked on, which files are being modified
 decisions that were made, and what the next steps are. \
 Preserve specific technical details, file paths, and code patterns.";
 
+/// System prompt for LLM-generated session titles.
+const TITLE_SYSTEM_PROMPT: &str = "Generate a concise 3-7 word title for this conversation \
+based on the user's first message. Output only the title — no punctuation at the end, \
+no quotes, no explanation. The title should capture the user's intent in plain English.";
+
 /// Guidance for efficient tool usage, injected into the system prompt.
 const TOOL_GUIDANCE: &str = "\n\n## Task Planning\n\n\
 When the user gives you a task with multiple sequential steps (e.g. \"do X, then Y, then Z\") or any task that will require 3+ distinct actions, \
@@ -913,6 +918,15 @@ impl App {
                 self.message_area_state.scroll_to_bottom();
                 tracing::error!("compaction failed, auto-compact disabled for this session");
             }
+            AppEvent::TitleGenerated { session_id, title } => {
+                self.apply_title_if_current(&session_id, &title);
+            }
+            AppEvent::TitleError {
+                session_id,
+                fallback_title,
+            } => {
+                self.apply_title_if_current(&session_id, &fallback_title);
+            }
             _ => {}
         }
         Ok(())
@@ -1489,31 +1503,120 @@ impl App {
     }
 
     /// Try to auto-generate a title for the session after the first exchange.
+    /// Uses `small_model` for async LLM title generation when configured,
+    /// otherwise falls back to truncating the first user message.
     fn maybe_generate_title(&mut self) {
         let Some(session) = &self.current_session else {
             return;
         };
 
-        // Use the first user message as a simple title (truncated).
-        // TODO: Upgrade to use small_model for LLM-generated titles.
+        // Don't re-title sessions that already have a non-default title
+        // (e.g., after /rename, or after compaction resets exchange_count).
+        if session.title != "New session" {
+            return;
+        }
+
         let first_user_msg = self.messages.iter().find_map(|m| match m {
             MessageBlock::User { text } => Some(text.clone()),
             _ => None,
         });
 
-        if let Some(text) = first_user_msg {
-            let title = if text.chars().count() > 60 {
-                let truncated: String = text.chars().take(57).collect();
-                format!("{truncated}...")
-            } else {
-                text
-            };
+        let Some(first_text) = first_user_msg else {
+            return;
+        };
 
-            let mgr = SessionManager::new(&self.storage, &self.project.id);
-            let mut session = session.clone();
-            let _ = mgr.rename_session(&mut session, &title);
-            self.current_session = Some(session);
+        let fallback = title_fallback(&first_text);
+
+        // Only use async LLM title gen when small_model is explicitly configured.
+        // Unlike compact_model_ref(), we don't fall back to the main model —
+        // title gen shouldn't add latency/cost to the primary model.
+        let Some(model_ref) = self.config.small_model.clone() else {
+            self.apply_session_title(&fallback);
+            return;
+        };
+
+        let Some(registry) = &self.provider_registry else {
+            self.apply_session_title(&fallback);
+            return;
+        };
+
+        let resolved = match registry.resolve_model(&model_ref) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to resolve title model, using fallback");
+                self.apply_session_title(&fallback);
+                return;
+            }
+        };
+
+        let client = match registry.client(&resolved.provider_id) {
+            Ok(c) => c.clone(),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to get title model client, using fallback");
+                self.apply_session_title(&fallback);
+                return;
+            }
+        };
+
+        let session_id = session.id.clone();
+        let api_model_id = resolved.api_model_id().to_string();
+        let event_tx = self.event_tx.clone();
+
+        tokio::spawn(async move {
+            match client
+                .simple_chat(&api_model_id, Some(TITLE_SYSTEM_PROMPT), &first_text)
+                .await
+            {
+                Ok(raw) => {
+                    let title = sanitize_title(&raw);
+                    if title.is_empty() {
+                        let _ = event_tx.send(AppEvent::TitleError {
+                            session_id,
+                            fallback_title: fallback,
+                        });
+                    } else {
+                        let _ = event_tx.send(AppEvent::TitleGenerated { session_id, title });
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "LLM title generation failed, using fallback");
+                    let _ = event_tx.send(AppEvent::TitleError {
+                        session_id,
+                        fallback_title: fallback,
+                    });
+                }
+            }
+        });
+    }
+
+    /// Apply a title only if `session_id` matches the current session and
+    /// the title is still the default "New session" (guards against stale
+    /// events after /new or /rename).
+    fn apply_title_if_current(&mut self, session_id: &str, title: &str) {
+        let should_apply = self
+            .current_session
+            .as_ref()
+            .is_some_and(|s| s.id == session_id && s.title == "New session");
+        if should_apply {
+            self.apply_session_title(title);
         }
+    }
+
+    /// Apply a generated title to the current session, persisting to storage.
+    fn apply_session_title(&mut self, title: &str) {
+        if title.is_empty() {
+            return;
+        }
+        let Some(session) = &self.current_session else {
+            return;
+        };
+        let mgr = SessionManager::new(&self.storage, &self.project.id);
+        let mut session = session.clone();
+        if let Err(e) = mgr.rename_session(&mut session, title) {
+            tracing::error!(error = %e, "failed to rename session");
+        }
+        self.current_session = Some(session);
+        self.update_sidebar();
     }
 
     /// Build API-compatible conversation history from stored messages.
@@ -1960,7 +2063,9 @@ impl App {
                 if let Some(session) = &self.current_session {
                     let mgr = SessionManager::new(&self.storage, &self.project.id);
                     let mut session = session.clone();
-                    let _ = mgr.rename_session(&mut session, &title);
+                    if let Err(e) = mgr.rename_session(&mut session, &title) {
+                        tracing::error!(error = %e, "failed to rename session");
+                    }
                     self.current_session = Some(session);
                     self.messages.push(MessageBlock::System {
                         text: format!("Session renamed to: {title}"),
@@ -2227,6 +2332,60 @@ impl App {
 
         Ok(())
     }
+}
+
+/// Enforce a 60-char cap on a title, appending "..." if truncated.
+fn truncate_title(text: &str) -> String {
+    if text.chars().count() > 60 {
+        let truncated: String = text.chars().take(57).collect();
+        format!("{truncated}...")
+    } else {
+        text.to_string()
+    }
+}
+
+/// Truncate the first user message to produce a sync fallback session title.
+/// Takes only the first non-empty line (handles Shift+Enter newlines).
+fn title_fallback(text: &str) -> String {
+    let line = text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(text)
+        .trim();
+    truncate_title(line)
+}
+
+/// Clean up an LLM-generated title: trim whitespace, strip surrounding quotes,
+/// remove common preamble prefixes, and enforce a 60-char cap.
+fn sanitize_title(raw: &str) -> String {
+    // Take only the first non-empty line (LLMs sometimes add explanation after).
+    let line = raw
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(raw)
+        .trim();
+
+    // Strip one layer of matching surrounding quotes (must be at least 2 chars).
+    let stripped = if line.len() >= 2
+        && ((line.starts_with('"') && line.ends_with('"'))
+            || (line.starts_with('\'') && line.ends_with('\'')))
+    {
+        &line[1..line.len() - 1]
+    } else {
+        line
+    };
+
+    // Strip common preamble prefix (case-insensitive, ASCII-safe guard).
+    let cleaned = if stripped.len() >= 6
+        && stripped.is_char_boundary(6)
+        && stripped[..6].eq_ignore_ascii_case("title:")
+    {
+        stripped[6..].trim()
+    } else {
+        stripped
+    };
+
+    truncate_title(cleaned)
 }
 
 #[cfg(test)]
@@ -2834,5 +2993,283 @@ pub(crate) mod tests {
 
         // Should silently do nothing
         assert_eq!(app.messages.len(), initial_count);
+    }
+
+    // -- title_fallback tests --
+
+    #[test]
+    fn title_fallback_short_text() {
+        assert_eq!(title_fallback("Fix the login bug"), "Fix the login bug");
+    }
+
+    #[test]
+    fn title_fallback_exactly_60_chars() {
+        let text = "a".repeat(60);
+        assert_eq!(title_fallback(&text), text);
+    }
+
+    #[test]
+    fn title_fallback_over_60_chars_truncates() {
+        let text = "a".repeat(80);
+        let result = title_fallback(&text);
+        assert_eq!(result.chars().count(), 60);
+        assert!(result.ends_with("..."));
+        assert_eq!(&result[..57], "a".repeat(57));
+    }
+
+    #[test]
+    fn title_fallback_unicode_truncation() {
+        // 70 emoji characters — should truncate to 57 + "..."
+        let text = "🦀".repeat(70);
+        let result = title_fallback(&text);
+        assert_eq!(result.chars().count(), 60);
+        assert!(result.ends_with("..."));
+    }
+
+    // -- sanitize_title tests --
+
+    #[test]
+    fn sanitize_title_clean_response() {
+        assert_eq!(sanitize_title("Fix login redirect"), "Fix login redirect");
+    }
+
+    #[test]
+    fn sanitize_title_strips_double_quotes() {
+        assert_eq!(sanitize_title("\"Fix login redirect\""), "Fix login redirect");
+    }
+
+    #[test]
+    fn sanitize_title_strips_single_quotes() {
+        assert_eq!(sanitize_title("'Fix login redirect'"), "Fix login redirect");
+    }
+
+    #[test]
+    fn sanitize_title_strips_title_prefix() {
+        assert_eq!(sanitize_title("Title: Fix login redirect"), "Fix login redirect");
+    }
+
+    #[test]
+    fn sanitize_title_strips_title_prefix_case_insensitive() {
+        assert_eq!(sanitize_title("TITLE: Fix login redirect"), "Fix login redirect");
+    }
+
+    #[test]
+    fn sanitize_title_takes_first_line() {
+        assert_eq!(
+            sanitize_title("Fix login redirect\nHere is some explanation"),
+            "Fix login redirect"
+        );
+    }
+
+    #[test]
+    fn sanitize_title_skips_empty_first_line() {
+        assert_eq!(
+            sanitize_title("\n  \nFix login redirect\n"),
+            "Fix login redirect"
+        );
+    }
+
+    #[test]
+    fn sanitize_title_enforces_60_char_cap() {
+        let long = "a".repeat(80);
+        let result = sanitize_title(&long);
+        assert_eq!(result.chars().count(), 60);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn sanitize_title_trims_whitespace() {
+        assert_eq!(sanitize_title("  Fix login redirect  \n"), "Fix login redirect");
+    }
+
+    #[test]
+    fn sanitize_title_empty_returns_empty() {
+        assert_eq!(sanitize_title(""), "");
+    }
+
+    #[test]
+    fn sanitize_title_combined_quote_and_prefix() {
+        // Quotes stripped first, then prefix stripped too
+        assert_eq!(sanitize_title("\"Title: Fix login\""), "Fix login");
+    }
+
+    #[test]
+    fn sanitize_title_single_quote_char_no_panic() {
+        assert_eq!(sanitize_title("\""), "\"");
+    }
+
+    #[test]
+    fn sanitize_title_single_apostrophe_no_panic() {
+        assert_eq!(sanitize_title("'"), "'");
+    }
+
+    #[test]
+    fn sanitize_title_non_ascii_prefix_no_panic() {
+        // "Título:" starts with a multibyte char — must not panic on byte-index
+        assert_eq!(sanitize_title("Título: Fix"), "Título: Fix");
+    }
+
+    // -- title_fallback edge cases --
+
+    #[test]
+    fn title_fallback_strips_newlines() {
+        assert_eq!(
+            title_fallback("Fix bug\nin login.rs"),
+            "Fix bug"
+        );
+    }
+
+    #[test]
+    fn title_fallback_empty_returns_empty() {
+        assert_eq!(title_fallback(""), "");
+    }
+
+    // -- apply_session_title edge cases --
+
+    #[test]
+    fn apply_session_title_rejects_empty_string() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        let session = create_test_session(&app);
+        app.current_session = Some(session);
+
+        app.apply_session_title("");
+
+        // Title should remain unchanged
+        assert_eq!(app.current_session.as_ref().unwrap().title, "New session");
+    }
+
+    // -- maybe_generate_title / apply_session_title tests --
+
+    /// Create a test app backed by an isolated temp directory for storage tests.
+    fn make_test_app_with_storage() -> (App, tempfile::TempDir) {
+        use crate::config::types::Config;
+        use crate::project::ProjectInfo;
+        use crate::storage::Storage;
+        use std::path::PathBuf;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let storage = Storage::with_base(dir.path().to_path_buf()).expect("storage");
+        let project = ProjectInfo {
+            root: PathBuf::from("/tmp/test"),
+            id: "test-title".to_string(),
+        };
+        let config = Config::default();
+        let app = App::new(project, config, storage, None, None, None, Vec::new());
+        (app, dir)
+    }
+
+    /// Helper: create a session via SessionManager and return the SessionInfo.
+    fn create_test_session(app: &App) -> SessionInfo {
+        let mgr = SessionManager::new(&app.storage, &app.project.id);
+        mgr.create_session("test/model").expect("create test session")
+    }
+
+    #[test]
+    fn maybe_generate_title_skips_non_default_title() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        let session = create_test_session(&app);
+
+        // Rename via manager before handing to app
+        {
+            let mgr = SessionManager::new(&app.storage, &app.project.id);
+            let mut s = session;
+            mgr.rename_session(&mut s, "My Custom Title").unwrap();
+            app.current_session = Some(s);
+        }
+
+        app.messages.push(MessageBlock::User {
+            text: "Hello world".to_string(),
+        });
+
+        app.maybe_generate_title();
+
+        assert_eq!(app.current_session.as_ref().unwrap().title, "My Custom Title");
+    }
+
+    #[test]
+    fn maybe_generate_title_sync_fallback_without_small_model() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        let session = create_test_session(&app);
+        app.current_session = Some(session);
+        assert!(app.config.small_model.is_none());
+
+        app.messages.push(MessageBlock::User {
+            text: "Fix the authentication bug in login.rs".to_string(),
+        });
+
+        app.maybe_generate_title();
+
+        assert_eq!(
+            app.current_session.as_ref().unwrap().title,
+            "Fix the authentication bug in login.rs"
+        );
+    }
+
+    #[test]
+    fn maybe_generate_title_sync_fallback_truncates_long_message() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        let session = create_test_session(&app);
+        app.current_session = Some(session);
+
+        app.messages.push(MessageBlock::User {
+            text: "a".repeat(80),
+        });
+
+        app.maybe_generate_title();
+
+        let title = &app.current_session.as_ref().unwrap().title;
+        assert_eq!(title.chars().count(), 60);
+        assert!(title.ends_with("..."));
+    }
+
+    #[test]
+    fn apply_session_title_updates_sidebar_and_persists() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        let session = create_test_session(&app);
+        let session_id = session.id.clone();
+        app.current_session = Some(session);
+
+        app.apply_session_title("My New Title");
+
+        assert_eq!(app.current_session.as_ref().unwrap().title, "My New Title");
+        assert_eq!(app.sidebar_state.session_title, "My New Title");
+
+        // Verify persisted to storage
+        {
+            let mgr = SessionManager::new(&app.storage, &app.project.id);
+            let reloaded = mgr.load_session(&session_id).expect("load");
+            assert_eq!(reloaded.title, "My New Title");
+        }
+    }
+
+    #[test]
+    fn title_event_guards_stale_session_id() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        let session = create_test_session(&app);
+        app.current_session = Some(session);
+
+        // Stale session ID — apply_title_if_current should be a no-op
+        app.apply_title_if_current("stale-id-does-not-match", "LLM Generated Title");
+
+        assert_eq!(app.current_session.as_ref().unwrap().title, "New session");
+    }
+
+    #[test]
+    fn title_event_guards_renamed_session() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        let session = create_test_session(&app);
+        let session_id = session.id.clone();
+        app.current_session = Some(session);
+
+        // User renames the session before async title arrives
+        app.apply_session_title("User Chose This");
+
+        // apply_title_if_current with matching session_id should still not overwrite
+        app.apply_title_if_current(&session_id, "LLM Generated Title");
+
+        assert_eq!(
+            app.current_session.as_ref().unwrap().title,
+            "User Chose This"
+        );
     }
 }
