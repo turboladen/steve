@@ -43,7 +43,7 @@ async fn main() -> Result<()> {
     tracing::info!(root = %project_info.root.display(), id = %project_info.id, "project detected");
 
     // Load config
-    let cfg = steve::config::load(&project_info.root)?;
+    let (cfg, config_warnings) = steve::config::load(&project_info.root)?;
     tracing::info!(providers = cfg.providers.len(), "config loaded");
 
     // Initialize storage
@@ -67,7 +67,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    let mut app = steve::app::App::new(project_info, cfg, store, agents_md, provider_registry, provider_error);
+    let mut app = steve::app::App::new(project_info, cfg, store, agents_md, provider_registry, provider_error, config_warnings);
     app.run().await?;
 
     tracing::info!("steve shutting down");

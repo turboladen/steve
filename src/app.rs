@@ -347,6 +347,7 @@ impl App {
         agents_md: Option<String>,
         provider_registry: Option<ProviderRegistry>,
         provider_error: Option<String>,
+        config_warnings: Vec<String>,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
@@ -373,6 +374,14 @@ impl App {
 
         // Build startup messages
         let mut messages = Vec::new();
+
+        // Show config parse warnings first so the user knows what went wrong
+        for warning in &config_warnings {
+            messages.push(MessageBlock::Error {
+                text: warning.clone(),
+            });
+        }
+
         if config.providers.is_empty() {
             messages.push(MessageBlock::Assistant {
                 thinking: None,
@@ -2647,6 +2656,6 @@ pub(crate) mod tests {
         };
         let config = Config::default();
         let storage = Storage::new("test-sidebar").expect("test storage");
-        App::new(project, config, storage, None, None, None)
+        App::new(project, config, storage, None, None, None, Vec::new())
     }
 }

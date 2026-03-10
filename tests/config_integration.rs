@@ -23,7 +23,7 @@ fn permission_rules_config_round_trip() {
     }"#;
     std::fs::write(dir.path().join(".steve.jsonc"), config_json).unwrap();
 
-    let config = config::load(dir.path()).unwrap();
+    let (config, _warnings) = config::load(dir.path()).unwrap();
     assert_eq!(config.permission_rules.len(), 2);
     assert_eq!(config.permission_rules[0].pattern, "src/**");
     assert_eq!(config.permission_rules[1].pattern, "/etc/**");
@@ -42,7 +42,7 @@ fn persist_and_reload_tool_grant() {
     config::persist_allow_tool(dir.path(), "edit").unwrap();
 
     // Reload and verify
-    let config = config::load(dir.path()).unwrap();
+    let (config, _warnings) = config::load(dir.path()).unwrap();
     assert!(config.allow_tools.contains(&"edit".to_string()));
     assert_eq!(config.model, Some("openai/gpt-4o".into()), "model preserved");
 }
@@ -57,7 +57,7 @@ fn persist_multiple_grants_accumulates() {
     config::persist_allow_tool(dir.path(), "bash").unwrap();
     config::persist_allow_tool(dir.path(), "write").unwrap();
 
-    let config = config::load(dir.path()).unwrap();
+    let (config, _warnings) = config::load(dir.path()).unwrap();
     assert_eq!(config.allow_tools.len(), 3);
     assert!(config.allow_tools.contains(&"edit".to_string()));
     assert!(config.allow_tools.contains(&"bash".to_string()));
@@ -105,6 +105,6 @@ fn missing_permission_rules_defaults_to_empty() {
         r#"{"model": "openai/gpt-4o"}"#,
     ).unwrap();
 
-    let config = config::load(dir.path()).unwrap();
+    let (config, _warnings) = config::load(dir.path()).unwrap();
     assert!(config.permission_rules.is_empty());
 }

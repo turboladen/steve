@@ -9,16 +9,21 @@ use types::Config;
 /// Load configuration with global + project merge.
 /// Global config at `~/.config/steve/config.jsonc` (XDG-style on all platforms) provides defaults;
 /// project-level `.steve.jsonc` overlays on top.
-pub fn load(project_root: &Path) -> Result<Config> {
-    let global = load_global();
-    let project = load_project(project_root)?;
+///
+/// Returns `(Config, Vec<String>)` — the merged config and any non-fatal warnings
+/// (e.g., parse errors from config files that exist but couldn't be loaded).
+pub fn load(project_root: &Path) -> Result<(Config, Vec<String>)> {
+    let mut warnings = Vec::new();
+    let global = load_global(&mut warnings);
+    let project = load_project(project_root, &mut warnings)?;
 
-    Ok(global.merge(project))
+    Ok((global.merge(project), warnings))
 }
 
 /// Load global config from `~/.config/steve/config.jsonc`.
 /// Returns `Config::default()` if no global config exists.
-fn load_global() -> Config {
+/// Pushes a warning if the file exists but can't be parsed.
+fn load_global(warnings: &mut Vec<String>) -> Config {
     let Some(path) = global_config_path() else {
         tracing::debug!(
             dir = ?global_config_dir(),
@@ -30,20 +35,38 @@ fn load_global() -> Config {
     match load_jsonc_file(&path) {
         Ok(config) => config,
         Err(e) => {
+            let msg = format_config_error(&path, &e);
             tracing::warn!(path = %path.display(), error = ?e, "failed to load global config, using defaults");
+            warnings.push(msg);
             Config::default()
         }
     }
 }
 
 /// Load project-level config from `.steve.jsonc` in the project root.
-fn load_project(project_root: &Path) -> Result<Config> {
+/// Pushes a warning if the file exists but can't be parsed.
+fn load_project(project_root: &Path, warnings: &mut Vec<String>) -> Result<Config> {
     let path = project_root.join(".steve.jsonc");
     if path.exists() {
-        load_jsonc_file(&path)
+        match load_jsonc_file(&path) {
+            Ok(config) => Ok(config),
+            Err(e) => {
+                let msg = format_config_error(&path, &e);
+                warnings.push(msg);
+                Ok(Config::default())
+            }
+        }
     } else {
         Ok(Config::default())
     }
+}
+
+/// Format a config error into a user-friendly message showing the file path
+/// and the root cause (e.g., the specific serde field error).
+fn format_config_error(path: &Path, error: &anyhow::Error) -> String {
+    // Walk the error chain to find the most specific cause
+    let root_cause = error.chain().last().unwrap_or(error.as_ref());
+    format!("Config error in {}: {root_cause}", path.display())
 }
 
 /// Parse a JSONC file into a Config. Works for both `.json` and `.jsonc`.
@@ -153,7 +176,7 @@ mod tests {
             r#"{"model": "openai/gpt-4o", "providers": {}}"#,
         )
         .unwrap();
-        let config = load(dir.path()).unwrap();
+        let (config, _warnings) = load(dir.path()).unwrap();
         assert_eq!(config.model, Some("openai/gpt-4o".into()));
     }
 
@@ -165,24 +188,27 @@ mod tests {
             "{\n  // this is a comment\n  \"model\": \"openai/gpt-4o\",\n  \"providers\": {}\n}",
         )
         .unwrap();
-        let config = load(dir.path()).unwrap();
+        let (config, _warnings) = load(dir.path()).unwrap();
         assert_eq!(config.model, Some("openai/gpt-4o".into()));
     }
 
     #[test]
     fn no_config_returns_default() {
         let dir = tempfile::tempdir().unwrap();
-        let config = load(dir.path()).unwrap();
+        let (config, _warnings) = load(dir.path()).unwrap();
         let default = Config::default();
         assert_eq!(config.model, default.model);
         assert_eq!(config.auto_compact, default.auto_compact);
     }
 
     #[test]
-    fn invalid_json_returns_error() {
+    fn invalid_json_returns_warning() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".steve.jsonc"), "{{invalid").unwrap();
-        assert!(load(dir.path()).is_err());
+        let (config, warnings) = load(dir.path()).unwrap();
+        assert!(!warnings.is_empty(), "should have a config warning");
+        assert!(warnings[0].contains(".steve.jsonc"), "warning mentions the file");
+        assert_eq!(config.model, None, "falls back to default config");
     }
 
     #[test]
@@ -207,7 +233,7 @@ mod tests {
             r#"{"model": "test/m"}"#,
         )
         .unwrap();
-        let config = load(dir.path()).unwrap();
+        let (config, _warnings) = load(dir.path()).unwrap();
         assert_eq!(config.model, Some("test/m".into()));
         assert!(config.auto_compact);
     }
@@ -240,9 +266,11 @@ mod tests {
     #[test]
     fn load_project_no_file_returns_default() {
         let dir = tempfile::tempdir().unwrap();
-        let config = load_project(dir.path()).unwrap();
+        let mut warnings = Vec::new();
+        let config = load_project(dir.path(), &mut warnings).unwrap();
         assert_eq!(config.model, None);
         assert!(config.providers.is_empty());
+        assert!(warnings.is_empty());
     }
 
     #[test]
@@ -290,14 +318,14 @@ mod tests {
             dir.path().join("steve.json"),
             r#"{"model": "openai/gpt-4o"}"#,
         ).unwrap();
-        let config = load(dir.path()).unwrap();
+        let (config, _warnings) = load(dir.path()).unwrap();
         assert_eq!(config.model, None, "steve.json should not be loaded");
 
         std::fs::write(
             dir.path().join("steve.jsonc"),
             r#"{"model": "openai/gpt-4o"}"#,
         ).unwrap();
-        let config = load(dir.path()).unwrap();
+        let (config, _warnings) = load(dir.path()).unwrap();
         assert_eq!(config.model, None, "steve.jsonc should not be loaded");
     }
 
@@ -318,7 +346,8 @@ mod tests {
 
         // Load and verify global providers are preserved
         let global = load_jsonc_file(&global_dir.path().join("config.jsonc")).unwrap();
-        let project = load_project(dir.path()).unwrap();
+        let mut warnings = Vec::new();
+        let project = load_project(dir.path(), &mut warnings).unwrap();
         let merged = global.merge(project);
 
         assert_eq!(merged.model, Some("openai/gpt-4o".into()));
@@ -332,7 +361,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         persist_allow_tool(dir.path(), "edit").unwrap();
 
-        let config = load(dir.path()).unwrap();
+        let (config, _warnings) = load(dir.path()).unwrap();
         assert!(config.allow_tools.contains(&"edit".to_string()));
     }
 
@@ -346,7 +375,7 @@ mod tests {
 
         persist_allow_tool(dir.path(), "edit").unwrap();
 
-        let config = load(dir.path()).unwrap();
+        let (config, _warnings) = load(dir.path()).unwrap();
         assert!(config.allow_tools.contains(&"bash".to_string()), "existing tool preserved");
         assert!(config.allow_tools.contains(&"edit".to_string()), "new tool added");
         assert_eq!(config.model, Some("openai/gpt-4o".into()), "other fields preserved");
@@ -376,7 +405,7 @@ mod tests {
 
         // Should create .steve.jsonc
         assert!(dir.path().join(".steve.jsonc").exists());
-        let config = load(dir.path()).unwrap();
+        let (config, _warnings) = load(dir.path()).unwrap();
         assert!(config.allow_tools.contains(&"bash".to_string()));
     }
 }
