@@ -92,13 +92,25 @@ enum EntityKind {
 }
 
 fn detect_entity(id: &str) -> Result<EntityKind> {
-    if id.starts_with("task-") || id.starts_with("bug-") {
-        Ok(EntityKind::Task)
-    } else if id.starts_with("epic-") {
-        Ok(EntityKind::Epic)
-    } else {
-        bail!("unknown ID prefix: {id} (expected task-*, bug-*, or epic-*)")
+    // New format first: {project}-{kind_char}{hash} — kind is first char after last dash.
+    // Must come before legacy checks because project names like "task-runner" would
+    // false-match the legacy "task-*" prefix.
+    if let Some(pos) = id.rfind('-') {
+        match id.as_bytes().get(pos + 1) {
+            Some(b't') | Some(b'b') => return Ok(EntityKind::Task),
+            Some(b'e') => return Ok(EntityKind::Epic),
+            _ => {}
+        }
     }
+    // Legacy format fallback: task-{8hex}, bug-{8hex}, epic-{8hex}
+    // These have hex chars (0-9, a-f) after the dash, which don't match t/b/e above.
+    if id.starts_with("task-") || id.starts_with("bug-") {
+        return Ok(EntityKind::Task);
+    }
+    if id.starts_with("epic-") {
+        return Ok(EntityKind::Epic);
+    }
+    bail!("unknown ID format: {id}")
 }
 
 fn parse_priority(s: &str) -> Result<Priority> {
@@ -119,7 +131,9 @@ fn parse_epic_status(s: &str) -> Result<EpicStatus> {
 pub fn run_task(command: TaskCommand) -> Result<()> {
     let project_info = crate::project::detect_or_cwd();
     let storage = crate::storage::Storage::new(&project_info.id)?;
-    let store = TaskStore::new(storage);
+    let repo_name = crate::project::git_repo_name(&project_info.root)
+        .unwrap_or_else(|| "proj".to_string());
+    let store = TaskStore::new(storage, repo_name);
 
     match command {
         TaskCommand::List {
@@ -487,7 +501,7 @@ mod tests {
         let dir = tempdir().expect("temp dir");
         let storage =
             crate::storage::Storage::with_base(dir.path().to_path_buf()).expect("storage");
-        (TaskStore::new(storage), dir)
+        (TaskStore::new(storage, "test".to_string()), dir)
     }
 
     // ── detect_entity ──
@@ -509,9 +523,36 @@ mod tests {
 
     #[test]
     fn detect_entity_unknown() {
-        assert!(detect_entity("foo-123").is_err());
         assert!(detect_entity("").is_err());
         assert!(detect_entity("taskfoo").is_err());
+        assert!(detect_entity("foo-x12").is_err());
+    }
+
+    #[test]
+    fn detect_entity_new_format_task() {
+        assert_eq!(detect_entity("steve-ta3f").unwrap(), EntityKind::Task);
+        assert_eq!(detect_entity("my-app-t01c").unwrap(), EntityKind::Task);
+    }
+
+    #[test]
+    fn detect_entity_new_format_bug() {
+        assert_eq!(detect_entity("steve-b01c").unwrap(), EntityKind::Task);
+        assert_eq!(detect_entity("my-app-b7ff").unwrap(), EntityKind::Task);
+    }
+
+    #[test]
+    fn detect_entity_new_format_epic() {
+        assert_eq!(detect_entity("steve-e7ff").unwrap(), EntityKind::Epic);
+        assert_eq!(detect_entity("proj-e001").unwrap(), EntityKind::Epic);
+    }
+
+    #[test]
+    fn detect_entity_project_name_starting_with_task() {
+        // Project "task-runner" produces IDs like "task-runner-ea3f" — must not
+        // false-match the legacy "task-*" prefix.
+        assert_eq!(detect_entity("task-runner-ea3f").unwrap(), EntityKind::Epic);
+        assert_eq!(detect_entity("task-runner-t01c").unwrap(), EntityKind::Task);
+        assert_eq!(detect_entity("bug-tracker-b7ff").unwrap(), EntityKind::Task);
     }
 
     // ── parse helpers ──

@@ -122,7 +122,7 @@ Example `.steve.jsonc`:
 
 Subcommands that don't need the TUI short-circuit before TUI setup in `main.rs` via the `Commands` enum. Pattern: parse CLI → match subcommand → return early. `Data` and `Task` both use this pattern.
 
-`steve task` manages tasks and epics from the terminal without the TUI. Auto-detects entity type by ID prefix (`task-*`/`bug-*` → Task, `epic-*` → Epic). `--epic`/`--bug` flags on `create` control what's created. Formatting functions return `String` for testability (not `println!` directly).
+`steve task` manages tasks and epics from the terminal without the TUI. Auto-detects entity type from the kind char after the last dash in the ID (`t`/`b` → Task, `e` → Epic), with legacy prefix fallback (`task-*`/`bug-*`/`epic-*`). `--epic`/`--bug` flags on `create` control what's created. Formatting functions return `String` for testability (not `println!` directly).
 
 ## Architecture
 
@@ -245,9 +245,9 @@ The `edit` tool supports four operations via the `operation` parameter (default:
 
 ### Task System (`task/`, `tool/task.rs`, `cli/mod.rs`)
 
-`TaskStore` wraps `Storage` for task/epic CRUD. Storage paths: tasks at `["tasks", "items", &id]`, epics at `["tasks", "epics", &id]`. IDs are generated with prefix + 8 hex chars (e.g., `task-a1b2c3d4`, `bug-a1b2c3d4`, `epic-a1b2c3d4`).
+`TaskStore` wraps `Storage` for task/epic CRUD. Storage paths: tasks at `["tasks", "items", &id]`, epics at `["tasks", "epics", &id]`. IDs use project-scoped format: `{project_name}-{kind_char}{4_hex_chars}` where `kind_char` is `t` (task), `b` (bug), or `e` (epic) — e.g., `steve-ta3f0`, `steve-b01c2`, `steve-e7ff4`. Project name comes from `git_repo_name()`, fallback `"proj"`. Legacy IDs (`task-*`, `bug-*`, `epic-*`) are still recognized by `detect_entity()` for backward compatibility. `TaskStore::new(storage, project_prefix)` takes the project name as a second argument.
 
-`TaskKind` enum (`Task`, `Bug`) controls ID prefix and display treatment. `#[serde(default)]` ensures backward compatibility with pre-kind stored tasks. `create_task()` takes 6 args: `(title, description, epic_id, session_id, priority, kind)`. `create_bug()` is a convenience wrapper.
+`TaskKind` enum (`Task`, `Bug`) controls the kind char in generated IDs (`t`/`b`) and display treatment. `#[serde(default)]` ensures backward compatibility with pre-kind stored tasks. `create_task()` takes 6 args: `(title, description, epic_id, session_id, priority, kind)`. `create_bug()` is a convenience wrapper.
 
 Three interfaces to `TaskStore` must stay in sync: the TUI tool handler (`tool/task.rs` — actions like `create`, `create_bug`, `list`), the CLI (`cli/mod.rs` — `steve task` subcommands), and `app.rs` (`Command::TaskNew`). When adding new task operations, update all three.
 

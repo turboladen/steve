@@ -442,7 +442,9 @@ impl App {
         )));
 
         // Build task store (persistent across sessions)
-        let task_store = crate::task::TaskStore::new(storage.clone());
+        let repo_name = crate::project::git_repo_name(&project.root)
+            .unwrap_or_else(|| "proj".to_string());
+        let task_store = crate::task::TaskStore::new(storage.clone(), repo_name);
 
         // Build startup messages
         let mut messages = Vec::new();

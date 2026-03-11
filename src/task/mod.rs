@@ -14,12 +14,17 @@ pub use types::*;
 #[derive(Debug, Clone)]
 pub struct TaskStore {
     storage: Storage,
+    /// Project name prefix used for generating task/epic IDs (e.g., "steve").
+    project_prefix: String,
 }
 
 impl TaskStore {
     /// Create a new `TaskStore` backed by the given storage instance.
-    pub fn new(storage: Storage) -> Self {
-        Self { storage }
+    ///
+    /// `project_prefix` is the project name used in generated IDs (e.g., "steve"
+    /// produces IDs like `steve-ta3f`).
+    pub fn new(storage: Storage, project_prefix: String) -> Self {
+        Self { storage, project_prefix }
     }
 
     // ── Task CRUD ──
@@ -37,12 +42,12 @@ impl TaskStore {
         kind: TaskKind,
     ) -> Result<Task> {
         let now = Utc::now();
-        let prefix = match kind {
-            TaskKind::Task => "task",
-            TaskKind::Bug => "bug",
+        let kind_char = match kind {
+            TaskKind::Task => 't',
+            TaskKind::Bug => 'b',
         };
         let task = Task {
-            id: generate_id(prefix),
+            id: generate_id(&self.project_prefix, kind_char),
             kind,
             title: title.to_string(),
             description: description.map(String::from),
@@ -124,7 +129,7 @@ impl TaskStore {
     ) -> Result<Epic> {
         let now = Utc::now();
         let epic = Epic {
-            id: generate_id("epic"),
+            id: generate_id(&self.project_prefix, 'e'),
             title: title.to_string(),
             description: description.to_string(),
             external_ref: external_ref.map(String::from),
@@ -348,11 +353,14 @@ fn truncate_summary(out: &mut String, max: usize) {
     out.push_str("...\n");
 }
 
-/// Generate a short prefixed ID using time + atomic counter for uniqueness.
+/// Generate a short project-scoped ID using time + atomic counter for uniqueness.
 ///
-/// Combines subsecond nanos with a process-local atomic counter to guarantee
-/// uniqueness even when multiple IDs are generated within the same nanosecond.
-fn generate_id(prefix: &str) -> String {
+/// Format: `{project_prefix}-{kind_char}{4_hex_chars}` (e.g., `steve-ta3f0`).
+/// Combines subsecond nanos with a process-local atomic counter to reduce
+/// collision probability. With 16 bits (65536 values per kind), birthday
+/// paradox gives ~50% collision chance at ~256 IDs — sufficient for typical
+/// task counts but not guaranteed unique.
+fn generate_id(project_prefix: &str, kind_char: char) -> String {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -363,9 +371,10 @@ fn generate_id(prefix: &str) -> String {
         .unwrap_or_default()
         .subsec_nanos();
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    // Mix nanos and counter to get 8 hex chars of entropy
+    // Mix nanos and counter, mask to 16 bits (4 hex chars = 65536 values)
     let mixed = nanos.wrapping_add(seq.wrapping_mul(2654435761)); // Knuth multiplicative hash
-    format!("{prefix}-{mixed:08x}")
+    let short_hash = mixed & 0xFFFF;
+    format!("{project_prefix}-{kind_char}{short_hash:04x}")
 }
 
 #[cfg(test)]
@@ -377,7 +386,7 @@ mod tests {
         let dir = tempdir().expect("failed to create temp dir");
         let storage =
             Storage::with_base(dir.path().to_path_buf()).expect("failed to create storage");
-        (TaskStore::new(storage), dir)
+        (TaskStore::new(storage, "test".to_string()), dir)
     }
 
     #[test]
@@ -386,7 +395,7 @@ mod tests {
         let task = store
             .create_task("Fix bug", Some("Segfault on exit"), None, None, Priority::High, TaskKind::Task)
             .expect("create_task");
-        assert!(task.id.starts_with("task-"));
+        assert!(task.id.starts_with("test-t"), "got: {}", task.id);
         assert_eq!(task.title, "Fix bug");
         assert_eq!(task.description.as_deref(), Some("Segfault on exit"));
         assert_eq!(task.status, TaskStatus::Open);
@@ -403,7 +412,7 @@ mod tests {
         let epic = store
             .create_epic("Big feature", "Implement everything", None, Priority::Medium)
             .expect("create_epic");
-        assert!(epic.id.starts_with("epic-"));
+        assert!(epic.id.starts_with("test-e"), "got: {}", epic.id);
         assert_eq!(epic.title, "Big feature");
         assert_eq!(epic.description, "Implement everything");
         assert_eq!(epic.status, EpicStatus::Open);
@@ -547,21 +556,21 @@ mod tests {
     }
 
     #[test]
-    fn generate_id_has_correct_prefix() {
-        let id = generate_id("task");
-        assert!(id.starts_with("task-"), "got: {id}");
-        // prefix + dash + 8 hex chars
-        assert_eq!(id.len(), "task-".len() + 8);
+    fn generate_id_has_correct_format() {
+        let id = generate_id("test", 't');
+        assert!(id.starts_with("test-t"), "got: {id}");
+        // "test" + "-" + kind_char + 4 hex chars = 4 + 1 + 1 + 4 = 10
+        assert_eq!(id.len(), "test-t".len() + 4, "got: {id}");
 
-        let eid = generate_id("epic");
-        assert!(eid.starts_with("epic-"), "got: {eid}");
-        assert_eq!(eid.len(), "epic-".len() + 8);
+        let eid = generate_id("test", 'e');
+        assert!(eid.starts_with("test-e"), "got: {eid}");
+        assert_eq!(eid.len(), "test-e".len() + 4, "got: {eid}");
     }
 
     #[test]
     fn generate_id_uniqueness() {
         // Rapid-fire generation should produce unique IDs thanks to atomic counter
-        let mut ids: Vec<String> = (0..100).map(|_| generate_id("task")).collect();
+        let mut ids: Vec<String> = (0..100).map(|_| generate_id("test", 't')).collect();
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), 100, "expected 100 unique IDs");
@@ -569,9 +578,9 @@ mod tests {
 
     #[test]
     fn generate_id_bug_prefix() {
-        let id = generate_id("bug");
-        assert!(id.starts_with("bug-"), "got: {id}");
-        assert_eq!(id.len(), "bug-".len() + 8);
+        let id = generate_id("test", 'b');
+        assert!(id.starts_with("test-b"), "got: {id}");
+        assert_eq!(id.len(), "test-b".len() + 4, "got: {id}");
     }
 
     // ── Bug creation and queries ──
@@ -582,7 +591,7 @@ mod tests {
         let bug = store
             .create_bug("Crash on empty input", Some("Segfault"), None, None, Priority::High)
             .expect("create_bug");
-        assert!(bug.id.starts_with("bug-"), "got: {}", bug.id);
+        assert!(bug.id.starts_with("test-b"), "got: {}", bug.id);
         assert_eq!(bug.kind, TaskKind::Bug);
         assert_eq!(bug.title, "Crash on empty input");
         assert_eq!(bug.status, TaskStatus::Open);

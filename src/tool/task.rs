@@ -585,7 +585,7 @@ mod tests {
     fn test_ctx() -> (ToolContext, tempfile::TempDir) {
         let dir = tempdir().expect("temp dir");
         let storage = Storage::with_base(dir.path().to_path_buf()).expect("storage");
-        let store = TaskStore::new(storage);
+        let store = TaskStore::new(storage, "test".to_string());
         let ctx = ToolContext {
             project_root: dir.path().to_path_buf(),
             storage_dir: None,
@@ -675,7 +675,7 @@ mod tests {
         ).unwrap();
         assert!(!result.is_error);
         assert!(result.output.contains("Fix bug"));
-        assert!(result.output.contains("task-"));
+        assert!(result.output.contains("test-t"));
     }
 
     #[test]
@@ -834,7 +834,7 @@ mod tests {
         ).unwrap();
         assert!(!result.is_error);
         assert!(result.output.contains("Big Feature"));
-        assert!(result.output.contains("epic-"));
+        assert!(result.output.contains("test-e"));
     }
 
     #[test]
@@ -869,7 +869,7 @@ mod tests {
         ).unwrap();
         assert!(!result.is_error);
         assert!(result.output.contains("Crash on exit"));
-        assert!(result.output.contains("bug-"));
+        assert!(result.output.contains("test-b"));
         assert!(result.output.starts_with("Created bug"));
     }
 

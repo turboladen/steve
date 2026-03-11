@@ -32,7 +32,7 @@ pub struct FileChange {
 /// Lightweight task summary for sidebar display.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SidebarTask {
-    /// Task ID (e.g., "task-a1b2c3d4" or "bug-a1b2c3d4").
+    /// Task ID (e.g., "steve-ta3f" or "steve-b01c").
     pub id: String,
     /// Whether this is a task or a bug.
     pub kind: TaskKind,
@@ -659,8 +659,7 @@ mod tests {
         assert!(text.contains("-3"), "should show removals in red");
     }
 
-    fn make_sidebar_task(id: &str, title: &str, priority: Priority, status: TaskStatus) -> SidebarTask {
-        let kind = if id.starts_with("bug-") { TaskKind::Bug } else { TaskKind::Task };
+    fn make_sidebar_task(id: &str, title: &str, kind: TaskKind, priority: Priority, status: TaskStatus) -> SidebarTask {
         SidebarTask {
             id: id.to_string(),
             kind,
@@ -674,8 +673,8 @@ mod tests {
     fn buffer_sidebar_tasks_section_shows_individual_tasks() {
         let state = SidebarState {
             tasks: vec![
-                make_sidebar_task("task-a1b2c3d4", "Fix sidebar rendering", Priority::High, TaskStatus::Open),
-                make_sidebar_task("task-e5f6g7h8", "Add new feature", Priority::Medium, TaskStatus::InProgress),
+                make_sidebar_task("task-a1b2c3d4", "Fix sidebar rendering", TaskKind::Task, Priority::High, TaskStatus::Open),
+                make_sidebar_task("task-e5f6g7h8", "Add new feature", TaskKind::Task, Priority::Medium, TaskStatus::InProgress),
             ],
             ..Default::default()
         };
@@ -692,8 +691,8 @@ mod tests {
     fn buffer_sidebar_tasks_section_shows_done_count() {
         let state = SidebarState {
             tasks: vec![
-                make_sidebar_task("task-a1b2c3d4", "Open task", Priority::Medium, TaskStatus::Open),
-                make_sidebar_task("task-e5f6g7h8", "Done task", Priority::Low, TaskStatus::Done),
+                make_sidebar_task("task-a1b2c3d4", "Open task", TaskKind::Task, Priority::Medium, TaskStatus::Open),
+                make_sidebar_task("task-e5f6g7h8", "Done task", TaskKind::Task, Priority::Low, TaskStatus::Done),
             ],
             ..Default::default()
         };
@@ -705,7 +704,7 @@ mod tests {
     fn buffer_sidebar_tasks_truncates_long_titles() {
         let long_title = "This is a very long task title that should be truncated in the sidebar";
         let state = SidebarState {
-            tasks: vec![make_sidebar_task("task-a1b2c3d4", long_title, Priority::Medium, TaskStatus::Open)],
+            tasks: vec![make_sidebar_task("task-a1b2c3d4", long_title, TaskKind::Task, Priority::Medium, TaskStatus::Open)],
             ..Default::default()
         };
         let text = render_sidebar_to_string(40, 30, &state);
@@ -717,9 +716,9 @@ mod tests {
     fn buffer_sidebar_tasks_status_icons() {
         let state = SidebarState {
             tasks: vec![
-                make_sidebar_task("task-open0001", "Open task", Priority::Low, TaskStatus::Open),
-                make_sidebar_task("task-prog0001", "Active task", Priority::High, TaskStatus::InProgress),
-                make_sidebar_task("task-done0001", "Finished task", Priority::Medium, TaskStatus::Done),
+                make_sidebar_task("task-open0001", "Open task", TaskKind::Task, Priority::Low, TaskStatus::Open),
+                make_sidebar_task("task-prog0001", "Active task", TaskKind::Task, Priority::High, TaskStatus::InProgress),
+                make_sidebar_task("task-done0001", "Finished task", TaskKind::Task, Priority::Medium, TaskStatus::Done),
             ],
             ..Default::default()
         };
