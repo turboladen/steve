@@ -1,6 +1,24 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use strum::{Display, EnumString};
+use strum::{Display, EnumIter, EnumString};
+
+/// Distinguishes tasks from bugs. Both share the same [`Task`] struct
+/// but carry different ID prefixes and display treatment.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display, EnumString, EnumIter,
+)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum TaskKind {
+    Task,
+    Bug,
+}
+
+impl Default for TaskKind {
+    fn default() -> Self {
+        Self::Task
+    }
+}
 
 /// Priority level for epics and tasks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display, EnumString)]
@@ -86,10 +104,14 @@ pub struct Epic {
 /// Tasks represent individual steps that the agent can tackle within a
 /// single session. They track progress independently and can be linked
 /// to both an epic (for grouping) and a session (for provenance).
+/// The `kind` field distinguishes regular tasks from bugs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
-    /// Unique identifier (UUID v4).
+    /// Unique identifier (prefixed `task-` or `bug-` by kind).
     pub id: String,
+    /// Whether this is a regular task or a bug report.
+    #[serde(default)]
+    pub kind: TaskKind,
     /// Human-readable title.
     pub title: String,
     /// Optional detailed description.
@@ -114,6 +136,39 @@ pub struct Task {
 mod tests {
     use super::*;
     use std::str::FromStr;
+    use strum::IntoEnumIterator;
+
+    // ── TaskKind ──
+
+    #[test]
+    fn task_kind_default_is_task() {
+        assert_eq!(TaskKind::default(), TaskKind::Task);
+    }
+
+    #[test]
+    fn task_kind_display_fromstr_round_trip() {
+        for variant in TaskKind::iter() {
+            let displayed = variant.to_string();
+            let parsed: TaskKind = TaskKind::from_str(&displayed).unwrap();
+            assert_eq!(parsed, variant);
+        }
+    }
+
+    #[test]
+    fn task_kind_serde_round_trip() {
+        for variant in TaskKind::iter() {
+            let json = serde_json::to_string(&variant).unwrap();
+            let back: TaskKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    #[test]
+    fn task_kind_rejects_invalid() {
+        assert!(TaskKind::from_str("epic").is_err());
+        assert!(TaskKind::from_str("").is_err());
+        assert!(TaskKind::from_str("TASK").is_err());
+    }
 
     // ── Priority ──
 
@@ -274,6 +329,7 @@ mod tests {
         let now = Utc::now();
         let task = Task {
             id: "task-001".into(),
+            kind: TaskKind::Task,
             title: "Create types module".into(),
             description: Some("Define Epic, Task, and enum types".into()),
             epic_id: Some("epic-001".into()),
@@ -290,8 +346,30 @@ mod tests {
         assert_eq!(back.description, task.description);
         assert_eq!(back.epic_id, task.epic_id);
         assert_eq!(back.session_id, task.session_id);
+        assert_eq!(back.kind, task.kind);
         assert_eq!(back.priority, task.priority);
         assert_eq!(back.status, task.status);
+    }
+
+    #[test]
+    fn task_serde_bug_kind_round_trip() {
+        let now = Utc::now();
+        let bug = Task {
+            id: "bug-001".into(),
+            kind: TaskKind::Bug,
+            title: "Crash on empty input".into(),
+            description: Some("Segfault when stdin is empty".into()),
+            epic_id: None,
+            session_id: None,
+            priority: Priority::High,
+            status: TaskStatus::Open,
+            created_at: now,
+            updated_at: now,
+        };
+        let json = serde_json::to_string_pretty(&bug).unwrap();
+        let back: Task = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kind, TaskKind::Bug);
+        assert_eq!(back.id, "bug-001");
     }
 
     #[test]
@@ -306,6 +384,7 @@ mod tests {
             "updated_at": "2026-03-10T00:00:00Z"
         }"#;
         let task: Task = serde_json::from_str(json).unwrap();
+        assert_eq!(task.kind, TaskKind::Task); // absent kind defaults to Task
         assert_eq!(task.priority, Priority::Medium);
         assert_eq!(task.status, TaskStatus::Open);
         assert!(task.description.is_none());

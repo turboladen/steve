@@ -6,26 +6,26 @@ use anyhow::Result;
 use serde_json::Value;
 
 use super::{ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput};
-use crate::task::types::{Priority, TaskStatus, EpicStatus};
+use crate::task::types::{Priority, TaskKind, TaskStatus, EpicStatus};
 use crate::task::TaskStore;
 
 pub fn tool() -> ToolEntry {
     ToolEntry {
         def: ToolDef {
             name: ToolName::Task,
-            description: "Manage persistent tasks and epics for multi-step work. Always use this \
-                FIRST when given multi-step work: create tasks for each step, then work through \
-                them sequentially. Actions: create (new task), list (show tasks), update (change \
-                status/fields), complete (mark done), show (details), delete, create_epic (new \
-                epic), list_epics, update_epic."
+            description: "Manage persistent tasks, bugs, and epics for multi-step work. Always use \
+                this FIRST when given multi-step work: create tasks for each step, then work \
+                through them sequentially. Actions: create (new task), create_bug (new bug), \
+                list (show tasks/bugs), update (change status/fields), complete (mark done), \
+                show (details), delete, create_epic (new epic), list_epics, update_epic."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["create", "list", "update", "complete", "show", "delete",
-                                 "create_epic", "list_epics", "update_epic"],
+                        "enum": ["create", "create_bug", "list", "update", "complete", "show",
+                                 "delete", "create_epic", "list_epics", "update_epic"],
                         "description": "The action to perform."
                     },
                     "title": {
@@ -129,6 +129,7 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
 
     match action {
         "create" => action_create(&args, store),
+        "create_bug" => action_create_bug(&args, store),
         "list" => action_list(&args, store),
         "update" => action_update(&args, store),
         "complete" => action_complete(&args, store),
@@ -140,8 +141,8 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
         _ => Ok(ToolOutput {
             title: "task".to_string(),
             output: format!(
-                "Error: unknown action '{action}'. Use create, list, update, complete, \
-                 show, delete, create_epic, list_epics, or update_epic."
+                "Error: unknown action '{action}'. Use create, create_bug, list, update, \
+                 complete, show, delete, create_epic, list_epics, or update_epic."
             ),
             is_error: true,
         }),
@@ -151,7 +152,24 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
 // ── Action handlers ──
 
 fn action_create(args: &Value, store: &Arc<TaskStore>) -> Result<ToolOutput> {
-    let title = match require_str(args, "title", "create") {
+    action_create_with_kind(args, store, TaskKind::Task)
+}
+
+fn action_create_bug(args: &Value, store: &Arc<TaskStore>) -> Result<ToolOutput> {
+    action_create_with_kind(args, store, TaskKind::Bug)
+}
+
+fn action_create_with_kind(args: &Value, store: &Arc<TaskStore>, kind: TaskKind) -> Result<ToolOutput> {
+    let label = match kind {
+        TaskKind::Task => "task",
+        TaskKind::Bug => "bug",
+    };
+    let action_name = match kind {
+        TaskKind::Task => "create",
+        TaskKind::Bug => "create_bug",
+    };
+
+    let title = match require_str(args, "title", action_name) {
         Ok(t) => t,
         Err(e) => return Ok(e),
     };
@@ -160,7 +178,7 @@ fn action_create(args: &Value, store: &Arc<TaskStore>) -> Result<ToolOutput> {
         Some(s) => match parse_priority(s) {
             Some(p) => p,
             None => return Ok(ToolOutput {
-                title: "task: create".to_string(),
+                title: format!("task: {action_name}"),
                 output: format!("Error: invalid priority '{s}'. Use high, medium, or low."),
                 is_error: true,
             }),
@@ -171,14 +189,14 @@ fn action_create(args: &Value, store: &Arc<TaskStore>) -> Result<ToolOutput> {
     let epic_id = args.get("epic_id").and_then(|v| v.as_str());
     let session_id = args.get("session_id").and_then(|v| v.as_str());
 
-    let task = store.create_task(title, description, epic_id, session_id, priority)?;
+    let task = store.create_task(title, description, epic_id, session_id, priority, kind)?;
 
-    let mut msg = format!("Created task {}: {} [{}]", task.id, task.title, task.priority);
+    let mut msg = format!("Created {label} {}: {} [{}]", task.id, task.title, task.priority);
     if let Some(eid) = &task.epic_id {
         msg.push_str(&format!(" (epic: {eid})"));
     }
     Ok(ToolOutput {
-        title: "task: create".to_string(),
+        title: format!("task: {action_name}"),
         output: msg,
         is_error: false,
     })
@@ -217,12 +235,22 @@ fn action_list(args: &Value, store: &Arc<TaskStore>) -> Result<ToolOutput> {
     }
 
     let open_count = filtered.iter().filter(|t| t.status != TaskStatus::Done).count();
+    let bug_count = filtered.iter().filter(|t| t.kind == TaskKind::Bug).count();
     let epics = store.list_epics().unwrap_or_default();
 
-    let mut lines = vec![format!("## Tasks ({open_count} open)")];
+    let header = if bug_count > 0 {
+        format!("## Tasks & Bugs ({open_count} open, {bug_count} bugs)")
+    } else {
+        format!("## Tasks ({open_count} open)")
+    };
+    let mut lines = vec![header];
     for task in &filtered {
         let marker = if task.status == TaskStatus::Done { "x" } else { " " };
-        let mut line = format!("- [{marker}] {}: {} [{}]", task.id, task.title, task.priority);
+        let kind_label = match task.kind {
+            TaskKind::Task => "",
+            TaskKind::Bug => " [bug]",
+        };
+        let mut line = format!("- [{marker}] {}: {}{kind_label} [{}]", task.id, task.title, task.priority);
         if task.status == TaskStatus::InProgress {
             line.push_str(" *in progress*");
         }
@@ -352,6 +380,7 @@ fn action_show(args: &Value, store: &Arc<TaskStore>) -> Result<ToolOutput> {
 
     let mut lines = vec![
         format!("ID: {}", task.id),
+        format!("Type: {}", task.kind),
         format!("Title: {}", task.title),
         format!("Status: {}", task.status),
         format!("Priority: {}", task.priority),
@@ -827,6 +856,78 @@ mod tests {
         let result = execute(serde_json::json!({"action": "list_epics"}), ctx).unwrap();
         assert!(!result.is_error);
         assert!(result.output.contains("No epics"));
+    }
+
+    // ── action: create_bug ──
+
+    #[test]
+    fn create_bug_round_trip() {
+        let (ctx, _dir) = test_ctx();
+        let result = execute(
+            serde_json::json!({"action": "create_bug", "title": "Crash on exit"}),
+            ctx,
+        ).unwrap();
+        assert!(!result.is_error);
+        assert!(result.output.contains("Crash on exit"));
+        assert!(result.output.contains("bug-"));
+        assert!(result.output.starts_with("Created bug"));
+    }
+
+    #[test]
+    fn create_bug_missing_title() {
+        let (ctx, _dir) = test_ctx();
+        let result = execute(
+            serde_json::json!({"action": "create_bug"}),
+            ctx,
+        ).unwrap();
+        assert!(result.is_error);
+        assert!(result.output.contains("'title'"));
+    }
+
+    #[test]
+    fn create_bug_invalid_priority() {
+        let (ctx, _dir) = test_ctx();
+        let result = execute(
+            serde_json::json!({"action": "create_bug", "title": "Test", "priority": "critical"}),
+            ctx,
+        ).unwrap();
+        assert!(result.is_error);
+        assert!(result.output.contains("invalid priority"));
+    }
+
+    #[test]
+    fn list_shows_bug_label() {
+        let (ctx, _dir) = test_ctx();
+        execute(
+            serde_json::json!({"action": "create", "title": "Task A"}),
+            ctx.clone(),
+        ).unwrap();
+        execute(
+            serde_json::json!({"action": "create_bug", "title": "Bug B"}),
+            ctx.clone(),
+        ).unwrap();
+        let result = execute(serde_json::json!({"action": "list"}), ctx).unwrap();
+        assert!(!result.is_error);
+        assert!(result.output.contains("[bug]"), "list should show [bug] label, got:\n{}", result.output);
+        assert!(result.output.contains("Bugs"), "header should mention bugs");
+    }
+
+    #[test]
+    fn show_displays_bug_kind() {
+        let (ctx, _dir) = test_ctx();
+        let create_result = execute(
+            serde_json::json!({"action": "create_bug", "title": "Crash"}),
+            ctx.clone(),
+        ).unwrap();
+        let id = create_result.output.split(':').next().unwrap()
+            .replace("Created bug ", "").trim().to_string();
+
+        let result = execute(
+            serde_json::json!({"action": "show", "id": id}),
+            ctx,
+        ).unwrap();
+        assert!(!result.is_error);
+        assert!(result.output.contains("Type: bug"), "show should display type, got:\n{}", result.output);
     }
 
     // ── unknown action ──

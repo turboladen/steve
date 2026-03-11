@@ -118,6 +118,12 @@ Example `.steve.jsonc`:
 | Mouse wheel | Scroll messages |
 | Click+drag | Select text (auto-copies to clipboard on release) |
 
+### CLI Subcommands (`src/cli/`, `src/main.rs`)
+
+Subcommands that don't need the TUI short-circuit before TUI setup in `main.rs` via the `Commands` enum. Pattern: parse CLI → match subcommand → return early. `Data` and `Task` both use this pattern.
+
+`steve task` manages tasks and epics from the terminal without the TUI. Auto-detects entity type by ID prefix (`task-*`/`bug-*` → Task, `epic-*` → Epic). `--epic`/`--bug` flags on `create` control what's created. Formatting functions return `String` for testability (not `println!` directly).
+
 ## Architecture
 
 The crate has both `lib.rs` (public modules) and `main.rs` (binary entry point). This enables integration tests in `tests/` to access all modules via `use steve::*`. Unit tests live inline in each module (`#[cfg(test)]`); integration tests live in `tests/`. ~40 source files, no workspace. All modules share core types.
@@ -221,7 +227,7 @@ Every `tool_call_id` in an assistant message **must** have a corresponding tool 
 
 Tools are registered in `ToolRegistry` as `ToolEntry` structs containing a `ToolDef` (name, description, JSON schema) and a handler closure `Fn(Value, ToolContext) -> Result<ToolOutput>`. Tools are synchronous (not async) — they run inside the stream task's spawned tokio task.
 
-Available tools: `read`, `grep`, `glob`, `list`, `edit`, `write`, `patch`, `move`, `copy`, `delete`, `mkdir`, `bash`, `question`, `todo`, `webfetch`, `memory`.
+Available tools: `read`, `grep`, `glob`, `list`, `edit`, `write`, `patch`, `move`, `copy`, `delete`, `mkdir`, `bash`, `question`, `todo`, `task`, `webfetch`, `memory`.
 
 `TOOL_GUIDANCE` in `app.rs` appends four sections to the system prompt: `## Task Planning` (mandatory todo usage for multi-step tasks — must stay prominent/first), `## Tool Call Budget` (10-20 call soft target), `## IMPORTANT: Use Native Tools, Not Bash` (table of redirections, warns of rejection), and `## Tool Usage Guidelines` (context-efficiency tips, including memory consolidation guidance).
 
@@ -236,6 +242,14 @@ The `edit` tool supports four operations via the `operation` parameter (default:
 **Exhaustive `ToolName` match locations** (all must be updated when adding new tool variants): `extract_args_summary()` and `extract_diff_content()` in `app.rs`, `extract_tool_summary()` in `export.rs`, `cache_key()` and `extract_path()` in `context/cache.rs`, `compress_tool_output()` in `context/compressor.rs`, `build_permission_summary()` and `extract_tool_path()` in `stream.rs`, `is_write_tool()`/`intent_category()`/`tool_marker()` in `tool/mod.rs`. All use explicit variant lists (no `_ =>` wildcards).
 
 - **Inner operation dispatches** (e.g., edit `operation` field): When a tool dispatches on a string parameter, list all known values explicitly and use `tracing::warn!` for the catch-all — same spirit as the no-wildcard rule for `ToolName` matches
+
+### Task System (`task/`, `tool/task.rs`, `cli/mod.rs`)
+
+`TaskStore` wraps `Storage` for task/epic CRUD. Storage paths: tasks at `["tasks", "items", &id]`, epics at `["tasks", "epics", &id]`. IDs are generated with prefix + 8 hex chars (e.g., `task-a1b2c3d4`, `bug-a1b2c3d4`, `epic-a1b2c3d4`).
+
+`TaskKind` enum (`Task`, `Bug`) controls ID prefix and display treatment. `#[serde(default)]` ensures backward compatibility with pre-kind stored tasks. `create_task()` takes 6 args: `(title, description, epic_id, session_id, priority, kind)`. `create_bug()` is a convenience wrapper.
+
+Three interfaces to `TaskStore` must stay in sync: the TUI tool handler (`tool/task.rs` — actions like `create`, `create_bug`, `list`), the CLI (`cli/mod.rs` — `steve task` subcommands), and `app.rs` (`Command::TaskNew`). When adding new task operations, update all three.
 
 ### Storage (`storage/mod.rs`)
 

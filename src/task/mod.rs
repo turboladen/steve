@@ -24,7 +24,9 @@ impl TaskStore {
 
     // ── Task CRUD ──
 
-    /// Create a new task with the given fields, persisting it immediately.
+    /// Create a new task or bug with the given fields, persisting it immediately.
+    ///
+    /// The `kind` parameter controls the ID prefix (`task-` or `bug-`).
     pub fn create_task(
         &self,
         title: &str,
@@ -32,10 +34,16 @@ impl TaskStore {
         epic_id: Option<&str>,
         session_id: Option<&str>,
         priority: Priority,
+        kind: TaskKind,
     ) -> Result<Task> {
         let now = Utc::now();
+        let prefix = match kind {
+            TaskKind::Task => "task",
+            TaskKind::Bug => "bug",
+        };
         let task = Task {
-            id: generate_id("task"),
+            id: generate_id(prefix),
+            kind,
             title: title.to_string(),
             description: description.map(String::from),
             epic_id: epic_id.map(String::from),
@@ -48,6 +56,18 @@ impl TaskStore {
         self.storage
             .write(&["tasks", "items", &task.id], &task)?;
         Ok(task)
+    }
+
+    /// Convenience: create a bug report (shorthand for `create_task` with `TaskKind::Bug`).
+    pub fn create_bug(
+        &self,
+        title: &str,
+        description: Option<&str>,
+        epic_id: Option<&str>,
+        session_id: Option<&str>,
+        priority: Priority,
+    ) -> Result<Task> {
+        self.create_task(title, description, epic_id, session_id, priority, TaskKind::Bug)
     }
 
     /// Read a task by ID.
@@ -155,6 +175,11 @@ impl TaskStore {
         Ok(epic)
     }
 
+    /// Delete an epic from storage.
+    pub fn delete_epic(&self, id: &str) -> Result<()> {
+        self.storage.delete(&["tasks", "epics", id])
+    }
+
     // ── Query helpers ──
 
     /// Return all tasks belonging to the given epic.
@@ -181,6 +206,24 @@ impl TaskStore {
             .list_tasks()?
             .into_iter()
             .filter(|t| t.status != TaskStatus::Done)
+            .collect())
+    }
+
+    /// Return only items with `TaskKind::Bug`.
+    pub fn list_bugs(&self) -> Result<Vec<Task>> {
+        Ok(self
+            .list_tasks()?
+            .into_iter()
+            .filter(|t| t.kind == TaskKind::Bug)
+            .collect())
+    }
+
+    /// Return open bugs (not Done, kind == Bug).
+    pub fn open_bugs(&self) -> Result<Vec<Task>> {
+        Ok(self
+            .list_tasks()?
+            .into_iter()
+            .filter(|t| t.kind == TaskKind::Bug && t.status != TaskStatus::Done)
             .collect())
     }
 
@@ -275,13 +318,18 @@ impl TaskStore {
 }
 
 /// Append a checkbox-style task line: `- [ ] title` or `- [x] title`.
+/// Bugs are prefixed with `[bug]` for visibility.
 fn append_task_line(out: &mut String, task: &Task) {
     let check = if task.status == TaskStatus::Done {
         "x"
     } else {
         " "
     };
-    out.push_str(&format!("- [{}] {}\n", check, task.title));
+    let kind_prefix = match task.kind {
+        TaskKind::Task => "",
+        TaskKind::Bug => "[bug] ",
+    };
+    out.push_str(&format!("- [{check}] {kind_prefix}{}\n", task.title));
 }
 
 /// Truncate the summary to approximately `max` characters, ending cleanly
@@ -336,7 +384,7 @@ mod tests {
     fn create_and_get_task_round_trip() {
         let (store, _dir) = test_store();
         let task = store
-            .create_task("Fix bug", Some("Segfault on exit"), None, None, Priority::High)
+            .create_task("Fix bug", Some("Segfault on exit"), None, None, Priority::High, TaskKind::Task)
             .expect("create_task");
         assert!(task.id.starts_with("task-"));
         assert_eq!(task.title, "Fix bug");
@@ -369,13 +417,13 @@ mod tests {
     fn list_tasks_returns_all() {
         let (store, _dir) = test_store();
         store
-            .create_task("Task A", None, None, None, Priority::Low)
+            .create_task("Task A", None, None, None, Priority::Low, TaskKind::Task)
             .unwrap();
         store
-            .create_task("Task B", None, None, None, Priority::Medium)
+            .create_task("Task B", None, None, None, Priority::Medium, TaskKind::Task)
             .unwrap();
         store
-            .create_task("Task C", None, None, None, Priority::High)
+            .create_task("Task C", None, None, None, Priority::High, TaskKind::Task)
             .unwrap();
 
         let tasks = store.list_tasks().expect("list_tasks");
@@ -386,7 +434,7 @@ mod tests {
     fn complete_task_changes_status() {
         let (store, _dir) = test_store();
         let task = store
-            .create_task("Finish it", None, None, None, Priority::Medium)
+            .create_task("Finish it", None, None, None, Priority::Medium, TaskKind::Task)
             .unwrap();
         assert_eq!(task.status, TaskStatus::Open);
 
@@ -401,7 +449,7 @@ mod tests {
     fn delete_task_removes_it() {
         let (store, _dir) = test_store();
         let task = store
-            .create_task("Ephemeral", None, None, None, Priority::Low)
+            .create_task("Ephemeral", None, None, None, Priority::Low, TaskKind::Task)
             .unwrap();
         assert!(store.get_task(&task.id).is_ok());
 
@@ -416,10 +464,10 @@ mod tests {
             .create_epic("My Epic", "desc", None, Priority::Medium)
             .unwrap();
         let t1 = store
-            .create_task("In epic", None, Some(&epic.id), None, Priority::Medium)
+            .create_task("In epic", None, Some(&epic.id), None, Priority::Medium, TaskKind::Task)
             .unwrap();
         let t2 = store
-            .create_task("No epic", None, None, None, Priority::Medium)
+            .create_task("No epic", None, None, None, Priority::Medium, TaskKind::Task)
             .unwrap();
 
         let filtered = store.tasks_by_epic(&epic.id).expect("tasks_by_epic");
@@ -432,10 +480,10 @@ mod tests {
     fn tasks_by_session_filters_correctly() {
         let (store, _dir) = test_store();
         let t1 = store
-            .create_task("Session A", None, None, Some("sess-a"), Priority::Medium)
+            .create_task("Session A", None, None, Some("sess-a"), Priority::Medium, TaskKind::Task)
             .unwrap();
         let t2 = store
-            .create_task("Session B", None, None, Some("sess-b"), Priority::Medium)
+            .create_task("Session B", None, None, Some("sess-b"), Priority::Medium, TaskKind::Task)
             .unwrap();
 
         let filtered = store.tasks_by_session("sess-a").expect("tasks_by_session");
@@ -448,10 +496,10 @@ mod tests {
     fn open_tasks_excludes_done() {
         let (store, _dir) = test_store();
         let t1 = store
-            .create_task("Open one", None, None, None, Priority::Medium)
+            .create_task("Open one", None, None, None, Priority::Medium, TaskKind::Task)
             .unwrap();
         let t2 = store
-            .create_task("Done one", None, None, None, Priority::Medium)
+            .create_task("Done one", None, None, None, Priority::Medium, TaskKind::Task)
             .unwrap();
         store.complete_task(&t2.id).unwrap();
 
@@ -465,10 +513,10 @@ mod tests {
     fn summary_for_prompt_produces_output() {
         let (store, _dir) = test_store();
         store
-            .create_task("Session task", None, None, Some("sess-1"), Priority::Medium)
+            .create_task("Session task", None, None, Some("sess-1"), Priority::Medium, TaskKind::Task)
             .unwrap();
         store
-            .create_task("Other task", None, None, None, Priority::High)
+            .create_task("Other task", None, None, None, Priority::High, TaskKind::Task)
             .unwrap();
 
         let summary = store.summary_for_prompt("sess-1");
@@ -486,7 +534,7 @@ mod tests {
             let title = format!(
                 "Task number {i:03} with a deliberately long title to consume characters quickly padding"
             );
-            let _ = store.create_task(&title, None, None, None, Priority::Medium);
+            let _ = store.create_task(&title, None, None, None, Priority::Medium, TaskKind::Task);
         }
 
         let summary = store.summary_for_prompt("no-session");
@@ -517,5 +565,76 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), 100, "expected 100 unique IDs");
+    }
+
+    #[test]
+    fn generate_id_bug_prefix() {
+        let id = generate_id("bug");
+        assert!(id.starts_with("bug-"), "got: {id}");
+        assert_eq!(id.len(), "bug-".len() + 8);
+    }
+
+    // ── Bug creation and queries ──
+
+    #[test]
+    fn create_bug_uses_bug_prefix_and_kind() {
+        let (store, _dir) = test_store();
+        let bug = store
+            .create_bug("Crash on empty input", Some("Segfault"), None, None, Priority::High)
+            .expect("create_bug");
+        assert!(bug.id.starts_with("bug-"), "got: {}", bug.id);
+        assert_eq!(bug.kind, TaskKind::Bug);
+        assert_eq!(bug.title, "Crash on empty input");
+        assert_eq!(bug.status, TaskStatus::Open);
+    }
+
+    #[test]
+    fn list_bugs_filters_by_kind() {
+        let (store, _dir) = test_store();
+        store
+            .create_task("Regular task", None, None, None, Priority::Medium, TaskKind::Task)
+            .unwrap();
+        store
+            .create_bug("A bug", None, None, None, Priority::High)
+            .unwrap();
+        store
+            .create_bug("Another bug", None, None, None, Priority::Low)
+            .unwrap();
+
+        let bugs = store.list_bugs().expect("list_bugs");
+        assert_eq!(bugs.len(), 2);
+        assert!(bugs.iter().all(|b| b.kind == TaskKind::Bug));
+
+        // list_tasks returns all (tasks + bugs)
+        let all = store.list_tasks().expect("list_tasks");
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn open_bugs_excludes_done() {
+        let (store, _dir) = test_store();
+        let b1 = store
+            .create_bug("Open bug", None, None, None, Priority::Medium)
+            .unwrap();
+        let b2 = store
+            .create_bug("Fixed bug", None, None, None, Priority::Low)
+            .unwrap();
+        store.complete_task(&b2.id).unwrap();
+
+        let open = store.open_bugs().expect("open_bugs");
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].id, b1.id);
+    }
+
+    #[test]
+    fn summary_for_prompt_shows_bug_prefix() {
+        let (store, _dir) = test_store();
+        store
+            .create_bug("Crash on exit", None, None, Some("sess-1"), Priority::High)
+            .unwrap();
+
+        let summary = store.summary_for_prompt("sess-1");
+        assert!(summary.contains("[bug]"), "bug should be prefixed in summary, got:\n{summary}");
+        assert!(summary.contains("Crash on exit"));
     }
 }

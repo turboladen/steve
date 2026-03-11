@@ -14,6 +14,11 @@ struct Cli {
 enum Commands {
     /// Browse usage data and cost analytics
     Data,
+    /// Manage tasks and epics
+    Task {
+        #[command(subcommand)]
+        command: steve::cli::TaskCommand,
+    },
 }
 
 #[tokio::main]
@@ -48,12 +53,18 @@ async fn main() -> Result<()> {
     tracing::info!("steve starting up");
 
     // Handle subcommands that don't need the full chat TUI setup
-    if let Some(Commands::Data) = cli.command {
-        let data_dir = directories::ProjectDirs::from("", "", "steve")
-            .map(|d| d.data_dir().to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from("/tmp/steve-data"));
-        let db_path = data_dir.join("usage.db");
-        return steve::data::run(&db_path);
+    match cli.command {
+        Some(Commands::Data) => {
+            let data_dir = directories::ProjectDirs::from("", "", "steve")
+                .map(|d| d.data_dir().to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("/tmp/steve-data"));
+            let db_path = data_dir.join("usage.db");
+            return steve::data::run(&db_path);
+        }
+        Some(Commands::Task { command }) => {
+            return steve::cli::run_task(command);
+        }
+        None => {}
     }
 
     // Detect project root

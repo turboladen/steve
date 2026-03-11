@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Paragraph, Wrap},
 };
 
-use crate::task::types::{Priority, TaskStatus};
+use crate::task::types::{Priority, TaskKind, TaskStatus};
 use crate::ui::message_block::{DiffContent, DiffLine};
 
 use super::status_line::format_tokens;
@@ -32,8 +32,10 @@ pub struct FileChange {
 /// Lightweight task summary for sidebar display.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SidebarTask {
-    /// Task ID (e.g., "task-a1b2c3d4").
+    /// Task ID (e.g., "task-a1b2c3d4" or "bug-a1b2c3d4").
     pub id: String,
+    /// Whether this is a task or a bug.
+    pub kind: TaskKind,
     /// Human-readable title.
     pub title: String,
     /// Priority level.
@@ -46,6 +48,7 @@ impl From<crate::task::Task> for SidebarTask {
     fn from(t: crate::task::Task) -> Self {
         Self {
             id: t.id,
+            kind: t.kind,
             title: t.title,
             priority: t.priority,
             status: t.status,
@@ -340,10 +343,12 @@ pub fn render_sidebar(
 
         // Individual task lines (2 lines each, pre-capped at MAX_SIDEBAR_TASKS by update_sidebar)
         for task in &state.tasks {
-            let (icon, icon_color) = match task.status {
-                TaskStatus::Open => ("\u{25cb}", theme.dim),           // ○
-                TaskStatus::InProgress => ("\u{25cf}", theme.accent),  // ●
-                TaskStatus::Done => ("\u{2713}", theme.success),       // ✓
+            let (icon, icon_color) = match (task.kind, task.status) {
+                (_, TaskStatus::Done) => ("\u{2713}", theme.success),           // ✓
+                (TaskKind::Bug, TaskStatus::Open) => ("\u{2298}", theme.error), // ⊘
+                (TaskKind::Bug, TaskStatus::InProgress) => ("\u{2298}", theme.accent), // ⊘
+                (TaskKind::Task, TaskStatus::Open) => ("\u{25cb}", theme.dim),  // ○
+                (TaskKind::Task, TaskStatus::InProgress) => ("\u{25cf}", theme.accent), // ●
             };
             let priority_abbr = match task.priority {
                 Priority::High => "hi",
@@ -655,8 +660,10 @@ mod tests {
     }
 
     fn make_sidebar_task(id: &str, title: &str, priority: Priority, status: TaskStatus) -> SidebarTask {
+        let kind = if id.starts_with("bug-") { TaskKind::Bug } else { TaskKind::Task };
         SidebarTask {
             id: id.to_string(),
+            kind,
             title: title.to_string(),
             priority,
             status,

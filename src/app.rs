@@ -39,7 +39,7 @@ use crate::ui::message_block::{
     AssistantPart, DiffContent, DiffLine, MessageBlock, ToolCall,
 };
 use crate::ui::selection::SelectionState;
-use crate::task::types::{Priority, TaskStatus};
+use crate::task::types::{Priority, TaskKind, TaskStatus};
 use crate::ui::sidebar::{SidebarState, SidebarTask, count_diff_lines, MAX_SIDEBAR_TASKS};
 use crate::ui::status_line::{Activity, StatusLineState};
 use crate::ui::theme::Theme;
@@ -2721,7 +2721,8 @@ impl App {
                             output.push_str(&format!("## {} ({})\n", epic.title, epic.id));
                             for t in &epic_tasks {
                                 let marker = if t.status == crate::task::types::TaskStatus::Done { "x" } else { " " };
-                                output.push_str(&format!("  - [{marker}] {}: {} [{}]\n", t.id, t.title, t.priority));
+                                let bug_label = if t.kind == TaskKind::Bug { " [bug]" } else { "" };
+                                output.push_str(&format!("  - [{marker}] {}: {}{bug_label} [{}]\n", t.id, t.title, t.priority));
                             }
                         }
                     }
@@ -2740,7 +2741,7 @@ impl App {
                 self.update_sidebar();
             }
             Command::TaskNew(title) => {
-                match self.task_store.create_task(&title, None, None, None, crate::task::types::Priority::default()) {
+                match self.task_store.create_task(&title, None, None, None, Priority::default(), TaskKind::Task) {
                     Ok(task) => {
                         self.messages.push(MessageBlock::System {
                             text: format!("Created task: {} \u{2014} {}", task.id, task.title),
@@ -2777,8 +2778,8 @@ impl App {
                             .map(|e| format!("{} ({})", e.title, e.id))
                             .unwrap_or_else(|| "(none)".to_string());
                         let text = format!(
-                            "ID: {}\nTitle: {}\nStatus: {}\nPriority: {}\nEpic: {}\nDescription: {}\nCreated: {}",
-                            task.id, task.title, task.status, task.priority,
+                            "ID: {}\nType: {}\nTitle: {}\nStatus: {}\nPriority: {}\nEpic: {}\nDescription: {}\nCreated: {}",
+                            task.id, task.kind, task.title, task.status, task.priority,
                             epic_info,
                             task.description.as_deref().unwrap_or("(none)"),
                             task.created_at.format("%Y-%m-%d %H:%M"),
