@@ -304,7 +304,15 @@ fn render_file_popup(
 
     let item_count = state.file_matches.len().min(10) as u16;
     let popup_height = item_count + 2; // +2 for borders
-    let popup_width = 60u16.min(input_area.width); // wider for file paths
+    // Dynamic width: sized to longest visible match, min 40, capped by available terminal width.
+    let longest_match = state.file_matches.iter()
+        .take(10) // only visible items
+        .map(|p| p.len())
+        .max()
+        .unwrap_or(0);
+    let content_width = (longest_match + 2) as u16; // +2 for border padding
+    let max_width = input_area.width.saturating_sub(2); // leave room for x offset
+    let popup_width = content_width.clamp(40, max_width);
 
     let popup_area = Rect {
         x: input_area.x + 2,

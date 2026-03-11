@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-use super::markdown::{MarkdownLine, render_markdown_line};
+use super::markdown::{MarkdownLine, is_table_row, render_markdown_line, render_table};
 use super::message_block::{AssistantPart, CodeFence, DiffContent, DiffLine, MessageBlock, ToolGroup, ToolGroupStatus};
 use super::selection::{ContentMap, ContentPos, SelectionState};
 use super::syntax;
@@ -799,10 +799,17 @@ fn render_text_with_code_blocks(
     let mut result: Vec<MarkdownLine<'static>> = Vec::new();
     let mut in_code_block = false;
     let mut highlighter: Option<syntect::easy::HighlightLines<'_>> = None;
+    let mut table_buffer: Vec<String> = Vec::new();
 
     for text_line in text.lines() {
         match CodeFence::classify(text_line, in_code_block) {
             CodeFence::Open { lang } => {
+                // Flush any pending table
+                if !table_buffer.is_empty() {
+                    result.extend(render_table(&table_buffer, theme, available_width));
+                    table_buffer.clear();
+                }
+
                 let code_bg_style = Style::default().fg(theme.dim).bg(theme.code_bg);
 
                 // Try to initialize syntax highlighter for this language
@@ -857,10 +864,27 @@ fn render_text_with_code_blocks(
                 });
             }
             CodeFence::NotFence => {
+                // Table row detection — buffer consecutive table lines
+                if is_table_row(text_line) {
+                    table_buffer.push(text_line.to_string());
+                    continue;
+                }
+
+                // Flush any pending table before prose
+                if !table_buffer.is_empty() {
+                    result.extend(render_table(&table_buffer, theme, available_width));
+                    table_buffer.clear();
+                }
+
                 // Normal prose line — apply markdown formatting
                 result.push(render_markdown_line(text_line, theme, available_width));
             }
         }
+    }
+
+    // Flush trailing table
+    if !table_buffer.is_empty() {
+        result.extend(render_table(&table_buffer, theme, available_width));
     }
 
     result
@@ -2084,4 +2108,27 @@ mod tests {
         assert!(text.contains("my answer"), "should show free text input, got:\n{text}");
     }
 
+    #[test]
+    fn table_renders_with_box_drawing() {
+        let theme = Theme::default();
+        let text = "| Name | Age |\n|------|-----|\n| Alice | 30 |";
+        let ml = render_text_with_code_blocks(text, &theme, 60);
+        assert_eq!(ml.len(), 3, "header + separator + data row");
+        // Header should contain Name
+        assert!(ml[0].plain.contains("Name"), "header should contain Name");
+        // Separator should use box-drawing chars
+        assert!(ml[1].plain.contains("─"), "separator should use ─");
+        // Data should contain Alice
+        assert!(ml[2].plain.contains("Alice"), "data should contain Alice");
+    }
+
+    #[test]
+    fn table_followed_by_prose() {
+        let theme = Theme::default();
+        let text = "| A | B |\n|---|---|\n| 1 | 2 |\n\nSome prose after";
+        let ml = render_text_with_code_blocks(text, &theme, 60);
+        // Table (3 lines) + empty line + prose = 5 lines
+        assert_eq!(ml.len(), 5, "expected 5 lines, got {}", ml.len());
+        assert!(ml[4].plain.contains("Some prose after"), "prose after table");
+    }
 }

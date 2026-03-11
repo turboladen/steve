@@ -127,7 +127,67 @@ pub fn render_sidebar(
     let mut lines: Vec<Line> = Vec::new();
     let header_color = theme.border_color(context_pct);
 
-    // -- Git section (only when branch is known) --
+    // -- Session section (top — most important context) --
+    lines.push(Line::from(Span::styled(
+        "Session",
+        Style::default()
+            .fg(header_color)
+            .add_modifier(Modifier::BOLD),
+    )));
+    let title = if state.session_title.is_empty() {
+        "(untitled)"
+    } else {
+        &state.session_title
+    };
+    lines.push(Line::from(Span::styled(
+        format!(" {title}"),
+        Style::default().fg(theme.fg),
+    )));
+    let model = if state.model_name.is_empty() {
+        "(none)"
+    } else {
+        &state.model_name
+    };
+    lines.push(Line::from(Span::styled(
+        format!(" {model}"),
+        Style::default().fg(theme.fg),
+    )));
+    // Context pressure: Ctx: X/Y (Z%) — replaces verbose in/out/total lines
+    if state.context_window > 0 {
+        let pct = (state.last_prompt_tokens * 100).checked_div(state.context_window).unwrap_or(0);
+        lines.push(Line::from(Span::styled(
+            format!(
+                " Ctx: {}/{} ({}%)",
+                format_tokens(state.last_prompt_tokens),
+                format_tokens(state.context_window),
+                pct,
+            ),
+            Style::default().fg(theme.dim),
+        )));
+    } else {
+        // Fallback when context_window is unknown
+        lines.push(Line::from(Span::styled(
+            format!(" Tokens: {}", format_tokens(state.total_tokens)),
+            Style::default().fg(theme.dim),
+        )));
+    }
+    match state.session_cost {
+        Some(cost) => {
+            lines.push(Line::from(Span::styled(
+                format!(" Cost: ${:.4}", cost),
+                Style::default().fg(theme.dim),
+            )));
+        }
+        None => {
+            lines.push(Line::from(Span::styled(
+                " Cost: N/A",
+                Style::default().fg(theme.dim),
+            )));
+        }
+    }
+    lines.push(Line::from(""));
+
+    // -- Git section (below session, only when branch is known) --
     if let Some(branch) = &state.git_branch {
         lines.push(Line::from(Span::styled(
             "Git",
@@ -137,7 +197,7 @@ pub fn render_sidebar(
         )));
         if let Some(repo_name) = &state.git_repo_name {
             lines.push(Line::from(Span::styled(
-                format!("  {repo_name}"),
+                format!(" {repo_name}"),
                 Style::default().fg(theme.dim),
             )));
         }
@@ -158,7 +218,7 @@ pub fn render_sidebar(
             None => theme.dim,
         };
         lines.push(Line::from(vec![
-            Span::styled(format!("  {truncated_branch}"), Style::default().fg(theme.fg)),
+            Span::styled(format!(" {truncated_branch}"), Style::default().fg(theme.fg)),
             Span::styled(status_text, Style::default().fg(status_color)),
         ]));
         lines.push(Line::from(""));
@@ -174,7 +234,7 @@ pub fn render_sidebar(
         )));
         for change in &state.changes {
             let mut spans = vec![Span::styled(
-                format!("  {}", change.path),
+                format!(" {}", change.path),
                 Style::default().fg(theme.fg),
             )];
             if change.additions > 0 {
@@ -195,7 +255,7 @@ pub fn render_sidebar(
         let (total_add, total_rem) = state.total_changes();
         let file_word = if state.changes.len() == 1 { "file" } else { "files" };
         let mut summary_spans: Vec<Span> = vec![Span::styled(
-            format!("  {} {file_word}", state.changes.len()),
+            format!(" {} {file_word}", state.changes.len()),
             Style::default().fg(theme.dim),
         )];
         if total_add > 0 {
@@ -215,66 +275,6 @@ pub fn render_sidebar(
         lines.push(Line::from(""));
     }
 
-    // -- Session section (compact redesign) --
-    lines.push(Line::from(Span::styled(
-        "Session",
-        Style::default()
-            .fg(header_color)
-            .add_modifier(Modifier::BOLD),
-    )));
-    let title = if state.session_title.is_empty() {
-        "(untitled)"
-    } else {
-        &state.session_title
-    };
-    lines.push(Line::from(Span::styled(
-        format!("  {title}"),
-        Style::default().fg(theme.fg),
-    )));
-    let model = if state.model_name.is_empty() {
-        "(none)"
-    } else {
-        &state.model_name
-    };
-    lines.push(Line::from(Span::styled(
-        format!("  {model}"),
-        Style::default().fg(theme.fg),
-    )));
-    // Context pressure: Ctx: X/Y (Z%) — replaces verbose in/out/total lines
-    if state.context_window > 0 {
-        let pct = (state.last_prompt_tokens * 100).checked_div(state.context_window).unwrap_or(0);
-        lines.push(Line::from(Span::styled(
-            format!(
-                "  Ctx: {}/{} ({}%)",
-                format_tokens(state.last_prompt_tokens),
-                format_tokens(state.context_window),
-                pct,
-            ),
-            Style::default().fg(theme.dim),
-        )));
-    } else {
-        // Fallback when context_window is unknown
-        lines.push(Line::from(Span::styled(
-            format!("  Tokens: {}", format_tokens(state.total_tokens)),
-            Style::default().fg(theme.dim),
-        )));
-    }
-    match state.session_cost {
-        Some(cost) => {
-            lines.push(Line::from(Span::styled(
-                format!("  Cost: ${:.4}", cost),
-                Style::default().fg(theme.dim),
-            )));
-        }
-        None => {
-            lines.push(Line::from(Span::styled(
-                "  Cost: N/A",
-                Style::default().fg(theme.dim),
-            )));
-        }
-    }
-    lines.push(Line::from(""));
-
     // -- Tasks section (if any open tasks) --
     if state.open_task_count > 0 {
         let task_word = if state.open_task_count == 1 { "task" } else { "tasks" };
@@ -285,12 +285,13 @@ pub fn render_sidebar(
                 .add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(Span::styled(
-            format!("  {} open {task_word}", state.open_task_count),
+            format!(" {} open {task_word}", state.open_task_count),
             Style::default().fg(theme.fg),
         )));
     }
 
-    let block = Block::default();
+    // 1-char left padding via Block::padding keeps content off the vertical divider.
+    let block = Block::default().padding(ratatui::widgets::Padding::new(1, 0, 0, 0));
 
     let paragraph = Paragraph::new(lines)
         .block(block)
@@ -561,16 +562,16 @@ mod tests {
     }
 
     #[test]
-    fn buffer_sidebar_changes_renders_above_session() {
+    fn buffer_sidebar_session_renders_above_changes() {
         let mut state = SidebarState {
             model_name: "gpt-4o".to_string(),
             ..Default::default()
         };
         state.record_file_change("file.rs".into(), 1, 0);
         let text = render_sidebar_to_string(40, 20, &state);
-        let changes_pos = text.find("Changes").expect("Changes header not found");
         let session_pos = text.find("Session").expect("Session header not found");
-        assert!(changes_pos < session_pos, "Changes should render above Session");
+        let changes_pos = text.find("Changes").expect("Changes header not found");
+        assert!(session_pos < changes_pos, "Session should render above Changes");
     }
 
     #[test]

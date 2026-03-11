@@ -438,6 +438,159 @@ fn parse_list_item(line: &str) -> Option<(&str, String, &str)> {
     None
 }
 
+/// Check if a line looks like a markdown table row (has | delimiters).
+pub fn is_table_row(line: &str) -> bool {
+    let trimmed = line.trim();
+    // Must contain at least one | and not be a horizontal rule
+    if !trimmed.contains('|') {
+        return false;
+    }
+    // A table row has | separating cells. Minimum: "a|b" or "|a|"
+    let pipe_count = trimmed.chars().filter(|c| *c == '|').count();
+    pipe_count >= 1
+}
+
+/// Check if a line is a table separator (e.g., |---|---|).
+fn is_table_separator(line: &str) -> bool {
+    let trimmed = line.trim();
+    if !trimmed.contains('|') {
+        return false;
+    }
+    // After removing pipes, colons, dashes, and spaces — nothing should remain
+    trimmed.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+        && trimmed.contains('-')
+}
+
+/// Parse a table row into cells (strips leading/trailing pipes and trims each cell).
+fn parse_table_cells(line: &str) -> Vec<String> {
+    let trimmed = line.trim();
+    // Strip leading/trailing pipe
+    let inner = trimmed.strip_prefix('|').unwrap_or(trimmed);
+    let inner = inner.strip_suffix('|').unwrap_or(inner);
+    inner.split('|').map(|cell| cell.trim().to_string()).collect()
+}
+
+/// Render buffered table rows into styled MarkdownLines.
+///
+/// The first row is treated as the header (rendered bold). The separator row
+/// is replaced with box-drawing horizontal lines. Data rows use normal styling.
+pub fn render_table(rows: &[String], theme: &Theme, available_width: usize) -> Vec<MarkdownLine<'static>> {
+    if rows.is_empty() {
+        return vec![];
+    }
+
+    // Parse all rows into cells
+    let parsed: Vec<Vec<String>> = rows.iter().map(|r| parse_table_cells(r)).collect();
+
+    // Find separator row index (usually row 1)
+    let sep_idx = parsed.iter().position(|cells| {
+        cells.iter().all(|c| {
+            let t = c.trim();
+            t.is_empty() || t.chars().all(|ch| matches!(ch, '-' | ':'))
+        }) && cells.iter().any(|c| c.contains('-'))
+    });
+
+    // Compute max column count and widths
+    let col_count = parsed.iter().map(|r| r.len()).max().unwrap_or(0);
+    if col_count == 0 {
+        return vec![];
+    }
+
+    let mut col_widths: Vec<usize> = vec![0; col_count];
+    for (row_idx, row) in parsed.iter().enumerate() {
+        if Some(row_idx) == sep_idx {
+            continue; // Don't let separator dashes influence widths
+        }
+        for (col_idx, cell) in row.iter().enumerate() {
+            if col_idx < col_count {
+                col_widths[col_idx] = col_widths[col_idx].max(cell.chars().count());
+            }
+        }
+    }
+
+    // Ensure each column is at least 3 chars wide
+    for w in &mut col_widths {
+        if *w < 3 {
+            *w = 3;
+        }
+    }
+
+    // Check if table fits; if total width exceeds available, clamp proportionally
+    let total_content: usize = col_widths.iter().sum();
+    let overhead = col_count + 1; // one │ per column boundary
+    let total_width = total_content + overhead;
+    if total_width > available_width && available_width > overhead {
+        let budget = available_width - overhead;
+        // Scale proportionally
+        let scale = budget as f64 / total_content as f64;
+        for w in &mut col_widths {
+            *w = ((*w as f64 * scale).floor() as usize).max(3);
+        }
+    }
+
+    let border_style = Style::default().fg(theme.dim);
+    let header_style = Style::default().fg(theme.heading).add_modifier(Modifier::BOLD);
+    let cell_style = Style::default().fg(theme.assistant_msg);
+
+    let mut result: Vec<MarkdownLine<'static>> = Vec::new();
+
+    for (row_idx, row) in parsed.iter().enumerate() {
+        if Some(row_idx) == sep_idx {
+            // Render separator as ├───┼───┤ style
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut plain = String::new();
+            spans.push(Span::styled("├", border_style));
+            plain.push('├');
+            for (col_idx, w) in col_widths.iter().enumerate() {
+                let bar = "─".repeat(*w);
+                spans.push(Span::styled(bar.clone(), border_style));
+                plain.push_str(&bar);
+                if col_idx + 1 < col_count {
+                    spans.push(Span::styled("┼", border_style));
+                    plain.push('┼');
+                }
+            }
+            spans.push(Span::styled("┤", border_style));
+            plain.push('┤');
+            result.push(MarkdownLine {
+                styled: Line::from(spans),
+                plain,
+            });
+            continue;
+        }
+
+        let is_header = row_idx == 0 && sep_idx == Some(1);
+        let style = if is_header { header_style } else { cell_style };
+
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut plain = String::new();
+        spans.push(Span::styled("│", border_style));
+        plain.push('│');
+        for col_idx in 0..col_count {
+            let cell = row.get(col_idx).map(|s| s.as_str()).unwrap_or("");
+            let w = col_widths[col_idx];
+            let cell_chars = cell.chars().count();
+            let padded = if cell_chars > w {
+                // Truncate with ellipsis if needed
+                let truncated: String = cell.chars().take(w.saturating_sub(1)).collect();
+                format!("{truncated}…")
+            } else {
+                format!("{cell}{}", " ".repeat(w - cell_chars))
+            };
+            spans.push(Span::styled(padded.clone(), style));
+            plain.push_str(&padded);
+            spans.push(Span::styled("│", border_style));
+            plain.push('│');
+        }
+        result.push(MarkdownLine {
+            styled: Line::from(spans),
+            plain,
+        });
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,5 +818,70 @@ mod tests {
         // "---" should be a horizontal rule, not a list item
         let result = render_markdown_line("---", &dark(), 20);
         assert!(result.plain.is_empty(), "--- should be a horizontal rule");
+    }
+
+    // -- Table detection --
+
+    #[test]
+    fn is_table_row_with_pipes() {
+        assert!(is_table_row("| Name | Age |"));
+        assert!(is_table_row("| a | b | c |"));
+        assert!(is_table_row("|---|---|"));
+    }
+
+    #[test]
+    fn is_table_row_without_leading_pipe() {
+        // Common markdown table format without leading pipe
+        assert!(is_table_row("Name | Age"));
+    }
+
+    #[test]
+    fn is_table_row_not_a_table() {
+        assert!(!is_table_row("just text"));
+        assert!(!is_table_row(""));
+        assert!(!is_table_row("no pipes here"));
+    }
+
+    // -- Table rendering --
+
+    #[test]
+    fn render_table_basic() {
+        let rows = vec![
+            "| Name | Age |".to_string(),
+            "|------|-----|".to_string(),
+            "| Alice | 30 |".to_string(),
+            "| Bob | 25 |".to_string(),
+        ];
+        let result = render_table(&rows, &dark(), 60);
+        assert_eq!(result.len(), 4, "header + separator + 2 data rows");
+        // Header row should contain Name and Age
+        assert!(result[0].plain.contains("Name"));
+        assert!(result[0].plain.contains("Age"));
+        // Separator should use box drawing
+        assert!(result[1].plain.contains("─"));
+        assert!(result[1].plain.contains("├"));
+        assert!(result[1].plain.contains("┤"));
+        // Data rows
+        assert!(result[2].plain.contains("Alice"));
+        assert!(result[3].plain.contains("Bob"));
+    }
+
+    #[test]
+    fn render_table_aligned_columns() {
+        let rows = vec![
+            "| A | BB |".to_string(),
+            "|---|-----|".to_string(),
+            "| x | yy |".to_string(),
+        ];
+        let result = render_table(&rows, &dark(), 60);
+        // Both data cells in a column should pad to the same width
+        // "A" and "x" should be padded to at least 3 (min column width)
+        assert!(result[0].plain.contains("│"), "should use │ as separators");
+    }
+
+    #[test]
+    fn render_table_empty() {
+        let result = render_table(&[], &dark(), 60);
+        assert!(result.is_empty());
     }
 }
