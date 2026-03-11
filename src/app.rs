@@ -2590,7 +2590,7 @@ impl App {
             }
             Command::Help => {
                 self.messages.push(MessageBlock::System {
-                    text: "Commands:\n  /new            \u{2014} Start a new session\n  /rename <t>     \u{2014} Rename current session\n  /models         \u{2014} List available models\n  /model <r>      \u{2014} Switch to a model\n  /compact        \u{2014} Compact conversation into a summary\n  /sessions       \u{2014} Browse sessions\n  /tasks          \u{2014} List all tasks\n  /task-new <t>   \u{2014} Create a task\n  /task-done <id> \u{2014} Complete a task\n  /task-show <id> \u{2014} Show task details\n  /epics          \u{2014} List epics\n  /epic-new <t>   \u{2014} Create an epic\n  /export-debug   \u{2014} Export session with logs\n  /init           \u{2014} Create AGENTS.md in project root\n  /help           \u{2014} Show this help\n  /exit           \u{2014} Quit\n\nKeys:\n  Enter       \u{2014} Send message\n  Shift+Enter \u{2014} Insert newline\n  Tab         \u{2014} Accept autocomplete / toggle Build\u{2013}Plan mode\n  Up/Down     \u{2014} Navigate autocomplete list\n  Ctrl+C      \u{2014} Cancel stream / quit\n  Ctrl+B      \u{2014} Toggle sidebar\n  Mouse wheel \u{2014} Scroll messages\n  Click+drag  \u{2014} Select text (auto-copies to clipboard)".to_string(),
+                    text: "Commands:\n  /new            \u{2014} Start a new session\n  /rename <t>     \u{2014} Rename current session\n  /models         \u{2014} List available models\n  /model <r>      \u{2014} Switch to a model\n  /compact        \u{2014} Compact conversation into a summary\n  /sessions       \u{2014} Browse sessions\n  /tasks          \u{2014} List all tasks\n  /task-new <t>   \u{2014} Create a task\n  /task-done <id> \u{2014} Complete a task\n  /task-show <id> \u{2014} Show task details\n  /task-edit <id> \u{2014} Edit a task (field=value)\n  /epics          \u{2014} List epics\n  /epic-new <t>   \u{2014} Create an epic\n  /export-debug   \u{2014} Export session with logs\n  /init           \u{2014} Create AGENTS.md in project root\n  /help           \u{2014} Show this help\n  /exit           \u{2014} Quit\n\nKeys:\n  Enter       \u{2014} Send message\n  Shift+Enter \u{2014} Insert newline\n  Tab         \u{2014} Accept autocomplete / toggle Build\u{2013}Plan mode\n  Up/Down     \u{2014} Navigate autocomplete list\n  Ctrl+C      \u{2014} Cancel stream / quit\n  Ctrl+B      \u{2014} Toggle sidebar\n  Mouse wheel \u{2014} Scroll messages\n  Click+drag  \u{2014} Select text (auto-copies to clipboard)".to_string(),
                 });
             }
             // -- Task management commands --
@@ -2673,6 +2673,73 @@ impl App {
                             task.created_at.format("%Y-%m-%d %H:%M"),
                         );
                         self.messages.push(MessageBlock::System { text });
+                    }
+                    Err(e) => {
+                        self.messages.push(MessageBlock::Error {
+                            text: format!("Task not found: {e}"),
+                        });
+                    }
+                }
+            }
+            Command::TaskEdit(args_str) => {
+                // Parse: "<task-id> field=value field=value ..."
+                let parts: Vec<&str> = args_str.splitn(2, ' ').collect();
+                let id = parts[0];
+                match self.task_store.get_task(id) {
+                    Ok(mut task) => {
+                        let mut changed = Vec::new();
+                        if let Some(kv_str) = parts.get(1) {
+                            for pair in kv_str.split_whitespace() {
+                                if let Some((key, val)) = pair.split_once('=') {
+                                    match key {
+                                        "title" => { task.title = val.to_string(); changed.push("title"); }
+                                        "priority" => {
+                                            match val {
+                                                "high" => { task.priority = crate::task::types::Priority::High; changed.push("priority"); }
+                                                "medium" => { task.priority = crate::task::types::Priority::Medium; changed.push("priority"); }
+                                                "low" => { task.priority = crate::task::types::Priority::Low; changed.push("priority"); }
+                                                _ => {
+                                                    self.messages.push(MessageBlock::Error {
+                                                        text: format!("Invalid priority '{val}'. Use high, medium, or low."),
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        "status" => {
+                                            match val {
+                                                "open" => { task.status = crate::task::types::TaskStatus::Open; changed.push("status"); }
+                                                "in_progress" | "inprogress" => { task.status = crate::task::types::TaskStatus::InProgress; changed.push("status"); }
+                                                "done" => { task.status = crate::task::types::TaskStatus::Done; changed.push("status"); }
+                                                _ => {
+                                                    self.messages.push(MessageBlock::Error {
+                                                        text: format!("Invalid status '{val}'. Use open, in_progress, or done."),
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        _ => {
+                                            self.messages.push(MessageBlock::Error {
+                                                text: format!("Unknown field '{key}'. Use title, priority, or status."),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if changed.is_empty() {
+                            self.messages.push(MessageBlock::Error {
+                                text: "No valid fields to update. Usage: /task-edit <id> title=... priority=... status=...".to_string(),
+                            });
+                        } else if let Err(e) = self.task_store.update_task(&mut task) {
+                            self.messages.push(MessageBlock::Error {
+                                text: format!("Failed to update task: {e}"),
+                            });
+                        } else {
+                            self.messages.push(MessageBlock::System {
+                                text: format!("Updated task {id}: changed {}.", changed.join(", ")),
+                            });
+                        }
+                        self.update_sidebar();
                     }
                     Err(e) => {
                         self.messages.push(MessageBlock::Error {

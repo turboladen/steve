@@ -20,11 +20,13 @@ impl Default for Priority {
 
 /// Lifecycle status of an epic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display, EnumString)]
-#[serde(rename_all = "lowercase")]
-#[strum(serialize_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum EpicStatus {
+    #[strum(serialize = "open")]
     Open,
+    #[strum(serialize = "in_progress")]
     InProgress,
+    #[strum(serialize = "done")]
     Done,
 }
 
@@ -36,11 +38,13 @@ impl Default for EpicStatus {
 
 /// Lifecycle status of a task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display, EnumString)]
-#[serde(rename_all = "lowercase")]
-#[strum(serialize_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
+    #[strum(serialize = "open")]
     Open,
+    #[strum(serialize = "in_progress")]
     InProgress,
+    #[strum(serialize = "done")]
     Done,
 }
 
@@ -159,7 +163,7 @@ mod tests {
     fn epic_status_display_fromstr_round_trip() {
         for (variant, expected) in [
             (EpicStatus::Open, "open"),
-            (EpicStatus::InProgress, "inprogress"),
+            (EpicStatus::InProgress, "in_progress"),
             (EpicStatus::Done, "done"),
         ] {
             let displayed = variant.to_string();
@@ -182,7 +186,7 @@ mod tests {
     fn epic_status_rejects_invalid() {
         assert!(EpicStatus::from_str("closed").is_err());
         assert!(EpicStatus::from_str("").is_err());
-        assert!(EpicStatus::from_str("in_progress").is_err());
+        assert!(EpicStatus::from_str("inprogress").is_err());
     }
 
     // ── TaskStatus ──
@@ -196,7 +200,7 @@ mod tests {
     fn task_status_display_fromstr_round_trip() {
         for (variant, expected) in [
             (TaskStatus::Open, "open"),
-            (TaskStatus::InProgress, "inprogress"),
+            (TaskStatus::InProgress, "in_progress"),
             (TaskStatus::Done, "done"),
         ] {
             let displayed = variant.to_string();

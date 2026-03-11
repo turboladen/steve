@@ -104,6 +104,11 @@ impl ToolName {
         matches!(self, ToolName::Memory)
     }
 
+    /// Whether this is the task tool (writes to disk via storage).
+    pub fn is_task(self) -> bool {
+        matches!(self, ToolName::Task)
+    }
+
     /// High-level intent category for UI intent indicators.
     ///
     /// Exhaustive match — adding a new variant forces updating this.
@@ -421,7 +426,7 @@ mod tests {
             } else if t.is_write_tool() || t.is_memory() {
                 assert_eq!(t.tool_marker(), "\u{270e}", "{t} is write/memory but doesn't have write marker");
             } else {
-                // Bash, Question, Todo, Webfetch — not covered by predicates
+                // Bash, Question, Task, Webfetch — not covered by predicates
                 assert!(
                     ["\u{00b7}", "$", "\u{26a1}"].contains(&t.tool_marker()),
                     "{t} has unexpected marker '{}'", t.tool_marker()

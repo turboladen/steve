@@ -26,7 +26,7 @@ impl PermissionEngine {
     ///
     /// `path_hint` is the primary file path from the tool arguments (if applicable).
     /// Path-specific rules use glob matching against this hint. Tools without paths
-    /// (bash, question, todo) pass `None` and skip path-specific rules.
+    /// (bash, question, task) pass `None` and skip path-specific rules.
     pub fn check(&self, tool_name: ToolName, path_hint: Option<&str>) -> PermissionAction {
         // If there's a session-level grant, allow immediately
         if self.session_grants.contains(&tool_name) {
@@ -226,13 +226,13 @@ fn trust_build_rules() -> Vec<PermissionRule> {
     ]
 }
 
-/// Cautious profile: everything requires permission except question/todo.
+/// Cautious profile: everything requires permission except question/task.
 fn cautious_build_rules() -> Vec<PermissionRule> {
     use crate::tool::ToolName;
     use types::PermissionActionSerde::*;
 
     vec![
-        // Only question and todo are auto-allowed (no filesystem effects)
+        // Only question and task are auto-allowed (no filesystem effects)
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Question), pattern: "*".into(), action: Allow },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Task), pattern: "*".into(), action: Allow },
         // Everything else requires permission
@@ -436,7 +436,7 @@ mod tests {
         assert_eq!(engine.check(ToolName::Read, None), PermissionAction::Ask);
         assert_eq!(engine.check(ToolName::Grep, None), PermissionAction::Ask);
         assert_eq!(engine.check(ToolName::Edit, None), PermissionAction::Ask);
-        // Only question/todo are auto-allowed
+        // Only question/task are auto-allowed
         assert_eq!(engine.check(ToolName::Question, None), PermissionAction::Allow);
         assert_eq!(engine.check(ToolName::Task, None), PermissionAction::Allow);
     }

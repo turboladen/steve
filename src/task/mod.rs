@@ -56,11 +56,10 @@ impl TaskStore {
     }
 
     /// Write an updated task back to storage, refreshing `updated_at`.
-    pub fn update_task(&self, task: &Task) -> Result<()> {
-        let mut updated = task.clone();
-        updated.updated_at = Utc::now();
+    pub fn update_task(&self, task: &mut Task) -> Result<()> {
+        task.updated_at = Utc::now();
         self.storage
-            .write(&["tasks", "items", &updated.id], &updated)
+            .write(&["tasks", "items", &task.id], task)
     }
 
     /// List all tasks.
@@ -125,11 +124,10 @@ impl TaskStore {
     }
 
     /// Write an updated epic back to storage, refreshing `updated_at`.
-    pub fn update_epic(&self, epic: &Epic) -> Result<()> {
-        let mut updated = epic.clone();
-        updated.updated_at = Utc::now();
+    pub fn update_epic(&self, epic: &mut Epic) -> Result<()> {
+        epic.updated_at = Utc::now();
         self.storage
-            .write(&["tasks", "epics", &updated.id], &updated)
+            .write(&["tasks", "epics", &epic.id], epic)
     }
 
     /// List all epics.
@@ -302,14 +300,24 @@ fn truncate_summary(out: &mut String, max: usize) {
     out.push_str("...\n");
 }
 
-/// Generate a short prefixed ID using the current system time.
+/// Generate a short prefixed ID using time + atomic counter for uniqueness.
+///
+/// Combines subsecond nanos with a process-local atomic counter to guarantee
+/// uniqueness even when multiple IDs are generated within the same nanosecond.
 fn generate_id(prefix: &str) -> String {
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .subsec_nanos();
-    format!("{prefix}-{nanos:08x}")
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    // Mix nanos and counter to get 8 hex chars of entropy
+    let mixed = nanos.wrapping_add(seq.wrapping_mul(2654435761)); // Knuth multiplicative hash
+    format!("{prefix}-{mixed:08x}")
 }
 
 #[cfg(test)]
@@ -363,11 +371,9 @@ mod tests {
         store
             .create_task("Task A", None, None, None, Priority::Low)
             .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(2));
         store
             .create_task("Task B", None, None, None, Priority::Medium)
             .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(2));
         store
             .create_task("Task C", None, None, None, Priority::High)
             .unwrap();
@@ -412,7 +418,6 @@ mod tests {
         let t1 = store
             .create_task("In epic", None, Some(&epic.id), None, Priority::Medium)
             .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(2));
         let t2 = store
             .create_task("No epic", None, None, None, Priority::Medium)
             .unwrap();
@@ -429,7 +434,6 @@ mod tests {
         let t1 = store
             .create_task("Session A", None, None, Some("sess-a"), Priority::Medium)
             .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(2));
         let t2 = store
             .create_task("Session B", None, None, Some("sess-b"), Priority::Medium)
             .unwrap();
@@ -446,7 +450,6 @@ mod tests {
         let t1 = store
             .create_task("Open one", None, None, None, Priority::Medium)
             .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(2));
         let t2 = store
             .create_task("Done one", None, None, None, Priority::Medium)
             .unwrap();
@@ -464,7 +467,6 @@ mod tests {
         store
             .create_task("Session task", None, None, Some("sess-1"), Priority::Medium)
             .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(2));
         store
             .create_task("Other task", None, None, None, Priority::High)
             .unwrap();
@@ -484,10 +486,6 @@ mod tests {
             let title = format!(
                 "Task number {i:03} with a deliberately long title to consume characters quickly padding"
             );
-            // Sleep to avoid ID collisions from subsec_nanos
-            if i % 5 == 0 {
-                std::thread::sleep(std::time::Duration::from_millis(2));
-            }
             let _ = store.create_task(&title, None, None, None, Priority::Medium);
         }
 
@@ -510,5 +508,14 @@ mod tests {
         let eid = generate_id("epic");
         assert!(eid.starts_with("epic-"), "got: {eid}");
         assert_eq!(eid.len(), "epic-".len() + 8);
+    }
+
+    #[test]
+    fn generate_id_uniqueness() {
+        // Rapid-fire generation should produce unique IDs thanks to atomic counter
+        let mut ids: Vec<String> = (0..100).map(|_| generate_id("task")).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 100, "expected 100 unique IDs");
     }
 }

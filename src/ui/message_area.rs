@@ -120,7 +120,7 @@ fn tool_color(name: ToolName, theme: &Theme) -> ratatui::style::Color {
 /// Return a guaranteed-1-column marker character for the gutter.
 ///
 /// Unlike `ToolName::tool_marker()` which uses `⚡` (U+26A1, East Asian Width "W" = 2 columns),
-/// the gutter needs exactly 1 terminal column per marker for alignment. Question/Todo use `!`
+/// the gutter needs exactly 1 terminal column per marker for alignment. Question/Task use `!`
 /// instead. All other markers are already 1 column wide.
 fn gutter_marker(name: ToolName) -> &'static str {
     match name {
@@ -733,7 +733,7 @@ fn render_diff_lines(
 
 /// Infer an intent category from the tool calls in a single tool group.
 /// Returns `None` if the group has no calls or only `Asking` tools
-/// (question/todo).
+/// (question/task).
 ///
 /// Priority: editing > executing > exploring. When a group contains
 /// mixed tools, the highest-priority wins (mutations matter most).

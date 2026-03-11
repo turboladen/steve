@@ -18,6 +18,7 @@ pub enum Command {
     TaskNew(String),
     TaskDone(String),
     TaskShow(String),
+    TaskEdit(String),
     Epics,
     EpicNew(String),
 }
@@ -77,6 +78,10 @@ impl Command {
                 Some(id) if !id.is_empty() => Ok(Command::TaskShow(id)),
                 _ => Err("Usage: /task-show <task-id>".to_string()),
             },
+            "/task-edit" => match arg {
+                Some(args) if !args.is_empty() => Ok(Command::TaskEdit(args)),
+                _ => Err("Usage: /task-edit <task-id> <field>=<value> ...".to_string()),
+            },
             "/epics" => Ok(Command::Epics),
             "/epic-new" => match arg {
                 Some(title) if !title.is_empty() => Ok(Command::EpicNew(title)),
@@ -99,6 +104,7 @@ impl Command {
             CommandInfo { name: "/task-new", description: "Create a task" },
             CommandInfo { name: "/task-done", description: "Complete a task" },
             CommandInfo { name: "/task-show", description: "Show task details" },
+            CommandInfo { name: "/task-edit", description: "Edit a task" },
             CommandInfo { name: "/epics", description: "List epics" },
             CommandInfo { name: "/epic-new", description: "Create an epic" },
             CommandInfo { name: "/init", description: "Create AGENTS.md" },
@@ -192,8 +198,9 @@ mod tests {
         assert!(names.contains(&"/task-done"));
         assert!(names.contains(&"/task-show"));
         assert!(names.contains(&"/epics"));
+        assert!(names.contains(&"/task-edit"));
         assert!(names.contains(&"/epic-new"));
-        assert_eq!(cmds.len(), 17);
+        assert_eq!(cmds.len(), 18);
     }
 
     #[test]
@@ -216,7 +223,7 @@ mod tests {
     #[test]
     fn filter_commands_slash_only() {
         let matches = Command::matching_commands("/");
-        assert_eq!(matches.len(), 17);
+        assert_eq!(matches.len(), 18);
     }
 
     #[test]
@@ -267,6 +274,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_task_edit_with_args() {
+        assert_eq!(
+            Command::parse("/task-edit task-abc123 title=New Title").unwrap(),
+            Command::TaskEdit("task-abc123 title=New Title".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_task_edit_without_args() {
+        assert!(Command::parse("/task-edit").is_err());
+    }
+
+    #[test]
     fn parse_epics_command() {
         assert_eq!(Command::parse("/epics").unwrap(), Command::Epics);
     }
@@ -292,6 +312,7 @@ mod tests {
         assert!(names.contains(&"/task-new"));
         assert!(names.contains(&"/task-done"));
         assert!(names.contains(&"/task-show"));
-        assert_eq!(names.len(), 4);
+        assert!(names.contains(&"/task-edit"));
+        assert_eq!(names.len(), 5);
     }
 }

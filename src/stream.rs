@@ -754,14 +754,16 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         }
 
         // Partition: auto-allowed read-only tools can run in parallel.
-        // Write tools (edit, write, patch) and memory tool (append action) always
-        // go to sequential phase for cache invalidation and permission prompts.
+        // Write tools (edit, write, patch), memory tool (append action), and
+        // task tool (writes to storage) always go to sequential phase for
+        // cache invalidation and permission prompts.
         let (auto_allowed, needs_interaction): (Vec<_>, Vec<_>) = prepared
             .into_iter()
             .partition(|tc| {
                 matches!(tc.action, PermissionAction::Allow)
                     && !tc.tool_name.is_write_tool()
                     && !tc.tool_name.is_memory()
+                    && !tc.tool_name.is_task()
                     && !matches!(tc.tool_name, ToolName::Question)
             });
 
@@ -1264,7 +1266,7 @@ fn check_iteration_warning(
 
 /// Extract the primary file path from tool arguments for path-based permission checks.
 ///
-/// Returns `None` for tools that don't operate on file paths (bash, question, todo).
+/// Returns `None` for tools that don't operate on file paths (bash, question, task).
 fn extract_tool_path(tool_name: ToolName, args: &Value) -> Option<String> {
     match tool_name {
         ToolName::Read | ToolName::Edit | ToolName::Write | ToolName::Patch | ToolName::List => {
