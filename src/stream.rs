@@ -1311,7 +1311,31 @@ fn build_permission_summary(tool_name: ToolName, args: &Value) -> String {
                 .get("file_path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("(unknown file)");
-            format!("Edit file: {file}")
+            let operation = args
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .unwrap_or("find_replace");
+            match operation {
+                "insert_lines" => {
+                    let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
+                    format!("Insert lines at line {line} in {file}")
+                }
+                "delete_lines" => {
+                    let start = args.get("start_line").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let end = args.get("end_line").and_then(|v| v.as_u64()).unwrap_or(0);
+                    format!("Delete lines {start}-{end} from {file}")
+                }
+                "replace_range" => {
+                    let start = args.get("start_line").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let end = args.get("end_line").and_then(|v| v.as_u64()).unwrap_or(0);
+                    format!("Replace lines {start}-{end} in {file}")
+                }
+                "find_replace" => format!("Edit file: {file}"),
+                other => {
+                    tracing::warn!("unhandled edit operation for permission summary: {other}");
+                    format!("Edit file: {file}")
+                }
+            }
         }
         ToolName::Write => {
             let file = args

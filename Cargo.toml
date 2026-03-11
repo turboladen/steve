@@ -50,6 +50,9 @@ wait-timeout = "0.2"
 # Unified diff application (fuzzy matching for AI-generated patches)
 mpatch = "1.3"
 
+# Rope data structure for efficient line-based text editing
+ropey = "1"
+
 # Trait object async
 async-trait = "0.1"
 

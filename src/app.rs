@@ -65,6 +65,7 @@ Use epics to group related tasks under a larger work item (e.g., a Jira ticket).
 ## Tool Usage Guidelines\n\n\
 - **Use native tools, not bash**: NEVER use `bash` to read files (`cat`, `head`, `tail`), search content (`grep`, `rg`), find files (`find`, `ls`), or write files (`sed`, `awk`, `tee`). Use the dedicated `read`, `grep`, `glob`, `list`, `edit`, `write`, and `patch` tools instead — they are faster, cached, and context-efficient.\n\
 - **Verify CLI tools before recommending**: When suggesting an external CLI tool (e.g., `pdftotext`, `jq`, `ffmpeg`), first check if it's installed by running `command -v <tool>` via `bash`. If it's not available, say so explicitly and suggest how to install it (e.g., `brew install poppler` on macOS). Never assume a tool is on the user's PATH.\n\
+- **Line-based edits**: The `edit` tool supports `insert_lines`, `delete_lines`, and `replace_range` operations with 1-indexed line numbers matching `read` output. Use these when you know the exact line numbers instead of find_replace.\n\
 - **Search before reading**: Use `grep` to find relevant code, then `read` with specific line ranges. Avoid reading entire large files.\n\
 - **Use line ranges**: The `read` tool supports `offset` and `limit` parameters. For files over 200 lines, read only the relevant section.\n\
 - **Be context-efficient**: Each tool result consumes context window space. Prefer targeted searches over broad reads.\n\
@@ -168,25 +169,73 @@ fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
 fn extract_diff_content(tool_name: ToolName, args: &Value) -> Option<DiffContent> {
     match tool_name {
         ToolName::Edit => {
-            let old = args
-                .get("old_string")
+            let operation = args
+                .get("operation")
                 .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let new = args
-                .get("new_string")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if old.is_empty() && new.is_empty() {
-                return None;
+                .unwrap_or("find_replace");
+            match operation {
+                "find_replace" => {
+                    let old = args
+                        .get("old_string")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let new = args
+                        .get("new_string")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if old.is_empty() && new.is_empty() {
+                        return None;
+                    }
+                    let mut lines = Vec::new();
+                    for line in old.lines() {
+                        lines.push(DiffLine::Removal(line.to_string()));
+                    }
+                    for line in new.lines() {
+                        lines.push(DiffLine::Addition(line.to_string()));
+                    }
+                    Some(DiffContent::EditDiff { lines })
+                }
+                "insert_lines" => {
+                    let line_num = args.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                    if content.is_empty() {
+                        return None;
+                    }
+                    let mut lines = vec![DiffLine::HunkHeader(format!("@@ +{line_num} @@"))];
+                    for line in content.lines() {
+                        lines.push(DiffLine::Addition(line.to_string()));
+                    }
+                    Some(DiffContent::EditDiff { lines })
+                }
+                "delete_lines" => {
+                    let start = args.get("start_line").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let end = args.get("end_line").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let count = end.saturating_sub(start) + 1;
+                    let lines = vec![
+                        DiffLine::HunkHeader(format!("@@ -{start},{count} @@")),
+                        DiffLine::Removal(format!("({count} line(s) deleted)")),
+                    ];
+                    Some(DiffContent::EditDiff { lines })
+                }
+                "replace_range" => {
+                    let start = args.get("start_line").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let end = args.get("end_line").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let old_count = end.saturating_sub(start) + 1;
+                    let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                    let mut lines = vec![
+                        DiffLine::HunkHeader(format!("@@ -{start},{old_count} @@")),
+                        DiffLine::Removal(format!("({old_count} line(s) replaced)")),
+                    ];
+                    for line in content.lines() {
+                        lines.push(DiffLine::Addition(line.to_string()));
+                    }
+                    Some(DiffContent::EditDiff { lines })
+                }
+                other => {
+                    tracing::warn!("unhandled edit operation for diff extraction: {other}");
+                    None
+                }
             }
-            let mut lines = Vec::new();
-            for line in old.lines() {
-                lines.push(DiffLine::Removal(line.to_string()));
-            }
-            for line in new.lines() {
-                lines.push(DiffLine::Addition(line.to_string()));
-            }
-            Some(DiffContent::EditDiff { lines })
         }
         ToolName::Write => {
             let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
@@ -3036,6 +3085,84 @@ pub(crate) mod tests {
     #[test]
     fn diff_content_edit_missing_args_returns_none() {
         let args = json!({"file_path": "f.rs"});
+        assert!(extract_diff_content(ToolName::Edit, &args).is_none());
+    }
+
+    #[test]
+    fn diff_content_edit_insert_lines() {
+        let args = json!({
+            "file_path": "f.rs",
+            "operation": "insert_lines",
+            "line": 5,
+            "content": "new line 1\nnew line 2"
+        });
+        match extract_diff_content(ToolName::Edit, &args) {
+            Some(DiffContent::EditDiff { lines }) => {
+                assert_eq!(lines.len(), 3);
+                assert_eq!(lines[0], DiffLine::HunkHeader("@@ +5 @@".into()));
+                assert_eq!(lines[1], DiffLine::Addition("new line 1".into()));
+                assert_eq!(lines[2], DiffLine::Addition("new line 2".into()));
+            }
+            other => panic!("expected EditDiff, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_content_edit_insert_lines_empty_content_returns_none() {
+        let args = json!({
+            "file_path": "f.rs",
+            "operation": "insert_lines",
+            "line": 1,
+            "content": ""
+        });
+        assert!(extract_diff_content(ToolName::Edit, &args).is_none());
+    }
+
+    #[test]
+    fn diff_content_edit_delete_lines() {
+        let args = json!({
+            "file_path": "f.rs",
+            "operation": "delete_lines",
+            "start_line": 3,
+            "end_line": 7
+        });
+        match extract_diff_content(ToolName::Edit, &args) {
+            Some(DiffContent::EditDiff { lines }) => {
+                assert_eq!(lines.len(), 2);
+                assert_eq!(lines[0], DiffLine::HunkHeader("@@ -3,5 @@".into()));
+                assert_eq!(lines[1], DiffLine::Removal("(5 line(s) deleted)".into()));
+            }
+            other => panic!("expected EditDiff, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_content_edit_replace_range() {
+        let args = json!({
+            "file_path": "f.rs",
+            "operation": "replace_range",
+            "start_line": 2,
+            "end_line": 4,
+            "content": "replaced1\nreplaced2"
+        });
+        match extract_diff_content(ToolName::Edit, &args) {
+            Some(DiffContent::EditDiff { lines }) => {
+                assert_eq!(lines.len(), 4);
+                assert_eq!(lines[0], DiffLine::HunkHeader("@@ -2,3 @@".into()));
+                assert_eq!(lines[1], DiffLine::Removal("(3 line(s) replaced)".into()));
+                assert_eq!(lines[2], DiffLine::Addition("replaced1".into()));
+                assert_eq!(lines[3], DiffLine::Addition("replaced2".into()));
+            }
+            other => panic!("expected EditDiff, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_content_edit_unknown_operation_returns_none() {
+        let args = json!({
+            "file_path": "f.rs",
+            "operation": "teleport"
+        });
         assert!(extract_diff_content(ToolName::Edit, &args).is_none());
     }
 

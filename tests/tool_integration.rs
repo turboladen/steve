@@ -243,3 +243,80 @@ fn copy_tool_duplicates_file() {
     let copy = std::fs::read_to_string(root.join("src/main_backup.rs")).unwrap();
     assert_eq!(original, copy);
 }
+
+// ── Edit tool: line-based operations ──
+
+#[test]
+fn edit_insert_lines_through_registry() {
+    let (_dir, root) = create_test_project();
+    let registry = ToolRegistry::new(root.clone());
+    let ctx = tool_context(root.clone());
+    let file_path = root.join("src/main.rs").to_string_lossy().to_string();
+
+    let output = registry.execute(
+        ToolName::Edit,
+        json!({
+            "file_path": &file_path,
+            "operation": "insert_lines",
+            "line": 2,
+            "content": "    // inserted comment"
+        }),
+        ctx,
+    ).unwrap();
+
+    assert!(!output.is_error, "insert_lines should succeed: {}", output.output);
+    let content = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
+    assert!(content.contains("// inserted comment"));
+    assert!(content.contains("fn main()"));
+}
+
+#[test]
+fn edit_delete_lines_through_registry() {
+    let (_dir, root) = create_test_project();
+    let registry = ToolRegistry::new(root.clone());
+    let ctx = tool_context(root.clone());
+    let file_path = root.join("src/main.rs").to_string_lossy().to_string();
+
+    // main.rs is: "fn main() {\n    println!(\"hello\");\n}\n" (3 lines)
+    let output = registry.execute(
+        ToolName::Edit,
+        json!({
+            "file_path": &file_path,
+            "operation": "delete_lines",
+            "start_line": 2,
+            "end_line": 2
+        }),
+        ctx,
+    ).unwrap();
+
+    assert!(!output.is_error, "delete_lines should succeed: {}", output.output);
+    let content = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
+    assert!(!content.contains("println!"));
+    assert_eq!(content, "fn main() {\n}\n");
+}
+
+#[test]
+fn edit_replace_range_through_registry() {
+    let (_dir, root) = create_test_project();
+    let registry = ToolRegistry::new(root.clone());
+    let ctx = tool_context(root.clone());
+    let file_path = root.join("src/main.rs").to_string_lossy().to_string();
+
+    let output = registry.execute(
+        ToolName::Edit,
+        json!({
+            "file_path": &file_path,
+            "operation": "replace_range",
+            "start_line": 2,
+            "end_line": 2,
+            "content": "    eprintln!(\"debug\");\n    println!(\"world\");"
+        }),
+        ctx,
+    ).unwrap();
+
+    assert!(!output.is_error, "replace_range should succeed: {}", output.output);
+    let content = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
+    assert!(content.contains("eprintln!"));
+    assert!(content.contains("println!(\"world\")"));
+    assert!(!content.contains("println!(\"hello\")"));
+}
