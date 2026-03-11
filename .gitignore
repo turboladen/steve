@@ -1,5 +1,4 @@
 /target
-.claude/settings.local.json
 .worktrees/
 .steve.jsonc
 .steve.jsonc.tmp
@@ -7,3 +6,7 @@
 # Dolt database files (added by bd init)
 .dolt/
 *.db
+
+# Claude
+.claude/settings.local.json
+.superpowers/
