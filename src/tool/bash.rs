@@ -28,7 +28,7 @@ pub fn definition() -> Value {
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "Execute a bash command in the project directory. Use this for builds, tests, git commands, installing packages, or other shell operations that have no dedicated tool. IMPORTANT: Do NOT use bash for reading files (use `read`), searching file contents (use `grep`), finding files (use `glob` or `list`), or modifying files (use `edit`, `write`, or `patch`). The command runs with the project root as the working directory.",
+            "description": "Execute a bash command in the project directory. Use ONLY for builds, tests, git commands, or operations with no dedicated tool. Commands duplicating native tools (cat, ls, grep, sed, etc.) are REJECTED — use read, list, glob, grep, edit, write, patch instead. The command runs with the project root as the working directory.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -47,11 +47,68 @@ pub fn definition() -> Value {
     })
 }
 
+/// Check if a bash command is a simple substitute for a native tool.
+/// Only intercepts standalone commands (no pipes, chains, or subshells).
+/// Returns Some(redirect_message) if rejected, None if allowed.
+fn check_native_tool_redirect(command: &str) -> Option<String> {
+    let trimmed = command.trim();
+
+    // Allow any compound command — pipes, chains, subshells mean the user
+    // is doing something beyond what a single native tool provides.
+    if trimmed.contains('|')
+        || trimmed.contains("&&")
+        || trimmed.contains("||")
+        || trimmed.contains(';')
+        || trimmed.contains('`')
+        || trimmed.contains("$(")
+    {
+        return None;
+    }
+
+    // Extract base command, stripping sudo/env/path prefixes
+    let mut words = trimmed.split_whitespace();
+    let mut base = words.next().unwrap_or("");
+    while matches!(base, "sudo" | "env" | "nice" | "nohup" | "time") {
+        base = words.next().unwrap_or("");
+    }
+    let base = base.rsplit('/').next().unwrap_or(base);
+
+    match base {
+        "cat" | "head" | "tail" | "less" | "more" => Some(
+            "Use the `read` tool instead. It supports `offset` and `limit` for line ranges.".into(),
+        ),
+        "ls" | "dir" => Some("Use the `list` tool instead.".into()),
+        "find" => Some(
+            "Use the `glob` tool instead. It supports patterns like `**/*.rs`.".into(),
+        ),
+        "grep" | "rg" | "ag" | "ack" => {
+            Some("Use the `grep` tool instead. It supports regex and is cached.".into())
+        }
+        "sed" | "awk" => Some("Use the `edit` or `patch` tool instead.".into()),
+        _ => None,
+    }
+}
+
 pub fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
     let command = args
         .get("command")
         .and_then(|v| v.as_str())
         .context("missing 'command' parameter")?;
+
+    // Reject simple commands that duplicate native tools
+    if let Some(redirect) = check_native_tool_redirect(command) {
+        let title = if command.chars().count() > 60 {
+            let truncated: String = command.chars().take(57).collect();
+            format!("$ {truncated}...")
+        } else {
+            format!("$ {command}")
+        };
+        return Ok(ToolOutput {
+            title,
+            output: redirect,
+            is_error: true,
+        });
+    }
 
     let timeout_secs = args
         .get("timeout")
@@ -230,5 +287,110 @@ mod tests {
         let ctx = ToolContext { project_root: Path::new("/tmp").to_path_buf(), storage_dir: None, task_store: None };
         let err = execute(args, ctx).unwrap_err();
         assert!(err.to_string().contains("timed out"));
+    }
+
+    // -- check_native_tool_redirect tests --
+
+    #[test]
+    fn redirect_cat_to_read() {
+        let msg = check_native_tool_redirect("cat src/main.rs");
+        assert!(msg.is_some());
+        assert!(msg.unwrap().contains("`read`"));
+    }
+
+    #[test]
+    fn redirect_ls_to_list() {
+        let msg = check_native_tool_redirect("ls -la src/");
+        assert!(msg.is_some());
+        assert!(msg.unwrap().contains("`list`"));
+    }
+
+    #[test]
+    fn redirect_grep_to_grep_tool() {
+        let msg = check_native_tool_redirect("grep -r 'pattern' src/");
+        assert!(msg.is_some());
+        assert!(msg.unwrap().contains("`grep`"));
+    }
+
+    #[test]
+    fn redirect_sudo_cat() {
+        let msg = check_native_tool_redirect("sudo cat /etc/hosts");
+        assert!(msg.is_some());
+        assert!(msg.unwrap().contains("`read`"));
+    }
+
+    #[test]
+    fn redirect_absolute_path_cat() {
+        let msg = check_native_tool_redirect("/usr/bin/cat foo.txt");
+        assert!(msg.is_some());
+        assert!(msg.unwrap().contains("`read`"));
+    }
+
+    #[test]
+    fn redirect_find_to_glob() {
+        let msg = check_native_tool_redirect("find . -name '*.rs'");
+        assert!(msg.is_some());
+        assert!(msg.unwrap().contains("`glob`"));
+    }
+
+    #[test]
+    fn redirect_sed_to_edit() {
+        let msg = check_native_tool_redirect("sed -i 's/foo/bar/' file.txt");
+        assert!(msg.is_some());
+        assert!(msg.unwrap().contains("`edit`"));
+    }
+
+    #[test]
+    fn redirect_rg_to_grep_tool() {
+        let msg = check_native_tool_redirect("rg 'pattern' src/");
+        assert!(msg.is_some());
+        assert!(msg.unwrap().contains("`grep`"));
+    }
+
+    #[test]
+    fn redirect_head_to_read() {
+        let msg = check_native_tool_redirect("head -20 src/main.rs");
+        assert!(msg.is_some());
+        assert!(msg.unwrap().contains("`read`"));
+    }
+
+    #[test]
+    fn allow_pipe_commands() {
+        assert!(check_native_tool_redirect("cat foo.rs | wc -l").is_none());
+        assert!(check_native_tool_redirect("grep TODO src/ | sort").is_none());
+        assert!(check_native_tool_redirect("cargo test 2>&1 | head -20").is_none());
+    }
+
+    #[test]
+    fn allow_chain_commands() {
+        assert!(check_native_tool_redirect("ls && echo done").is_none());
+    }
+
+    #[test]
+    fn allow_subshell_commands() {
+        assert!(check_native_tool_redirect("echo $(cat foo)").is_none());
+    }
+
+    #[test]
+    fn allow_empty_command() {
+        assert!(check_native_tool_redirect("").is_none());
+        assert!(check_native_tool_redirect("   ").is_none());
+    }
+
+    #[test]
+    fn allow_legitimate_bash_commands() {
+        assert!(check_native_tool_redirect("cargo build").is_none());
+        assert!(check_native_tool_redirect("git status").is_none());
+        assert!(check_native_tool_redirect("npm install").is_none());
+        assert!(check_native_tool_redirect("python script.py").is_none());
+    }
+
+    #[test]
+    fn execute_rejects_simple_cat() {
+        let args = serde_json::json!({ "command": "cat src/main.rs" });
+        let ctx = ToolContext { project_root: Path::new("/tmp").to_path_buf(), storage_dir: None, task_store: None };
+        let output = execute(args, ctx).unwrap();
+        assert!(output.is_error);
+        assert!(output.output.contains("`read`"));
     }
 }

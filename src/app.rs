@@ -62,8 +62,22 @@ you MUST use the `task` tool FIRST to create your plan before doing any other wo
 Create one task per step, then work through them one at a time — complete each task before starting the next. \
 Tasks persist across sessions, so you can plan in one session and execute across multiple. \
 Use epics to group related tasks under a larger work item (e.g., a Jira ticket).\n\n\
+## Tool Call Budget\n\n\
+You have a limited number of tool calls per response. Plan your exploration efficiently:\n\
+- **Aim for 10-20 tool calls** per response. Beyond that, you are likely over-exploring.\n\
+- After gathering key files, synthesize your findings and respond. Do not keep exploring.\n\
+- The system will warn you as you approach the hard limit, but you should self-limit well before that.\n\n\
+## IMPORTANT: Use Native Tools, Not Bash\n\n\
+Do NOT use `bash` for simple file operations — use the dedicated tool instead:\n\
+| Instead of... | Use |\n\
+|---|---|\n\
+| `cat`, `head`, `tail` | `read` (with `offset`/`limit`) |\n\
+| `ls`, `find` | `list`, `glob` |\n\
+| `grep`, `rg` | `grep` |\n\
+| `sed`, `awk` | `edit`, `patch` |\n\n\
+Simple bash commands like `cat file` or `ls dir` will be REJECTED — use the native tool.\n\
+Piped/compound commands (e.g., `cat file | wc -l`) are allowed since they go beyond native tool capabilities.\n\n\
 ## Tool Usage Guidelines\n\n\
-- **Use native tools, not bash**: NEVER use `bash` to read files (`cat`, `head`, `tail`), search content (`grep`, `rg`), find files (`find`, `ls`), or write files (`sed`, `awk`, `tee`). Use the dedicated `read`, `grep`, `glob`, `list`, `edit`, `write`, and `patch` tools instead — they are faster, cached, and context-efficient.\n\
 - **Verify CLI tools before recommending**: When suggesting an external CLI tool (e.g., `pdftotext`, `jq`, `ffmpeg`), first check if it's installed by running `command -v <tool>` via `bash`. If it's not available, say so explicitly and suggest how to install it (e.g., `brew install poppler` on macOS). Never assume a tool is on the user's PATH.\n\
 - **Line-based edits**: The `edit` tool supports `insert_lines`, `delete_lines`, and `replace_range` operations with 1-indexed line numbers matching `read` output. Use these when you know the exact line numbers instead of find_replace.\n\
 - **Search before reading**: Use `grep` to find relevant code, then `read` with specific line ranges. Avoid reading entire large files.\n\
@@ -1767,6 +1781,10 @@ impl App {
             usage_project_id: self.project.id.clone(),
             usage_session_id: session_id.clone(),
             usage_model_cost: resolved.config.cost.clone(),
+            is_plan_mode: {
+                use crate::ui::input::AgentMode;
+                self.input.mode == AgentMode::Plan
+            },
         });
 
         Ok(())

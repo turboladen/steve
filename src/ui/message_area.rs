@@ -356,13 +356,21 @@ pub fn render_message_blocks(
             }
 
             MessageBlock::System { text } => {
-                for text_line in text.lines() {
-                    glines.push(Line::from(Span::styled(
+                for (i, text_line) in text.lines().enumerate() {
+                    let mut spans = Vec::new();
+                    if i == 0 {
+                        spans.push(Span::styled(
+                            "system ",
+                            Style::default().fg(theme.dim),
+                        ));
+                    }
+                    spans.push(Span::styled(
                         text_line.to_string(),
                         Style::default()
                             .fg(theme.system_msg)
                             .add_modifier(Modifier::ITALIC),
-                    )), GutterMark::Empty);
+                    ));
+                    glines.push(Line::from(spans), GutterMark::Empty);
                 }
             }
 
