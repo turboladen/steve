@@ -227,9 +227,13 @@ Available tools: `read`, `grep`, `glob`, `list`, `edit`, `write`, `patch`, `move
 
 The `memory` tool supports three actions: `read`, `append`, and `replace` (full overwrite for consolidation). Auto-prunes at 4KB (`MAX_MEMORY_BYTES`) — truncates oldest entries at line boundaries. Memory is auto-loaded into the LLM's context at session start.
 
-**Tool argument names vary**: `read`/`list`/`grep`/`glob`/`delete`/`mkdir` use `"path"`. `edit`/`write`/`patch` use `"file_path"`. `move`/`copy` use `"from_path"`/`"to_path"`. Check each tool's schema before constructing JSON args in tests.
+The `edit` tool supports four operations via the `operation` parameter (default: `find_replace`): **find_replace** (original String-based exact replacement, no ropey), **insert_lines** (insert content before a 1-indexed line number), **delete_lines** (delete inclusive 1-indexed range), **replace_range** (replace inclusive range with new content). Line-based ops use `ropey::Rope`. **Ropey gotcha**: `Rope::from_str("").len_lines()` returns 1, not 0 — the `total_lines()` helper in `edit.rs` checks `len_chars() == 0` first; it also subtracts 1 when the file ends with `\n`. When adding new edit operations: update `extract_diff_content()` in `app.rs` and `build_permission_summary()` in `stream.rs` (both have inner string matches on the `operation` field).
+
+**Tool argument names vary**: `read`/`list`/`grep`/`glob`/`delete`/`mkdir` use `"path"`. `edit`/`write`/`patch` use `"file_path"`. `edit` also uses `"operation"` (default `"find_replace"`), `"line"`, `"content"`, `"start_line"`, `"end_line"` for line-based ops. `move`/`copy` use `"from_path"`/`"to_path"`. Check each tool's schema before constructing JSON args in tests.
 
 **Exhaustive `ToolName` match locations** (all must be updated when adding new tool variants): `extract_args_summary()` and `extract_diff_content()` in `app.rs`, `extract_tool_summary()` in `export.rs`, `cache_key()` and `extract_path()` in `context/cache.rs`, `compress_tool_output()` in `context/compressor.rs`, `build_permission_summary()` and `extract_tool_path()` in `stream.rs`, `is_write_tool()`/`intent_category()`/`tool_marker()` in `tool/mod.rs`. All use explicit variant lists (no `_ =>` wildcards).
+
+- **Inner operation dispatches** (e.g., edit `operation` field): When a tool dispatches on a string parameter, list all known values explicitly and use `tracing::warn!` for the catch-all — same spirit as the no-wildcard rule for `ToolName` matches
 
 ### Storage (`storage/mod.rs`)
 
