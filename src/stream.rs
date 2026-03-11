@@ -1350,6 +1350,13 @@ fn build_permission_summary(tool_name: ToolName, args: &Value) -> String {
                     format!("Replace lines {start}-{end} in {file}")
                 }
                 "find_replace" => format!("Edit file: {file}"),
+                "multi_find_replace" => {
+                    let count = args
+                        .get("edits")
+                        .and_then(|v| v.as_array())
+                        .map_or(0, |a| a.len());
+                    format!("Multi-edit ({count} replacements) in {file}")
+                }
                 other => {
                     tracing::warn!("unhandled edit operation for permission summary: {other}");
                     format!("Edit file: {file}")

@@ -246,6 +246,29 @@ fn extract_diff_content(tool_name: ToolName, args: &Value) -> Option<DiffContent
                     }
                     Some(DiffContent::EditDiff { lines })
                 }
+                "multi_find_replace" => {
+                    let edits = args.get("edits").and_then(|v| v.as_array());
+                    let mut lines = Vec::new();
+                    if let Some(edits) = edits {
+                        for edit in edits {
+                            let old =
+                                edit.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
+                            let new =
+                                edit.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+                            for line in old.lines() {
+                                lines.push(DiffLine::Removal(line.to_string()));
+                            }
+                            for line in new.lines() {
+                                lines.push(DiffLine::Addition(line.to_string()));
+                            }
+                        }
+                    }
+                    if lines.is_empty() {
+                        None
+                    } else {
+                        Some(DiffContent::EditDiff { lines })
+                    }
+                }
                 other => {
                     tracing::warn!("unhandled edit operation for diff extraction: {other}");
                     None

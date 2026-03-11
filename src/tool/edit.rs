@@ -1,10 +1,11 @@
 //! Edit tool — performs string replacement and line-based operations in files.
 //!
-//! Supports four operations via the `operation` parameter:
+//! Supports five operations via the `operation` parameter:
 //! - `find_replace` (default): Exact string replacement (original behavior)
 //! - `insert_lines`: Insert content at a specific line number
 //! - `delete_lines`: Delete a range of lines
 //! - `replace_range`: Replace a range of lines with new content
+//! - `multi_find_replace`: Apply multiple find-replace pairs atomically
 
 use std::fs;
 use std::path::PathBuf;
@@ -37,6 +38,10 @@ pub fn definition() -> Value {
                 - **find_replace** (default): Exact string replacement. Provide old_string and new_string. \
                 The old_string must match exactly (including whitespace/indentation). Fails if old_string \
                 appears multiple times — provide more surrounding context to make it unique.\n\
+                - **multi_find_replace**: Apply multiple find-replace pairs atomically in a single call. \
+                Provide an array of {old_string, new_string} objects in the `edits` parameter. \
+                All old_strings must appear exactly once. Edits must not overlap. \
+                Reduces round-trips when making multiple independent replacements in one file.\n\
                 - **insert_lines**: Insert content at a specific line number (1-indexed). Content is inserted \
                 before the specified line. Use line=N+1 to append after the last line.\n\
                 - **delete_lines**: Delete a range of lines (1-indexed, inclusive).\n\
@@ -50,7 +55,7 @@ pub fn definition() -> Value {
                     },
                     "operation": {
                         "type": "string",
-                        "enum": ["find_replace", "insert_lines", "delete_lines", "replace_range"],
+                        "enum": ["find_replace", "insert_lines", "delete_lines", "replace_range", "multi_find_replace"],
                         "description": "The edit operation to perform. Defaults to find_replace if omitted."
                     },
                     "old_string": {
@@ -76,6 +81,18 @@ pub fn definition() -> Value {
                     "end_line": {
                         "type": "integer",
                         "description": "Last line of range, inclusive (1-indexed) (delete_lines and replace_range)."
+                    },
+                    "edits": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_string": { "type": "string" },
+                                "new_string": { "type": "string" }
+                            },
+                            "required": ["old_string", "new_string"]
+                        },
+                        "description": "Array of find-replace pairs to apply atomically (multi_find_replace only). Each old_string must appear exactly once in the file."
                     }
                 },
                 "required": ["file_path"]
@@ -100,7 +117,8 @@ pub fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
         "insert_lines" => execute_insert_lines(&args, file_path_str, &ctx),
         "delete_lines" => execute_delete_lines(&args, file_path_str, &ctx),
         "replace_range" => execute_replace_range(&args, file_path_str, &ctx),
-        other => bail!("unknown edit operation: '{other}'. Expected one of: find_replace, insert_lines, delete_lines, replace_range"),
+        "multi_find_replace" => execute_multi_find_replace(&args, file_path_str, &ctx),
+        other => bail!("unknown edit operation: '{other}'. Expected one of: find_replace, insert_lines, delete_lines, replace_range, multi_find_replace"),
     }
 }
 
@@ -384,6 +402,112 @@ fn execute_replace_range(args: &Value, file_path_str: &str, ctx: &ToolContext) -
             new_count,
             file_path.display()
         ),
+        is_error: false,
+    })
+}
+
+/// Apply multiple find-replace pairs atomically to a single file.
+///
+/// All `old_string` values must appear exactly once; matches must not overlap.
+/// Replacements are applied from end-to-front so byte offsets remain stable.
+fn execute_multi_find_replace(
+    args: &Value,
+    file_path_str: &str,
+    ctx: &ToolContext,
+) -> Result<ToolOutput> {
+    let edits = args
+        .get("edits")
+        .and_then(|v| v.as_array())
+        .context("missing 'edits' array parameter for multi_find_replace")?;
+
+    if edits.is_empty() {
+        bail!("'edits' array must not be empty");
+    }
+
+    // Parse edit pairs
+    let mut pairs: Vec<(&str, &str)> = Vec::with_capacity(edits.len());
+    for (i, edit) in edits.iter().enumerate() {
+        let old = edit
+            .get("old_string")
+            .and_then(|v| v.as_str())
+            .with_context(|| format!("edit[{i}] missing 'old_string'"))?;
+        let new = edit
+            .get("new_string")
+            .and_then(|v| v.as_str())
+            .with_context(|| format!("edit[{i}] missing 'new_string'"))?;
+        pairs.push((old, new));
+    }
+
+    // Check for duplicate old_string values across edit pairs
+    for i in 0..pairs.len() {
+        for j in (i + 1)..pairs.len() {
+            if pairs[i].0 == pairs[j].0 {
+                bail!("edit[{i}] and edit[{j}] have the same old_string");
+            }
+        }
+    }
+
+    let file_path = resolve_path(file_path_str, &ctx.project_root);
+    let content = fs::read_to_string(&file_path)
+        .with_context(|| format!("failed to read file: {}", file_path.display()))?;
+
+    // Validate each old_string appears exactly once, collect (start_byte, old_len, new_string)
+    let mut matches: Vec<(usize, usize, &str)> = Vec::with_capacity(pairs.len());
+    for (i, (old, new)) in pairs.iter().enumerate() {
+        let count = content.matches(old).count();
+        if count == 0 {
+            bail!("edit[{i}]: old_string not found in {}", file_path.display());
+        }
+        if count > 1 {
+            bail!(
+                "edit[{i}]: old_string found {count} times in {}. Provide more context to make the match unique.",
+                file_path.display()
+            );
+        }
+        let start = content.find(old).unwrap(); // safe: count == 1
+        matches.push((start, old.len(), new));
+    }
+
+    // Check for overlapping ranges
+    for i in 0..matches.len() {
+        let (start_a, len_a, _) = matches[i];
+        let end_a = start_a + len_a;
+        for j in (i + 1)..matches.len() {
+            let (start_b, len_b, _) = matches[j];
+            let end_b = start_b + len_b;
+            // Overlap: ranges [start_a, end_a) and [start_b, end_b) intersect
+            if start_a < end_b && start_b < end_a {
+                bail!(
+                    "edit[{i}] and edit[{j}] have overlapping matches (bytes {start_a}..{end_a} and {start_b}..{end_b})"
+                );
+            }
+        }
+    }
+
+    // Sort by start_byte descending for end-to-front application
+    matches.sort_by(|a, b| b.0.cmp(&a.0));
+
+    // Apply replacements
+    let mut result = content;
+    for (start, old_len, new_str) in &matches {
+        result.replace_range(*start..(*start + *old_len), new_str);
+    }
+
+    fs::write(&file_path, &result)
+        .with_context(|| format!("failed to write file: {}", file_path.display()))?;
+
+    let count = pairs.len();
+    let title = format!("Edit {}", file_path_str);
+    let mut output = format!(
+        "Successfully applied {count} edit(s) to {}.",
+        file_path.display()
+    );
+    if count == 1 {
+        output.push_str(" Hint: use 'find_replace' for single replacements.");
+    }
+    Ok(ToolOutput {
+        title,
+        output,
         is_error: false,
     })
 }
@@ -1044,5 +1168,208 @@ mod tests {
         let result = execute(args, test_ctx(&dir)).unwrap();
         assert!(!result.is_error);
         assert_eq!(fs::read_to_string(&file).unwrap(), "a\nb\nz");
+    }
+
+    // ── multi_find_replace tests ──
+
+    #[test]
+    fn multi_find_replace_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        fs::write(&file, "fn foo() {}\nfn bar() {}\n").unwrap();
+
+        let args = serde_json::json!({
+            "file_path": file.to_str().unwrap(),
+            "operation": "multi_find_replace",
+            "edits": [
+                { "old_string": "fn foo()", "new_string": "fn baz()" },
+                { "old_string": "fn bar()", "new_string": "fn qux()" }
+            ]
+        });
+        let result = execute(args, test_ctx(&dir)).unwrap();
+        assert!(!result.is_error);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "fn baz() {}\nfn qux() {}\n");
+    }
+
+    #[test]
+    fn multi_find_replace_three_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        fs::write(&file, "aaa\nbbb\nccc\n").unwrap();
+
+        let args = serde_json::json!({
+            "file_path": file.to_str().unwrap(),
+            "operation": "multi_find_replace",
+            "edits": [
+                { "old_string": "aaa", "new_string": "AAA" },
+                { "old_string": "bbb", "new_string": "BBB" },
+                { "old_string": "ccc", "new_string": "CCC" }
+            ]
+        });
+        let result = execute(args, test_ctx(&dir)).unwrap();
+        assert!(!result.is_error);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "AAA\nBBB\nCCC\n");
+    }
+
+    #[test]
+    fn multi_find_replace_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        fs::write(&file, "hello world").unwrap();
+
+        let args = serde_json::json!({
+            "file_path": file.to_str().unwrap(),
+            "operation": "multi_find_replace",
+            "edits": [
+                { "old_string": "hello", "new_string": "hi" },
+                { "old_string": "missing", "new_string": "gone" }
+            ]
+        });
+        let result = execute(args, test_ctx(&dir));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("edit[1]"));
+        assert!(err.contains("not found"));
+        // File should be unchanged (atomic: validate all before applying any)
+        assert_eq!(fs::read_to_string(&file).unwrap(), "hello world");
+    }
+
+    #[test]
+    fn multi_find_replace_ambiguous() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        fs::write(&file, "foo bar foo baz").unwrap();
+
+        let args = serde_json::json!({
+            "file_path": file.to_str().unwrap(),
+            "operation": "multi_find_replace",
+            "edits": [
+                { "old_string": "foo", "new_string": "qux" },
+                { "old_string": "baz", "new_string": "quux" }
+            ]
+        });
+        let result = execute(args, test_ctx(&dir));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("edit[0]"));
+        assert!(err.contains("2 times"));
+        // File unchanged
+        assert_eq!(fs::read_to_string(&file).unwrap(), "foo bar foo baz");
+    }
+
+    #[test]
+    fn multi_find_replace_overlapping() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        fs::write(&file, "abcdef").unwrap();
+
+        let args = serde_json::json!({
+            "file_path": file.to_str().unwrap(),
+            "operation": "multi_find_replace",
+            "edits": [
+                { "old_string": "abcd", "new_string": "XXXX" },
+                { "old_string": "cdef", "new_string": "YYYY" }
+            ]
+        });
+        let result = execute(args, test_ctx(&dir));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("overlapping"));
+        // File unchanged
+        assert_eq!(fs::read_to_string(&file).unwrap(), "abcdef");
+    }
+
+    #[test]
+    fn multi_find_replace_empty_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        fs::write(&file, "hello").unwrap();
+
+        let args = serde_json::json!({
+            "file_path": file.to_str().unwrap(),
+            "operation": "multi_find_replace",
+            "edits": []
+        });
+        let result = execute(args, test_ctx(&dir));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn multi_find_replace_single_edit_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        fs::write(&file, "hello world").unwrap();
+
+        let args = serde_json::json!({
+            "file_path": file.to_str().unwrap(),
+            "operation": "multi_find_replace",
+            "edits": [
+                { "old_string": "hello", "new_string": "hi" }
+            ]
+        });
+        let result = execute(args, test_ctx(&dir)).unwrap();
+        assert!(!result.is_error);
+        assert!(result.output.contains("find_replace"));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "hi world");
+    }
+
+    #[test]
+    fn multi_find_replace_duplicate_old_string() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        fs::write(&file, "hello world").unwrap();
+
+        let args = serde_json::json!({
+            "file_path": file.to_str().unwrap(),
+            "operation": "multi_find_replace",
+            "edits": [
+                { "old_string": "hello", "new_string": "hi" },
+                { "old_string": "hello", "new_string": "hey" }
+            ]
+        });
+        let result = execute(args, test_ctx(&dir));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("same old_string"), "expected 'same old_string' error, got: {err}");
+        // File unchanged
+        assert_eq!(fs::read_to_string(&file).unwrap(), "hello world");
+    }
+
+    #[test]
+    fn multi_find_replace_preserves_unrelated() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        fs::write(&file, "prefix AAA middle BBB suffix\n").unwrap();
+
+        let args = serde_json::json!({
+            "file_path": file.to_str().unwrap(),
+            "operation": "multi_find_replace",
+            "edits": [
+                { "old_string": "AAA", "new_string": "111" },
+                { "old_string": "BBB", "new_string": "222" }
+            ]
+        });
+        let result = execute(args, test_ctx(&dir)).unwrap();
+        assert!(!result.is_error);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "prefix 111 middle 222 suffix\n");
+    }
+
+    #[test]
+    fn multi_find_replace_adjacent() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        fs::write(&file, "AABB").unwrap();
+
+        let args = serde_json::json!({
+            "file_path": file.to_str().unwrap(),
+            "operation": "multi_find_replace",
+            "edits": [
+                { "old_string": "AA", "new_string": "XX" },
+                { "old_string": "BB", "new_string": "YY" }
+            ]
+        });
+        let result = execute(args, test_ctx(&dir)).unwrap();
+        assert!(!result.is_error);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "XXYY");
     }
 }

@@ -144,9 +144,9 @@ Two phases: (1) parallel — read-only `Allow` tools via `spawn_blocking`, (2) s
 
 ### Tool System (`tool/mod.rs`)
 
-Tools: `read`, `grep`, `glob`, `list`, `edit`, `write`, `patch`, `move`, `copy`, `delete`, `mkdir`, `bash`, `question`, `todo`, `task`, `webfetch`, `memory`. Synchronous handlers via `Fn(Value, ToolContext) -> Result<ToolOutput>`.
+Tools: `read`, `grep`, `glob`, `list`, `edit`, `write`, `patch`, `move`, `copy`, `delete`, `mkdir`, `bash`, `question`, `task`, `webfetch`, `memory`. Synchronous handlers via `Fn(Value, ToolContext) -> Result<ToolOutput>`.
 
-**Tool argument names vary**: `read`/`list`/`grep`/`glob`/`delete`/`mkdir` use `"path"`. `edit`/`write`/`patch` use `"file_path"`. `move`/`copy` use `"from_path"`/`"to_path"`. `edit` ops: `find_replace` (default), `insert_lines`, `delete_lines`, `replace_range`.
+**Tool argument names vary**: `read`/`list`/`grep`/`glob`/`delete`/`mkdir` use `"path"`. `edit`/`write`/`patch` use `"file_path"`. `move`/`copy` use `"from_path"`/`"to_path"`. `edit` ops: `find_replace` (default), `multi_find_replace`, `insert_lines`, `delete_lines`, `replace_range`.
 
 **Ropey gotcha**: `Rope::from_str("").len_lines()` returns 1. `total_lines()` helper checks `len_chars() == 0` first and subtracts 1 for trailing `\n`.
 
