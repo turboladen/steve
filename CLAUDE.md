@@ -13,84 +13,47 @@ cargo build            # Build (debug)
 cargo build --release  # Build (release)
 cargo run              # Run the TUI (requires config — see Configuration)
 cargo check            # Type-check without building
+cargo test             # Run all tests
 RUST_LOG=steve=debug cargo run  # Override log level (default: steve=info)
 ```
 
-The project uses Rust edition 2024. `build.rs` injects the git short rev at compile time as `STEVE_GIT_REV` — used by clap for `--version` output (`0.1.0-abc1234`). Re-runs only when `.git/HEAD` or `.git/refs/heads/` change.
-
-CLI uses **clap derive** (`src/main.rs`). `Cli::parse()` runs before TUI setup, handling `--version` and `--help` automatically. Version string uses `concat!(env!("CARGO_PKG_VERSION"), "-", env!("STEVE_GIT_REV"))` — must be `&'static str` (clap's `#[command(version = ...)]` doesn't accept `String`).
-
-```bash
-cargo test              # Run all tests
-```
+Rust edition 2024. `build.rs` injects git short rev as `STEVE_GIT_REV` for clap `--version` output — must be `&'static str` (use `concat!(env!(...))`, not `format!()`).
 
 ### Testing Policy
 
-Every change that introduces new types, trait impls, or behavior must include unit tests. Specifically:
+Every change that introduces new types, trait impls, or behavior must include unit tests:
 
-- **Strum-derived enums** (`ToolName`): `FromStr`/`Display` are auto-derived via strum. When adding new variants, just add to the enum — no manual match arms needed. Existing round-trip tests validate the derives.
-- **New enums**: `FromStr`/`Display` round-trip for all variants, serde round-trip, rejection of invalid input
 - **Match arms**: Prefer explicit variant lists over `_ =>` wildcards — exhaustive matching is a primary safety mechanism
-- **Exhaustive test loops**: Use `ToolName::iter()` (not hard-coded variant arrays) to iterate all variants. Branch on predicates with `if/else if/else` (not independent `if` blocks) so every variant hits at least one assertion
+- **Exhaustive test loops**: Use `ToolName::iter()` (not hard-coded variant arrays). Branch on predicates with `if/else if/else` so every variant hits at least one assertion
 - **Helper methods** (e.g., `is_write_tool()`): Exhaustive assertions covering every variant, not just spot checks
-- **Parse functions**: Valid inputs, invalid inputs, edge cases (empty string, extra whitespace)
+- **New enums**: `FromStr`/`Display` round-trip, serde round-trip, rejection of invalid input. Strum-derived enums just need the variant added — existing tests validate
 - **Refactors**: Existing tests passing is necessary but not sufficient — new logic paths need dedicated tests
 
-Run `cargo test` after every change. Aim for tests that break if someone adds a new variant without updating all the relevant match arms.
+Run `cargo test` after every change.
 
 **Test infrastructure**:
-- **UI rendering**: `render_to_buffer(width, height, draw_fn)` in `ui/mod.rs` (`#[cfg(test)]`) creates a headless ratatui `TestBackend` for buffer assertions. `make_test_app()` in `app.rs` constructs a minimal `App` for rendering tests
-- **Storage**: `Storage::with_base(path)` (`#[cfg(test)]`) bypasses `directories::ProjectDirs` for temp-dir-based tests
-- **Stream**: `MockChatStream` in `stream.rs` (`#[cfg(test)]`) provides canned SSE responses for integration tests. Use `with_test_manager(|mgr| { ... })` callback pattern for `SessionManager` tests (avoids `Box::leak` lifetime hacks)
-- **Assertions**: Never use trivially-true assertions like `!a.is_empty() || !b.is_empty()` — verify the specific behavior under test
-- **Integration tests** (`tests/` directory): Three suites — `permission_integration` (rule composition, session grants, plan mode), `config_integration` (round-trips, persistent grants, merging), `tool_integration` (11 tools against filesystem fixtures). Use `ToolRegistry::new(root)` + `ToolContext { project_root, storage_dir: None }` for tool tests. Use `create_test_project()` pattern for temp directory fixtures
+- **UI rendering**: `render_to_buffer(width, height, draw_fn)` in `ui/mod.rs` creates a headless `TestBackend`. `make_test_app()` in `app.rs` for rendering tests
+- **Storage**: `Storage::with_base(path)` for temp-dir-based tests. For UI tests: `Storage::new("test-name").expect("test storage")`
+- **Stream**: `MockChatStream` in `stream.rs` — canned SSE responses. Use `with_test_manager(|mgr| { ... })` for `SessionManager` tests
+- **Integration tests** (`tests/`): `permission_integration`, `config_integration`, `tool_integration`. Use `ToolRegistry::new(root)` + `ToolContext { project_root, storage_dir: None }`
+- **Assertions**: Never use trivially-true assertions — verify the specific behavior under test
 
-Logs are written to `{data_dir}/logs/steve.log` (daily rolling via `tracing-appender`). Data dir is resolved via `directories::ProjectDirs` — on macOS: `~/Library/Application Support/steve/`, on Linux: `~/.local/share/steve/`.
+Logs: `{data_dir}/logs/steve.log.YYYY-MM-DD` (daily rolling via `tracing-appender`).
 
 ## Configuration
 
-Steve loads config from two layers, merged at startup (`config/mod.rs`):
-1. **Global config**: `~/.config/steve/config.jsonc`
-2. **Project config**: `.steve.jsonc` in the project root (dotfile — user-specific, not committed)
+Two layers merged at startup (`config/mod.rs`):
+1. **Global**: `~/.config/steve/config.jsonc`
+2. **Project**: `.steve.jsonc` in project root (dotfile, not committed)
 
-Both are parsed through the JSONC parser. Project values override global values; providers deep-merge by provider ID, then by model ID within providers.
+Project values override global; providers deep-merge by provider ID, then model ID. Model references use `"provider_id/model_id"` format throughout.
 
-Model references use `"provider_id/model_id"` format throughout (config, commands, internal types).
+Optional top-level fields: `small_model` (title gen + compaction), `auto_compact` (default `true`, triggers at 80% context), `permission_profile` (`"trust"`/`"standard"`/`"cautious"`), `allow_tools` (per-tool auto-allow list).
 
-Optional top-level fields: `small_model` (used for async session title generation and compaction — title gen only uses `small_model` directly, compaction falls back to `model`), `auto_compact` (default `true` — auto-compacts at 80% context window usage), `permission_profile` (`"trust"`, `"standard"` default, or `"cautious"`), `allow_tools` (list of tool names to auto-allow regardless of profile).
-
-Example `.steve.jsonc`:
-```jsonc
-{
-  "model": "openai/gpt-4o",
-  // "small_model": "openai/gpt-4o-mini",  // optional: used for title gen + /compact
-  // "auto_compact": true,                  // optional: default true
-  // "permission_profile": "standard",      // optional: trust/standard/cautious
-  // "allow_tools": ["edit", "bash"],        // optional: per-tool overrides
-  "providers": {
-    "openai": {
-      "base_url": "https://api.openai.com/v1",
-      "api_key_env": "OPENAI_API_KEY",
-      "models": {
-        "gpt-4o": {
-          "id": "gpt-4o",
-          "name": "GPT-4o",
-          "context_window": 128000,
-          "capabilities": { "tool_call": true, "reasoning": false }
-        }
-      }
-    }
-  }
-}
-```
-
-**`Config::default()` vs serde defaults**: `Config::default()` gives `auto_compact=false` (Rust bool default), while serde deserialization gives `auto_compact=true` via `#[serde(default = "default_auto_compact")]`. The `merge()` method detects "empty" project configs (no providers, no model, no small_model) to avoid clobbering global `auto_compact` with the wrong default.
-
-**Config file naming**: One canonical name per level — `config.jsonc` (global) and `.steve.jsonc` (project). No json/jsonc fallback dance. The JSONC parser handles both pure JSON and JSONC content. `find_global_config_in()` is a testable helper that accepts an optional directory override.
-
-**`config::load()` returns `Result<(Config, Vec<String>)>`** — the second element carries non-fatal config warnings (parse errors from files that exist but failed to deserialize). Callers must destructure the tuple. `App::new()` accepts `config_warnings: Vec<String>` and displays them as `MessageBlock::Error` blocks at startup.
-
-**Serde aliases**: `ModelCost` fields accept both short (`input`/`output`) and full (`input_per_million`/`output_per_million`) names via `#[serde(alias)]`. Aliases deserialize both forms but serialize the canonical name.
+**Config gotchas**:
+- `Config::default()` gives `auto_compact=false` (Rust bool); serde gives `true` via `#[serde(default = "default_auto_compact")]`. `merge()` detects empty project configs to avoid clobbering
+- `config::load()` returns `Result<(Config, Vec<String>)>` — second element is non-fatal warnings
+- `ModelCost` uses `#[serde(alias)]` for `input`/`input_per_million` dual naming
 
 ## Commands & Keys
 
@@ -99,9 +62,9 @@ Example `.steve.jsonc`:
 | `/new` | Start a new session |
 | `/rename <title>` | Rename current session |
 | `/models` | List available models |
-| `/model <ref>` | Switch to a model (e.g., `/model openai/gpt-4o`) |
-| `/compact` | Compact conversation into a summary (frees context window) |
-| `/export-debug` | Export session as structured markdown for debugging (includes filtered logs) |
+| `/model <ref>` | Switch model (e.g., `/model openai/gpt-4o`) |
+| `/compact` | Compact conversation (frees context window) |
+| `/export-debug` | Export session as markdown for debugging |
 | `/init` | Create AGENTS.md in project root |
 | `/help` | Show help |
 | `/quit` or `/exit` | Quit |
@@ -110,216 +73,140 @@ Example `.steve.jsonc`:
 |-----|--------|
 | Enter | Send message |
 | Shift+Enter | Insert newline |
-| Tab | Accept & execute autocomplete selection / toggle Build–Plan mode (when no autocomplete) |
-| Up/Down | Navigate autocomplete list (when visible) / scroll messages one line |
+| Tab | Accept autocomplete / toggle Build–Plan mode |
+| Up/Down | Navigate autocomplete / scroll messages |
 | PageUp/PageDown | Scroll messages one page |
-| Ctrl+C | Cancel stream (first press) / quit (second press) |
+| Ctrl+C | Cancel stream (first) / quit (second) |
 | Ctrl+B | Toggle sidebar (auto → hide → show → auto) |
 | Mouse wheel | Scroll messages |
-| Click+drag | Select text (auto-copies to clipboard on release) |
+| Click+drag | Select text (auto-copies to clipboard) |
 
 ### CLI Subcommands (`src/cli/`, `src/main.rs`)
 
-Subcommands that don't need the TUI short-circuit before TUI setup in `main.rs` via the `Commands` enum. Pattern: parse CLI → match subcommand → return early. `Data` and `Task` both use this pattern.
-
-`steve task` manages tasks and epics from the terminal without the TUI. Auto-detects entity type from the kind char after the last dash in the ID (`t`/`b` → Task, `e` → Epic), with legacy prefix fallback (`task-*`/`bug-*`/`epic-*`). `--epic`/`--bug` flags on `create` control what's created. Formatting functions return `String` for testability (not `println!` directly).
+Subcommands short-circuit before TUI setup via `Commands` enum. `steve task` manages tasks/epics from terminal — auto-detects entity type from kind char in ID. Formatting functions return `String` for testability.
 
 ## Architecture
 
-The crate has both `lib.rs` (public modules) and `main.rs` (binary entry point). This enables integration tests in `tests/` to access all modules via `use steve::*`. Unit tests live inline in each module (`#[cfg(test)]`); integration tests live in `tests/`. ~40 source files, no workspace. All modules share core types.
+`lib.rs` (public modules) + `main.rs` (binary). Integration tests in `tests/` access modules via `use steve::*`. ~40 source files, no workspace.
 
 ### Event-Driven Architecture
 
-Everything funnels into a single `AppEvent` enum through one `mpsc::UnboundedSender`:
+Single `AppEvent` enum through one `mpsc::UnboundedSender`. Main loop in `app.rs` uses `tokio::select!` across terminal input, LLM streaming, tool execution, and tick timer (100ms).
 
-1. **Terminal input** — crossterm `EventStream`
-2. **LLM streaming** — tokio task sends deltas, tool calls, finish events
-3. **Tool execution** — synchronous tool handlers called from the stream task
-4. **Tick timer** — 100ms interval for UI refresh
-
-The main loop in `app.rs` uses `tokio::select!` across these sources, then re-renders after every event.
-
-**System prompt** (`build_system_prompt()` in `app.rs`): Includes Steve identity, environment context (current model, mode, git branch, current date), permission model explanation, AGENTS.md (if present), and TOOL_GUIDANCE. The LLM knows it's "Steve" and understands its available modes and permissions.
+**System prompt** (`build_system_prompt()` in `app.rs`): Steve identity, environment context, permission model, AGENTS.md (if present), and `TOOL_GUIDANCE`.
 
 ### LLM Stream + Tool Call Loop (`stream.rs`)
 
-A spawned tokio task opens an SSE stream via async-openai, processes chunks (sending `AppEvent::LlmDelta` to the UI), and accumulates tool call fragments. When the stream finishes, it checks for valid tool call data (non-empty `id` and `function_name`) regardless of `finish_reason` — some providers (e.g., Fuel iX/litellm) don't reliably set `FinishReason::ToolCalls`. Tool calls with invalid/truncated JSON arguments (common when `finish_reason=Length`) are filtered out before execution. Valid tool calls are executed (with permission checks), results appended as `ChatCompletionRequestToolMessage`s, and the loop continues until no valid tool calls remain. A safety limit terminates the loop with `LlmError` if the LLM gets stuck in an infinite tool-call cycle. Build mode uses `MAX_TOOL_ITERATIONS = 75`; Plan mode uses `MAX_PLAN_ITERATIONS = 40` (selected via `StreamRequest::is_plan_mode`, snapshotted at launch — mid-stream mode toggles don't change it). Four escalating warning tiers (nudge 20%, warning 47%, critical 73%, final 93%) inject increasingly directive messages into the last tool result. The counter resets to zero whenever the user grants a permission (AllowOnce/AllowAlways), so interactive sessions where the user periodically approves tools can run well beyond the limit.
+Spawned tokio task streams via async-openai, accumulates tool call fragments, executes tools in a loop until none remain. Safety limits: `MAX_TOOL_ITERATIONS = 75` (build), `MAX_PLAN_ITERATIONS = 40` (plan). Counter resets on user permission grants.
 
-Cancellation uses `tokio_util::sync::CancellationToken` with `select!` — the token is checked before each LLM call, during chunk processing, and between tool executions.
+**Critical gotchas**:
+- Detect tool calls by checking for valid data (non-empty `id` + `function_name`), NOT `finish_reason` — providers vary
+- Filter out tool calls with invalid JSON args (truncated by `finish_reason=Length`)
+- Use `last_assistant_mut()` during streaming, NOT `messages.last_mut()` — Permission/System blocks interleave
+- No `unreachable!()` in stream tasks — panics crash silently. Use `tracing::error!`
 
-The stream is decoupled from async-openai via the `ChatStreamProvider` trait (`#[async_trait]`). Production uses `OpenAIChatStream`; tests use `MockChatStream` which returns pre-built response chunks from a `VecDeque` (supports multi-call tool loop scenarios). Builder helpers: `text_delta()`, `tool_call_chunk()`, `finish_chunk()`.
+Stream decoupled via `ChatStreamProvider` trait (`#[async_trait]`). Tests use `MockChatStream`.
 
-### Permission Handshake
+### Permission System
 
-When a tool needs user permission, the stream task sends a `PermissionRequest` containing a `oneshot::Sender`, then awaits the `oneshot::Receiver`. The main event loop shows the prompt; when the user responds (y/n/a), it sends the reply through the stored sender. This suspends the stream task at exactly the right point without polling.
+Stream task sends `PermissionRequest` with `oneshot::Sender`, awaits reply. Permission handler matches `(key.code, key.modifiers)` tuples — new `Ctrl+<key>` bindings must not conflict with `y`/`n`/`a` handlers.
 
-**Critical**: Permission and System blocks are interleaved into `self.messages` during the stream. Streaming event handlers (`LlmDelta`, `LlmReasoning`, `LlmToolCallStreaming`, `LlmToolCall`, `ToolResult`) must use `last_assistant_mut()` to find the correct Assistant block — **not** `messages.last_mut()`, which may return a Permission or System block after a permission prompt.
+**Modes** (Tab toggles):
+- **Build** (default): read auto-allowed, write/execute require Ask
+- **Plan**: read auto-allowed, writes denied entirely, bash requires Ask
 
-The permission prompt handler matches `(key.code, key.modifiers)` tuples. When adding new `Ctrl+<key>` bindings, check whether the key conflicts with the permission prompt's letter handlers (`y`/`n`/`a`).
+**Profiles**: Trust (all allowed), Standard (default), Cautious (almost everything asks). `allow_tools` overrides insert rules before profile defaults (first-match-wins). Plan mode strips write overrides. Both `build_mode_rules()` and `plan_mode_rules()` explicitly list every `ToolName` variant.
 
-**Path-based permission rules**: `PermissionEngine::check()` accepts `path_hint: Option<&str>` for glob pattern matching against file paths. Rules with patterns other than `"*"` only match when a path is provided and the glob matches. Config: `permission_rules` array in `.steve.jsonc` with `{"tool": "edit", "pattern": "src/**", "action": "allow"}` objects. Priority: path rules > allow_tools overrides > profile defaults (first-match wins). Plan mode strips write-allow path rules. Invalid glob patterns are logged and skipped.
+**Path rules**: `permission_rules` array in `.steve.jsonc` with `{"tool", "pattern", "action"}`. Priority: path rules > allow_tools > profile defaults.
 
-**Persistent grants**: When user presses `a` (AllowAlways), the tool is persisted to `allow_tools` in the project's `.steve.jsonc` via `config::persist_allow_tool()` (atomic tmp+rename write). In-memory config and permission rules are updated immediately. The persist runs on a background `std::thread` to avoid blocking the UI.
+**Persistent grants**: `a` (AllowAlways) persists to `.steve.jsonc` via `config::persist_allow_tool()` (atomic tmp+rename, background thread).
 
-**Permission diff preview**: `MessageBlock::Permission` has a `diff_content: Option<DiffContent>` field. `PermissionRequest` carries `tool_args: Value` so the UI can extract and render inline diffs for edit/write/patch tools in the permission prompt card.
-
-### Agent Modes
-
-- **Build mode** (default): read tools auto-allowed, write/execute tools require permission (Ask)
-- **Plan mode**: read tools auto-allowed, write tools denied entirely (excluded from LLM tool list), bash requires permission
-
-Tab toggles between modes. Rules are generated by `profile_build_rules()` / `profile_plan_rules()` in `permission/mod.rs`, driven by the config's `permission_profile` and `allow_tools`. Three profiles:
-- **Trust**: All tools auto-allowed (wildcard Allow rule)
-- **Standard** (default): Read tools + utility tools auto-allowed, write/execute require Ask
-- **Cautious**: Only question/todo auto-allowed, everything else requires Ask
-
-Per-tool `allow_tools` overrides insert `Allow` rules before profile defaults (first-match-wins). Plan mode strips write tool overrides — writes are always denied in plan mode regardless of profile or overrides. Both `build_mode_rules()` and `plan_mode_rules()` explicitly list every `ToolName` variant — no tool falls through to the default `Ask`. Exhaustive coverage tests (`all_tools_have_explicit_rule_in_*`) enforce this.
-
-### Debug Export (`export.rs`)
-
-`/export-debug` writes the current session to `steve-debug-<timestamp>.md` in the project root, including filtered log entries. Synchronous (filesystem I/O only). `ExportParams` borrows session state — no cloning. `extract_tool_summary()` mirrors `extract_args_summary()` in `app.rs` with exhaustive `ToolName` match (keep both in sync when adding tools). Log filtering uses per-file `emitting` flag to track whether continuation lines (no timestamp) should be included — resets at file boundaries and when a timestamped line falls outside the session range.
-
-### Compaction (`/compact`)
-
-Summarizes the conversation into a single message to reclaim context window space. Uses a non-streaming `LlmClient::simple_chat()` call in a background tokio task, communicating results back via `AppEvent::CompactFinish` / `AppEvent::CompactError`. Uses `small_model` if configured, otherwise falls back to the main model. On completion, old messages are deleted from storage and replaced with a single assistant message containing the summary. Auto-compact triggers after `LlmFinish` when `last_prompt_tokens >= context_window * 0.80` (controlled by `auto_compact` config). If compaction fails (`CompactError`), `auto_compact_failed` is set to suppress retries for the rest of the session (reset on `/new`). Manual `/compact` still works.
-
-### Session Title Generation
-
-Auto-titles sessions after the first completed LLM exchange (`exchange_count == 1`). Two paths:
-- **Async LLM path** (when `small_model` configured): Spawns a `tokio::spawn` background task calling `simple_chat()` with `TITLE_SYSTEM_PROMPT`. Result arrives as `AppEvent::TitleGenerated`/`TitleError`. `sanitize_title()` strips quotes, preamble prefixes ("Title:"), and enforces 60-char cap. Empty sanitized titles trigger `TitleError` with sync fallback. Does **not** fall back to the main model — uses `config.small_model` directly (not `compact_model_ref()`).
-- **Sync fallback** (no `small_model`): `title_fallback()` takes first non-empty line of first user message, truncates to 60 chars.
-
-Guards prevent re-titling: `maybe_generate_title()` returns early if `session.title != "New session"` (protects after `/rename` and after compaction resets `exchange_count`). `apply_title_if_current()` checks both `session_id` (stale event from previous session) and title sentinel. `apply_session_title()` rejects empty strings and logs `rename_session` errors (no silent `let _ =`).
-
-Both `title_fallback()` and `sanitize_title()` delegate to `truncate_title()` for the 60-char cap — single source for truncation constants.
+**Permission diff preview**: `MessageBlock::Permission` has `diff_content: Option<DiffContent>`. `PermissionRequest` carries `tool_args: Value` for inline diff rendering.
 
 ### Context Management (`context/`)
 
-Reduces LLM API token usage via two subsystems in `src/context/`:
-- **Compressor** (`compressor.rs`): Before each LLM API call in the tool loop, replaces already-seen tool results with compact heuristic summaries (e.g., `"[Previously read: 150 lines, Rust.]"`). Summaries do not invite re-reading — phrasing like "Re-read if needed" was removed to prevent compressor/cache feedback loops. Preserves `tool_call_id` for valid conversation structure.
-- **Cache** (`cache.rs`): Session-scoped `ToolResultCache` lives in `App` behind `Arc<std::sync::Mutex<ToolResultCache>>`, passed to the stream task via `StreamRequest`. Maps `(tool_name, canonical_args)` → cached output. All tool cache keys normalize paths via `normalize_path()` (resolves relative paths against project root) for consistent matching. On first cache hit, returns the full cached output (skipping disk I/O). After `REPEAT_THRESHOLD` (2) total hits on the same key, returns a short summary instead of full content to break feedback loops where the LLM re-reads the same file indefinitely. Per-key hit counts reset when `invalidate_path()` fires (legitimate re-reads after edits). Invalidated when write ops modify files — grep/glob entries are wholesale-invalidated since they can't be tracked by individual path. Reset on `/new` session. File-backed cache entries store `mtime` at `put()` time; `get()` checks current mtime and auto-invalidates on external changes (git merges, editor saves, etc.).
+- **Compressor** (`compressor.rs`): Replaces already-seen tool results with compact summaries. Aggressive pruning at 60% context. Summaries must NOT invite re-reading
+- **Cache** (`cache.rs`): Session-scoped `ToolResultCache` behind `Arc<Mutex>`. Path-normalized keys. Auto-invalidates on mtime changes. After `REPEAT_THRESHOLD` (2) hits returns short summary to break feedback loops
 
-**Critical invariant**: Write tools (`edit`, `write`, `patch`, `move`, `copy`, `delete`, `mkdir`) and the `memory` tool (which writes to disk) must never run in the parallel execution phase — they must go through the sequential phase for proper cache invalidation, even if they have `AllowAlways` permission.
-
-The compressor also runs an aggressive pruning pass (compressing ALL tool results including current iteration) when estimated token usage exceeds 60% of the context window. The `read` tool detects binary files (null bytes in first 8KB) and returns `"Binary file (N bytes), not displayed."` instead of garbled content. It also enforces a 2000-line default cap (`max_lines` parameter), `bash` uses head+tail truncation at 20KB, and `grep` truncates individual match lines to 200 chars. A 60% context warning is shown to the user before auto-compact triggers at 80%.
+**Critical invariant**: Write tools (`edit`, `write`, `patch`, `move`, `copy`, `delete`, `mkdir`) and `memory` must never run in parallel execution phase — sequential only for cache invalidation.
 
 ### Token Pipeline
 
-Two token metrics — do not confuse them:
-- **`last_prompt_tokens`** (per-call): API's reported `prompt_tokens` from the most recent call. Represents actual context window pressure. Used by input bar display and `check_context_warning()` (60% threshold).
-- **`total_tokens`** (cumulative): Sum across all API calls in the session. Used by sidebar cost display. Both `should_auto_compact()` (80%) and `check_context_warning()` (60%) use `last_prompt_tokens`.
+Two metrics — do not confuse:
+- **`last_prompt_tokens`** (per-call): Context window pressure. Used by input bar, `check_context_warning()` (60%), `should_auto_compact()` (80%)
+- **`total_tokens`** (cumulative): Used by sidebar cost display
 
-`LlmUsageUpdate` events send per-call values during tool loops for live UI updates. `LlmFinish` sends accumulated `total_usage` for storage. The `LlmFinish` handler must NOT overwrite `last_prompt_tokens` — the last `LlmUsageUpdate` already set the correct value.
-
-**Sidebar token display** uses a two-tier approach: `LlmUsageUpdate` accumulates (`+=`) into `sidebar_state.{prompt,completion,total}_tokens` for live feedback during tool loops. `sync_sidebar_tokens()` reconciles with authoritative `session.token_usage` at discrete sync points: `LlmFinish` (after `add_usage`), `/new`, `switch_to_session`, `resume_or_new_session`, `CompactFinish`. `update_sidebar()` does NOT sync tokens — it reads stale session data during tool loops.
+`LlmFinish` handler must NOT overwrite `last_prompt_tokens`. `sync_sidebar_tokens()` reconciles at discrete sync points (`LlmFinish`, `/new`, `switch_to_session`, `CompactFinish`).
 
 ### Parallel Tool Execution (`stream.rs`)
 
-The tool call loop partitions pending tool calls into two phases:
-1. **Phase 2 (parallel)**: Read-only tools with `Allow` permission run via `spawn_blocking`. Write tools are excluded even with `AllowAlways`.
-2. **Phase 3 (sequential)**: Permission-required tools (Ask/Deny) and write tools. Handles permission handshake and cache invalidation.
-
-Every `tool_call_id` in an assistant message **must** have a corresponding tool result message — missing one causes an API error. The parallel phase uses `unwrap_or_else` with an error fallback to guarantee this.
-
-**Event ordering invariant**: Phase 2 results are emitted by iterating `auto_allowed` in original index order (not completion order), so `LlmToolCall`/`ToolResult` pairs arrive in the same order the calls were added. `complete_tool_call()` in `message_block.rs` relies on this — it uses forward search to match results to calls by `tool_name`.
+Two phases: (1) parallel — read-only `Allow` tools via `spawn_blocking`, (2) sequential — permission-required + write tools. Every `tool_call_id` must have a corresponding result message. Results emitted in original index order (not completion order) — `complete_tool_call()` depends on this.
 
 ### Tool System (`tool/mod.rs`)
 
-Tools are registered in `ToolRegistry` as `ToolEntry` structs containing a `ToolDef` (name, description, JSON schema) and a handler closure `Fn(Value, ToolContext) -> Result<ToolOutput>`. Tools are synchronous (not async) — they run inside the stream task's spawned tokio task.
+Tools: `read`, `grep`, `glob`, `list`, `edit`, `write`, `patch`, `move`, `copy`, `delete`, `mkdir`, `bash`, `question`, `todo`, `task`, `webfetch`, `memory`. Synchronous handlers via `Fn(Value, ToolContext) -> Result<ToolOutput>`.
 
-Available tools: `read`, `grep`, `glob`, `list`, `edit`, `write`, `patch`, `move`, `copy`, `delete`, `mkdir`, `bash`, `question`, `todo`, `task`, `webfetch`, `memory`.
+**Tool argument names vary**: `read`/`list`/`grep`/`glob`/`delete`/`mkdir` use `"path"`. `edit`/`write`/`patch` use `"file_path"`. `move`/`copy` use `"from_path"`/`"to_path"`. `edit` ops: `find_replace` (default), `insert_lines`, `delete_lines`, `replace_range`.
 
-`TOOL_GUIDANCE` in `app.rs` appends four sections to the system prompt: `## Task Planning` (mandatory todo usage for multi-step tasks — must stay prominent/first), `## Tool Call Budget` (10-20 call soft target), `## IMPORTANT: Use Native Tools, Not Bash` (table of redirections, warns of rejection), and `## Tool Usage Guidelines` (context-efficiency tips, including memory consolidation guidance).
+**Ropey gotcha**: `Rope::from_str("").len_lines()` returns 1. `total_lines()` helper checks `len_chars() == 0` first and subtracts 1 for trailing `\n`.
 
-The `memory` tool supports three actions: `read`, `append`, and `replace` (full overwrite for consolidation). Auto-prunes at 4KB (`MAX_MEMORY_BYTES`) — truncates oldest entries at line boundaries. Memory is auto-loaded into the LLM's context at session start.
+**Bash interception**: `check_native_tool_redirect()` rejects `cat`→read, `ls`→list, `find`→glob, `grep`→grep, `sed`→edit. Compound commands pass through.
 
-The `edit` tool supports four operations via the `operation` parameter (default: `find_replace`): **find_replace** (original String-based exact replacement, no ropey), **insert_lines** (insert content before a 1-indexed line number), **delete_lines** (delete inclusive 1-indexed range), **replace_range** (replace inclusive range with new content). Line-based ops use `ropey::Rope`. **Ropey gotcha**: `Rope::from_str("").len_lines()` returns 1, not 0 — the `total_lines()` helper in `edit.rs` checks `len_chars() == 0` first; it also subtracts 1 when the file ends with `\n`. When adding new edit operations: update `extract_diff_content()` in `app.rs` and `build_permission_summary()` in `stream.rs` (both have inner string matches on the `operation` field).
+**Exhaustive `ToolName` match locations** (all must update when adding variants): `extract_args_summary()` and `extract_diff_content()` in `app.rs`, `extract_tool_summary()` in `export.rs`, `cache_key()` and `extract_path()` in `context/cache.rs`, `compress_tool_output()` in `context/compressor.rs`, `build_permission_summary()` and `extract_tool_path()` in `stream.rs`, `is_write_tool()`/`intent_category()`/`tool_marker()` in `tool/mod.rs`. Inner operation dispatches (e.g., edit `operation`) must also list all values explicitly.
 
-**Bash tool interception** (`bash.rs`): `check_native_tool_redirect()` rejects simple standalone commands that duplicate native tools (`cat`/`head`/`tail` → read, `ls` → list, `find` → glob, `grep`/`rg` → grep, `sed`/`awk` → edit/patch). Returns `is_error: true` so the LLM retries with the correct tool. Compound commands (pipes, chains, subshells, command substitution) always pass through. The function strips `sudo`/`env`/`nice`/`nohup`/`time` prefixes and path prefixes (`/usr/bin/cat` → `cat`).
-
-**Tool argument names vary**: `read`/`list`/`grep`/`glob`/`delete`/`mkdir` use `"path"`. `edit`/`write`/`patch` use `"file_path"`. `edit` also uses `"operation"` (default `"find_replace"`), `"line"`, `"content"`, `"start_line"`, `"end_line"` for line-based ops. `move`/`copy` use `"from_path"`/`"to_path"`. Check each tool's schema before constructing JSON args in tests.
-
-**Exhaustive `ToolName` match locations** (all must be updated when adding new tool variants): `extract_args_summary()` and `extract_diff_content()` in `app.rs`, `extract_tool_summary()` in `export.rs`, `cache_key()` and `extract_path()` in `context/cache.rs`, `compress_tool_output()` in `context/compressor.rs`, `build_permission_summary()` and `extract_tool_path()` in `stream.rs`, `is_write_tool()`/`intent_category()`/`tool_marker()` in `tool/mod.rs`. All use explicit variant lists (no `_ =>` wildcards).
-
-- **Inner operation dispatches** (e.g., edit `operation` field): When a tool dispatches on a string parameter, list all known values explicitly and use `tracing::warn!` for the catch-all — same spirit as the no-wildcard rule for `ToolName` matches
+When adding edit operations: update `extract_diff_content()` in `app.rs` and `build_permission_summary()` in `stream.rs`.
 
 ### Task System (`task/`, `tool/task.rs`, `cli/mod.rs`)
 
-`TaskStore` wraps `Storage` for task/epic CRUD. Storage paths: tasks at `["tasks", "items", &id]`, epics at `["tasks", "epics", &id]`. IDs use project-scoped format: `{project_name}-{kind_char}{4_hex_chars}` where `kind_char` is `t` (task), `b` (bug), or `e` (epic) — e.g., `steve-ta3f0`, `steve-b01c2`, `steve-e7ff4`. Project name comes from `git_repo_name()`, fallback `"proj"`. Legacy IDs (`task-*`, `bug-*`, `epic-*`) are still recognized by `detect_entity()` for backward compatibility. `TaskStore::new(storage, project_prefix)` takes the project name as a second argument.
-
-`TaskKind` enum (`Task`, `Bug`) controls the kind char in generated IDs (`t`/`b`) and display treatment. `#[serde(default)]` ensures backward compatibility with pre-kind stored tasks. `create_task()` takes 6 args: `(title, description, epic_id, session_id, priority, kind)`. `create_bug()` is a convenience wrapper.
-
-Three interfaces to `TaskStore` must stay in sync: the TUI tool handler (`tool/task.rs` — actions like `create`, `create_bug`, `list`), the CLI (`cli/mod.rs` — `steve task` subcommands), and `app.rs` (`Command::TaskNew`). When adding new task operations, update all three.
+IDs: `{project_name}-{kind_char}{4_hex}` (e.g., `steve-ta3f0`). Kind chars: `t` (task), `b` (bug), `e` (epic). Legacy IDs (`task-*`/`bug-*`/`epic-*`) still recognized. Three interfaces must stay in sync: TUI tool handler (`tool/task.rs`), CLI (`cli/mod.rs`), and `app.rs` (`Command::TaskNew`).
 
 ### Storage (`storage/mod.rs`)
 
-Flat JSON files under `{data_dir}/storage/{project_id}/` (see Data Locations for platform paths). Key paths map to filesystem paths: `["sessions", "abc123"]` → `sessions/abc123.json`. Uses `fs2` file locking (shared for reads, exclusive for writes) and atomic writes via tmp+rename.
-
-Project ID is derived from the git root commit hash (deterministic across clones). Falls back to a hash of CWD for non-git directories.
-
-Messages are stored one-per-file under `messages/{session_id}/{message_id}.json` to avoid read-modify-write races during streaming.
+Flat JSON files under `{data_dir}/storage/{project_id}/`. Key paths → filesystem paths. `fs2` file locking + atomic tmp+rename writes. Project ID from git root commit hash (fallback: CWD hash). Messages stored one-per-file under `messages/{session_id}/`.
 
 ### UI (`ui/`)
 
-Built with ratatui 0.30 + crossterm 0.29 + ratatui-textarea 0.8. Sidebar appears at terminal width >= 120. The TUI owns stdout, so all logging goes to a file via `tracing-appender`.
+ratatui 0.30 + crossterm 0.29 + ratatui-textarea 0.8. Sidebar at width >= 120. TUI owns stdout — all logging to file.
 
-Messages render as `MessageBlock` variants: `User`, `Assistant` (with thinking/parts), `System`, `Error`, `Permission`. Styled per-variant in `message_area.rs`. Permission prompts render as bold yellow blocks with highlighted key letters.
+**Key patterns**:
+- `MessageBlock` variants: `User`, `Assistant` (with `parts: Vec<AssistantPart>`), `System`, `Error`, `Permission`
+- `complete_tool_call()` uses **forward** search — stream emits events in original order
+- Tool colors: `tool_read` (read-only + webfetch), `tool_write` (write tools + memory), `accent` (bash/question/todo). Markers: `·`/`✎`/`$`/`⚡`
+- Intent labels (`exploring`/`editing`/`executing`) derived at render time via `infer_group_intent()`. Consecutive same-category groups deduplicated
+- Code blocks rendered via `render_text_with_code_blocks()` using `CodeFence::classify()` from `message_block.rs`
+- Auto-scroll uses wrapped line widths (not `lines.len()`) — critical for `Wrap { trim: false }`
+- Scroll: Map `ScrollDown`→`scroll_down()` directly — do NOT invert (macOS already applies natural scrolling)
+- `/new` resets ALL session state: messages, tool cache, changeset, todos, tokens, context warning, auto-compact flag. When adding session-scoped state, add its reset here
 
-**Interleaved assistant parts**: `MessageBlock::Assistant` stores `parts: Vec<AssistantPart>` where `AssistantPart` is either `Text(String)` or `ToolGroup(ToolGroup)`. Parts are rendered in order, preserving the chronological interleaving from the LLM stream (text → tool calls → more text → more tool calls). The `thinking` field stays separate (always rendered first). `append_text()` appends to the last `Text` part or creates a new one. `ensure_preparing_tool_group()` checks the last part. `complete_tool_call()` uses **forward** search (not reverse) to match results to calls — stream.rs emits events in original order. **ToolGroup lifecycle**: Each LLM response turn typically creates its own `ToolGroup` because `LlmToolCall` sets status to `Running`, `ToolResult` sets to `Complete`, and the next turn's `LlmToolCallStreaming` calls `ensure_preparing_tool_group()` which creates a new group when the last one isn't `Preparing`. This means sequential single-tool calls (common for exploratory reads) produce multiple groups even though they're all the same category. The intent indicator dedup handles this at render time.
+**Sidebar**: Changes (file diffs), Session (model/tokens/cost), Todos. Changeset recorded at `ToolResult` time, gated on `!output.is_error`. `strip_project_root()` takes `&str` not `&Path`.
 
-**Inline diff rendering**: Write tools (edit/write/patch) auto-expand (`expanded: true`) and show colored inline diffs extracted from tool call arguments at `LlmToolCall` time. Diff content is UI-only — it does not change tool output or what the LLM sees. Types: `DiffContent` (enum: `EditDiff`, `WriteSummary`, `PatchDiff`) and `DiffLine` (enum: `Removal`, `Addition`, `Context`, `HunkHeader`) live in `message_block.rs`. Extraction logic (`extract_diff_content`, `parse_unified_diff_lines`) lives in `app.rs` alongside `extract_args_summary`. Rendering (`render_diff_lines`) lives in `message_area.rs` — uses box-drawing frame (`┌─│└─`) with `theme.error` for removals, `theme.success` for additions, `theme.dim` for context. Both `extract_args_summary` and `extract_diff_content` use exhaustive `ToolName` matches (no wildcards).
+**Input area**: `INPUT_HEIGHT = 5` (1 border + 1 context + 3 textarea). Context line shows `[Mode] ~/path prompt_tokens/ctx (%)`.
 
-**Code block rendering**: `render_text_with_code_blocks()` in `message_area.rs` replaces plain text rendering for `AssistantPart::Text`. Detects CommonMark fenced code blocks (triple-backtick with ≤3 leading spaces) and renders them with `theme.code_bg` background tint. Opening fences with a language label render a header line (label + space fill on `code_bg` background — no box-drawing characters, so copied text stays clean); bare fences (no language) skip the header entirely. Closing fences are consumed. Unclosed blocks tint all remaining lines gracefully. The function is stateless (line-by-line scanner toggling `in_code_block` flag). `code_bg` is a warm dark tint (`Rgb(28, 26, 23)`) distinct from the base `bg`. `render_text_with_code_blocks()` uses `CodeFence::classify()` from `message_block.rs` as the single source of truth for fence detection.
+**Ambient context pressure**: `Theme::border_color(context_pct)` shifts borders through gray→amber→yellow→red at 40/60/80% thresholds.
 
-**Copy-on-select** (`selection.rs`): Click-drag in the message area selects text with visual highlighting. On mouse release, selected text is automatically copied to the system clipboard via `pbcopy` (macOS) → `xclip` (Linux) → OSC 52 (fallback). `ContentMap` is built during each render pass from `GutteredLines::texts` — a parallel plain-text representation of every line (gutter-stripped). `ContentMap::screen_to_content()` reverse-maps screen coordinates to `ContentPos { line, char_offset }` using binary search over cumulative wrapped row indices. `SelectionState` lives on `App` with `anchor`/`cursor`/`dragging` fields. `App::last_message_area: Rect` stores the message area bounds for mouse hit-testing. Selection highlighting is applied in `render_message_blocks()` by modifying span backgrounds with `theme.selection_bg`. Dragging past the top/bottom edge of the message area triggers scroll-to-select. A "Copied!" flash overlay renders for 1 second after successful copy (cleared by `Tick` handler). The `/new` handler clears selection state.
+## Key Dependency Gotchas
 
-**Warm Terminal palette** (`theme.rs`): Uses RGB colors for consistent appearance across terminals. `Theme` derives `Debug, PartialEq`. `user_msg` is blue-tinted (`Rgb(145, 185, 225)`), `assistant_msg` warm cream, `system_msg` has its own distinct color. `reasoning` uses muted lavender. Tool calls use three color categories: `tool_read` (muted warm gray) for read-only tools + webfetch, `tool_write` (coral) for write tools (edit/write/patch/move/copy/delete/mkdir) + memory, and `accent` (amber) for bash/question/todo. The `memory` tool gets `tool_write` because it writes to disk (see critical invariant in Context Management). Each category also has a distinct marker symbol: `·` (read), `✎` (write), `$` (execute/bash), `⚡` (interactive/question/todo) — see `ToolName::tool_marker()`. `Webfetch` gets the read marker/color despite `is_read_only()` being false — it's read-like in the UI but not in the permission/caching domain.
-
-**Ambient context pressure** (`theme.rs`): `Theme::border_color(context_pct: u8) -> Color` shifts all border/chrome colors as context window usage increases: <40% normal gray (`self.border`), 40–59% warm amber-brown (`self.context_amber`), 60–79% yellow (`self.warning`), 80%+ red (`self.error`). Called in 7 locations: input top border, sidebar separator, sidebar section headers, autocomplete popup border, and diff box borders (top, left, bottom). The `context_pct` is computed once in `render()` from `app.status_line_state.context_usage_pct()` and threaded through to `render_message_blocks()`, `render_autocomplete()`, and `render_sidebar()` as a `u8` parameter.
-
-**Intent indicators** (`message_area.rs`): Each tool group within an assistant turn shows a contextual label before its tool calls: `── exploring ──`, `── editing ──`, or `── executing ──`. Rendered per-group (not per-block) so the label appears right before the tools it describes — when an agent reads files then edits, you see both `── exploring ──` and `── editing ──` in the same turn. Derived at render time from `infer_group_intent()` — no stored state. `ToolName::intent_category()` maps each tool to an `IntentCategory` (Exploring, Editing, Executing, Asking). Priority when a group contains mixed tools: editing > executing > exploring. `Asking` tools (question/todo) don't influence the label — they're utility tools that don't characterize codebase interaction. Colors reuse the existing tool category palette: `tool_read` for exploring, `tool_write` for editing, `accent` for executing. Consecutive same-category groups are deduplicated at render time — `last_intent` tracking suppresses repeated labels. Both text between groups and asking-only groups (which emit no label) reset the tracking, so the label reappears correctly after either.
-
-The input area has a top border (`Borders::TOP`, `INPUT_HEIGHT = 5`: 1 border + 1 context + 3 textarea), then a starship-style prompt: context line (`[Mode] ~/path prompt_tokens/ctx (%)`) showing context pressure (per-call `last_prompt_tokens`, not cumulative). `render_input` takes an `InputContext` with `last_prompt_tokens` and `context_window`. The border uses `block.inner(area)` to get the inner rect — child widgets layout inside that, not the textarea's own block. No status bar — activity spinner displays inline in the message area. Sidebar visibility uses `sidebar_override: Option<bool>` (None=auto, Some=forced).
-
-**Sidebar changeset panel** (`sidebar.rs`): Three sections top-to-bottom: Changes (files modified by write tools with `+N`/`-N` line counts), Session (model, cumulative `in:/out:/total:` tokens, cost), Todos. The sidebar shows *cumulative* token usage — complementary to the input bar's *per-call* context pressure. `FileChange` accumulates per-file additions/removals via `SidebarState::record_file_change()` (linear scan dedup by path, skips zero-change entries). `count_diff_lines()` extracts counts from `DiffContent` — counts `Addition`/`Removal` DiffLine variants for EditDiff/PatchDiff, treats `WriteSummary.line_count` as all additions. Changeset is recorded at `ToolResult` time (not `LlmToolCall`) gated on `!output.is_error`, so failed writes don't appear. `App::find_last_completed_call()` retrieves the tool call's stored `diff_content` and `args_summary` for this. `App::strip_project_root()` converts absolute paths to relative display paths — uses string prefix stripping with path-boundary guard (won't match sibling directories like `/foo/bar-baz` when root is `/foo/bar`). The `/new` handler resets all session state: messages, stored_messages, tool cache, changeset, todos (`clear_todos()`), token counters (`sync_sidebar_tokens()`), context warning, auto-compact flag. When adding new session-scoped state, add its reset to the `Command::New` handler. `switch_to_session` also clears changeset.
-
-**Scroll direction**: Terminal emulators on macOS already apply natural scrolling. Map `ScrollDown` → `scroll_down()` and `ScrollUp` → `scroll_up()` directly — do NOT invert them at the application level.
-
-Auto-scroll calculates content height using wrapped line widths (not `lines.len()`) since `Paragraph` uses `Wrap { trim: false }`. This is critical — using unwrapped line count causes scroll to undershoot on long messages, hiding new content below the visible area. The height sum uses `u32` internally, capped at `u16::MAX` to prevent overflow on very long conversations.
-
-## Key Dependency Notes
-
-- **strum 0.28** derives `EnumString`, `Display`, `EnumIter`, `IntoStaticStr` on `ToolName`. Use `ToolName::iter()` (via `strum::IntoEnumIterator`) in tests for truly exhaustive variant coverage — never hard-code variant lists. Use `IntoStaticStr` (not `AsRefStr`) when you need `&'static str` — `AsRefStr` returns `&str` tied to `&self` lifetime
-- **wait-timeout 0.2** provides `ChildExt::wait_timeout()` for bash tool timeout enforcement. Requires `Stdio::piped()` + `spawn()` (not `output()`)
-- **mpatch 1.3** applies unified diffs with fuzzy matching via `patch_content_str()`. Always appends trailing newline — `apply_unified_diff()` in `patch.rs` post-processes to preserve original newline behavior
-- **ratatui-textarea 0.8** is the official ratatui fork of tui-textarea, supports ratatui 0.30 + crossterm 0.29
-- **async-openai 0.33** requires `features = ["chat-completion"]`; types live under `async_openai::types::chat::`, not `async_openai::types::`
-- **async-openai 0.33 tool types**: `ChatCompletionTools` (plural enum with `Function` variant), `ChatCompletionMessageToolCalls` (plural enum with `Function` variant). `ChatCompletionRequestAssistantMessage` requires `audio: None` and `function_call: None` fields. `ChatCompletionStreamOptions` has `include_usage` and `include_obfuscation` fields
-- **stream_options is required**: `CreateChatCompletionRequest` must include `stream_options: Some(ChatCompletionStreamOptions { include_usage: Some(true), .. })` — without it, token usage is never reported and auto-compact cannot trigger
-- **jsonc-parser** requires `features = ["serde"]` for `parse_to_serde_value`
-- **html2text v0.16** `from_read()` returns `Result<String, Error>`, not `String`
-- **tracing** outputs to file appender, never stdout (TUI owns stdout)
-- **No `unreachable!()` in stream tasks** — panics in the stream tokio task crash silently. Use graceful error handling with `tracing::error!` instead
-- **No `dirs` crate** — use `std::env::var("HOME")` for home directory detection, or `directories::ProjectDirs` for app data paths. Global config dir uses `$HOME/.config/steve/` directly (not `ProjectDirs::config_dir()` which gives `~/Library/Application Support/` on macOS — wrong for terminal tools)
-- **async-trait 0.1** enables `#[async_trait]` for `ChatStreamProvider` trait in `stream.rs` (required for `async fn` in `dyn` trait objects)
-- **`Storage::new(project_id: &str)`** returns `Result<Self>` — takes a project ID string (not a path). For isolated tests: `Storage::with_base(tempdir().path().to_path_buf())`. For UI tests where no writes happen: `Storage::new("test-name").expect("test storage")`
-- `AGENTS.md` in the project root is optional — if present, it's loaded at startup and injected as part of the system prompt. Create one with `/init`
-- **File locking (Rust 2024)**: `std::fs::File` has native `lock()` (exclusive), `lock_shared()`, `unlock()` methods. `fs2::FileExt` still provides `lock_exclusive()` (no native equivalent with that name) but `lock_shared`/`unlock` shadow the trait — importing `fs2::FileExt` triggers unused-import warnings for those
-- **`ToolContext` fields**: `project_root: PathBuf` and `storage_dir: Option<PathBuf>`. In tests, use `storage_dir: None` unless testing the memory tool
-- **Unicode width in TUI**: Box-drawing characters like `─` (U+2500) are 3 bytes in UTF-8 but 1 display character. Use `.chars().count()` (not `.len()`) for visual width calculations. The `unicode-width` crate is available if true terminal column width is needed (e.g., CJK characters)
-- **`all_commands()` ordering**: New commands inserted in `all_commands()` affect autocomplete match order. Tests like `selected_command_returns_name` and `buffer_shows_filtered_matches` in `autocomplete.rs` use prefix matching — update them when adding commands that share a prefix with existing ones
-- **clap 4** (derive mode) for CLI argument parsing. Version string must be `&'static str` — use `concat!(env!(...))`, not `format!()`
-- **`move` is a Rust keyword**: The move tool's module is `move_` (`src/tool/move_.rs`). The `ToolName::Move` variant uses `#[strum(serialize = "move")]` and `#[serde(rename = "move")]` to keep the API-facing name as `"move"`
+- **strum 0.28**: Use `IntoStaticStr` (not `AsRefStr`) for `&'static str`. `ToolName::iter()` for exhaustive coverage
+- **async-openai 0.33**: Types under `async_openai::types::chat::`, not `async_openai::types::`. `ChatCompletionRequestAssistantMessage` requires `audio: None` and `function_call: None`. Must set `stream_options` with `include_usage: Some(true)` or token usage never reports
+- **mpatch 1.3**: Always appends trailing newline — `apply_unified_diff()` post-processes to preserve original behavior
+- **html2text v0.16**: `from_read()` returns `Result<String, Error>`, not `String`
+- **Rust 2024 file locking**: `std::fs::File` has native `lock()`/`lock_shared()`. Importing `fs2::FileExt` triggers warnings for shadowed methods
+- **`move` is a Rust keyword**: Module is `move_`, variant uses `#[strum(serialize = "move")]` + `#[serde(rename = "move")]`
+- **Unicode width**: Box-drawing `─` is 3 bytes UTF-8 but 1 display char — use `.chars().count()` not `.len()`
+- **`all_commands()` ordering** affects autocomplete prefix matching — update autocomplete tests when adding commands
+- **`ToolContext` fields**: `project_root: PathBuf`, `storage_dir: Option<PathBuf>`. Use `storage_dir: None` in tests unless testing memory tool
+- No `dirs` crate — use `std::env::var("HOME")` or `directories::ProjectDirs`. Global config uses `$HOME/.config/steve/` directly
+- `AGENTS.md` optional — loaded at startup if present, injected into system prompt
 
 ## Provider Compatibility
 
-Steve targets any OpenAI-compatible API. Known quirks with non-OpenAI providers (e.g., Fuel iX/litellm):
-- **`finish_reason`**: May not be `ToolCalls` even when tool calls are streamed — detect tool calls by checking for valid data, not finish reason
-- **`finish_reason=Length`**: Truncates the last tool call's JSON arguments mid-stream — validate JSON with `serde_json::from_str` before execution, drop invalid entries
-- **`stream_options`**: `include_usage: Some(true)` works with Fuel iX; without it, token usage is never reported
+Steve targets any OpenAI-compatible API. Known quirks:
+- `finish_reason` may not be `ToolCalls` even with tool calls present — detect by data, not reason
+- `finish_reason=Length` truncates JSON args — validate with `serde_json::from_str`, drop invalid
+- `stream_options` with `include_usage: Some(true)` required for token reporting
 
 ## Data Locations
 
-- **Data dir**: macOS `~/Library/Application Support/steve/`, Linux `~/.local/share/steve/` (via `directories::ProjectDirs`)
-- **Storage**: `{data_dir}/storage/{project_id}/` — sessions, messages, project metadata
-- **Logs**: `{data_dir}/logs/steve.log.YYYY-MM-DD` — daily rolling tracing output (date-suffixed by `tracing-appender`)
+- **Data dir**: macOS `~/Library/Application Support/steve/`, Linux `~/.local/share/steve/`
+- **Storage**: `{data_dir}/storage/{project_id}/`
+- **Logs**: `{data_dir}/logs/steve.log.YYYY-MM-DD`
