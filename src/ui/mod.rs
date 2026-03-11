@@ -18,7 +18,10 @@ use anyhow::Result;
 use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-    event::{EnableMouseCapture, DisableMouseCapture, EnableBracketedPaste, DisableBracketedPaste},
+    event::{
+        EnableMouseCapture, DisableMouseCapture, EnableBracketedPaste, DisableBracketedPaste,
+        PushKeyboardEnhancementFlags, PopKeyboardEnhancementFlags, KeyboardEnhancementFlags,
+    },
 };
 use ratatui::{Frame, Terminal, backend::CrosstermBackend, style::Style, widgets::Block};
 
@@ -36,7 +39,13 @@ pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 pub fn setup_terminal() -> Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -52,7 +61,13 @@ pub fn detect_and_setup_terminal() -> Result<(Tui, terminal_detect::DetectedBack
     let detected = terminal_detect::detect_background();
     tracing::info!(?detected, "terminal background detected");
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok((terminal, detected))
@@ -64,7 +79,8 @@ pub fn restore_terminal(terminal: &mut Tui) -> Result<()> {
         terminal.backend_mut(),
         LeaveAlternateScreen,
         DisableMouseCapture,
-        DisableBracketedPaste
+        DisableBracketedPaste,
+        PopKeyboardEnhancementFlags
     )?;
     terminal.show_cursor()?;
     Ok(())
