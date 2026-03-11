@@ -1288,7 +1288,8 @@ fn check_iteration_warning(
 /// Returns `None` for tools that don't operate on file paths (bash, question, task).
 fn extract_tool_path(tool_name: ToolName, args: &Value) -> Option<String> {
     match tool_name {
-        ToolName::Read | ToolName::Edit | ToolName::Write | ToolName::Patch | ToolName::List => {
+        ToolName::Read | ToolName::Edit | ToolName::Write | ToolName::Patch | ToolName::List
+        | ToolName::Symbols => {
             args.get("file_path").or_else(|| args.get("path"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
@@ -1391,7 +1392,8 @@ fn build_permission_summary(tool_name: ToolName, args: &Value) -> String {
             format!("Create directory: {path}")
         }
         ToolName::Read | ToolName::Grep | ToolName::Glob | ToolName::List
-        | ToolName::Question | ToolName::Task | ToolName::Webfetch | ToolName::Memory => {
+        | ToolName::Question | ToolName::Task | ToolName::Webfetch | ToolName::Memory
+        | ToolName::Symbols => {
             format!("{tool_name}: {}", serde_json::to_string(args).unwrap_or_default())
         }
     }

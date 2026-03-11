@@ -268,6 +268,14 @@ impl ToolResultCache {
                     .unwrap_or(1);
                 Some(format!("list:{}:{}", normalized.display(), depth))
             }
+            ToolName::Symbols => {
+                let path = args.get("path")?.as_str()?;
+                let normalized = self.normalize_path(path);
+                let op = args.get("operation").and_then(|v| v.as_str()).unwrap_or("list_symbols");
+                let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
+                Some(format!("symbols:{}:{}:{}:{}", normalized.display(), op, name, line))
+            }
             // Don't cache tools with side effects or dynamic content
             ToolName::Bash | ToolName::Edit | ToolName::Write | ToolName::Patch
             | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
@@ -278,7 +286,7 @@ impl ToolResultCache {
     /// Extract the primary file path referenced by a tool invocation.
     fn extract_path(&self, tool_name: ToolName, args: &Value) -> Option<PathBuf> {
         match tool_name {
-            ToolName::Read | ToolName::List => {
+            ToolName::Read | ToolName::List | ToolName::Symbols => {
                 let path = args.get("path")?.as_str()?;
                 Some(self.normalize_path(path))
             }

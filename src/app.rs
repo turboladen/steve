@@ -88,6 +88,7 @@ Piped/compound commands (e.g., `cat file | wc -l`) are allowed since they go bey
 - **Batch related reads**: If you need multiple files, request them in a single response to enable parallel execution.\n\
 - **Respond literally**: When the user asks to see, show, or display content, output the actual content in a fenced code block — do not summarize or paraphrase. In general, follow the user's request directly rather than reinterpreting what they want.\n\
 - **Avoid re-reading**: Files you've already read are cached. The system will tell you if content is unchanged.\n\
+- **Code structure**: Use the `symbols` tool to list functions/structs/classes in a file, find what scope contains a line, or locate a symbol definition. Faster and more accurate than grepping for structural queries.\n\
 - **Record discoveries**: Use the `memory` tool to save important project context (architecture, patterns, key files) that persists across sessions. \
 Your project memory is automatically loaded into context — you don't need to read it manually. \
 When memory gets long, use 'replace' to consolidate into a curated summary. Worth remembering: \
@@ -120,6 +121,21 @@ fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
+        ToolName::Symbols => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let op = args.get("operation").and_then(|v| v.as_str()).unwrap_or("list_symbols");
+            match op {
+                "find_scope" => {
+                    let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
+                    format!("{path} scope@{line}")
+                }
+                "find_definition" => {
+                    let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    format!("{path} def:{name}")
+                }
+                _ => path.to_string(),
+            }
+        }
         ToolName::Grep | ToolName::Glob => args
             .get("pattern")
             .and_then(|v| v.as_str())
@@ -305,7 +321,8 @@ fn extract_diff_content(tool_name: ToolName, args: &Value) -> Option<DiffContent
         | ToolName::Move
         | ToolName::Copy
         | ToolName::Delete
-        | ToolName::Mkdir => None,
+        | ToolName::Mkdir
+        | ToolName::Symbols => None,
     }
 }
 
@@ -3111,6 +3128,7 @@ pub(crate) mod tests {
             ToolName::Task,
             ToolName::Webfetch,
             ToolName::Memory,
+            ToolName::Symbols,
         ];
         for tool in all_tools {
             // Just ensure it doesn't panic

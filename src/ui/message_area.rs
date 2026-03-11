@@ -109,7 +109,7 @@ enum GutterMark {
 fn tool_color(name: ToolName, theme: &Theme) -> ratatui::style::Color {
     match name {
         ToolName::Read | ToolName::Grep | ToolName::Glob
-        | ToolName::List | ToolName::Webfetch => theme.tool_read,
+        | ToolName::List | ToolName::Webfetch | ToolName::Symbols => theme.tool_read,
         ToolName::Edit | ToolName::Write | ToolName::Patch
         | ToolName::Move | ToolName::Copy | ToolName::Delete
         | ToolName::Mkdir | ToolName::Memory => theme.tool_write,
@@ -125,7 +125,7 @@ fn tool_color(name: ToolName, theme: &Theme) -> ratatui::style::Color {
 fn gutter_marker(name: ToolName) -> &'static str {
     match name {
         ToolName::Read | ToolName::Grep | ToolName::Glob
-        | ToolName::List | ToolName::Webfetch => "\u{00b7}",       // · (1 col)
+        | ToolName::List | ToolName::Webfetch | ToolName::Symbols => "\u{00b7}",       // · (1 col)
         ToolName::Edit | ToolName::Write | ToolName::Patch
         | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
         | ToolName::Memory => "\u{270e}",                           // ✎ (1 col)

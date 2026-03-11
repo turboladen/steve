@@ -320,3 +320,80 @@ fn edit_replace_range_through_registry() {
     assert!(content.contains("println!(\"world\")"));
     assert!(!content.contains("println!(\"hello\")"));
 }
+
+// ── Symbols tool ──
+
+#[test]
+fn symbols_tool_lists_rust_symbols() {
+    let (_dir, root) = create_test_project();
+    let registry = ToolRegistry::new(root.clone());
+    let ctx = tool_context(root.clone());
+
+    let output = registry.execute(
+        ToolName::Symbols,
+        json!({ "path": root.join("src/main.rs").to_string_lossy().to_string() }),
+        ctx,
+    ).unwrap();
+
+    assert!(!output.is_error, "symbols should succeed: {}", output.output);
+    assert!(output.output.contains("fn main"), "should find fn main");
+    assert!(output.output.contains("Symbols in"), "should have header");
+}
+
+#[test]
+fn symbols_tool_unsupported_file_type() {
+    let (_dir, root) = create_test_project();
+    let registry = ToolRegistry::new(root.clone());
+    let ctx = tool_context(root.clone());
+
+    let output = registry.execute(
+        ToolName::Symbols,
+        json!({ "path": root.join("Cargo.toml").to_string_lossy().to_string() }),
+        ctx,
+    ).unwrap();
+
+    // TOML is supported, so it should parse
+    assert!(!output.is_error);
+}
+
+#[test]
+fn symbols_tool_find_definition() {
+    let (_dir, root) = create_test_project();
+    let registry = ToolRegistry::new(root.clone());
+    let ctx = tool_context(root.clone());
+
+    // lib.rs has `pub fn greet()`
+    let output = registry.execute(
+        ToolName::Symbols,
+        json!({
+            "path": root.join("src/lib.rs").to_string_lossy().to_string(),
+            "operation": "find_definition",
+            "name": "greet"
+        }),
+        ctx,
+    ).unwrap();
+
+    assert!(!output.is_error, "find_definition should succeed: {}", output.output);
+    assert!(output.output.contains("greet"), "should find greet function");
+}
+
+#[test]
+fn symbols_tool_find_scope() {
+    let (_dir, root) = create_test_project();
+    let registry = ToolRegistry::new(root.clone());
+    let ctx = tool_context(root.clone());
+
+    // main.rs line 2 is inside fn main
+    let output = registry.execute(
+        ToolName::Symbols,
+        json!({
+            "path": root.join("src/main.rs").to_string_lossy().to_string(),
+            "operation": "find_scope",
+            "line": 2
+        }),
+        ctx,
+    ).unwrap();
+
+    assert!(!output.is_error, "find_scope should succeed: {}", output.output);
+    assert!(output.output.contains("main"), "should find main scope");
+}

@@ -174,6 +174,21 @@ fn extract_tool_summary(tool_name: ToolName, input: &serde_json::Value) -> Strin
             .and_then(|v| v.as_str())
             .unwrap_or("(no path)")
             .to_string(),
+        ToolName::Symbols => {
+            let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("(no path)");
+            let op = input.get("operation").and_then(|v| v.as_str()).unwrap_or("list_symbols");
+            match op {
+                "find_scope" => {
+                    let line = input.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
+                    format!("{path} scope@{line}")
+                }
+                "find_definition" => {
+                    let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    format!("{path} def:{name}")
+                }
+                _ => path.to_string(),
+            }
+        }
         ToolName::Grep | ToolName::Glob => input
             .get("pattern")
             .and_then(|v| v.as_str())

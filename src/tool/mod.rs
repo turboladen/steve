@@ -11,6 +11,7 @@ pub mod move_;
 pub mod patch;
 pub mod question;
 pub mod read;
+pub mod symbols;
 pub mod task;
 pub mod webfetch;
 pub mod write;
@@ -66,6 +67,7 @@ pub enum ToolName {
     Task,
     Webfetch,
     Memory,
+    Symbols,
 }
 
 impl ToolName {
@@ -83,11 +85,12 @@ impl ToolName {
         )
     }
 
-    /// Whether this is a read-only tool (read, grep, glob, list).
+    /// Whether this is a read-only tool (read, grep, glob, list, symbols).
     pub fn is_read_only(self) -> bool {
         matches!(
             self,
             ToolName::Read | ToolName::Grep | ToolName::Glob | ToolName::List
+            | ToolName::Symbols
         )
     }
 
@@ -96,6 +99,7 @@ impl ToolName {
         matches!(
             self,
             ToolName::Read | ToolName::Grep | ToolName::Glob | ToolName::List
+            | ToolName::Symbols
         )
     }
 
@@ -115,7 +119,7 @@ impl ToolName {
     pub fn intent_category(self) -> IntentCategory {
         match self {
             ToolName::Read | ToolName::Grep | ToolName::Glob
-            | ToolName::List | ToolName::Webfetch => IntentCategory::Exploring,
+            | ToolName::List | ToolName::Webfetch | ToolName::Symbols => IntentCategory::Exploring,
             ToolName::Edit | ToolName::Write | ToolName::Patch
             | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
             | ToolName::Memory => IntentCategory::Editing,
@@ -132,7 +136,7 @@ impl ToolName {
     pub fn tool_marker(self) -> &'static str {
         match self {
             ToolName::Read | ToolName::Grep | ToolName::Glob
-            | ToolName::List | ToolName::Webfetch => "\u{00b7}",       // ·
+            | ToolName::List | ToolName::Webfetch | ToolName::Symbols => "\u{00b7}",       // ·
             ToolName::Edit | ToolName::Write | ToolName::Patch
             | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
             | ToolName::Memory => "\u{270e}",                           // ✎
@@ -203,6 +207,7 @@ impl ToolRegistry {
         registry.register(grep::tool());
         registry.register(glob::tool());
         registry.register(list::tool());
+        registry.register(symbols::tool());
 
         // Register write/execute tools
         registry.register(edit::tool());
@@ -325,6 +330,7 @@ mod tests {
             ToolName::Task,
             ToolName::Webfetch,
             ToolName::Memory,
+            ToolName::Symbols,
         ];
         for t in write_tools {
             assert!(t.is_write_tool(), "{t} should be a write tool");
@@ -336,7 +342,7 @@ mod tests {
 
     #[test]
     fn is_read_only_correct() {
-        let read_only = [ToolName::Read, ToolName::Grep, ToolName::Glob, ToolName::List];
+        let read_only = [ToolName::Read, ToolName::Grep, ToolName::Glob, ToolName::List, ToolName::Symbols];
         let not_read_only = [
             ToolName::Edit,
             ToolName::Write,
@@ -361,7 +367,7 @@ mod tests {
 
     #[test]
     fn is_cacheable_correct() {
-        let cacheable = [ToolName::Read, ToolName::Grep, ToolName::Glob, ToolName::List];
+        let cacheable = [ToolName::Read, ToolName::Grep, ToolName::Glob, ToolName::List, ToolName::Symbols];
         let not_cacheable = [
             ToolName::Edit,
             ToolName::Write,
@@ -393,7 +399,7 @@ mod tests {
         }
 
         // Read tools get ·
-        for t in [ToolName::Read, ToolName::Grep, ToolName::Glob, ToolName::List, ToolName::Webfetch] {
+        for t in [ToolName::Read, ToolName::Grep, ToolName::Glob, ToolName::List, ToolName::Webfetch, ToolName::Symbols] {
             assert_eq!(t.tool_marker(), "\u{00b7}", "{t} should have read marker ·");
         }
 

@@ -251,6 +251,7 @@ pub fn build_mode_rules() -> Vec<PermissionRule> {
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Grep), pattern: "*".into(), action: Allow },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Glob), pattern: "*".into(), action: Allow },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::List), pattern: "*".into(), action: Allow },
+        PermissionRule { tool: ToolMatcher::Specific(ToolName::Symbols), pattern: "*".into(), action: Allow },
         // Utility tools: always allowed (no filesystem side effects)
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Memory), pattern: "*".into(), action: Allow },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Task), pattern: "*".into(), action: Allow },
@@ -280,6 +281,7 @@ pub fn plan_mode_rules() -> Vec<PermissionRule> {
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Grep), pattern: "*".into(), action: Allow },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Glob), pattern: "*".into(), action: Allow },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::List), pattern: "*".into(), action: Allow },
+        PermissionRule { tool: ToolMatcher::Specific(ToolName::Symbols), pattern: "*".into(), action: Allow },
         // Utility tools: always allowed (even in Plan mode)
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Memory), pattern: "*".into(), action: Allow },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Task), pattern: "*".into(), action: Allow },
