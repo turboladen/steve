@@ -13,6 +13,13 @@ pub enum Command {
     Sessions,
     ExportDebug,
     Help,
+    // Task management commands
+    Tasks,
+    TaskNew(String),
+    TaskDone(String),
+    TaskShow(String),
+    Epics,
+    EpicNew(String),
 }
 
 /// Metadata for a known slash command, used for autocomplete.
@@ -56,6 +63,25 @@ impl Command {
             "/sessions" => Ok(Command::Sessions),
             "/export-debug" => Ok(Command::ExportDebug),
             "/help" => Ok(Command::Help),
+            // Task management commands
+            "/tasks" => Ok(Command::Tasks),
+            "/task-new" => match arg {
+                Some(title) if !title.is_empty() => Ok(Command::TaskNew(title)),
+                _ => Err("Usage: /task-new <title>".to_string()),
+            },
+            "/task-done" => match arg {
+                Some(id) if !id.is_empty() => Ok(Command::TaskDone(id)),
+                _ => Err("Usage: /task-done <task-id>".to_string()),
+            },
+            "/task-show" => match arg {
+                Some(id) if !id.is_empty() => Ok(Command::TaskShow(id)),
+                _ => Err("Usage: /task-show <task-id>".to_string()),
+            },
+            "/epics" => Ok(Command::Epics),
+            "/epic-new" => match arg {
+                Some(title) if !title.is_empty() => Ok(Command::EpicNew(title)),
+                _ => Err("Usage: /epic-new <title>".to_string()),
+            },
             _ => Err(format!("Unknown command: {cmd}. Type /help for available commands.")),
         }
     }
@@ -69,6 +95,12 @@ impl Command {
             CommandInfo { name: "/models", description: "List available models" },
             CommandInfo { name: "/compact", description: "Compact conversation" },
             CommandInfo { name: "/sessions", description: "Browse sessions" },
+            CommandInfo { name: "/tasks", description: "List all tasks" },
+            CommandInfo { name: "/task-new", description: "Create a task" },
+            CommandInfo { name: "/task-done", description: "Complete a task" },
+            CommandInfo { name: "/task-show", description: "Show task details" },
+            CommandInfo { name: "/epics", description: "List epics" },
+            CommandInfo { name: "/epic-new", description: "Create an epic" },
             CommandInfo { name: "/init", description: "Create AGENTS.md" },
             CommandInfo { name: "/export-debug", description: "Export session with logs" },
             CommandInfo { name: "/help", description: "Show help" },
@@ -155,7 +187,13 @@ mod tests {
         assert!(names.contains(&"/help"));
         assert!(names.contains(&"/export-debug"));
         assert!(names.contains(&"/quit"));
-        assert_eq!(cmds.len(), 11);
+        assert!(names.contains(&"/tasks"));
+        assert!(names.contains(&"/task-new"));
+        assert!(names.contains(&"/task-done"));
+        assert!(names.contains(&"/task-show"));
+        assert!(names.contains(&"/epics"));
+        assert!(names.contains(&"/epic-new"));
+        assert_eq!(cmds.len(), 17);
     }
 
     #[test]
@@ -178,12 +216,82 @@ mod tests {
     #[test]
     fn filter_commands_slash_only() {
         let matches = Command::matching_commands("/");
-        assert_eq!(matches.len(), 11);
+        assert_eq!(matches.len(), 17);
     }
 
     #[test]
     fn filter_commands_no_match() {
         let matches = Command::matching_commands("/zzz");
         assert!(matches.is_empty());
+    }
+
+    // -- Task command tests --
+
+    #[test]
+    fn parse_tasks_command() {
+        assert_eq!(Command::parse("/tasks").unwrap(), Command::Tasks);
+    }
+
+    #[test]
+    fn parse_task_new_with_title() {
+        assert_eq!(
+            Command::parse("/task-new Fix the bug").unwrap(),
+            Command::TaskNew("Fix the bug".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_task_new_without_title() {
+        assert!(Command::parse("/task-new").is_err());
+    }
+
+    #[test]
+    fn parse_task_done_with_id() {
+        assert_eq!(
+            Command::parse("/task-done task-abc123").unwrap(),
+            Command::TaskDone("task-abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_task_done_without_id() {
+        assert!(Command::parse("/task-done").is_err());
+    }
+
+    #[test]
+    fn parse_task_show_with_id() {
+        assert_eq!(
+            Command::parse("/task-show task-abc123").unwrap(),
+            Command::TaskShow("task-abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_epics_command() {
+        assert_eq!(Command::parse("/epics").unwrap(), Command::Epics);
+    }
+
+    #[test]
+    fn parse_epic_new_with_title() {
+        assert_eq!(
+            Command::parse("/epic-new Auth Overhaul").unwrap(),
+            Command::EpicNew("Auth Overhaul".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_epic_new_without_title() {
+        assert!(Command::parse("/epic-new").is_err());
+    }
+
+    #[test]
+    fn filter_commands_task_prefix() {
+        let matches = Command::matching_commands("/task");
+        let names: Vec<&str> = matches.iter().map(|c| c.name).collect();
+        assert!(names.contains(&"/tasks"));
+        assert!(names.contains(&"/task-new"));
+        assert!(names.contains(&"/task-done"));
+        assert!(names.contains(&"/task-show"));
+        assert_eq!(names.len(), 4);
     }
 }

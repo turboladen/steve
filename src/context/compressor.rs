@@ -138,7 +138,7 @@ fn compress_tool_output(tool_name: ToolName, content: &str) -> String {
         ToolName::Write => compress_write(content),
         ToolName::Patch => compress_patch(content),
         ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
-        | ToolName::Question | ToolName::Todo | ToolName::Webfetch | ToolName::Memory => {
+        | ToolName::Question | ToolName::Task | ToolName::Webfetch | ToolName::Memory => {
             compress_generic(content)
         }
     }

@@ -113,7 +113,7 @@ fn tool_color(name: ToolName, theme: &Theme) -> ratatui::style::Color {
         ToolName::Edit | ToolName::Write | ToolName::Patch
         | ToolName::Move | ToolName::Copy | ToolName::Delete
         | ToolName::Mkdir | ToolName::Memory => theme.tool_write,
-        ToolName::Bash | ToolName::Question | ToolName::Todo => theme.accent,
+        ToolName::Bash | ToolName::Question | ToolName::Task => theme.accent,
     }
 }
 
@@ -130,7 +130,7 @@ fn gutter_marker(name: ToolName) -> &'static str {
         | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
         | ToolName::Memory => "\u{270e}",                           // ✎ (1 col)
         ToolName::Bash => "$",
-        ToolName::Question | ToolName::Todo => "!",                 // 1-col replacement for ⚡
+        ToolName::Question | ToolName::Task => "!",                 // 1-col replacement for ⚡
     }
 }
 
@@ -1518,13 +1518,13 @@ mod tests {
 
     #[test]
     fn infer_group_intent_only_asking_tools() {
-        let group = make_tool_group(&[ToolName::Question, ToolName::Todo]);
+        let group = make_tool_group(&[ToolName::Question, ToolName::Task]);
         assert_eq!(infer_group_intent(&group), None, "asking tools should not produce a label");
     }
 
     #[test]
     fn infer_group_intent_asking_plus_exploring() {
-        let group = make_tool_group(&[ToolName::Todo, ToolName::Read]);
+        let group = make_tool_group(&[ToolName::Task, ToolName::Read]);
         assert_eq!(infer_group_intent(&group), Some(IntentCategory::Exploring), "exploring should show even with asking tools");
     }
 

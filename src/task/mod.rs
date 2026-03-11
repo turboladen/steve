@@ -1,0 +1,514 @@
+pub mod types;
+
+use anyhow::Result;
+use chrono::Utc;
+
+use crate::storage::Storage;
+pub use types::*;
+
+/// Wraps the [`Storage`] layer for task and epic CRUD operations.
+///
+/// Storage key paths:
+/// - Epics: `["tasks", "epics", &id]`
+/// - Tasks: `["tasks", "items", &id]`
+#[derive(Debug, Clone)]
+pub struct TaskStore {
+    storage: Storage,
+}
+
+impl TaskStore {
+    /// Create a new `TaskStore` backed by the given storage instance.
+    pub fn new(storage: Storage) -> Self {
+        Self { storage }
+    }
+
+    // ── Task CRUD ──
+
+    /// Create a new task with the given fields, persisting it immediately.
+    pub fn create_task(
+        &self,
+        title: &str,
+        description: Option<&str>,
+        epic_id: Option<&str>,
+        session_id: Option<&str>,
+        priority: Priority,
+    ) -> Result<Task> {
+        let now = Utc::now();
+        let task = Task {
+            id: generate_id("task"),
+            title: title.to_string(),
+            description: description.map(String::from),
+            epic_id: epic_id.map(String::from),
+            session_id: session_id.map(String::from),
+            priority,
+            status: TaskStatus::Open,
+            created_at: now,
+            updated_at: now,
+        };
+        self.storage
+            .write(&["tasks", "items", &task.id], &task)?;
+        Ok(task)
+    }
+
+    /// Read a task by ID.
+    pub fn get_task(&self, id: &str) -> Result<Task> {
+        self.storage.read(&["tasks", "items", id])
+    }
+
+    /// Write an updated task back to storage, refreshing `updated_at`.
+    pub fn update_task(&self, task: &Task) -> Result<()> {
+        let mut updated = task.clone();
+        updated.updated_at = Utc::now();
+        self.storage
+            .write(&["tasks", "items", &updated.id], &updated)
+    }
+
+    /// List all tasks.
+    pub fn list_tasks(&self) -> Result<Vec<Task>> {
+        let ids = self.storage.list(&["tasks", "items"])?;
+        let mut tasks = Vec::with_capacity(ids.len());
+        for id in &ids {
+            match self.storage.read::<Task>(&["tasks", "items", id]) {
+                Ok(task) => tasks.push(task),
+                Err(e) => {
+                    tracing::warn!("skipping unreadable task {id}: {e}");
+                }
+            }
+        }
+        Ok(tasks)
+    }
+
+    /// Mark a task as done and return the updated task.
+    pub fn complete_task(&self, id: &str) -> Result<Task> {
+        let mut task: Task = self.get_task(id)?;
+        task.status = TaskStatus::Done;
+        task.updated_at = Utc::now();
+        self.storage
+            .write(&["tasks", "items", &task.id], &task)?;
+        Ok(task)
+    }
+
+    /// Delete a task from storage.
+    pub fn delete_task(&self, id: &str) -> Result<()> {
+        self.storage.delete(&["tasks", "items", id])
+    }
+
+    // ── Epic CRUD ──
+
+    /// Create a new epic with the given fields, persisting it immediately.
+    pub fn create_epic(
+        &self,
+        title: &str,
+        description: &str,
+        external_ref: Option<&str>,
+        priority: Priority,
+    ) -> Result<Epic> {
+        let now = Utc::now();
+        let epic = Epic {
+            id: generate_id("epic"),
+            title: title.to_string(),
+            description: description.to_string(),
+            external_ref: external_ref.map(String::from),
+            priority,
+            status: EpicStatus::Open,
+            created_at: now,
+            updated_at: now,
+        };
+        self.storage
+            .write(&["tasks", "epics", &epic.id], &epic)?;
+        Ok(epic)
+    }
+
+    /// Read an epic by ID.
+    pub fn get_epic(&self, id: &str) -> Result<Epic> {
+        self.storage.read(&["tasks", "epics", id])
+    }
+
+    /// Write an updated epic back to storage, refreshing `updated_at`.
+    pub fn update_epic(&self, epic: &Epic) -> Result<()> {
+        let mut updated = epic.clone();
+        updated.updated_at = Utc::now();
+        self.storage
+            .write(&["tasks", "epics", &updated.id], &updated)
+    }
+
+    /// List all epics.
+    pub fn list_epics(&self) -> Result<Vec<Epic>> {
+        let ids = self.storage.list(&["tasks", "epics"])?;
+        let mut epics = Vec::with_capacity(ids.len());
+        for id in &ids {
+            match self.storage.read::<Epic>(&["tasks", "epics", id]) {
+                Ok(epic) => epics.push(epic),
+                Err(e) => {
+                    tracing::warn!("skipping unreadable epic {id}: {e}");
+                }
+            }
+        }
+        Ok(epics)
+    }
+
+    /// Mark an epic as done and return the updated epic.
+    pub fn complete_epic(&self, id: &str) -> Result<Epic> {
+        let mut epic: Epic = self.get_epic(id)?;
+        epic.status = EpicStatus::Done;
+        epic.updated_at = Utc::now();
+        self.storage
+            .write(&["tasks", "epics", &epic.id], &epic)?;
+        Ok(epic)
+    }
+
+    // ── Query helpers ──
+
+    /// Return all tasks belonging to the given epic.
+    pub fn tasks_by_epic(&self, epic_id: &str) -> Result<Vec<Task>> {
+        Ok(self
+            .list_tasks()?
+            .into_iter()
+            .filter(|t| t.epic_id.as_deref() == Some(epic_id))
+            .collect())
+    }
+
+    /// Return all tasks linked to the given session.
+    pub fn tasks_by_session(&self, session_id: &str) -> Result<Vec<Task>> {
+        Ok(self
+            .list_tasks()?
+            .into_iter()
+            .filter(|t| t.session_id.as_deref() == Some(session_id))
+            .collect())
+    }
+
+    /// Return all tasks whose status is not `Done`.
+    pub fn open_tasks(&self) -> Result<Vec<Task>> {
+        Ok(self
+            .list_tasks()?
+            .into_iter()
+            .filter(|t| t.status != TaskStatus::Done)
+            .collect())
+    }
+
+    // ── System prompt summary ──
+
+    /// Build a compact markdown summary suitable for injection into the LLM
+    /// system prompt. Session-scoped tasks appear first, then persistent
+    /// tasks grouped by epic. Capped at approximately 1500 characters.
+    pub fn summary_for_prompt(&self, current_session_id: &str) -> String {
+        const MAX_CHARS: usize = 1500;
+
+        let all_tasks = match self.list_tasks() {
+            Ok(t) => t,
+            Err(_) => return String::new(),
+        };
+        let all_epics = self.list_epics().unwrap_or_default();
+
+        if all_tasks.is_empty() {
+            return String::new();
+        }
+
+        let mut out = String::new();
+
+        // Session tasks first
+        let session_tasks: Vec<&Task> = all_tasks
+            .iter()
+            .filter(|t| t.session_id.as_deref() == Some(current_session_id))
+            .collect();
+
+        if !session_tasks.is_empty() {
+            out.push_str("## Session Tasks\n");
+            for task in &session_tasks {
+                append_task_line(&mut out, task);
+                if out.len() >= MAX_CHARS {
+                    truncate_summary(&mut out, MAX_CHARS);
+                    return out;
+                }
+            }
+            out.push('\n');
+        }
+
+        // Persistent tasks grouped by epic
+        let persistent_tasks: Vec<&Task> = all_tasks
+            .iter()
+            .filter(|t| t.session_id.as_deref() != Some(current_session_id))
+            .collect();
+
+        if persistent_tasks.is_empty() {
+            return out;
+        }
+
+        // Tasks with an epic, grouped
+        for epic in &all_epics {
+            let epic_tasks: Vec<&&Task> = persistent_tasks
+                .iter()
+                .filter(|t| t.epic_id.as_deref() == Some(&epic.id))
+                .collect();
+            if epic_tasks.is_empty() {
+                continue;
+            }
+
+            out.push_str(&format!("## {}\n", epic.title));
+            for task in &epic_tasks {
+                append_task_line(&mut out, task);
+                if out.len() >= MAX_CHARS {
+                    truncate_summary(&mut out, MAX_CHARS);
+                    return out;
+                }
+            }
+            out.push('\n');
+        }
+
+        // Orphan persistent tasks (no epic)
+        let orphans: Vec<&&Task> = persistent_tasks
+            .iter()
+            .filter(|t| t.epic_id.is_none())
+            .collect();
+
+        if !orphans.is_empty() {
+            out.push_str("## Tasks\n");
+            for task in &orphans {
+                append_task_line(&mut out, task);
+                if out.len() >= MAX_CHARS {
+                    truncate_summary(&mut out, MAX_CHARS);
+                    return out;
+                }
+            }
+        }
+
+        out
+    }
+}
+
+/// Append a checkbox-style task line: `- [ ] title` or `- [x] title`.
+fn append_task_line(out: &mut String, task: &Task) {
+    let check = if task.status == TaskStatus::Done {
+        "x"
+    } else {
+        " "
+    };
+    out.push_str(&format!("- [{}] {}\n", check, task.title));
+}
+
+/// Truncate the summary to approximately `max` characters, ending cleanly
+/// at a line boundary with a `...` marker.
+fn truncate_summary(out: &mut String, max: usize) {
+    if out.len() <= max {
+        return;
+    }
+    // Find the last newline before the limit
+    let truncated = &out[..max];
+    if let Some(pos) = truncated.rfind('\n') {
+        out.truncate(pos + 1);
+    } else {
+        out.truncate(max);
+    }
+    out.push_str("...\n");
+}
+
+/// Generate a short prefixed ID using the current system time.
+fn generate_id(prefix: &str) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    format!("{prefix}-{nanos:08x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn test_store() -> (TaskStore, tempfile::TempDir) {
+        let dir = tempdir().expect("failed to create temp dir");
+        let storage =
+            Storage::with_base(dir.path().to_path_buf()).expect("failed to create storage");
+        (TaskStore::new(storage), dir)
+    }
+
+    #[test]
+    fn create_and_get_task_round_trip() {
+        let (store, _dir) = test_store();
+        let task = store
+            .create_task("Fix bug", Some("Segfault on exit"), None, None, Priority::High)
+            .expect("create_task");
+        assert!(task.id.starts_with("task-"));
+        assert_eq!(task.title, "Fix bug");
+        assert_eq!(task.description.as_deref(), Some("Segfault on exit"));
+        assert_eq!(task.status, TaskStatus::Open);
+        assert_eq!(task.priority, Priority::High);
+
+        let fetched = store.get_task(&task.id).expect("get_task");
+        assert_eq!(fetched.id, task.id);
+        assert_eq!(fetched.title, task.title);
+    }
+
+    #[test]
+    fn create_and_get_epic_round_trip() {
+        let (store, _dir) = test_store();
+        let epic = store
+            .create_epic("Big feature", "Implement everything", None, Priority::Medium)
+            .expect("create_epic");
+        assert!(epic.id.starts_with("epic-"));
+        assert_eq!(epic.title, "Big feature");
+        assert_eq!(epic.description, "Implement everything");
+        assert_eq!(epic.status, EpicStatus::Open);
+
+        let fetched = store.get_epic(&epic.id).expect("get_epic");
+        assert_eq!(fetched.id, epic.id);
+        assert_eq!(fetched.title, epic.title);
+    }
+
+    #[test]
+    fn list_tasks_returns_all() {
+        let (store, _dir) = test_store();
+        store
+            .create_task("Task A", None, None, None, Priority::Low)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store
+            .create_task("Task B", None, None, None, Priority::Medium)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store
+            .create_task("Task C", None, None, None, Priority::High)
+            .unwrap();
+
+        let tasks = store.list_tasks().expect("list_tasks");
+        assert_eq!(tasks.len(), 3, "expected 3 tasks, got {}", tasks.len());
+    }
+
+    #[test]
+    fn complete_task_changes_status() {
+        let (store, _dir) = test_store();
+        let task = store
+            .create_task("Finish it", None, None, None, Priority::Medium)
+            .unwrap();
+        assert_eq!(task.status, TaskStatus::Open);
+
+        let completed = store.complete_task(&task.id).expect("complete_task");
+        assert_eq!(completed.status, TaskStatus::Done);
+
+        let fetched = store.get_task(&task.id).expect("get after complete");
+        assert_eq!(fetched.status, TaskStatus::Done);
+    }
+
+    #[test]
+    fn delete_task_removes_it() {
+        let (store, _dir) = test_store();
+        let task = store
+            .create_task("Ephemeral", None, None, None, Priority::Low)
+            .unwrap();
+        assert!(store.get_task(&task.id).is_ok());
+
+        store.delete_task(&task.id).expect("delete_task");
+        assert!(store.get_task(&task.id).is_err());
+    }
+
+    #[test]
+    fn tasks_by_epic_filters_correctly() {
+        let (store, _dir) = test_store();
+        let epic = store
+            .create_epic("My Epic", "desc", None, Priority::Medium)
+            .unwrap();
+        let t1 = store
+            .create_task("In epic", None, Some(&epic.id), None, Priority::Medium)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let t2 = store
+            .create_task("No epic", None, None, None, Priority::Medium)
+            .unwrap();
+
+        let filtered = store.tasks_by_epic(&epic.id).expect("tasks_by_epic");
+        let ids: Vec<&str> = filtered.iter().map(|t| t.id.as_str()).collect();
+        assert!(ids.contains(&t1.id.as_str()));
+        assert!(!ids.contains(&t2.id.as_str()));
+    }
+
+    #[test]
+    fn tasks_by_session_filters_correctly() {
+        let (store, _dir) = test_store();
+        let t1 = store
+            .create_task("Session A", None, None, Some("sess-a"), Priority::Medium)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let t2 = store
+            .create_task("Session B", None, None, Some("sess-b"), Priority::Medium)
+            .unwrap();
+
+        let filtered = store.tasks_by_session("sess-a").expect("tasks_by_session");
+        let ids: Vec<&str> = filtered.iter().map(|t| t.id.as_str()).collect();
+        assert!(ids.contains(&t1.id.as_str()));
+        assert!(!ids.contains(&t2.id.as_str()));
+    }
+
+    #[test]
+    fn open_tasks_excludes_done() {
+        let (store, _dir) = test_store();
+        let t1 = store
+            .create_task("Open one", None, None, None, Priority::Medium)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let t2 = store
+            .create_task("Done one", None, None, None, Priority::Medium)
+            .unwrap();
+        store.complete_task(&t2.id).unwrap();
+
+        let open = store.open_tasks().expect("open_tasks");
+        let ids: Vec<&str> = open.iter().map(|t| t.id.as_str()).collect();
+        assert!(ids.contains(&t1.id.as_str()));
+        assert!(!ids.contains(&t2.id.as_str()));
+    }
+
+    #[test]
+    fn summary_for_prompt_produces_output() {
+        let (store, _dir) = test_store();
+        store
+            .create_task("Session task", None, None, Some("sess-1"), Priority::Medium)
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store
+            .create_task("Other task", None, None, None, Priority::High)
+            .unwrap();
+
+        let summary = store.summary_for_prompt("sess-1");
+        assert!(!summary.is_empty());
+        assert!(summary.contains("Session Tasks"));
+        assert!(summary.contains("Session task"));
+        assert!(summary.contains("[ ]"));
+    }
+
+    #[test]
+    fn summary_for_prompt_truncation() {
+        let (store, _dir) = test_store();
+        // Create many tasks with long titles to exceed 1500 chars
+        for i in 0..100 {
+            let title = format!(
+                "Task number {i:03} with a deliberately long title to consume characters quickly padding"
+            );
+            // Sleep to avoid ID collisions from subsec_nanos
+            if i % 5 == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            let _ = store.create_task(&title, None, None, None, Priority::Medium);
+        }
+
+        let summary = store.summary_for_prompt("no-session");
+        // Should be capped near 1500 chars (plus the "...\n" marker)
+        assert!(
+            summary.len() <= 1600,
+            "summary too long: {} chars",
+            summary.len()
+        );
+    }
+
+    #[test]
+    fn generate_id_has_correct_prefix() {
+        let id = generate_id("task");
+        assert!(id.starts_with("task-"), "got: {id}");
+        // prefix + dash + 8 hex chars
+        assert_eq!(id.len(), "task-".len() + 8);
+
+        let eid = generate_id("epic");
+        assert!(eid.starts_with("epic-"), "got: {eid}");
+        assert_eq!(eid.len(), "epic-".len() + 8);
+    }
+}

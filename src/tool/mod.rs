@@ -11,17 +11,20 @@ pub mod move_;
 pub mod patch;
 pub mod question;
 pub mod read;
-pub mod todo;
+pub mod task;
 pub mod webfetch;
 pub mod write;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use strum::{Display, EnumIter, EnumString, IntoStaticStr};
+
+use crate::task::TaskStore;
 
 /// High-level intent category for UI intent indicators.
 ///
@@ -35,7 +38,7 @@ pub enum IntentCategory {
     Editing,
     /// Shell commands (bash).
     Executing,
-    /// Interactive/utility (question, todo).
+    /// Interactive/utility (question, task).
     Asking,
 }
 
@@ -60,7 +63,7 @@ pub enum ToolName {
     Mkdir,
     Bash,
     Question,
-    Todo,
+    Task,
     Webfetch,
     Memory,
 }
@@ -112,7 +115,7 @@ impl ToolName {
             | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
             | ToolName::Memory => IntentCategory::Editing,
             ToolName::Bash => IntentCategory::Executing,
-            ToolName::Question | ToolName::Todo => IntentCategory::Asking,
+            ToolName::Question | ToolName::Task => IntentCategory::Asking,
         }
     }
 
@@ -129,7 +132,7 @@ impl ToolName {
             | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
             | ToolName::Memory => "\u{270e}",                           // ✎
             ToolName::Bash => "$",
-            ToolName::Question | ToolName::Todo => "\u{26a1}",          // ⚡
+            ToolName::Question | ToolName::Task => "\u{26a1}",          // ⚡
         }
     }
 }
@@ -158,6 +161,8 @@ pub struct ToolContext {
     pub project_root: PathBuf,
     /// The storage directory for this project (for memory tool).
     pub storage_dir: Option<PathBuf>,
+    /// The task store for persistent task management.
+    pub task_store: Option<Arc<TaskStore>>,
 }
 
 /// Definition of a tool (for sending to the LLM as a function schema).
@@ -206,7 +211,7 @@ impl ToolRegistry {
 
         // Register utility tools
         registry.register(question::tool());
-        registry.register(todo::tool());
+        registry.register(task::tool());
         registry.register(webfetch::tool());
         registry.register(memory::tool());
 
@@ -312,7 +317,7 @@ mod tests {
             ToolName::List,
             ToolName::Bash,
             ToolName::Question,
-            ToolName::Todo,
+            ToolName::Task,
             ToolName::Webfetch,
             ToolName::Memory,
         ];
@@ -337,7 +342,7 @@ mod tests {
             ToolName::Mkdir,
             ToolName::Bash,
             ToolName::Question,
-            ToolName::Todo,
+            ToolName::Task,
             ToolName::Webfetch,
             ToolName::Memory,
         ];
@@ -362,7 +367,7 @@ mod tests {
             ToolName::Mkdir,
             ToolName::Bash,
             ToolName::Question,
-            ToolName::Todo,
+            ToolName::Task,
             ToolName::Webfetch,
             ToolName::Memory,
         ];
@@ -400,7 +405,7 @@ mod tests {
         assert_eq!(ToolName::Bash.tool_marker(), "$");
 
         // Interactive tools get ⚡
-        for t in [ToolName::Question, ToolName::Todo] {
+        for t in [ToolName::Question, ToolName::Task] {
             assert_eq!(t.tool_marker(), "\u{26a1}", "{t} should have interactive marker ⚡");
         }
     }

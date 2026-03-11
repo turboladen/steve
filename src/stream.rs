@@ -622,6 +622,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         let ctx = tool_context.clone().unwrap_or_else(|| ToolContext {
             project_root: std::path::PathBuf::from("."),
             storage_dir: None,
+            task_store: None,
         });
 
         // Sort tool calls by index for deterministic ordering
@@ -1288,7 +1289,7 @@ fn extract_tool_path(tool_name: ToolName, args: &Value) -> Option<String> {
                 .map(|s| s.to_string())
         }
         // Tools without file paths
-        ToolName::Bash | ToolName::Question | ToolName::Todo
+        ToolName::Bash | ToolName::Question | ToolName::Task
         | ToolName::Webfetch | ToolName::Memory => None,
     }
 }
@@ -1338,7 +1339,7 @@ fn build_permission_summary(tool_name: ToolName, args: &Value) -> String {
             format!("Create directory: {path}")
         }
         ToolName::Read | ToolName::Grep | ToolName::Glob | ToolName::List
-        | ToolName::Question | ToolName::Todo | ToolName::Webfetch | ToolName::Memory => {
+        | ToolName::Question | ToolName::Task | ToolName::Webfetch | ToolName::Memory => {
             format!("{tool_name}: {}", serde_json::to_string(args).unwrap_or_default())
         }
     }
@@ -1864,6 +1865,7 @@ mod tests {
         req.tool_context = Some(ToolContext {
             project_root: std::path::PathBuf::from("/tmp/test"),
             storage_dir: None,
+            task_store: None,
         });
         req.permission_engine = Some(Arc::new(tokio::sync::Mutex::new(
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
@@ -1904,6 +1906,7 @@ mod tests {
         req.tool_context = Some(ToolContext {
             project_root: std::path::PathBuf::from("/tmp/test"),
             storage_dir: None,
+            task_store: None,
         });
         req.permission_engine = Some(Arc::new(tokio::sync::Mutex::new(
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
@@ -1961,6 +1964,7 @@ mod tests {
         req.tool_context = Some(ToolContext {
             project_root: std::path::PathBuf::from("/tmp/test"),
             storage_dir: None,
+            task_store: None,
         });
         req.permission_engine = Some(Arc::new(tokio::sync::Mutex::new(
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
@@ -2020,6 +2024,7 @@ mod tests {
             tool_context: Some(ToolContext {
                 project_root: std::path::PathBuf::from("/tmp/test"),
                 storage_dir: None,
+            task_store: None,
             }),
             permission_engine: Some(Arc::new(tokio::sync::Mutex::new(
                 crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
@@ -2068,6 +2073,7 @@ mod tests {
         req.tool_context = Some(ToolContext {
             project_root: std::path::PathBuf::from("/tmp/test"),
             storage_dir: None,
+            task_store: None,
         });
         req.permission_engine = Some(Arc::new(tokio::sync::Mutex::new(
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
@@ -2208,6 +2214,7 @@ mod tests {
         req.tool_context = Some(ToolContext {
             project_root: std::path::PathBuf::from("/tmp/test"),
             storage_dir: None,
+            task_store: None,
         });
         req.permission_engine = Some(Arc::new(tokio::sync::Mutex::new(
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
@@ -2251,6 +2258,7 @@ mod tests {
         req.tool_context = Some(ToolContext {
             project_root: std::path::PathBuf::from("/tmp/test"),
             storage_dir: None,
+            task_store: None,
         });
         req.permission_engine = Some(Arc::new(tokio::sync::Mutex::new(
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
@@ -2319,6 +2327,7 @@ mod tests {
         req.tool_context = Some(ToolContext {
             project_root: std::path::PathBuf::from("/tmp/test"),
             storage_dir: None,
+            task_store: None,
         });
         req.permission_engine = Some(Arc::new(tokio::sync::Mutex::new(
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),

@@ -14,6 +14,7 @@ pub mod provider;
 pub mod session;
 pub mod storage;
 pub mod stream;
+pub mod task;
 pub mod tool;
 pub mod ui;
 pub mod usage;

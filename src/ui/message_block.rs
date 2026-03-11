@@ -643,7 +643,7 @@ mod tests {
             ToolName::List,
             ToolName::Bash,
             ToolName::Question,
-            ToolName::Todo,
+            ToolName::Task,
             ToolName::Webfetch,
             ToolName::Memory,
         ] {

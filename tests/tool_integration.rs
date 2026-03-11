@@ -14,6 +14,7 @@ fn tool_context(project_root: PathBuf) -> ToolContext {
     ToolContext {
         project_root,
         storage_dir: None,
+        task_store: None,
     }
 }
 

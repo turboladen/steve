@@ -163,6 +163,7 @@ mod tests {
         ToolContext {
             project_root: dir.to_path_buf(),
             storage_dir: None,
+            task_store: None,
         }
     }
 

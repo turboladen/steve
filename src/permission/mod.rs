@@ -234,7 +234,7 @@ fn cautious_build_rules() -> Vec<PermissionRule> {
     vec![
         // Only question and todo are auto-allowed (no filesystem effects)
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Question), pattern: "*".into(), action: Allow },
-        PermissionRule { tool: ToolMatcher::Specific(ToolName::Todo), pattern: "*".into(), action: Allow },
+        PermissionRule { tool: ToolMatcher::Specific(ToolName::Task), pattern: "*".into(), action: Allow },
         // Everything else requires permission
         PermissionRule { tool: ToolMatcher::All, pattern: "*".into(), action: Ask },
     ]
@@ -253,7 +253,7 @@ pub fn build_mode_rules() -> Vec<PermissionRule> {
         PermissionRule { tool: ToolMatcher::Specific(ToolName::List), pattern: "*".into(), action: Allow },
         // Utility tools: always allowed (no filesystem side effects)
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Memory), pattern: "*".into(), action: Allow },
-        PermissionRule { tool: ToolMatcher::Specific(ToolName::Todo), pattern: "*".into(), action: Allow },
+        PermissionRule { tool: ToolMatcher::Specific(ToolName::Task), pattern: "*".into(), action: Allow },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Question), pattern: "*".into(), action: Allow },
         // Write/execute tools: require permission
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Edit), pattern: "*".into(), action: Ask },
@@ -282,7 +282,7 @@ pub fn plan_mode_rules() -> Vec<PermissionRule> {
         PermissionRule { tool: ToolMatcher::Specific(ToolName::List), pattern: "*".into(), action: Allow },
         // Utility tools: always allowed (even in Plan mode)
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Memory), pattern: "*".into(), action: Allow },
-        PermissionRule { tool: ToolMatcher::Specific(ToolName::Todo), pattern: "*".into(), action: Allow },
+        PermissionRule { tool: ToolMatcher::Specific(ToolName::Task), pattern: "*".into(), action: Allow },
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Question), pattern: "*".into(), action: Allow },
         // Write/execute tools: denied in Plan mode
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Edit), pattern: "*".into(), action: Deny },
@@ -312,7 +312,7 @@ mod tests {
         assert_eq!(engine.check(ToolName::List, None), PermissionAction::Allow);
         // Utility tools also auto-allowed
         assert_eq!(engine.check(ToolName::Memory, None), PermissionAction::Allow);
-        assert_eq!(engine.check(ToolName::Todo, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Task, None), PermissionAction::Allow);
         assert_eq!(engine.check(ToolName::Question, None), PermissionAction::Allow);
     }
 
@@ -339,7 +339,7 @@ mod tests {
         assert_eq!(engine.check(ToolName::Read, None), PermissionAction::Allow);
         assert_eq!(engine.check(ToolName::Grep, None), PermissionAction::Allow);
         // Utility tools also auto-allowed in plan mode
-        assert_eq!(engine.check(ToolName::Todo, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Task, None), PermissionAction::Allow);
         assert_eq!(engine.check(ToolName::Question, None), PermissionAction::Allow);
     }
 
@@ -438,7 +438,7 @@ mod tests {
         assert_eq!(engine.check(ToolName::Edit, None), PermissionAction::Ask);
         // Only question/todo are auto-allowed
         assert_eq!(engine.check(ToolName::Question, None), PermissionAction::Allow);
-        assert_eq!(engine.check(ToolName::Todo, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Task, None), PermissionAction::Allow);
     }
 
     #[test]

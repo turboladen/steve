@@ -30,7 +30,8 @@ pub struct SidebarState {
     pub completion_tokens: u64,
     pub total_tokens: u64,
     pub session_cost: Option<f64>,
-    pub todos: Vec<TodoItem>,
+    /// Number of open tasks (from persistent task store).
+    pub open_task_count: usize,
     /// Accumulated file changes from write tools this session.
     pub changes: Vec<FileChange>,
     /// Current git branch name (None if not in a git repo).
@@ -45,13 +46,6 @@ pub struct SidebarState {
     pub last_prompt_tokens: u64,
 }
 
-/// A todo item displayed in the sidebar.
-#[derive(Debug, Clone)]
-pub struct TodoItem {
-    pub text: String,
-    pub done: bool,
-}
-
 impl Default for SidebarState {
     fn default() -> Self {
         Self {
@@ -61,7 +55,7 @@ impl Default for SidebarState {
             completion_tokens: 0,
             total_tokens: 0,
             session_cost: None,
-            todos: Vec::new(),
+            open_task_count: 0,
             changes: Vec::new(),
             git_branch: None,
             git_dirty: None,
@@ -281,26 +275,19 @@ pub fn render_sidebar(
     }
     lines.push(Line::from(""));
 
-    // -- Todos section (if any) --
-    if !state.todos.is_empty() {
+    // -- Tasks section (if any open tasks) --
+    if state.open_task_count > 0 {
+        let task_word = if state.open_task_count == 1 { "task" } else { "tasks" };
         lines.push(Line::from(Span::styled(
-            "Todos",
+            "Tasks",
             Style::default()
                 .fg(header_color)
                 .add_modifier(Modifier::BOLD),
         )));
-        for todo in &state.todos {
-            let marker = if todo.done { "✓" } else { "○" };
-            let style = if todo.done {
-                Style::default().fg(theme.dim)
-            } else {
-                Style::default().fg(theme.fg)
-            };
-            lines.push(Line::from(Span::styled(
-                format!("  {marker} {}", todo.text),
-                style,
-            )));
-        }
+        lines.push(Line::from(Span::styled(
+            format!("  {} open {task_word}", state.open_task_count),
+            Style::default().fg(theme.fg),
+        )));
     }
 
     let block = Block::default();
@@ -546,18 +533,31 @@ mod tests {
     }
 
     #[test]
-    fn buffer_sidebar_todos_section() {
+    fn buffer_sidebar_tasks_section() {
         let state = SidebarState {
-            todos: vec![
-                TodoItem { text: "Fix bug".to_string(), done: false },
-                TodoItem { text: "Write tests".to_string(), done: true },
-            ],
+            open_task_count: 3,
             ..Default::default()
         };
         let text = render_sidebar_to_string(40, 20, &state);
-        assert!(text.contains("Todos"), "should show 'Todos' header");
-        assert!(text.contains("○ Fix bug"), "pending todo should show ○");
-        assert!(text.contains("✓ Write tests"), "done todo should show ✓");
+        assert!(text.contains("Tasks"), "should show 'Tasks' header");
+        assert!(text.contains("3 open tasks"), "should show open task count");
+    }
+
+    #[test]
+    fn buffer_sidebar_tasks_section_singular() {
+        let state = SidebarState {
+            open_task_count: 1,
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(text.contains("1 open task"), "should use singular for 1 task");
+    }
+
+    #[test]
+    fn buffer_sidebar_no_tasks_no_section() {
+        let state = SidebarState::default();
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(!text.contains("Tasks"), "no open tasks = no 'Tasks' header");
     }
 
     #[test]

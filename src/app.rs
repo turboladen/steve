@@ -58,9 +58,10 @@ no quotes, no explanation. The title should capture the user's intent in plain E
 /// Guidance for efficient tool usage, injected into the system prompt.
 const TOOL_GUIDANCE: &str = "\n\n## Task Planning\n\n\
 When the user gives you a task with multiple sequential steps (e.g. \"do X, then Y, then Z\") or any task that will require 3+ distinct actions, \
-you MUST use the `todo` tool FIRST to create your plan before doing any other work. \
-Add one todo item per step, then work through them one at a time — complete each item before starting the next. \
-This keeps you focused and shows the user your progress in the sidebar.\n\n\
+you MUST use the `task` tool FIRST to create your plan before doing any other work. \
+Create one task per step, then work through them one at a time — complete each task before starting the next. \
+Tasks persist across sessions, so you can plan in one session and execute across multiple. \
+Use epics to group related tasks under a larger work item (e.g., a Jira ticket).\n\n\
 ## Tool Usage Guidelines\n\n\
 - **Use native tools, not bash**: NEVER use `bash` to read files (`cat`, `head`, `tail`), search content (`grep`, `rg`), find files (`find`, `ls`), or write files (`sed`, `awk`, `tee`). Use the dedicated `read`, `grep`, `glob`, `list`, `edit`, `write`, and `patch` tools instead — they are faster, cached, and context-efficient.\n\
 - **Verify CLI tools before recommending**: When suggesting an external CLI tool (e.g., `pdftotext`, `jq`, `ffmpeg`), first check if it's installed by running `command -v <tool>` via `bash`. If it's not available, say so explicitly and suggest how to install it (e.g., `brew install poppler` on macOS). Never assume a tool is on the user's PATH.\n\
@@ -144,7 +145,11 @@ fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
                 }
             })
             .unwrap_or_default(),
-        ToolName::Todo => String::new(),
+        ToolName::Task => args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         ToolName::Webfetch => args
             .get("url")
             .and_then(|v| v.as_str())
@@ -207,7 +212,7 @@ fn extract_diff_content(tool_name: ToolName, args: &Value) -> Option<DiffContent
         | ToolName::List
         | ToolName::Bash
         | ToolName::Question
-        | ToolName::Todo
+        | ToolName::Task
         | ToolName::Webfetch
         | ToolName::Memory
         | ToolName::Move
@@ -248,6 +253,9 @@ pub struct App {
     pub storage: Storage,
     pub agents_md: Option<String>,
     pub provider_registry: Option<ProviderRegistry>,
+
+    /// Persistent task store (epics + tasks).
+    pub task_store: crate::task::TaskStore,
 
     /// Currently selected model ref ("provider/model").
     pub current_model: Option<String>,
@@ -369,6 +377,9 @@ impl App {
             project.root.clone(),
         )));
 
+        // Build task store (persistent across sessions)
+        let task_store = crate::task::TaskStore::new(storage.clone());
+
         // Build startup messages
         let mut messages = Vec::new();
 
@@ -397,6 +408,7 @@ impl App {
             storage,
             agents_md,
             provider_registry,
+            task_store,
             current_model,
             current_session: None,
             tool_registry,
@@ -1691,6 +1703,7 @@ impl App {
             tool_context: Some(ToolContext {
                 project_root: self.project.root.clone(),
                 storage_dir: Some(self.storage.base_dir().clone()),
+                task_store: Some(Arc::new(self.task_store.clone())),
             }),
             permission_engine: Some(self.permission_engine.clone()),
             tool_cache: self.tool_cache.clone(),
@@ -1948,15 +1961,11 @@ impl App {
                 );
             }
         }
-        // Sync todos from the todo tool
-        let tool_todos = crate::tool::todo::get_todos();
-        self.sidebar_state.todos = tool_todos
-            .into_iter()
-            .map(|t| crate::ui::sidebar::TodoItem {
-                text: t.text,
-                done: t.done,
-            })
-            .collect();
+        // Sync open task count for sidebar
+        self.sidebar_state.open_task_count = self.task_store
+            .open_tasks()
+            .map(|tasks| tasks.len())
+            .unwrap_or(0);
 
         // Sync status line state
         if let Some(model) = &self.current_model {
@@ -2133,6 +2142,15 @@ impl App {
             }
         }
 
+        // Inject open tasks summary
+        let session_id = self.current_session.as_ref()
+            .map(|s| s.id.as_str())
+            .unwrap_or("");
+        let task_summary = self.task_store.summary_for_prompt(session_id);
+        if !task_summary.is_empty() {
+            parts.push(format!("\n## Active Tasks\n\n{task_summary}"));
+        }
+
         if let Some(agents_md) = &self.agents_md {
             parts.push(format!("\n---\n\n{agents_md}"));
         }
@@ -2303,9 +2321,9 @@ impl App {
                 self.session_browse_list = None;
                 // Reset tool result cache for the new session
                 *self.tool_cache.lock().unwrap() = ToolResultCache::new(self.project.root.clone());
-                // Clear changeset tracking, todos, selection, and reset token counters
+                // Clear changeset tracking, selection, and reset token counters
+                // Note: tasks persist across sessions (not cleared on /new)
                 self.sidebar_state.changes.clear();
-                crate::tool::todo::clear_todos();
                 self.selection_state.clear();
                 self.pending_question = None;
                 self.model_picker.close();
@@ -2572,8 +2590,127 @@ impl App {
             }
             Command::Help => {
                 self.messages.push(MessageBlock::System {
-                    text: "Commands:\n  /new            \u{2014} Start a new session\n  /rename <t>     \u{2014} Rename current session\n  /models         \u{2014} List available models\n  /model <r>      \u{2014} Switch to a model\n  /compact        \u{2014} Compact conversation into a summary\n  /sessions       \u{2014} Browse sessions\n  /export-debug   \u{2014} Export session with logs\n  /init           \u{2014} Create AGENTS.md in project root\n  /help           \u{2014} Show this help\n  /exit           \u{2014} Quit\n\nKeys:\n  Enter       \u{2014} Send message\n  Shift+Enter \u{2014} Insert newline\n  Tab         \u{2014} Accept autocomplete / toggle Build\u{2013}Plan mode\n  Up/Down     \u{2014} Navigate autocomplete list\n  Ctrl+C      \u{2014} Cancel stream / quit\n  Ctrl+B      \u{2014} Toggle sidebar\n  Mouse wheel \u{2014} Scroll messages\n  Click+drag  \u{2014} Select text (auto-copies to clipboard)".to_string(),
+                    text: "Commands:\n  /new            \u{2014} Start a new session\n  /rename <t>     \u{2014} Rename current session\n  /models         \u{2014} List available models\n  /model <r>      \u{2014} Switch to a model\n  /compact        \u{2014} Compact conversation into a summary\n  /sessions       \u{2014} Browse sessions\n  /tasks          \u{2014} List all tasks\n  /task-new <t>   \u{2014} Create a task\n  /task-done <id> \u{2014} Complete a task\n  /task-show <id> \u{2014} Show task details\n  /epics          \u{2014} List epics\n  /epic-new <t>   \u{2014} Create an epic\n  /export-debug   \u{2014} Export session with logs\n  /init           \u{2014} Create AGENTS.md in project root\n  /help           \u{2014} Show this help\n  /exit           \u{2014} Quit\n\nKeys:\n  Enter       \u{2014} Send message\n  Shift+Enter \u{2014} Insert newline\n  Tab         \u{2014} Accept autocomplete / toggle Build\u{2013}Plan mode\n  Up/Down     \u{2014} Navigate autocomplete list\n  Ctrl+C      \u{2014} Cancel stream / quit\n  Ctrl+B      \u{2014} Toggle sidebar\n  Mouse wheel \u{2014} Scroll messages\n  Click+drag  \u{2014} Select text (auto-copies to clipboard)".to_string(),
                 });
+            }
+            // -- Task management commands --
+            Command::Tasks => {
+                let tasks = self.task_store.list_tasks().unwrap_or_default();
+                let epics = self.task_store.list_epics().unwrap_or_default();
+                if tasks.is_empty() {
+                    self.messages.push(MessageBlock::System {
+                        text: "No tasks. Use /task-new <title> to create one.".to_string(),
+                    });
+                } else {
+                    let mut output = String::new();
+                    // Group tasks by epic
+                    for epic in &epics {
+                        let epic_tasks: Vec<_> = tasks.iter().filter(|t| t.epic_id.as_deref() == Some(&epic.id)).collect();
+                        if !epic_tasks.is_empty() {
+                            output.push_str(&format!("## {} ({})\n", epic.title, epic.id));
+                            for t in &epic_tasks {
+                                let marker = if t.status == crate::task::types::TaskStatus::Done { "x" } else { " " };
+                                output.push_str(&format!("  - [{marker}] {}: {} [{}]\n", t.id, t.title, t.priority));
+                            }
+                        }
+                    }
+                    // Standalone tasks (no epic)
+                    let standalone: Vec<_> = tasks.iter().filter(|t| t.epic_id.is_none()).collect();
+                    if !standalone.is_empty() {
+                        if !output.is_empty() { output.push('\n'); }
+                        output.push_str("## Standalone Tasks\n");
+                        for t in &standalone {
+                            let marker = if t.status == crate::task::types::TaskStatus::Done { "x" } else { " " };
+                            output.push_str(&format!("  - [{marker}] {}: {} [{}]\n", t.id, t.title, t.priority));
+                        }
+                    }
+                    self.messages.push(MessageBlock::System { text: output.trim_end().to_string() });
+                }
+                self.update_sidebar();
+            }
+            Command::TaskNew(title) => {
+                match self.task_store.create_task(&title, None, None, None, crate::task::types::Priority::default()) {
+                    Ok(task) => {
+                        self.messages.push(MessageBlock::System {
+                            text: format!("Created task: {} \u{2014} {}", task.id, task.title),
+                        });
+                        self.update_sidebar();
+                    }
+                    Err(e) => {
+                        self.messages.push(MessageBlock::Error {
+                            text: format!("Failed to create task: {e}"),
+                        });
+                    }
+                }
+            }
+            Command::TaskDone(id) => {
+                match self.task_store.complete_task(&id) {
+                    Ok(task) => {
+                        self.messages.push(MessageBlock::System {
+                            text: format!("Completed: {} \u{2014} {}", task.id, task.title),
+                        });
+                        self.update_sidebar();
+                    }
+                    Err(e) => {
+                        self.messages.push(MessageBlock::Error {
+                            text: format!("Failed to complete task: {e}"),
+                        });
+                    }
+                }
+            }
+            Command::TaskShow(id) => {
+                match self.task_store.get_task(&id) {
+                    Ok(task) => {
+                        let epic_info = task.epic_id.as_ref()
+                            .and_then(|eid| self.task_store.get_epic(eid).ok())
+                            .map(|e| format!("{} ({})", e.title, e.id))
+                            .unwrap_or_else(|| "(none)".to_string());
+                        let text = format!(
+                            "ID: {}\nTitle: {}\nStatus: {}\nPriority: {}\nEpic: {}\nDescription: {}\nCreated: {}",
+                            task.id, task.title, task.status, task.priority,
+                            epic_info,
+                            task.description.as_deref().unwrap_or("(none)"),
+                            task.created_at.format("%Y-%m-%d %H:%M"),
+                        );
+                        self.messages.push(MessageBlock::System { text });
+                    }
+                    Err(e) => {
+                        self.messages.push(MessageBlock::Error {
+                            text: format!("Task not found: {e}"),
+                        });
+                    }
+                }
+            }
+            Command::Epics => {
+                let epics = self.task_store.list_epics().unwrap_or_default();
+                if epics.is_empty() {
+                    self.messages.push(MessageBlock::System {
+                        text: "No epics. Use /epic-new <title> to create one.".to_string(),
+                    });
+                } else {
+                    let lines: Vec<String> = epics.iter().map(|e| {
+                        let ref_str = e.external_ref.as_deref().unwrap_or("");
+                        let ref_part = if ref_str.is_empty() { String::new() } else { format!(" ({ref_str})") };
+                        format!("  {} \u{2014} {} [{}]{ref_part}", e.id, e.title, e.status)
+                    }).collect();
+                    self.messages.push(MessageBlock::System {
+                        text: format!("## Epics\n{}", lines.join("\n")),
+                    });
+                }
+            }
+            Command::EpicNew(title) => {
+                match self.task_store.create_epic(&title, "", None, crate::task::types::Priority::default()) {
+                    Ok(epic) => {
+                        self.messages.push(MessageBlock::System {
+                            text: format!("Created epic: {} \u{2014} {}", epic.id, epic.title),
+                        });
+                    }
+                    Err(e) => {
+                        self.messages.push(MessageBlock::Error {
+                            text: format!("Failed to create epic: {e}"),
+                        });
+                    }
+                }
             }
         }
 
@@ -2725,9 +2862,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn extract_args_summary_todo_always_empty() {
-        let args = json!({"action": "add", "text": "something"});
-        assert_eq!(extract_args_summary(ToolName::Todo, &args), "");
+    fn extract_args_summary_task_returns_action() {
+        let args = json!({"action": "create", "title": "something"});
+        assert_eq!(extract_args_summary(ToolName::Task, &args), "create");
     }
 
     #[test]
@@ -2767,7 +2904,7 @@ pub(crate) mod tests {
             ToolName::Patch,
             ToolName::Bash,
             ToolName::Question,
-            ToolName::Todo,
+            ToolName::Task,
             ToolName::Webfetch,
             ToolName::Memory,
         ];
@@ -2901,7 +3038,7 @@ pub(crate) mod tests {
             ToolName::List,
             ToolName::Bash,
             ToolName::Question,
-            ToolName::Todo,
+            ToolName::Task,
             ToolName::Webfetch,
             ToolName::Memory,
         ] {
@@ -2925,7 +3062,7 @@ pub(crate) mod tests {
             ToolName::Patch,
             ToolName::Bash,
             ToolName::Question,
-            ToolName::Todo,
+            ToolName::Task,
             ToolName::Webfetch,
             ToolName::Memory,
         ];

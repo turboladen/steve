@@ -218,7 +218,7 @@ fn extract_tool_summary(tool_name: ToolName, input: &serde_json::Value) -> Strin
                 }
             })
             .unwrap_or_default(),
-        ToolName::Todo => input
+        ToolName::Task => input
             .get("action")
             .and_then(|v| v.as_str())
             .unwrap_or("")
