@@ -6,10 +6,17 @@ use ratatui::{
     widgets::{Block, Paragraph, Wrap},
 };
 
+use crate::task::types::{Priority, TaskStatus};
 use crate::ui::message_block::{DiffContent, DiffLine};
 
 use super::status_line::format_tokens;
 use super::theme::Theme;
+
+/// Maximum number of tasks shown in the sidebar.
+pub const MAX_SIDEBAR_TASKS: usize = 10;
+
+/// Maximum characters for a task title on a single sidebar line.
+const MAX_TASK_TITLE_CHARS: usize = 34;
 
 /// A file modified by a write tool, with accumulated line-change counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +29,30 @@ pub struct FileChange {
     pub removals: usize,
 }
 
+/// Lightweight task summary for sidebar display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidebarTask {
+    /// Task ID (e.g., "task-a1b2c3d4").
+    pub id: String,
+    /// Human-readable title.
+    pub title: String,
+    /// Priority level.
+    pub priority: Priority,
+    /// Current lifecycle status.
+    pub status: TaskStatus,
+}
+
+impl From<crate::task::Task> for SidebarTask {
+    fn from(t: crate::task::Task) -> Self {
+        Self {
+            id: t.id,
+            title: t.title,
+            priority: t.priority,
+            status: t.status,
+        }
+    }
+}
+
 /// State for the sidebar panel.
 pub struct SidebarState {
     pub session_title: String,
@@ -30,8 +61,10 @@ pub struct SidebarState {
     pub completion_tokens: u64,
     pub total_tokens: u64,
     pub session_cost: Option<f64>,
-    /// Number of open tasks (from persistent task store).
-    pub open_task_count: usize,
+    /// Tasks to display in the sidebar (open + session-closed, capped at MAX_SIDEBAR_TASKS).
+    pub tasks: Vec<SidebarTask>,
+    /// Task IDs completed during this session (shown with Done status in sidebar).
+    pub session_closed_task_ids: Vec<String>,
     /// Accumulated file changes from write tools this session.
     pub changes: Vec<FileChange>,
     /// Current git branch name (None if not in a git repo).
@@ -55,7 +88,8 @@ impl Default for SidebarState {
             completion_tokens: 0,
             total_tokens: 0,
             session_cost: None,
-            open_task_count: 0,
+            tasks: Vec::new(),
+            session_closed_task_ids: Vec::new(),
             changes: Vec::new(),
             git_branch: None,
             git_dirty: None,
@@ -110,6 +144,13 @@ impl SidebarState {
         self.changes
             .iter()
             .fold((0, 0), |(a, r), c| (a + c.additions, r + c.removals))
+    }
+
+    /// Record a task ID as completed during this session (dedup on insert).
+    pub fn record_task_closed(&mut self, id: String) {
+        if !self.session_closed_task_ids.contains(&id) {
+            self.session_closed_task_ids.push(id);
+        }
     }
 }
 
@@ -275,19 +316,63 @@ pub fn render_sidebar(
         lines.push(Line::from(""));
     }
 
-    // -- Tasks section (if any open tasks) --
-    if state.open_task_count > 0 {
-        let task_word = if state.open_task_count == 1 { "task" } else { "tasks" };
+    // -- Tasks section (if any tasks to show) --
+    if !state.tasks.is_empty() {
+        let open_count = state
+            .tasks
+            .iter()
+            .filter(|t| t.status != TaskStatus::Done)
+            .count();
+        let done_count = state.tasks.len() - open_count;
+
+        // Header with summary counts
+        let mut header_parts = format!("Tasks ({open_count} open");
+        if done_count > 0 {
+            header_parts.push_str(&format!(", {done_count} done"));
+        }
+        header_parts.push(')');
         lines.push(Line::from(Span::styled(
-            "Tasks",
+            header_parts,
             Style::default()
                 .fg(header_color)
                 .add_modifier(Modifier::BOLD),
         )));
-        lines.push(Line::from(Span::styled(
-            format!(" {} open {task_word}", state.open_task_count),
-            Style::default().fg(theme.fg),
-        )));
+
+        // Individual task lines (2 lines each, pre-capped at MAX_SIDEBAR_TASKS by update_sidebar)
+        for task in &state.tasks {
+            let (icon, icon_color) = match task.status {
+                TaskStatus::Open => ("\u{25cb}", theme.dim),           // ○
+                TaskStatus::InProgress => ("\u{25cf}", theme.accent),  // ●
+                TaskStatus::Done => ("\u{2713}", theme.success),       // ✓
+            };
+            let priority_abbr = match task.priority {
+                Priority::High => "hi",
+                Priority::Medium => "med",
+                Priority::Low => "lo",
+            };
+            // Line 1: icon + short ID + priority
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {icon} "), Style::default().fg(icon_color)),
+                Span::styled(&task.id, Style::default().fg(theme.dim)),
+                Span::styled(format!(" {priority_abbr}"), Style::default().fg(theme.dim)),
+            ]));
+            // Line 2: truncated title
+            let title = if task.title.chars().count() > MAX_TASK_TITLE_CHARS {
+                let truncated: String = task.title.chars().take(MAX_TASK_TITLE_CHARS - 3).collect();
+                format!("{truncated}...")
+            } else {
+                task.title.clone()
+            };
+            let title_color = if task.status == TaskStatus::Done {
+                theme.dim
+            } else {
+                theme.fg
+            };
+            lines.push(Line::from(Span::styled(
+                format!("   {title}"),
+                Style::default().fg(title_color),
+            )));
+        }
     }
 
     // 1-char left padding via Block::padding keeps content off the vertical divider.
@@ -458,6 +543,42 @@ mod tests {
         assert!(state.changes.is_empty());
     }
 
+    #[test]
+    fn sidebar_state_default_has_empty_tasks() {
+        let state = SidebarState::default();
+        assert!(state.tasks.is_empty());
+        assert!(state.session_closed_task_ids.is_empty());
+    }
+
+    // -- record_task_closed tests --
+
+    #[test]
+    fn record_task_closed_adds_id() {
+        let mut state = SidebarState::default();
+        state.record_task_closed("task-abc".into());
+        assert_eq!(state.session_closed_task_ids, vec!["task-abc"]);
+    }
+
+    #[test]
+    fn record_task_closed_deduplicates() {
+        let mut state = SidebarState::default();
+        state.record_task_closed("task-abc".into());
+        state.record_task_closed("task-abc".into());
+        assert_eq!(state.session_closed_task_ids.len(), 1);
+    }
+
+    #[test]
+    fn record_task_closed_preserves_order() {
+        let mut state = SidebarState::default();
+        state.record_task_closed("task-111".into());
+        state.record_task_closed("task-222".into());
+        state.record_task_closed("task-333".into());
+        assert_eq!(
+            state.session_closed_task_ids,
+            vec!["task-111", "task-222", "task-333"]
+        );
+    }
+
     // -- Buffer rendering tests --
 
     use ratatui::layout::Rect;
@@ -533,32 +654,79 @@ mod tests {
         assert!(text.contains("-3"), "should show removals in red");
     }
 
-    #[test]
-    fn buffer_sidebar_tasks_section() {
-        let state = SidebarState {
-            open_task_count: 3,
-            ..Default::default()
-        };
-        let text = render_sidebar_to_string(40, 20, &state);
-        assert!(text.contains("Tasks"), "should show 'Tasks' header");
-        assert!(text.contains("3 open tasks"), "should show open task count");
+    fn make_sidebar_task(id: &str, title: &str, priority: Priority, status: TaskStatus) -> SidebarTask {
+        SidebarTask {
+            id: id.to_string(),
+            title: title.to_string(),
+            priority,
+            status,
+        }
     }
 
     #[test]
-    fn buffer_sidebar_tasks_section_singular() {
+    fn buffer_sidebar_tasks_section_shows_individual_tasks() {
         let state = SidebarState {
-            open_task_count: 1,
+            tasks: vec![
+                make_sidebar_task("task-a1b2c3d4", "Fix sidebar rendering", Priority::High, TaskStatus::Open),
+                make_sidebar_task("task-e5f6g7h8", "Add new feature", Priority::Medium, TaskStatus::InProgress),
+            ],
             ..Default::default()
         };
-        let text = render_sidebar_to_string(40, 20, &state);
-        assert!(text.contains("1 open task"), "should use singular for 1 task");
+        let text = render_sidebar_to_string(40, 30, &state);
+        assert!(text.contains("Tasks (2 open)"), "should show header with count, got:\n{text}");
+        assert!(text.contains("task-a1b2c3d4"), "should show task ID");
+        assert!(text.contains("hi"), "should show priority abbreviation");
+        assert!(text.contains("Fix sidebar rendering"), "should show task title");
+        assert!(text.contains("task-e5f6g7h8"), "should show second task ID");
+        assert!(text.contains("Add new feature"), "should show second task title");
+    }
+
+    #[test]
+    fn buffer_sidebar_tasks_section_shows_done_count() {
+        let state = SidebarState {
+            tasks: vec![
+                make_sidebar_task("task-a1b2c3d4", "Open task", Priority::Medium, TaskStatus::Open),
+                make_sidebar_task("task-e5f6g7h8", "Done task", Priority::Low, TaskStatus::Done),
+            ],
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 30, &state);
+        assert!(text.contains("Tasks (1 open, 1 done)"), "should show open and done counts, got:\n{text}");
+    }
+
+    #[test]
+    fn buffer_sidebar_tasks_truncates_long_titles() {
+        let long_title = "This is a very long task title that should be truncated in the sidebar";
+        let state = SidebarState {
+            tasks: vec![make_sidebar_task("task-a1b2c3d4", long_title, Priority::Medium, TaskStatus::Open)],
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 30, &state);
+        assert!(text.contains("..."), "long title should be truncated with ellipsis");
+        assert!(!text.contains(long_title), "full title should not appear");
+    }
+
+    #[test]
+    fn buffer_sidebar_tasks_status_icons() {
+        let state = SidebarState {
+            tasks: vec![
+                make_sidebar_task("task-open0001", "Open task", Priority::Low, TaskStatus::Open),
+                make_sidebar_task("task-prog0001", "Active task", Priority::High, TaskStatus::InProgress),
+                make_sidebar_task("task-done0001", "Finished task", Priority::Medium, TaskStatus::Done),
+            ],
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 30, &state);
+        assert!(text.contains("\u{25cb}"), "should show open icon (○)");
+        assert!(text.contains("\u{25cf}"), "should show in-progress icon (●)");
+        assert!(text.contains("\u{2713}"), "should show done icon (✓)");
     }
 
     #[test]
     fn buffer_sidebar_no_tasks_no_section() {
         let state = SidebarState::default();
         let text = render_sidebar_to_string(40, 20, &state);
-        assert!(!text.contains("Tasks"), "no open tasks = no 'Tasks' header");
+        assert!(!text.contains("Tasks"), "no tasks = no 'Tasks' header");
     }
 
     #[test]

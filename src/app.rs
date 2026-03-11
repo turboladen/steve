@@ -39,7 +39,8 @@ use crate::ui::message_block::{
     AssistantPart, DiffContent, DiffLine, MessageBlock, ToolCall,
 };
 use crate::ui::selection::SelectionState;
-use crate::ui::sidebar::{SidebarState, count_diff_lines};
+use crate::task::types::{Priority, TaskStatus};
+use crate::ui::sidebar::{SidebarState, SidebarTask, count_diff_lines, MAX_SIDEBAR_TASKS};
 use crate::ui::status_line::{Activity, StatusLineState};
 use crate::ui::theme::Theme;
 
@@ -672,6 +673,7 @@ impl App {
         });
         self.current_session = Some(session.clone());
         self.sidebar_state.changes.clear();
+        self.sidebar_state.session_closed_task_ids.clear();
         self.refresh_git_info();
         self.sync_sidebar_tokens();
         self.messages.push(MessageBlock::System {
@@ -867,6 +869,22 @@ impl App {
                                 additions,
                                 removals,
                             );
+                        }
+                    }
+                }
+
+                // Track task completions for sidebar display
+                if tool_name == ToolName::Task && !output.is_error {
+                    if let Some(call) = self.find_last_completed_call(tool_name) {
+                        if call.args_summary == "complete" {
+                            // Parse task ID from output: "Completed task {id}: {title}"
+                            // Safe to split on ':' — task IDs are hex-only (task-XXXXXXXX)
+                            if let Some(rest) = output.output.strip_prefix("Completed task ") {
+                                if let Some(id) = rest.split(':').next() {
+                                    self.sidebar_state
+                                        .record_task_closed(id.trim().to_string());
+                                }
+                            }
                         }
                     }
                 }
@@ -2008,6 +2026,15 @@ impl App {
     /// `LlmUsageUpdate` (accumulate per-call) and authoritatively by
     /// `sync_sidebar_tokens()` after `add_usage()` on `LlmFinish`.
     fn update_sidebar(&mut self) {
+        /// Map priority to a sort key (lower = higher priority).
+        fn priority_sort_key(p: Priority) -> u8 {
+            match p {
+                Priority::High => 0,
+                Priority::Medium => 1,
+                Priority::Low => 2,
+            }
+        }
+
         if let Some(session) = &self.current_session {
             self.sidebar_state.session_title = session.title.clone();
         }
@@ -2028,11 +2055,27 @@ impl App {
                 );
             }
         }
-        // Sync open task count for sidebar
-        self.sidebar_state.open_task_count = self.task_store
-            .open_tasks()
-            .map(|tasks| tasks.len())
-            .unwrap_or(0);
+        // Sync task list for sidebar: open/in_progress tasks + session-closed tasks
+        self.sidebar_state.tasks = self.task_store
+            .list_tasks()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| {
+                t.status != TaskStatus::Done
+                    || self.sidebar_state.session_closed_task_ids.contains(&t.id)
+            })
+            .map(|t| SidebarTask::from(t))
+            .collect();
+        // Sort: open/in_progress first (by priority High→Low), then done at bottom
+        self.sidebar_state.tasks.sort_by(|a, b| {
+            let a_done = a.status == TaskStatus::Done;
+            let b_done = b.status == TaskStatus::Done;
+            a_done.cmp(&b_done).then_with(|| {
+                // Within same done/not-done group, sort by priority (High < Medium < Low)
+                priority_sort_key(a.priority).cmp(&priority_sort_key(b.priority))
+            })
+        });
+        self.sidebar_state.tasks.truncate(MAX_SIDEBAR_TASKS);
 
         // Sync status line state
         if let Some(model) = &self.current_model {
@@ -2388,9 +2431,10 @@ impl App {
                 self.session_browse_list = None;
                 // Reset tool result cache for the new session
                 *self.tool_cache.lock().unwrap() = ToolResultCache::new(self.project.root.clone());
-                // Clear changeset tracking, selection, and reset token counters
+                // Clear changeset tracking, session-closed tasks, selection, and reset token counters
                 // Note: tasks persist across sessions (not cleared on /new)
                 self.sidebar_state.changes.clear();
+                self.sidebar_state.session_closed_task_ids.clear();
                 self.selection_state.clear();
                 self.pending_question = None;
                 self.model_picker.close();
