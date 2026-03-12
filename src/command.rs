@@ -21,6 +21,7 @@ pub enum Command {
     TaskEdit(String),
     Epics,
     EpicNew(String),
+    Diagnostics,
 }
 
 /// Metadata for a known slash command, used for autocomplete.
@@ -82,6 +83,7 @@ impl Command {
                 Some(args) if !args.is_empty() => Ok(Command::TaskEdit(args)),
                 _ => Err("Usage: /task-edit <task-id> <field>=<value> ...".to_string()),
             },
+            "/diagnostics" => Ok(Command::Diagnostics),
             "/epics" => Ok(Command::Epics),
             "/epic-new" => match arg {
                 Some(title) if !title.is_empty() => Ok(Command::EpicNew(title)),
@@ -107,6 +109,7 @@ impl Command {
             CommandInfo { name: "/task-edit", description: "Edit a task" },
             CommandInfo { name: "/epics", description: "List epics" },
             CommandInfo { name: "/epic-new", description: "Create an epic" },
+            CommandInfo { name: "/diagnostics", description: "Show health dashboard" },
             CommandInfo { name: "/init", description: "Create AGENTS.md" },
             CommandInfo { name: "/export-debug", description: "Export session with logs" },
             CommandInfo { name: "/help", description: "Show help" },
@@ -200,7 +203,8 @@ mod tests {
         assert!(names.contains(&"/epics"));
         assert!(names.contains(&"/task-edit"));
         assert!(names.contains(&"/epic-new"));
-        assert_eq!(cmds.len(), 18);
+        assert!(names.contains(&"/diagnostics"));
+        assert_eq!(cmds.len(), 19);
     }
 
     #[test]
@@ -223,7 +227,7 @@ mod tests {
     #[test]
     fn filter_commands_slash_only() {
         let matches = Command::matching_commands("/");
-        assert_eq!(matches.len(), 18);
+        assert_eq!(matches.len(), 19);
     }
 
     #[test]
@@ -302,6 +306,11 @@ mod tests {
     #[test]
     fn parse_epic_new_without_title() {
         assert!(Command::parse("/epic-new").is_err());
+    }
+
+    #[test]
+    fn parse_diagnostics_command() {
+        assert_eq!(Command::parse("/diagnostics").unwrap(), Command::Diagnostics);
     }
 
     #[test]

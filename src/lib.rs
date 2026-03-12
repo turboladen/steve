@@ -5,6 +5,7 @@ pub mod cli;
 pub mod command;
 pub mod config;
 pub mod context;
+pub mod diagnostics;
 pub mod data;
 pub mod event;
 pub mod export;

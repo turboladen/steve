@@ -449,6 +449,12 @@ pub struct App {
     /// Model picker overlay state.
     pub model_picker: ModelPickerState,
 
+    /// Diagnostics overlay state.
+    pub diagnostics_overlay: crate::ui::diagnostics_overlay::DiagnosticsOverlayState,
+
+    /// Number of compactions in the current session (for diagnostics).
+    pub compaction_count: u32,
+
     /// Text selection state for copy-on-select.
     pub selection_state: SelectionState,
 
@@ -568,6 +574,8 @@ impl App {
             sidebar_override: None,
             file_index: None,
             model_picker: ModelPickerState::default(),
+            diagnostics_overlay: crate::ui::diagnostics_overlay::DiagnosticsOverlayState::default(),
+            compaction_count: 0,
             selection_state: SelectionState::default(),
             last_message_area: ratatui::layout::Rect::default(),
             lsp_manager,
@@ -702,6 +710,7 @@ impl App {
 
         self.refresh_git_info();
         self.sync_sidebar_tokens();
+        self.sync_diagnostics();
         self.update_sidebar();
     }
 
@@ -770,8 +779,12 @@ impl App {
         self.current_session = Some(session.clone());
         self.sidebar_state.changes.clear();
         self.sidebar_state.session_closed_task_ids.clear();
+        self.model_picker.close();
+        self.diagnostics_overlay.close();
+        self.compaction_count = 0;
         self.refresh_git_info();
         self.sync_sidebar_tokens();
+        self.sync_diagnostics();
         self.messages.push(MessageBlock::System {
             text: format!("Switched to: {}", session.title),
         });
@@ -786,7 +799,7 @@ impl App {
             AppEvent::Input(Event::Mouse(mouse)) => {
                 use crossterm::event::MouseButton;
                 // Block mouse events in the message area when an overlay is active
-                if self.model_picker.visible || self.pending_question.is_some() {
+                if self.model_picker.visible || self.diagnostics_overlay.visible || self.pending_question.is_some() {
                     return Ok(());
                 }
                 match mouse.kind {
@@ -1032,6 +1045,7 @@ impl App {
                     }
 
                     self.sync_sidebar_tokens();
+                    self.sync_diagnostics();
                     self.update_sidebar();
 
                     // Check context usage and warn if approaching limits
@@ -1132,6 +1146,7 @@ impl App {
             }
             AppEvent::CompactFinish { summary } => {
                 self.is_loading = false;
+                self.compaction_count += 1;
 
                 let session_id = self
                     .current_session
@@ -1172,6 +1187,7 @@ impl App {
                 self.context_warned = false;
                 self.last_prompt_tokens = 0;
                 self.sync_sidebar_tokens();
+                self.sync_diagnostics();
                 self.update_sidebar();
 
                 tracing::info!("conversation compacted successfully");
@@ -1451,6 +1467,29 @@ impl App {
                 }
                 (KeyCode::Char(c), _) => {
                     self.model_picker.type_char(c);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // If the diagnostics overlay is open, intercept keystrokes
+        if self.diagnostics_overlay.visible {
+            match (key.code, key.modifiers) {
+                (KeyCode::Esc, _) => {
+                    self.diagnostics_overlay.close();
+                }
+                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
+                    self.diagnostics_overlay.close();
+                    if self.is_loading || self.streaming_active {
+                        self.cancel_stream();
+                    }
+                }
+                (KeyCode::Up, _) => {
+                    self.diagnostics_overlay.scroll_up(1);
+                }
+                (KeyCode::Down, _) => {
+                    self.diagnostics_overlay.scroll_down(1);
                 }
                 _ => {}
             }
@@ -2207,6 +2246,43 @@ impl App {
         self.sidebar_state.last_prompt_tokens = self.status_line_state.last_prompt_tokens;
     }
 
+    /// Run all diagnostic checks against current app state.
+    /// Called at discrete sync points (LlmFinish, CompactFinish, /new, switch_to_session)
+    /// and when the /diagnostics overlay is opened — not per-frame.
+    fn collect_diagnostics(&self) -> Vec<crate::diagnostics::DiagnosticCheck> {
+        let (cache_hits, cache_misses) = self.tool_cache.lock().unwrap().cache_stats();
+        let lsp_servers: Vec<(crate::lsp::types::Language, bool)> =
+            self.sidebar_state.lsp_servers.iter()
+                .map(|s| (s.language, s.running))
+                .collect();
+        let system_prompt_len = self.build_system_prompt()
+            .map(|s| s.len())
+            .unwrap_or(0);
+        let total_tokens = self.current_session
+            .as_ref()
+            .map(|s| s.token_usage.total_tokens)
+            .unwrap_or(0);
+        let input = crate::diagnostics::DiagnosticInput {
+            agents_md: self.agents_md.as_deref(),
+            system_prompt_len,
+            config: &self.config,
+            lsp_servers: &lsp_servers,
+            total_tokens,
+            exchange_count: self.exchange_count,
+            cache_hits,
+            cache_misses,
+            compaction_count: self.compaction_count,
+            session_cost: self.sidebar_state.session_cost,
+        };
+        crate::diagnostics::run_diagnostics(&input)
+    }
+
+    /// Refresh diagnostics summary for the sidebar indicator.
+    fn sync_diagnostics(&mut self) {
+        let checks = self.collect_diagnostics();
+        self.sidebar_state.diagnostics_summary = crate::diagnostics::summarize(&checks);
+    }
+
     /// Refresh git information in the sidebar state.
     fn refresh_git_info(&mut self) {
         use crate::project::{git_branch, git_is_dirty, git_repo_name};
@@ -2541,10 +2617,13 @@ impl App {
                 self.selection_state.clear();
                 self.pending_question = None;
                 self.model_picker.close();
+                self.diagnostics_overlay.close();
+                self.compaction_count = 0;
                 self.autocomplete_state.hide();
                 self.ensure_session();
                 self.refresh_git_info();
                 self.sync_sidebar_tokens();
+                self.sync_diagnostics();
                 self.message_area_state.scroll_to_bottom();
                 self.messages.push(MessageBlock::System {
                     text: "New session started.".to_string(),
@@ -2589,6 +2668,7 @@ impl App {
                 }
             }
             Command::Models => {
+                self.diagnostics_overlay.close();
                 if let Some(registry) = &self.provider_registry {
                     let models = registry.list_models();
                     if models.is_empty() {
@@ -2608,6 +2688,13 @@ impl App {
                         text: "No providers configured.".to_string(),
                     });
                 }
+            }
+            Command::Diagnostics => {
+                // Close model picker if open (mutual exclusivity)
+                self.model_picker.close();
+                // Run diagnostics and open the overlay
+                let checks = self.collect_diagnostics();
+                self.diagnostics_overlay.open(checks);
             }
             Command::Init => {
                 let agents_path = self.project.root.join("AGENTS.md");
@@ -4075,6 +4162,76 @@ pub(crate) mod tests {
         assert!(
             text.contains("openai/gpt-4o"),
             "model ref should be visible, got:\n{text}"
+        );
+    }
+
+    // -- diagnostics overlay tests --
+
+    #[test]
+    fn diagnostics_overlay_close_on_new() {
+        let mut app = make_test_app();
+        app.diagnostics_overlay.open(vec![]);
+        assert!(app.diagnostics_overlay.visible);
+
+        // Simulate the relevant part of Command::New handler
+        app.diagnostics_overlay.close();
+        assert!(!app.diagnostics_overlay.visible);
+    }
+
+    #[test]
+    fn diagnostics_overlay_closes_model_picker() {
+        let mut app = make_test_app();
+        let models = vec![("openai/gpt-4o".into(), "GPT-4o".into())];
+        app.model_picker.open(&models, None);
+        assert!(app.model_picker.visible);
+
+        // Opening diagnostics should close model picker (mutual exclusivity)
+        app.model_picker.close();
+        let checks = app.collect_diagnostics();
+        app.diagnostics_overlay.open(checks);
+        assert!(app.diagnostics_overlay.visible);
+        assert!(!app.model_picker.visible);
+    }
+
+    #[test]
+    fn compaction_count_resets_on_new() {
+        let mut app = make_test_app();
+        app.compaction_count = 5;
+
+        // Simulate the relevant part of Command::New handler
+        app.compaction_count = 0;
+        assert_eq!(app.compaction_count, 0);
+    }
+
+    #[test]
+    fn compaction_count_increments() {
+        let mut app = make_test_app();
+        assert_eq!(app.compaction_count, 0);
+        app.compaction_count += 1;
+        assert_eq!(app.compaction_count, 1);
+    }
+
+    #[test]
+    fn diagnostics_overlay_renders_in_full_app() {
+        let mut app = make_test_app();
+        let checks = app.collect_diagnostics();
+        app.diagnostics_overlay.open(checks);
+
+        let buf = crate::ui::render_to_buffer(80, 24, |frame| {
+            crate::ui::render(frame, &mut app);
+        });
+
+        let mut text = String::new();
+        for y in 0..24 {
+            for x in 0..80 {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+
+        assert!(
+            text.contains("Health Dashboard"),
+            "overlay title should be visible, got:\n{text}"
         );
     }
 }

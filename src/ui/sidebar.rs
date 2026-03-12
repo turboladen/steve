@@ -6,6 +6,7 @@ use ratatui::{
     widgets::{Block, Paragraph, Wrap},
 };
 
+use crate::diagnostics::{DiagnosticSummary, Severity};
 use crate::lsp::types::Language;
 use crate::task::types::{Priority, TaskKind, TaskStatus};
 use crate::ui::message_block::{DiffContent, DiffLine};
@@ -92,6 +93,8 @@ pub struct SidebarState {
     pub context_window: u64,
     /// Last-reported prompt tokens (per-call context pressure).
     pub last_prompt_tokens: u64,
+    /// Diagnostics summary for sidebar indicator.
+    pub diagnostics_summary: DiagnosticSummary,
 }
 
 impl Default for SidebarState {
@@ -112,6 +115,7 @@ impl Default for SidebarState {
             git_repo_name: None,
             context_window: 0,
             last_prompt_tokens: 0,
+            diagnostics_summary: DiagnosticSummary::default(),
         }
     }
 }
@@ -301,6 +305,41 @@ pub fn render_sidebar(
                 Span::styled(name, Style::default().fg(theme.fg)),
             ]));
         }
+        lines.push(Line::from(""));
+    }
+
+    // -- Health section (1-line diagnostic summary) --
+    {
+        let summary = &state.diagnostics_summary;
+        let max_sev = summary.max_severity();
+        let (icon, icon_color, label) = match max_sev {
+            Severity::Error => (
+                "\u{25cf}",
+                theme.error,
+                format!("{} errors", summary.error_count),
+            ),
+            Severity::Warning => (
+                "\u{25cf}",
+                theme.warning,
+                format!("{} warnings", summary.warning_count),
+            ),
+            Severity::Info if summary.info_count > 0 => (
+                "\u{2139}",
+                theme.dim,
+                format!("{} info", summary.info_count),
+            ),
+            Severity::Info => ("\u{2713}", theme.success, "ok".into()),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                "Health ",
+                Style::default()
+                    .fg(header_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("{icon} "), Style::default().fg(icon_color)),
+            Span::styled(label, Style::default().fg(theme.dim)),
+        ]));
         lines.push(Line::from(""));
     }
 

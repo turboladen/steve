@@ -308,6 +308,11 @@ impl ToolResultCache {
         }
     }
 
+    /// Return `(hits, misses)` counters for diagnostics.
+    pub fn cache_stats(&self) -> (u32, u32) {
+        (self.hits, self.misses)
+    }
+
     /// Log cache statistics (called at end of session/stream).
     pub fn log_stats(&self) {
         if self.hits > 0 || self.misses > 0 {
@@ -474,6 +479,24 @@ mod tests {
 
         cache.put(ToolName::Read, &args, &error_output);
         assert!(cache.get(ToolName::Read, &args).is_none());
+    }
+
+    #[test]
+    fn test_cache_stats_returns_hits_misses() {
+        let mut cache = test_cache();
+        let args = json!({"path": "src/main.rs"});
+
+        // Initial state: 0/0
+        assert_eq!(cache.cache_stats(), (0, 0));
+
+        // Miss
+        cache.get(ToolName::Read, &args);
+        assert_eq!(cache.cache_stats(), (0, 1));
+
+        // Put + Hit
+        cache.put(ToolName::Read, &args, &test_output("content"));
+        cache.get(ToolName::Read, &args);
+        assert_eq!(cache.cache_stats(), (1, 1));
     }
 
     #[test]
