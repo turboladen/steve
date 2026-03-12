@@ -1,5 +1,10 @@
 use ratatui::style::Color;
 
+/// Context pressure tier thresholds (percentage of context window used).
+pub const CONTEXT_TIER_1: u8 = 40;
+pub const CONTEXT_TIER_2: u8 = 60;
+pub const CONTEXT_TIER_3: u8 = 80;
+
 /// Color palette for the TUI — "Warm Terminal" identity.
 /// Rich amber accent, warm grays, coral for write operations.
 /// User messages use a distinct blue tint for immediate visual separation.
@@ -13,6 +18,7 @@ pub struct Theme {
     pub warning: Color,
     pub success: Color,
     pub user_msg: Color,
+    pub user_msg_bg: Color,
     pub assistant_msg: Color,
     pub tool_read: Color,
     pub tool_write: Color,
@@ -47,14 +53,30 @@ impl Theme {
     /// | 60–79%  | `self.warning`            | Yellow           |
     /// | 80%+    | `self.error`              | Red              |
     pub fn border_color(&self, context_pct: u8) -> Color {
-        if context_pct >= 80 {
+        if context_pct >= CONTEXT_TIER_3 {
             self.error
-        } else if context_pct >= 60 {
+        } else if context_pct >= CONTEXT_TIER_2 {
             self.warning
-        } else if context_pct >= 40 {
+        } else if context_pct >= CONTEXT_TIER_1 {
             self.context_amber
         } else {
             self.border
+        }
+    }
+
+    /// Return the text color for context pressure indicators.
+    ///
+    /// Similar to `border_color()` but maps the lowest tier to `self.dim`
+    /// (for token counters) instead of `self.border` (for borders).
+    pub fn context_color(&self, context_pct: u8) -> Color {
+        if context_pct >= CONTEXT_TIER_3 {
+            self.error
+        } else if context_pct >= CONTEXT_TIER_2 {
+            self.warning
+        } else if context_pct >= CONTEXT_TIER_1 {
+            self.context_amber
+        } else {
+            self.dim
         }
     }
 
@@ -69,6 +91,7 @@ impl Theme {
             warning: Color::Rgb(240, 190, 60),         // Warm gold
             success: Color::Rgb(85, 195, 120),         // Soft green
             user_msg: Color::Rgb(145, 185, 225),       // Soft blue (distinct from assistant)
+            user_msg_bg: Color::Rgb(25, 30, 40),        // Barely-visible blue-gray tint
             assistant_msg: Color::Rgb(225, 222, 215),   // Warm cream
             tool_read: Color::Rgb(130, 125, 115),      // Warm mid-gray (brighter than dim)
             tool_write: Color::Rgb(240, 120, 85),      // Warm coral (slightly softer)
@@ -100,6 +123,7 @@ impl Theme {
             warning: Color::Rgb(180, 130, 0),             // Dark gold
             success: Color::Rgb(30, 140, 60),             // Dark green
             user_msg: Color::Rgb(40, 90, 160),            // Dark blue
+            user_msg_bg: Color::Rgb(220, 230, 245),       // Subtle light blue tint
             assistant_msg: Color::Rgb(40, 38, 35),        // Near-black
             tool_read: Color::Rgb(100, 95, 90),           // Darker gray
             tool_write: Color::Rgb(190, 60, 30),          // Dark coral
@@ -205,6 +229,41 @@ mod tests {
         assert!(matches!(t.heading, Color::Rgb(..)));
         assert!(matches!(t.inline_code_bg, Color::Rgb(..)));
         assert!(matches!(t.link, Color::Rgb(..)));
+        assert!(matches!(t.user_msg_bg, Color::Rgb(..)));
+    }
+
+    #[test]
+    fn user_msg_bg_differs_from_bg() {
+        let t = Theme::dark();
+        assert_ne!(t.user_msg_bg, t.bg, "user_msg_bg should differ from bg");
+    }
+
+    #[test]
+    fn context_color_below_40_returns_dim() {
+        let t = Theme::dark();
+        assert_eq!(t.context_color(0), t.dim);
+        assert_eq!(t.context_color(39), t.dim);
+    }
+
+    #[test]
+    fn context_color_40_to_59_returns_amber() {
+        let t = Theme::dark();
+        assert_eq!(t.context_color(40), t.context_amber);
+        assert_eq!(t.context_color(59), t.context_amber);
+    }
+
+    #[test]
+    fn context_color_60_to_79_returns_warning() {
+        let t = Theme::dark();
+        assert_eq!(t.context_color(60), t.warning);
+        assert_eq!(t.context_color(79), t.warning);
+    }
+
+    #[test]
+    fn context_color_80_plus_returns_error() {
+        let t = Theme::dark();
+        assert_eq!(t.context_color(80), t.error);
+        assert_eq!(t.context_color(100), t.error);
     }
 
     #[test]

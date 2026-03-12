@@ -29,6 +29,20 @@ use strum::{Display, EnumIter, EnumString, IntoStaticStr};
 use crate::lsp::LspManager;
 use crate::task::TaskStore;
 
+/// Visual category for tool color and gutter marker resolution.
+///
+/// Used by the UI layer to map tool names to colors and marker characters
+/// without exhaustive matching at every call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolVisualCategory {
+    /// Read-only + webfetch + lsp — uses `tool_read` color, `·` marker.
+    Read,
+    /// Write tools + memory — uses `tool_write` color, `✎` marker.
+    Write,
+    /// Bash, question, task — uses `accent` color, `$` or `!` marker.
+    Accent,
+}
+
 /// High-level intent category for UI intent indicators.
 ///
 /// Derived from the tool calls in an assistant turn to show what the agent
@@ -129,6 +143,38 @@ impl ToolName {
             | ToolName::Memory => IntentCategory::Editing,
             ToolName::Bash => IntentCategory::Executing,
             ToolName::Question | ToolName::Task => IntentCategory::Asking,
+        }
+    }
+
+    /// Visual category for UI color and marker resolution.
+    ///
+    /// Exhaustive match — adding a new variant forces updating this.
+    pub fn visual_category(self) -> ToolVisualCategory {
+        match self {
+            ToolName::Read | ToolName::Grep | ToolName::Glob
+            | ToolName::List | ToolName::Webfetch | ToolName::Symbols
+            | ToolName::Lsp => ToolVisualCategory::Read,
+            ToolName::Edit | ToolName::Write | ToolName::Patch
+            | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
+            | ToolName::Memory => ToolVisualCategory::Write,
+            ToolName::Bash | ToolName::Question | ToolName::Task => ToolVisualCategory::Accent,
+        }
+    }
+
+    /// 1-column gutter marker character for the activity rail.
+    ///
+    /// Unlike `tool_marker()` which uses `⚡` (2 terminal columns), this always
+    /// returns a single-column character suitable for the gutter.
+    pub fn gutter_char(self) -> &'static str {
+        match self {
+            ToolName::Read | ToolName::Grep | ToolName::Glob
+            | ToolName::List | ToolName::Webfetch | ToolName::Symbols
+            | ToolName::Lsp => "\u{00b7}",       // · (1 col)
+            ToolName::Edit | ToolName::Write | ToolName::Patch
+            | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
+            | ToolName::Memory => "\u{270e}",     // ✎ (1 col)
+            ToolName::Bash => "$",
+            ToolName::Question | ToolName::Task => "!",
         }
     }
 
@@ -483,6 +529,52 @@ mod tests {
                 !(t.is_write_tool() && t.is_read_only()),
                 "{t} is both write and read-only"
             );
+        }
+    }
+
+    /// Every variant returns a valid visual category (exhaustive).
+    #[test]
+    fn visual_category_exhaustive() {
+        for t in ToolName::iter() {
+            let cat = t.visual_category();
+            if t.is_read_only() || t == ToolName::Webfetch || t == ToolName::Lsp {
+                assert_eq!(cat, ToolVisualCategory::Read, "{t} should be Read");
+            } else if t.is_write_tool() || t.is_memory() {
+                assert_eq!(cat, ToolVisualCategory::Write, "{t} should be Write");
+            } else {
+                assert_eq!(cat, ToolVisualCategory::Accent, "{t} should be Accent");
+            }
+        }
+    }
+
+    /// Every variant returns a non-empty 1-column gutter char.
+    #[test]
+    fn gutter_char_exhaustive() {
+        for t in ToolName::iter() {
+            let ch = t.gutter_char();
+            assert!(!ch.is_empty(), "{t} gutter_char should be non-empty");
+            assert_eq!(ch.chars().count(), 1, "{t} gutter_char should be 1 char, got '{ch}'");
+        }
+    }
+
+    /// visual_category is consistent with tool_marker groupings.
+    #[test]
+    fn visual_category_consistent_with_markers() {
+        for t in ToolName::iter() {
+            match t.visual_category() {
+                ToolVisualCategory::Read => {
+                    assert_eq!(t.gutter_char(), "\u{00b7}", "{t} Read should have · gutter");
+                }
+                ToolVisualCategory::Write => {
+                    assert_eq!(t.gutter_char(), "\u{270e}", "{t} Write should have ✎ gutter");
+                }
+                ToolVisualCategory::Accent => {
+                    assert!(
+                        ["$", "!"].contains(&t.gutter_char()),
+                        "{t} Accent should have $ or ! gutter, got '{}'", t.gutter_char()
+                    );
+                }
+            }
         }
     }
 }

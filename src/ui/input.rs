@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use ratatui_textarea::TextArea;
 use unicode_width::UnicodeWidthChar;
@@ -91,6 +91,8 @@ pub struct InputState {
     pub scroll_offset: u16,
     /// When set, the textarea shows a summary instead of raw pasted text.
     pub collapsed_paste: Option<CollapsedPaste>,
+    /// Whether the paste preview overlay is visible (Ctrl+P toggle).
+    pub paste_preview_visible: bool,
 }
 
 impl Default for InputState {
@@ -103,6 +105,7 @@ impl Default for InputState {
             mode: AgentMode::Build,
             scroll_offset: 0,
             collapsed_paste: None,
+            paste_preview_visible: false,
         }
     }
 }
@@ -323,6 +326,7 @@ impl InputState {
     /// Replace the current text in the textarea (for autocomplete insertion).
     pub fn set_text(&mut self, text: &str) {
         self.collapsed_paste = None;
+        self.paste_preview_visible = false;
         let mut textarea = TextArea::default();
         textarea.set_cursor_line_style(Style::default());
         textarea.set_placeholder_text("Type a message...");
@@ -349,6 +353,7 @@ impl InputState {
         textarea.set_placeholder_text("Type a message...");
         self.textarea = textarea;
         self.scroll_offset = 0;
+        self.paste_preview_visible = false;
         text
     }
 
@@ -395,6 +400,7 @@ impl InputState {
     /// Restore the full pasted text to the textarea, clearing collapsed state.
     pub fn expand_paste(&mut self) {
         if let Some(paste) = self.collapsed_paste.take() {
+            self.paste_preview_visible = false;
             let mut textarea = TextArea::default();
             textarea.set_cursor_line_style(Style::default());
             textarea.set_placeholder_text("Type a message...");
@@ -544,15 +550,7 @@ pub fn render_input(
     let mut right_spans: Vec<Span> = Vec::new();
     if context.context_window > 0 {
         let pct = context.context_usage_pct;
-        let token_color = if pct >= 80 {
-            theme.error
-        } else if pct >= 60 {
-            theme.warning
-        } else if pct >= 40 {
-            theme.context_amber
-        } else {
-            theme.dim
-        };
+        let token_color = theme.context_color(pct);
         right_spans.push(Span::styled(
             format!(
                 "{}/{} ({}%)",
@@ -599,6 +597,87 @@ pub fn render_input(
     frame.render_widget(chevron, input_horizontal[0]);
 
     render_wrapped_textarea(frame, input_horizontal[1], state, theme);
+}
+
+/// Maximum number of paste preview lines shown in the overlay.
+const MAX_PASTE_PREVIEW_LINES: usize = 20;
+
+/// Render the paste preview overlay centered in the message area.
+///
+/// Shows the first lines of a collapsed paste so the user can inspect
+/// what was pasted without expanding it into the textarea.
+pub fn render_paste_preview(
+    frame: &mut Frame,
+    message_area: Rect,
+    state: &InputState,
+    theme: &Theme,
+    context_pct: u8,
+) {
+    // Only render when visible AND there's a collapsed paste to preview
+    let paste = match (&state.collapsed_paste, state.paste_preview_visible) {
+        (Some(paste), true) => paste,
+        _ => return,
+    };
+
+    let lines: Vec<&str> = paste.full_text.lines().take(MAX_PASTE_PREVIEW_LINES).collect();
+    let total_lines = paste.full_text.lines().count();
+    let truncated = total_lines > MAX_PASTE_PREVIEW_LINES;
+
+    // Build display lines
+    let mut display_lines: Vec<Line<'_>> = lines
+        .iter()
+        .map(|line| Line::from(Span::styled(*line, Style::default().fg(theme.fg))))
+        .collect();
+
+    if truncated {
+        display_lines.push(Line::from(Span::styled(
+            format!("  ... ({} more lines)", total_lines - MAX_PASTE_PREVIEW_LINES),
+            Style::default().fg(theme.dim),
+        )));
+    }
+
+    // Calculate popup dimensions
+    let content_height = display_lines.len() as u16;
+    let popup_height = (content_height + 2).min(message_area.height.saturating_sub(2)); // +2 for borders
+    let popup_width = 60u16.min(message_area.width.saturating_sub(4));
+
+    if popup_width < 20 || popup_height < 5 {
+        return;
+    }
+
+    // Center in message area
+    let popup_x = message_area.x + (message_area.width.saturating_sub(popup_width)) / 2;
+    let popup_y = message_area.y + (message_area.height.saturating_sub(popup_height)) / 2;
+
+    let popup_area = Rect {
+        x: popup_x,
+        y: popup_y,
+        width: popup_width,
+        height: popup_height,
+    };
+
+    // Clear behind the popup
+    frame.render_widget(Clear, popup_area);
+
+    let border_style = Style::default().fg(theme.border_color(context_pct));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(Line::from(vec![
+            Span::styled(
+                " Paste Preview ",
+                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            ),
+        ]))
+        .title_bottom(Line::from(vec![
+            Span::styled(" Ctrl+P to close ", Style::default().fg(theme.dim)),
+        ]));
+
+    let paragraph = Paragraph::new(display_lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(paragraph, popup_area);
 }
 
 #[cfg(test)]

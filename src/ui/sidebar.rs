@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Paragraph, Wrap},
 };
@@ -11,6 +11,7 @@ use crate::lsp::types::Language;
 use crate::task::types::{Priority, TaskKind, TaskStatus};
 use crate::ui::message_block::{DiffContent, DiffLine};
 
+use super::primitives;
 use super::status_line::format_tokens;
 use super::theme::Theme;
 
@@ -18,7 +19,10 @@ use super::theme::Theme;
 pub const MAX_SIDEBAR_TASKS: usize = 10;
 
 /// Maximum characters for a task title on a single sidebar line.
-const MAX_TASK_TITLE_CHARS: usize = 34;
+/// Derived at render time from sidebar width.
+fn max_task_title_chars(sidebar_width: usize) -> usize {
+    sidebar_width.saturating_sub(6) // 1 indent + 3 icon + 2 margin
+}
 
 /// A file modified by a write tool, with accumulated line-change counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,8 +178,10 @@ impl SidebarState {
     }
 }
 
-/// Maximum visible characters for branch name (sidebar is ~40 cols, indent + status suffix).
-const MAX_BRANCH_DISPLAY: usize = 28;
+/// Maximum visible characters for branch name (derived from sidebar width).
+fn max_branch_display(sidebar_width: usize) -> usize {
+    sidebar_width.saturating_sub(12) // indent + " · dirty" suffix
+}
 
 /// Render the sidebar into the given area.
 pub fn render_sidebar(
@@ -187,14 +193,11 @@ pub fn render_sidebar(
 ) {
     let mut lines: Vec<Line> = Vec::new();
     let header_color = theme.border_color(context_pct);
+    // Sidebar content width (area minus 1-char left padding)
+    let sidebar_width = area.width.saturating_sub(1) as usize;
 
     // -- Session section (top — most important context) --
-    lines.push(Line::from(Span::styled(
-        "Session",
-        Style::default()
-            .fg(header_color)
-            .add_modifier(Modifier::BOLD),
-    )));
+    lines.push(primitives::section_header("Session", header_color));
     let title = if state.session_title.is_empty() {
         "(untitled)"
     } else {
@@ -246,24 +249,20 @@ pub fn render_sidebar(
             )));
         }
     }
-    lines.push(Line::from(""));
+    lines.push(primitives::section_separator(sidebar_width, theme));
 
     // -- Git section (below session, only when branch is known) --
     if let Some(branch) = &state.git_branch {
-        lines.push(Line::from(Span::styled(
-            "Git",
-            Style::default()
-                .fg(header_color)
-                .add_modifier(Modifier::BOLD),
-        )));
+        lines.push(primitives::section_header("Git", header_color));
         if let Some(repo_name) = &state.git_repo_name {
             lines.push(Line::from(Span::styled(
                 format!(" {repo_name}"),
                 Style::default().fg(theme.dim),
             )));
         }
-        let truncated_branch = if branch.chars().count() > MAX_BRANCH_DISPLAY {
-            let s: String = branch.chars().take(MAX_BRANCH_DISPLAY - 1).collect();
+        let max_branch = max_branch_display(sidebar_width);
+        let truncated_branch = if branch.chars().count() > max_branch {
+            let s: String = branch.chars().take(max_branch - 1).collect();
             format!("{s}…")
         } else {
             branch.clone()
@@ -282,17 +281,12 @@ pub fn render_sidebar(
             Span::styled(format!(" {truncated_branch}"), Style::default().fg(theme.fg)),
             Span::styled(status_text, Style::default().fg(status_color)),
         ]));
-        lines.push(Line::from(""));
+        lines.push(primitives::section_separator(sidebar_width, theme));
     }
 
     // -- LSP section (if any servers detected) --
     if !state.lsp_servers.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "LSP",
-            Style::default()
-                .fg(header_color)
-                .add_modifier(Modifier::BOLD),
-        )));
+        lines.push(primitives::section_header("LSP", header_color));
         for server in &state.lsp_servers {
             let (icon, icon_color) = if server.running {
                 ("\u{25cf}", theme.success) // ● green — running
@@ -305,11 +299,12 @@ pub fn render_sidebar(
                 Span::styled(name, Style::default().fg(theme.fg)),
             ]));
         }
-        lines.push(Line::from(""));
+        lines.push(primitives::section_separator(sidebar_width, theme));
     }
 
-    // -- Health section (1-line diagnostic summary) --
+    // -- Health section (header + separate status line) --
     {
+        lines.push(primitives::section_header("Health", header_color));
         let summary = &state.diagnostics_summary;
         let max_sev = summary.max_severity();
         let (icon, icon_color, label) = match max_sev {
@@ -331,26 +326,15 @@ pub fn render_sidebar(
             Severity::Info => ("\u{2713}", theme.success, "ok".into()),
         };
         lines.push(Line::from(vec![
-            Span::styled(
-                "Health ",
-                Style::default()
-                    .fg(header_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("{icon} "), Style::default().fg(icon_color)),
+            Span::styled(format!(" {icon} "), Style::default().fg(icon_color)),
             Span::styled(label, Style::default().fg(theme.dim)),
         ]));
-        lines.push(Line::from(""));
+        lines.push(primitives::section_separator(sidebar_width, theme));
     }
 
     // -- Changes section (if any files were modified) --
     if !state.changes.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "Changes",
-            Style::default()
-                .fg(header_color)
-                .add_modifier(Modifier::BOLD),
-        )));
+        lines.push(primitives::section_header("Changes", header_color));
         for change in &state.changes {
             let mut spans = vec![Span::styled(
                 format!(" {}", change.path),
@@ -391,7 +375,7 @@ pub fn render_sidebar(
         }
         lines.push(Line::from(""));
         lines.push(Line::from(summary_spans));
-        lines.push(Line::from(""));
+        lines.push(primitives::section_separator(sidebar_width, theme));
     }
 
     // -- Tasks section (if any tasks to show) --
@@ -409,12 +393,7 @@ pub fn render_sidebar(
             header_parts.push_str(&format!(", {done_count} done"));
         }
         header_parts.push(')');
-        lines.push(Line::from(Span::styled(
-            header_parts,
-            Style::default()
-                .fg(header_color)
-                .add_modifier(Modifier::BOLD),
-        )));
+        lines.push(primitives::section_header(&header_parts, header_color));
 
         // Individual task lines (2 lines each, pre-capped at MAX_SIDEBAR_TASKS by update_sidebar)
         for task in &state.tasks {
@@ -437,8 +416,9 @@ pub fn render_sidebar(
                 Span::styled(format!(" {priority_abbr}"), Style::default().fg(theme.dim)),
             ]));
             // Line 2: truncated title
-            let title = if task.title.chars().count() > MAX_TASK_TITLE_CHARS {
-                let truncated: String = task.title.chars().take(MAX_TASK_TITLE_CHARS - 3).collect();
+            let max_title = max_task_title_chars(sidebar_width);
+            let title = if task.title.chars().count() > max_title {
+                let truncated: String = task.title.chars().take(max_title - 3).collect();
                 format!("{truncated}...")
             } else {
                 task.title.clone()

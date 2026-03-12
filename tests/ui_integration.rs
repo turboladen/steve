@@ -719,16 +719,15 @@ fn bare_fence_no_header() {
     let text = full_buffer_text(&buf);
     assert!(text.contains("just code"), "code should render");
 
-    // Count non-empty content lines. A fenced block with language label produces:
-    // header + code = 2 lines. Bare fence skips the header, so only 1 content line.
+    // Count non-empty content lines. Bare fence now emits:
+    // header rule + code + closing rule = 3 content lines.
     let content_lines: Vec<&str> = text.lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
         .collect();
-    // Should have exactly 1 content line ("just code") — no header line
     assert_eq!(
-        content_lines.len(), 1,
-        "bare fence should produce 1 content line (no header), got: {content_lines:?}"
+        content_lines.len(), 3,
+        "bare fence should produce 3 content lines (header rule + code + closing rule), got: {content_lines:?}"
     );
 }
 

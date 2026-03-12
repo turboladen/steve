@@ -9,8 +9,16 @@ pub struct AppLayout {
     pub sidebar_separator: Option<Rect>,
 }
 
-const SIDEBAR_WIDTH: u16 = 40;
 const SIDEBAR_MIN_TERMINAL_WIDTH: u16 = 120;
+
+/// Responsive sidebar width: wider at large terminals.
+fn sidebar_width(terminal_width: u16) -> u16 {
+    if terminal_width >= 160 {
+        44
+    } else {
+        36
+    }
+}
 
 /// Compute the layout given the full terminal area and dynamic input height.
 ///
@@ -23,6 +31,7 @@ pub fn compute_layout(area: Rect, show_sidebar: bool, input_height: u16) -> AppL
     let sidebar_visible = show_sidebar && area.width >= SIDEBAR_MIN_TERMINAL_WIDTH;
 
     if sidebar_visible {
+        let sb_width = sidebar_width(area.width);
         // Split horizontally: content | 1-col gap | sidebar
         // The gap prevents the sidebar border character from appearing in copied text.
         let horizontal = Layout::default()
@@ -30,7 +39,7 @@ pub fn compute_layout(area: Rect, show_sidebar: bool, input_height: u16) -> AppL
             .constraints([
                 Constraint::Min(40),
                 Constraint::Length(1),          // visual separator (empty column)
-                Constraint::Length(SIDEBAR_WIDTH),
+                Constraint::Length(sb_width),
             ])
             .split(area);
 
@@ -98,12 +107,23 @@ mod tests {
         let layout = compute_layout(rect(120, 24), true, MIN_INPUT_HEIGHT);
         assert!(layout.sidebar.is_some());
         let sidebar = layout.sidebar.unwrap();
-        assert_eq!(sidebar.width, SIDEBAR_WIDTH);
-        // Message area width = 120 - 1(sep) - 40(sidebar) = 79
-        assert_eq!(layout.message_area.width, 79);
+        let sb_w = sidebar_width(120); // 36 at 120 cols
+        assert_eq!(sidebar.width, sb_w);
+        // Message area width = 120 - 1(sep) - sb_w(sidebar)
+        assert_eq!(layout.message_area.width, 120 - 1 - sb_w);
         // Separator is 1 column between content and sidebar
         assert!(layout.sidebar_separator.is_some());
         assert_eq!(layout.sidebar_separator.unwrap().width, 1);
+    }
+
+    #[test]
+    fn layout_wide_sidebar() {
+        let layout = compute_layout(rect(160, 24), true, MIN_INPUT_HEIGHT);
+        assert!(layout.sidebar.is_some());
+        let sidebar = layout.sidebar.unwrap();
+        let sb_w = sidebar_width(160); // 44 at 160 cols
+        assert_eq!(sidebar.width, sb_w);
+        assert_eq!(layout.message_area.width, 160 - 1 - sb_w);
     }
 
     #[test]

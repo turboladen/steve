@@ -8,10 +8,11 @@ use ratatui::{
 
 use super::markdown::{MarkdownLine, is_table_row, render_markdown_line, render_table};
 use super::message_block::{AssistantPart, CodeFence, DiffContent, DiffLine, MessageBlock, ToolGroup, ToolGroupStatus};
+use super::primitives;
 use super::selection::{ContentMap, ContentPos, SelectionState};
 use super::syntax;
 use super::theme::Theme;
-use crate::tool::{IntentCategory, ToolName};
+use crate::tool::{IntentCategory, ToolName, ToolVisualCategory};
 
 /// State for the scrollable message area.
 ///
@@ -105,35 +106,19 @@ enum GutterMark {
     Intent,
 }
 
-/// Resolve the UI color for a tool name (extracted from the inline match).
+/// Resolve the UI color for a tool name via `ToolVisualCategory`.
 fn tool_color(name: ToolName, theme: &Theme) -> ratatui::style::Color {
-    match name {
-        ToolName::Read | ToolName::Grep | ToolName::Glob
-        | ToolName::List | ToolName::Webfetch | ToolName::Symbols
-        | ToolName::Lsp => theme.tool_read,
-        ToolName::Edit | ToolName::Write | ToolName::Patch
-        | ToolName::Move | ToolName::Copy | ToolName::Delete
-        | ToolName::Mkdir | ToolName::Memory => theme.tool_write,
-        ToolName::Bash | ToolName::Question | ToolName::Task => theme.accent,
+    match name.visual_category() {
+        ToolVisualCategory::Read => theme.tool_read,
+        ToolVisualCategory::Write => theme.tool_write,
+        ToolVisualCategory::Accent => theme.accent,
     }
 }
 
 /// Return a guaranteed-1-column marker character for the gutter.
-///
-/// Unlike `ToolName::tool_marker()` which uses `⚡` (U+26A1, East Asian Width "W" = 2 columns),
-/// the gutter needs exactly 1 terminal column per marker for alignment. Question/Task use `!`
-/// instead. All other markers are already 1 column wide.
+/// Delegates to `ToolName::gutter_char()`.
 fn gutter_marker(name: ToolName) -> &'static str {
-    match name {
-        ToolName::Read | ToolName::Grep | ToolName::Glob
-        | ToolName::List | ToolName::Webfetch | ToolName::Symbols
-        | ToolName::Lsp => "\u{00b7}",       // · (1 col)
-        ToolName::Edit | ToolName::Write | ToolName::Patch
-        | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
-        | ToolName::Memory => "\u{270e}",                           // ✎ (1 col)
-        ToolName::Bash => "$",
-        ToolName::Question | ToolName::Task => "!",                 // 1-col replacement for ⚡
-    }
+    name.gutter_char()
 }
 
 /// Build gutter spans for a line based on its mark type.
@@ -225,13 +210,61 @@ pub fn render_message_blocks(
     messages: &[MessageBlock],
     state: &mut MessageAreaState,
     theme: &Theme,
-    activity: Option<(char, String)>,
+    activity: Option<(char, String, bool)>,
     context_pct: u8,
     selection: &SelectionState,
 ) {
     let mut glines = GutteredLines::new(theme);
     let available_width = area.width.max(1) as usize;
     let content_width = available_width.saturating_sub(GUTTER_WIDTH);
+    let visible_height = area.height;
+
+    // 3A: Empty state welcome message
+    if messages.is_empty() && activity.is_none() {
+        let welcome_y = (visible_height as usize * 40 / 100).max(1);
+        // Pad blank lines to vertically center
+        for _ in 0..welcome_y {
+            glines.push(Line::from(""), GutterMark::Empty);
+        }
+
+        // "steve" in accent
+        let steve_label = "steve";
+        let steve_pad = content_width.saturating_sub(steve_label.len()) / 2;
+        glines.push(Line::from(vec![
+            Span::raw(" ".repeat(steve_pad)),
+            Span::styled(steve_label, Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+        ]), GutterMark::Empty);
+
+        // Subtitle lines in dim
+        let lines_text = [
+            "Type a message to get started.",
+            "Tab to toggle Build/Plan mode.",
+        ];
+        for subtitle in lines_text {
+            let pad = content_width.saturating_sub(subtitle.len()) / 2;
+            glines.push(Line::from(vec![
+                Span::raw(" ".repeat(pad)),
+                Span::styled(subtitle, Style::default().fg(theme.dim)),
+            ]), GutterMark::Empty);
+        }
+
+        // Render and return early — skip the message loop
+        let (lines, texts) = glines.into_lines_and_texts();
+        let content_map = ContentMap::build(texts, available_width);
+        state.content_map = Some(content_map);
+        let content_height = lines.len() as u16;
+        state.update_dimensions(content_height, visible_height);
+
+        let block = Block::default()
+            .borders(Borders::NONE)
+            .style(Style::default().fg(theme.fg));
+        let paragraph = Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false })
+            .scroll((state.scroll_offset, 0));
+        frame.render_widget(paragraph, area);
+        return;
+    }
 
     for msg in messages.iter() {
         match msg {
@@ -242,12 +275,14 @@ pub fn render_message_blocks(
                             "│ ",
                             Style::default()
                                 .fg(theme.user_msg)
+                                .bg(theme.user_msg_bg)
                                 .add_modifier(Modifier::BOLD),
                         ),
                     ];
                     spans.extend(style_file_refs(text_line, theme));
                     // Use push_with_text to exclude the "│ " decoration from clipboard text
-                    glines.push_with_text(Line::from(spans), GutterMark::Empty, text_line.to_string());
+                    let line = Line::from(spans).style(Style::default().bg(theme.user_msg_bg));
+                    glines.push_with_text(line, GutterMark::Empty, text_line.to_string());
                 }
             }
 
@@ -328,19 +363,26 @@ pub fn render_message_blocks(
                                     tool_color(call.tool_name, theme)
                                 };
 
-                                glines.push(Line::from(Span::styled(
-                                    format!(
-                                        "{status_indicator} {}({}){}",
-                                        call.tool_name, call.args_summary, result_part
+                                glines.push(Line::from(vec![
+                                    Span::styled(
+                                        format!("{status_indicator} "),
+                                        Style::default().fg(color),
                                     ),
-                                    Style::default().fg(color),
-                                )), GutterMark::ToolMarker(call.tool_name));
+                                    Span::styled(
+                                        call.tool_name.to_string(),
+                                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                                    ),
+                                    Span::styled(
+                                        format!(" {}{}", call.args_summary, result_part),
+                                        Style::default().fg(color),
+                                    ),
+                                ]), GutterMark::ToolMarker(call.tool_name));
 
                                 // Expanded output — diff content or raw output fallback
                                 if call.expanded {
                                     if let Some(diff) = &call.diff_content {
                                         let mut diff_output: Vec<Line> = Vec::new();
-                                        render_diff_lines(&mut diff_output, diff, call.result_summary.as_deref(), theme, context_pct);
+                                        render_diff_lines(&mut diff_output, diff, call.result_summary.as_deref(), theme, context_pct, content_width);
                                         glines.extend(diff_output, GutterMark::Continuation(call.tool_name));
                                     } else if let Some(output) = &call.full_output {
                                         for output_line in output.lines() {
@@ -359,20 +401,24 @@ pub fn render_message_blocks(
 
             MessageBlock::System { text } => {
                 for (i, text_line) in text.lines().enumerate() {
-                    let mut spans = Vec::new();
                     if i == 0 {
-                        spans.push(Span::styled(
-                            "system ",
-                            Style::default().fg(theme.dim),
-                        ));
+                        // Rule-style: ── Message text ──────────────
+                        let prefix = format!("\u{2500}\u{2500} {text_line} ");
+                        let prefix_chars = prefix.chars().count();
+                        let dash_count = content_width.saturating_sub(prefix_chars);
+                        let dashes = "\u{2500}".repeat(dash_count);
+                        glines.push(Line::from(Span::styled(
+                            format!("{prefix}{dashes}"),
+                            Style::default().fg(theme.system_msg),
+                        )), GutterMark::Empty);
+                    } else {
+                        glines.push(Line::from(Span::styled(
+                            format!("   {text_line}"),
+                            Style::default()
+                                .fg(theme.system_msg)
+                                .add_modifier(Modifier::ITALIC),
+                        )), GutterMark::Empty);
                     }
-                    spans.push(Span::styled(
-                        text_line.to_string(),
-                        Style::default()
-                            .fg(theme.system_msg)
-                            .add_modifier(Modifier::ITALIC),
-                    ));
-                    glines.push(Line::from(spans), GutterMark::Empty);
                 }
             }
 
@@ -391,10 +437,10 @@ pub fn render_message_blocks(
                 diff_content,
             } => {
                 // Top rule
-                glines.push(Line::from(Span::styled(
-                    "\u{2500}".repeat(40),
-                    Style::default().fg(theme.permission),
-                )), GutterMark::Empty);
+                glines.push(
+                    primitives::horizontal_rule(content_width, theme.permission),
+                    GutterMark::Empty,
+                );
                 // Prompt line
                 glines.push(Line::from(vec![
                     Span::styled(
@@ -419,7 +465,7 @@ pub fn render_message_blocks(
                 // Inline diff preview if available
                 if let Some(diff) = diff_content {
                     let mut diff_output: Vec<Line> = Vec::new();
-                    render_diff_lines(&mut diff_output, diff, None, theme, context_pct);
+                    render_diff_lines(&mut diff_output, diff, None, theme, context_pct, content_width);
                     glines.extend(diff_output, GutterMark::Empty);
                 }
                 // Options line with highlighted key letters
@@ -448,10 +494,10 @@ pub fn render_message_blocks(
                     Span::raw("]lways"),
                 ]), GutterMark::Empty);
                 // Bottom rule
-                glines.push(Line::from(Span::styled(
-                    "\u{2500}".repeat(40),
-                    Style::default().fg(theme.permission),
-                )), GutterMark::Empty);
+                glines.push(
+                    primitives::horizontal_rule(content_width, theme.permission),
+                    GutterMark::Empty,
+                );
             }
 
             MessageBlock::Question {
@@ -462,11 +508,18 @@ pub fn render_message_blocks(
                 answered,
             } => {
                 // Top rule
-                glines.push(Line::from(Span::styled(
-                    "\u{2500}".repeat(40),
-                    Style::default().fg(theme.question),
-                )), GutterMark::Empty);
-                // Question line
+                glines.push(
+                    primitives::horizontal_rule(content_width, theme.question),
+                    GutterMark::Empty,
+                );
+                // Question line with mode badge
+                let mode_badge = if *answered != None {
+                    "" // No badge for answered questions
+                } else if selected.is_none() {
+                    " [typing]"
+                } else {
+                    " [selecting]"
+                };
                 glines.push(Line::from(vec![
                     Span::styled(
                         "? ",
@@ -480,6 +533,10 @@ pub fn render_message_blocks(
                             .fg(theme.fg)
                             .add_modifier(Modifier::BOLD),
                     ),
+                    Span::styled(
+                        mode_badge.to_string(),
+                        Style::default().fg(theme.question),
+                    ),
                 ]), GutterMark::Empty);
 
                 if let Some(answer) = answered {
@@ -490,6 +547,7 @@ pub fn render_message_blocks(
                     )), GutterMark::Empty);
                 } else {
                     // Active state — show options or free-text input
+                    let in_free_text_mode = selected.is_none();
                     for (i, option) in options.iter().enumerate() {
                         let is_selected = *selected == Some(i);
                         let prefix = if is_selected { "  \u{25b8} " } else { "    " };
@@ -498,6 +556,9 @@ pub fn render_message_blocks(
                             Style::default()
                                 .fg(theme.question)
                                 .add_modifier(Modifier::BOLD)
+                        } else if in_free_text_mode {
+                            // Dim options when in free-text mode
+                            Style::default().fg(theme.dim)
                         } else {
                             Style::default().fg(theme.fg)
                         };
@@ -545,10 +606,10 @@ pub fn render_message_blocks(
                 }
 
                 // Bottom rule
-                glines.push(Line::from(Span::styled(
-                    "\u{2500}".repeat(40),
-                    Style::default().fg(theme.question),
-                )), GutterMark::Empty);
+                glines.push(
+                    primitives::horizontal_rule(content_width, theme.question),
+                    GutterMark::Empty,
+                );
             }
         }
 
@@ -557,11 +618,20 @@ pub fn render_message_blocks(
     }
 
     // Inline activity spinner (replaces the old "..." and status bar spinner)
-    if let Some((spinner, text)) = activity {
-        glines.push(Line::from(Span::styled(
-            format!("{spinner} {text}"),
-            Style::default().fg(theme.accent),
-        )), GutterMark::Empty);
+    if let Some((spinner, text, has_pending)) = activity {
+        let mut spans = vec![
+            Span::styled(
+                format!("{spinner} {text}"),
+                Style::default().fg(theme.accent),
+            ),
+        ];
+        if has_pending {
+            spans.push(Span::styled(
+                "  (message queued)",
+                Style::default().fg(theme.dim),
+            ));
+        }
+        glines.push(Line::from(spans), GutterMark::Empty);
         glines.push(Line::from(""), GutterMark::Empty);
     }
 
@@ -603,6 +673,26 @@ pub fn render_message_blocks(
         .scroll((state.scroll_offset, 0));
 
     frame.render_widget(paragraph, area);
+
+    // Scroll position indicator overlay
+    if !state.auto_scroll && state.scroll_offset > 0 {
+        let lines_above = state.scroll_offset;
+        let indicator = format!(" \u{2191} {} lines above ", lines_above);
+        let ind_width = indicator.len() as u16;
+        if area.width >= ind_width + 2 {
+            let ind_area = Rect::new(
+                area.x + area.width - ind_width - 1,
+                area.y,
+                ind_width,
+                1,
+            );
+            let ind_widget = Paragraph::new(Line::from(Span::styled(
+                indicator,
+                Style::default().fg(theme.dim),
+            )));
+            frame.render_widget(ind_widget, ind_area);
+        }
+    }
 
     // "Copied!" flash overlay
     if let Some(flash_time) = selection.copied_flash {
@@ -695,15 +785,17 @@ fn render_diff_lines(
     result_summary: Option<&str>,
     theme: &Theme,
     context_pct: u8,
+    content_width: usize,
 ) {
     match diff {
         DiffContent::EditDiff { lines: diff_lines }
         | DiffContent::PatchDiff { lines: diff_lines } => {
+            // Border width: content_width minus the "  ┌"/"  └" indent (3 chars)
+            let border_width = content_width.saturating_sub(3);
+            let border_color = theme.border_color(context_pct);
+
             // Top border
-            lines.push(Line::from(Span::styled(
-                "  \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
-                Style::default().fg(theme.border_color(context_pct)),
-            )));
+            lines.push(primitives::diff_border_top(border_width, border_color));
 
             for diff_line in diff_lines {
                 let (prefix, text, color) = match diff_line {
@@ -713,7 +805,7 @@ fn render_diff_lines(
                     DiffLine::HunkHeader(t) => ("", t.as_str(), theme.dim),
                 };
                 lines.push(Line::from(vec![
-                    Span::styled("  \u{2502} ", Style::default().fg(theme.border_color(context_pct))),
+                    Span::styled("  \u{2502} ", Style::default().fg(border_color)),
                     Span::styled(
                         format!("{prefix}{text}"),
                         Style::default().fg(color),
@@ -722,10 +814,7 @@ fn render_diff_lines(
             }
 
             // Bottom border
-            lines.push(Line::from(Span::styled(
-                "  \u{2514}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
-                Style::default().fg(theme.border_color(context_pct)),
-            )));
+            lines.push(primitives::diff_border_bottom(border_width, border_color));
         }
         DiffContent::WriteSummary { line_count } => {
             // Determine if this is a create or overwrite from the result summary
@@ -826,25 +915,42 @@ fn render_text_with_code_blocks(
                 highlighter = syntax::try_highlighter(&lang);
 
                 if !lang.is_empty() {
-                    // Language label followed by space fill (background tint provides framing)
-                    let label = format!("{lang} ");
-                    let fill_len = available_width.saturating_sub(label.chars().count());
-                    let fill = " ".repeat(fill_len);
+                    // Language header: "  lang ─────────────────"
+                    let label = format!("  {lang} ");
+                    let label_chars = label.chars().count();
+                    let dash_count = available_width.saturating_sub(label_chars);
+                    let dashes = "\u{2500}".repeat(dash_count);
                     let line = Line::from(vec![
                         Span::styled(label.clone(), code_bg_style),
-                        Span::styled(fill, code_bg_style),
+                        Span::styled(dashes, code_bg_style),
                     ])
                     .style(Style::default().bg(theme.code_bg));
                     result.push(MarkdownLine {
                         plain: label.trim().to_string(),
                         styled: line,
                     });
+                } else {
+                    // No language: emit a thin rule header for visual framing
+                    let dashes = "\u{2500}".repeat(available_width);
+                    let line = Line::from(Span::styled(dashes, code_bg_style))
+                        .style(Style::default().bg(theme.code_bg));
+                    result.push(MarkdownLine {
+                        plain: String::new(),
+                        styled: line,
+                    });
                 }
-                // No language: skip header entirely — code_bg on code lines
-                // provides framing. An all-space header would be invisible.
                 in_code_block = true;
             }
             CodeFence::Close => {
+                // Closing rule line
+                let code_bg_style = Style::default().fg(theme.dim).bg(theme.code_bg);
+                let dashes = "\u{2500}".repeat(available_width);
+                let line = Line::from(Span::styled(dashes, code_bg_style))
+                    .style(Style::default().bg(theme.code_bg));
+                result.push(MarkdownLine {
+                    plain: String::new(),
+                    styled: line,
+                });
                 in_code_block = false;
                 highlighter = None;
             }
@@ -1170,7 +1276,7 @@ mod tests {
             ],
         };
         let mut output: Vec<Line> = Vec::new();
-        render_diff_lines(&mut output, &diff, None, &theme, 0);
+        render_diff_lines(&mut output, &diff, None, &theme, 0, 60);
         // top border + 2 diff lines + bottom border = 4 lines
         assert_eq!(output.len(), 4);
     }
@@ -1187,7 +1293,7 @@ mod tests {
             ],
         };
         let mut output: Vec<Line> = Vec::new();
-        render_diff_lines(&mut output, &diff, None, &theme, 0);
+        render_diff_lines(&mut output, &diff, None, &theme, 0, 60);
         // top border + 4 diff lines + bottom border = 6 lines
         assert_eq!(output.len(), 6);
     }
@@ -1197,7 +1303,7 @@ mod tests {
         let theme = Theme::default();
         let diff = DiffContent::WriteSummary { line_count: 10 };
         let mut output: Vec<Line> = Vec::new();
-        render_diff_lines(&mut output, &diff, Some("Created /tmp/foo (42 bytes)"), &theme, 0);
+        render_diff_lines(&mut output, &diff, Some("Created /tmp/foo (42 bytes)"), &theme, 0, 60);
         assert_eq!(output.len(), 1);
         let text = format!("{:?}", output[0]);
         assert!(text.contains("Created"), "verb should be Created");
@@ -1209,7 +1315,7 @@ mod tests {
         let theme = Theme::default();
         let diff = DiffContent::WriteSummary { line_count: 5 };
         let mut output: Vec<Line> = Vec::new();
-        render_diff_lines(&mut output, &diff, Some("Overwrote /tmp/foo (20 bytes)"), &theme, 0);
+        render_diff_lines(&mut output, &diff, Some("Overwrote /tmp/foo (20 bytes)"), &theme, 0, 60);
         assert_eq!(output.len(), 1);
         let text = format!("{:?}", output[0]);
         assert!(text.contains("Overwrote"), "verb should be Overwrote");
@@ -1220,7 +1326,7 @@ mod tests {
         let theme = Theme::default();
         let diff = DiffContent::WriteSummary { line_count: 3 };
         let mut output: Vec<Line> = Vec::new();
-        render_diff_lines(&mut output, &diff, None, &theme, 0);
+        render_diff_lines(&mut output, &diff, None, &theme, 0, 60);
         assert_eq!(output.len(), 1);
         let text = format!("{:?}", output[0]);
         assert!(text.contains("Overwrote"), "should default to Overwrote when no summary");
@@ -1231,7 +1337,7 @@ mod tests {
         let theme = Theme::default();
         let diff = DiffContent::EditDiff { lines: vec![] };
         let mut output: Vec<Line> = Vec::new();
-        render_diff_lines(&mut output, &diff, None, &theme, 0);
+        render_diff_lines(&mut output, &diff, None, &theme, 0, 60);
         // top border + 0 diff lines + bottom border = 2 lines
         assert_eq!(output.len(), 2);
     }
@@ -1249,7 +1355,7 @@ mod tests {
         width: u16,
         height: u16,
         messages: &[MessageBlock],
-        activity: Option<(char, String)>,
+        activity: Option<(char, String, bool)>,
     ) -> String {
         let theme = Theme::default();
         let mut state = MessageAreaState::default();
@@ -1463,7 +1569,7 @@ mod tests {
     #[test]
     fn buffer_activity_spinner_inline() {
         let messages = vec![];
-        let text = render_messages_to_string(60, 10, &messages, Some(('⠋', "Thinking...".to_string())));
+        let text = render_messages_to_string(60, 10, &messages, Some(('⠋', "Thinking...".to_string(), false)));
         assert!(text.contains("Thinking..."), "activity text should appear");
     }
 
@@ -1881,14 +1987,12 @@ mod tests {
         let theme = Theme::default();
         let text = "before\n```rust\nfn main() {}\n```\nafter";
         let ml = render_text_with_code_blocks(text, &theme, 40);
-        // 5 input lines → "before", header, "fn main() {}", (closing consumed), "after" = 4 output lines
-        assert_eq!(ml.len(), 4, "expected 4 lines, got {}", ml.len());
-        // Header should contain language label
+        // "before", header, "fn main() {}", closing rule, "after" = 5 output lines
+        assert_eq!(ml.len(), 5, "expected 5 lines, got {}", ml.len());
+        // Header should contain language label with dash fill
         let header_text: String = ml[1].styled.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(header_text.starts_with("rust "), "header should start with 'rust ', got: {header_text}");
-        // Fill after label should be all spaces (copy-text constraint: no box-drawing chars)
-        assert!(header_text["rust ".len()..].chars().all(|c| c == ' '),
-            "header fill should be all spaces, got: {header_text}");
+        assert!(header_text.contains("rust"), "header should contain 'rust', got: {header_text}");
+        assert!(header_text.contains("\u{2500}"), "header should contain dash fill");
     }
 
     #[test]
@@ -1896,11 +2000,15 @@ mod tests {
         let theme = Theme::default();
         let text = "```\ncode\n```";
         let ml = render_text_with_code_blocks(text, &theme, 30);
-        // No header for bare fences — just the code line (closing consumed)
-        assert_eq!(ml.len(), 1);
-        let code_text: String = ml[0].styled.spans.iter().map(|s| s.content.as_ref()).collect();
+        // Header rule + code line + closing rule = 3 lines
+        assert_eq!(ml.len(), 3, "expected 3 lines, got {}", ml.len());
+        // Middle line is the code
+        let code_text: String = ml[1].styled.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(code_text, "code");
-        assert_eq!(ml[0].styled.style.bg, Some(theme.code_bg), "code line should have code_bg");
+        assert_eq!(ml[1].styled.style.bg, Some(theme.code_bg), "code line should have code_bg");
+        // Header and closing should have code_bg
+        assert_eq!(ml[0].styled.style.bg, Some(theme.code_bg), "header rule should have code_bg");
+        assert_eq!(ml[2].styled.style.bg, Some(theme.code_bg), "closing rule should have code_bg");
     }
 
     #[test]
@@ -1924,8 +2032,10 @@ mod tests {
         let theme = Theme::default();
         let text = "```\n```";
         let ml = render_text_with_code_blocks(text, &theme, 20);
-        // No header for bare fences, no code content — nothing to render
-        assert_eq!(ml.len(), 0);
+        // Header rule + closing rule = 2 lines (no code content in between)
+        assert_eq!(ml.len(), 2, "expected 2 lines (header + closing), got {}", ml.len());
+        assert_eq!(ml[0].styled.style.bg, Some(theme.code_bg), "header rule should have code_bg");
+        assert_eq!(ml[1].styled.style.bg, Some(theme.code_bg), "closing rule should have code_bg");
     }
 
     #[test]
@@ -1943,15 +2053,15 @@ mod tests {
         let theme = Theme::default();
         let text = "text1\n```rust\nfn a() {}\n```\ntext2\n```go\nfunc b() {}\n```\ntext3";
         let ml = render_text_with_code_blocks(text, &theme, 40);
-        // text1, header1, "fn a() {}", text2, header2, "func b() {}", text3 = 7 lines
-        assert_eq!(ml.len(), 7, "expected 7 lines, got {}", ml.len());
+        // text1, header1, "fn a() {}", close1, text2, header2, "func b() {}", close2, text3 = 9 lines
+        assert_eq!(ml.len(), 9, "expected 9 lines, got {}", ml.len());
         // Normal text lines should NOT have code_bg
         assert_eq!(ml[0].styled.style.bg, None, "text1 should not have bg");
-        assert_eq!(ml[3].styled.style.bg, None, "text2 should not have bg");
-        assert_eq!(ml[6].styled.style.bg, None, "text3 should not have bg");
+        assert_eq!(ml[4].styled.style.bg, None, "text2 should not have bg");
+        assert_eq!(ml[8].styled.style.bg, None, "text3 should not have bg");
         // Code lines should have code_bg
         assert_eq!(ml[2].styled.style.bg, Some(theme.code_bg), "code line 1 should have bg");
-        assert_eq!(ml[5].styled.style.bg, Some(theme.code_bg), "code line 2 should have bg");
+        assert_eq!(ml[6].styled.style.bg, Some(theme.code_bg), "code line 2 should have bg");
     }
 
     #[test]
@@ -1983,10 +2093,12 @@ mod tests {
         let theme = Theme::default();
         let text = "```\ncode\n```\nafter";
         let ml = render_text_with_code_blocks(text, &theme, 40);
-        // No header for bare fence, "code" + "after" = 2 lines (closing fence consumed)
-        assert_eq!(ml.len(), 2);
-        assert_eq!(ml[0].styled.style.bg, Some(theme.code_bg), "code line should have code_bg");
-        assert_eq!(ml[1].styled.style.bg, None, "line after closing fence should be normal text");
+        // Header rule + "code" + closing rule + "after" = 4 lines
+        assert_eq!(ml.len(), 4, "expected 4 lines, got {}", ml.len());
+        assert_eq!(ml[0].styled.style.bg, Some(theme.code_bg), "header rule should have code_bg");
+        assert_eq!(ml[1].styled.style.bg, Some(theme.code_bg), "code line should have code_bg");
+        assert_eq!(ml[2].styled.style.bg, Some(theme.code_bg), "closing rule should have code_bg");
+        assert_eq!(ml[3].styled.style.bg, None, "line after closing fence should be normal text");
     }
 
     #[test]
@@ -2011,7 +2123,8 @@ mod tests {
         let text = render_messages_to_string(60, 15, &messages, None);
         // The header should appear with language label
         assert!(text.contains("rust"), "should contain language label 'rust'");
-        assert!(!text.contains('\u{2500}'), "should not contain ─ (copy-text constraint)");
+        // Code block framing now uses ─ for header/footer rules
+        assert!(text.contains('\u{2500}'), "should contain ─ in code block framing");
         // The code line should appear
         assert!(text.contains("fn main() {}"), "should contain code content");
         // The fence lines (```) should NOT appear
@@ -2028,8 +2141,8 @@ mod tests {
         let theme = Theme::default();
         let text = "```rust\nfn main() { let x = 42; }\n```";
         let ml = render_text_with_code_blocks(text, &theme, 80);
-        // lines: header, code line = 2 output lines
-        assert_eq!(ml.len(), 2, "expected 2 lines, got {}", ml.len());
+        // lines: header, code line, closing rule = 3 output lines
+        assert_eq!(ml.len(), 3, "expected 3 lines, got {}", ml.len());
         // The code line (index 1) should have multiple spans from syntax highlighting
         assert!(
             ml[1].styled.spans.len() > 1,
@@ -2052,8 +2165,8 @@ mod tests {
         let theme = Theme::default();
         let text = "```nonexistent_gibberish_42\nsome code here\n```";
         let ml = render_text_with_code_blocks(text, &theme, 80);
-        // lines: header, code line = 2 output lines
-        assert_eq!(ml.len(), 2, "expected 2 lines, got {}", ml.len());
+        // lines: header, code line, closing rule = 3 output lines
+        assert_eq!(ml.len(), 3, "expected 3 lines, got {}", ml.len());
         // Unknown lang falls back to plain rendering — 1 span with assistant_msg fg
         assert_eq!(
             ml[1].styled.spans.len(),

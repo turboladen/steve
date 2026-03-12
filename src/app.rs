@@ -1590,6 +1590,12 @@ impl App {
                     Some(true) => None,        // forced visible -> auto
                 };
             }
+            (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
+                // Toggle paste preview overlay (only meaningful when a paste is collapsed)
+                if self.input.collapsed_paste.is_some() {
+                    self.input.paste_preview_visible = !self.input.paste_preview_visible;
+                }
+            }
             (KeyCode::Enter, KeyModifiers::SHIFT) => {
                 // Shift+Enter: insert newline in textarea (forward as plain Enter)
                 self.input.expand_paste();

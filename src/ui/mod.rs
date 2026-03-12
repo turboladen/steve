@@ -6,6 +6,7 @@ pub mod markdown;
 pub mod message_area;
 pub mod message_block;
 pub mod model_picker;
+pub mod primitives;
 pub mod selection;
 pub mod sidebar;
 pub mod status_line;
@@ -30,7 +31,7 @@ use crate::app::App;
 use layout::compute_layout;
 use message_area::render_message_blocks;
 use autocomplete::render_autocomplete;
-use input::{render_input, abbreviate_path, InputContext, MIN_INPUT_HEIGHT, MAX_INPUT_PCT, CHEVRON_WIDTH};
+use input::{render_input, render_paste_preview, abbreviate_path, InputContext, MIN_INPUT_HEIGHT, MAX_INPUT_PCT, CHEVRON_WIDTH};
 use diagnostics_overlay::render_diagnostics_overlay;
 use model_picker::render_model_picker;
 use sidebar::render_sidebar;
@@ -107,7 +108,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let max_input = ((area.height as u32 * MAX_INPUT_PCT as u32 / 100) as u16).max(MIN_INPUT_HEIGHT);
     // Compute textarea width accounting for sidebar and chevron
     let content_width = if show_sidebar && area.width >= 120 {
-        area.width.saturating_sub(1 + 40) // separator + sidebar
+        let sb_width = if area.width >= 160 { 44 } else { 36 };
+        area.width.saturating_sub(1 + sb_width) // separator + sidebar
     } else {
         area.width
     };
@@ -119,10 +121,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let pct = app.status_line_state.context_usage_pct();
 
     // Build activity info for inline display in message area
+    let has_pending_input = app.is_loading && !app.input.textarea.lines().join("").is_empty();
     let activity = if app.is_loading {
         let state = &app.status_line_state;
         if state.activity != Activity::Idle {
-            state.spinner_char().map(|ch| (ch, state.activity_text()))
+            state.spinner_char().map(|ch| (ch, state.activity_text(), has_pending_input))
         } else {
             None
         }
@@ -198,6 +201,14 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         &app.theme,
         pct,
     );
+
+    render_paste_preview(
+        frame,
+        layout.message_area,
+        &app.input,
+        &app.theme,
+        pct,
+    );
 }
 
 #[cfg(test)]
@@ -255,8 +266,8 @@ mod tests {
         let buf = render_to_buffer(120, 24, |frame| {
             render(frame, &mut app);
         });
-        // The separator is 1 column wide, at x = 120 - 1(sep) - 40(sidebar) = 79
-        let sep_x = 79;
+        // The separator is 1 column wide, at x = 120 - 1(sep) - 36(sidebar) = 83
+        let sep_x = 83;
         let cell = &buf[(sep_x, 0)];
         assert_eq!(
             cell.bg, app.theme.border_color(0),
