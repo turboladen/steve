@@ -7,7 +7,6 @@ use ratatui::{
 };
 
 use crate::diagnostics::{DiagnosticSummary, Severity};
-use crate::lsp::types::Language;
 use crate::task::types::{Priority, TaskKind, TaskStatus};
 use crate::ui::message_block::{DiffContent, DiffLine};
 
@@ -38,8 +37,8 @@ pub struct FileChange {
 /// LSP server status for sidebar display.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SidebarLsp {
-    /// Language name (e.g., "rust", "python").
-    pub language: Language,
+    /// Binary name of the LSP server (e.g., "rust-analyzer", "ty", "ruff").
+    pub binary: String,
     /// Whether the server is currently running.
     pub running: bool,
 }
@@ -293,10 +292,9 @@ pub fn render_sidebar(
             } else {
                 ("\u{25cb}", theme.dim) // ○ dim — detected but not running
             };
-            let name: &str = (&server.language).into();
             lines.push(Line::from(vec![
                 Span::styled(format!(" {icon} "), Style::default().fg(icon_color)),
-                Span::styled(name, Style::default().fg(theme.fg)),
+                Span::styled(server.binary.clone(), Style::default().fg(theme.fg)),
             ]));
         }
         lines.push(primitives::section_separator(sidebar_width, theme));
@@ -959,15 +957,15 @@ mod tests {
     fn buffer_sidebar_lsp_section_shows_running_servers() {
         let state = SidebarState {
             lsp_servers: vec![
-                SidebarLsp { language: Language::Rust, running: true },
-                SidebarLsp { language: Language::Python, running: true },
+                SidebarLsp { binary: "rust-analyzer".to_string(), running: true },
+                SidebarLsp { binary: "ty".to_string(), running: true },
             ],
             ..Default::default()
         };
         let text = render_sidebar_to_string(40, 20, &state);
         assert!(text.contains("LSP"), "should show 'LSP' header");
-        assert!(text.contains("rust"), "should show rust language");
-        assert!(text.contains("python"), "should show python language");
+        assert!(text.contains("rust-analyzer"), "should show rust-analyzer");
+        assert!(text.contains("ty"), "should show ty");
         // Running servers get filled circle
         assert!(text.contains("\u{25cf}"), "running server should show ● icon");
     }
@@ -976,23 +974,23 @@ mod tests {
     fn buffer_sidebar_lsp_section_shows_not_running() {
         let state = SidebarState {
             lsp_servers: vec![
-                SidebarLsp { language: Language::Rust, running: true },
-                SidebarLsp { language: Language::Ruby, running: false },
+                SidebarLsp { binary: "rust-analyzer".to_string(), running: true },
+                SidebarLsp { binary: "solargraph".to_string(), running: false },
             ],
             ..Default::default()
         };
         let text = render_sidebar_to_string(40, 20, &state);
         assert!(text.contains("\u{25cf}"), "running server should show ● icon");
         assert!(text.contains("\u{25cb}"), "not-running server should show ○ icon");
-        assert!(text.contains("rust"), "should show rust");
-        assert!(text.contains("ruby"), "should show ruby");
+        assert!(text.contains("rust-analyzer"), "should show rust-analyzer");
+        assert!(text.contains("solargraph"), "should show solargraph");
     }
 
     #[test]
     fn buffer_sidebar_lsp_renders_above_changes() {
         let mut state = SidebarState {
             lsp_servers: vec![
-                SidebarLsp { language: Language::Rust, running: true },
+                SidebarLsp { binary: "rust-analyzer".to_string(), running: true },
             ],
             ..Default::default()
         };
@@ -1009,7 +1007,7 @@ mod tests {
             git_branch: Some("main".to_string()),
             git_dirty: Some(false),
             lsp_servers: vec![
-                SidebarLsp { language: Language::TypeScript, running: true },
+                SidebarLsp { binary: "typescript-language-server".to_string(), running: true },
             ],
             ..Default::default()
         };

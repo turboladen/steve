@@ -1,7 +1,6 @@
 //! Pure diagnostic check functions — each takes typed inputs and returns findings.
 
 use crate::config::types::Config;
-use crate::lsp::types::Language;
 
 use super::types::{Category, DiagnosticCheck, Severity};
 
@@ -78,7 +77,7 @@ pub fn ai_environment_checks(
 }
 
 /// LSP server health checks.
-pub fn lsp_health_checks(servers: &[(Language, bool)]) -> Vec<DiagnosticCheck> {
+pub fn lsp_health_checks(servers: &[(&str, bool)]) -> Vec<DiagnosticCheck> {
     let mut checks = Vec::new();
 
     if servers.is_empty() {
@@ -98,9 +97,8 @@ pub fn lsp_health_checks(servers: &[(Language, bool)]) -> Vec<DiagnosticCheck> {
         });
     }
 
-    for (lang, running) in servers {
+    for (name, running) in servers {
         if !running {
-            let name: &str = lang.into();
             checks.push(DiagnosticCheck {
                 severity: Severity::Warning,
                 category: Category::LspHealth,
@@ -270,8 +268,8 @@ mod tests {
     #[test]
     fn lsp_all_running_no_warnings() {
         let servers = vec![
-            (Language::Rust, true),
-            (Language::Python, true),
+            ("rust-analyzer", true),
+            ("ty", true),
         ];
         let checks = lsp_health_checks(&servers);
         assert!(checks.is_empty());
@@ -280,20 +278,20 @@ mod tests {
     #[test]
     fn lsp_detected_not_running_warns() {
         let servers = vec![
-            (Language::Rust, true),
-            (Language::Python, false),
+            ("rust-analyzer", true),
+            ("ty", false),
         ];
         let checks = lsp_health_checks(&servers);
         assert_eq!(checks.len(), 1);
-        assert!(checks[0].label.contains("python"));
+        assert!(checks[0].label.contains("ty"));
         assert_eq!(checks[0].severity, Severity::Warning);
     }
 
     #[test]
     fn lsp_zero_running_error() {
         let servers = vec![
-            (Language::Rust, false),
-            (Language::Python, false),
+            ("rust-analyzer", false),
+            ("ty", false),
         ];
         let checks = lsp_health_checks(&servers);
         // Should have 1 error (no servers) + 2 warnings (per-server)

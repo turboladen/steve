@@ -607,7 +607,7 @@ impl App {
                         let running: Vec<&str> = status
                             .iter()
                             .filter(|(_, r)| *r)
-                            .map(|(l, _)| <&str>::from(l))
+                            .map(|(l, _)| l.as_str())
                             .collect();
                         if !running.is_empty() {
                             let _ = tx.send(AppEvent::StreamNotice {
@@ -1105,7 +1105,7 @@ impl App {
             AppEvent::LspStatus { servers } => {
                 self.sidebar_state.lsp_servers = servers
                     .into_iter()
-                    .map(|(language, running)| SidebarLsp { language, running })
+                    .map(|(binary, running)| SidebarLsp { binary, running })
                     .collect();
             }
             AppEvent::PermissionRequest(req) => {
@@ -2257,9 +2257,9 @@ impl App {
     /// and when the /diagnostics overlay is opened — not per-frame.
     fn collect_diagnostics(&self) -> Vec<crate::diagnostics::DiagnosticCheck> {
         let (cache_hits, cache_misses) = self.tool_cache.lock().unwrap().cache_stats();
-        let lsp_servers: Vec<(crate::lsp::types::Language, bool)> =
+        let lsp_servers: Vec<(&str, bool)> =
             self.sidebar_state.lsp_servers.iter()
-                .map(|s| (s.language, s.running))
+                .map(|s| (s.binary.as_str(), s.running))
                 .collect();
         let system_prompt_len = self.build_system_prompt()
             .map(|s| s.len())

@@ -6,7 +6,6 @@ pub mod types;
 pub use types::{Category, DiagnosticCheck, DiagnosticSummary, Severity};
 
 use crate::config::types::Config;
-use crate::lsp::types::Language;
 
 /// Bundle of inputs for running all diagnostic checks.
 /// Borrows from existing App state — no cloning required.
@@ -14,7 +13,7 @@ pub struct DiagnosticInput<'a> {
     pub agents_md: Option<&'a str>,
     pub system_prompt_len: usize,
     pub config: &'a Config,
-    pub lsp_servers: &'a [(Language, bool)],
+    pub lsp_servers: &'a [(&'a str, bool)],
     pub total_tokens: u64,
     pub exchange_count: usize,
     pub cache_hits: u32,
@@ -69,7 +68,7 @@ mod tests {
     fn run_diagnostics_returns_checks_from_all_categories() {
         // Use a config that triggers some checks (default has no costs, no small_model)
         let config = Config::default();
-        let lsp = [(crate::lsp::types::Language::Rust, false)];
+        let lsp = [("rust-analyzer", false)];
         let input = DiagnosticInput {
             agents_md: None, // triggers AI env warning
             system_prompt_len: 1000,

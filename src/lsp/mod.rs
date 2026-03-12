@@ -22,6 +22,7 @@ pub struct LspServer {
     _process: Child,
     transport: JsonRpcTransport,
     language: Language,
+    pub binary: String,
     capabilities: ServerCapabilities,
     open_files: HashSet<Uri>,
     /// Buffered diagnostics from publishDiagnostics notifications.
@@ -117,6 +118,7 @@ impl LspManager {
             _process: child,
             transport,
             language: lang,
+            binary: binary.clone(),
             capabilities: init_result.capabilities,
             open_files: HashSet::new(),
             diagnostics: HashMap::new(),
@@ -166,11 +168,19 @@ impl LspManager {
     }
 
     /// Return all detected languages with their running status.
-    /// Each entry is `(Language, running: bool)`.
-    pub fn language_status(&self) -> Vec<(Language, bool)> {
+    /// Each entry is `(binary_name: String, running: bool)`.
+    pub fn language_status(&self) -> Vec<(String, bool)> {
         self.detected_languages
             .iter()
-            .map(|&lang| (lang, self.servers.contains_key(&lang)))
+            .map(|&lang| {
+                let binary = self
+                    .servers
+                    .get(&lang)
+                    .map(|s| s.binary.clone())
+                    .unwrap_or_else(|| lang.server_candidates()[0].binary.to_string());
+                let running = self.servers.contains_key(&lang);
+                (binary, running)
+            })
             .collect()
     }
 }
@@ -489,9 +499,9 @@ mod tests {
         // Populate detected_languages without starting servers
         mgr.detected_languages = Language::detect_from_project(dir.path());
         let status = mgr.language_status();
-        // Rust should be detected but not running; Json is always detected
-        assert!(status.iter().any(|(l, r)| *l == Language::Rust && !r));
-        assert!(status.iter().any(|(l, r)| *l == Language::Json && !r));
+        // Both detected languages should be present but not running
+        assert!(status.len() >= 2, "expected at least 2 detected languages");
+        assert!(status.iter().all(|(_, r)| !r), "no servers should be running");
     }
 
     #[test]

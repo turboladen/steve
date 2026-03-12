@@ -150,7 +150,7 @@ impl Language {
                 args: &["--stdio"],
             }],
             Language::Json => &[ServerCandidate {
-                binary: "vscode-json-languageserver",
+                binary: "vscode-json-language-server",
                 args: &["--stdio"],
             }],
             Language::Ruby => &[
