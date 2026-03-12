@@ -108,7 +108,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let max_input = ((area.height as u32 * MAX_INPUT_PCT as u32 / 100) as u16).max(MIN_INPUT_HEIGHT);
     // Compute textarea width accounting for sidebar and chevron
     let content_width = if show_sidebar && area.width >= 120 {
-        let sb_width = if area.width >= 160 { 44 } else { 36 };
+        let sb_width = layout::sidebar_width(area.width);
         area.width.saturating_sub(1 + sb_width) // separator + sidebar
     } else {
         area.width

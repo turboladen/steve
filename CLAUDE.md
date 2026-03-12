@@ -152,7 +152,7 @@ Tools: `read`, `grep`, `glob`, `list`, `symbols`, `lsp`, `edit`, `write`, `patch
 
 **Bash interception**: `check_native_tool_redirect()` rejects `cat`→read, `ls`→list, `find`→glob, `grep`→grep, `sed`→edit. Compound commands pass through.
 
-**Exhaustive `ToolName` match locations** (all must update when adding variants): `extract_args_summary()` and `extract_diff_content()` in `app.rs`, `extract_tool_summary()` in `export.rs`, `cache_key()` and `extract_path()` in `context/cache.rs`, `compress_tool_output()` in `context/compressor.rs`, `build_permission_summary()` and `extract_tool_path()` in `stream.rs`, `is_write_tool()`/`intent_category()`/`tool_marker()` in `tool/mod.rs`, `tool_color()` and `gutter_marker()` in `ui/message_area.rs`, `build_mode_rules()` and `plan_mode_rules()` in `permission/mod.rs`. Inner operation dispatches (e.g., edit `operation`) must also list all values explicitly.
+**Exhaustive `ToolName` match locations** (all must update when adding variants): `extract_args_summary()` and `extract_diff_content()` in `app.rs`, `extract_tool_summary()` in `export.rs`, `cache_key()` and `extract_path()` in `context/cache.rs`, `compress_tool_output()` in `context/compressor.rs`, `build_permission_summary()` and `extract_tool_path()` in `stream.rs`, `is_write_tool()`/`intent_category()`/`tool_marker()`/`visual_category()`/`gutter_char()` in `tool/mod.rs`, `build_mode_rules()` and `plan_mode_rules()` in `permission/mod.rs`. Inner operation dispatches (e.g., edit `operation`) must also list all values explicitly.
 
 When adding edit operations: update `extract_diff_content()` in `app.rs` and `build_permission_summary()` in `stream.rs`.
 

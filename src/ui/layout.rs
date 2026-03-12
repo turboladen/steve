@@ -12,7 +12,7 @@ pub struct AppLayout {
 const SIDEBAR_MIN_TERMINAL_WIDTH: u16 = 120;
 
 /// Responsive sidebar width: wider at large terminals.
-fn sidebar_width(terminal_width: u16) -> u16 {
+pub(super) fn sidebar_width(terminal_width: u16) -> u16 {
     if terminal_width >= 160 {
         44
     } else {

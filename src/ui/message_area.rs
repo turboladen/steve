@@ -222,7 +222,7 @@ pub fn render_message_blocks(
     // 3A: Empty state welcome message
     if messages.is_empty() && activity.is_none() {
         let welcome_y = (visible_height as usize * 40 / 100).max(1);
-        // Pad blank lines to vertically center
+        // Pad blank lines to place content slightly above center
         for _ in 0..welcome_y {
             glines.push(Line::from(""), GutterMark::Empty);
         }
@@ -513,7 +513,7 @@ pub fn render_message_blocks(
                     GutterMark::Empty,
                 );
                 // Question line with mode badge
-                let mode_badge = if *answered != None {
+                let mode_badge = if answered.is_some() {
                     "" // No badge for answered questions
                 } else if selected.is_none() {
                     " [typing]"
@@ -678,7 +678,7 @@ pub fn render_message_blocks(
     if !state.auto_scroll && state.scroll_offset > 0 {
         let lines_above = state.scroll_offset;
         let indicator = format!(" \u{2191} {} lines above ", lines_above);
-        let ind_width = indicator.len() as u16;
+        let ind_width = indicator.chars().count() as u16;
         if area.width >= ind_width + 2 {
             let ind_area = Rect::new(
                 area.x + area.width - ind_width - 1,
@@ -790,12 +790,12 @@ fn render_diff_lines(
     match diff {
         DiffContent::EditDiff { lines: diff_lines }
         | DiffContent::PatchDiff { lines: diff_lines } => {
-            // Border width: content_width minus the "  ┌"/"  └" indent (3 chars)
-            let border_width = content_width.saturating_sub(3);
+            // Dash count: fill remaining width after the "  ┌"/"  └" prefix (3 chars)
+            let dash_count = content_width.saturating_sub(3);
             let border_color = theme.border_color(context_pct);
 
             // Top border
-            lines.push(primitives::diff_border_top(border_width, border_color));
+            lines.push(primitives::diff_border_top(dash_count, border_color));
 
             for diff_line in diff_lines {
                 let (prefix, text, color) = match diff_line {
@@ -814,7 +814,7 @@ fn render_diff_lines(
             }
 
             // Bottom border
-            lines.push(primitives::diff_border_bottom(border_width, border_color));
+            lines.push(primitives::diff_border_bottom(dash_count, border_color));
         }
         DiffContent::WriteSummary { line_count } => {
             // Determine if this is a create or overwrite from the result summary
@@ -2253,5 +2253,139 @@ mod tests {
         // Table (3 lines) + empty line + prose = 5 lines
         assert_eq!(ml.len(), 5, "expected 5 lines, got {}", ml.len());
         assert!(ml[4].plain.contains("Some prose after"), "prose after table");
+    }
+
+    // -- Phase review: missing test coverage --
+
+    #[test]
+    fn buffer_empty_state_welcome() {
+        let text = render_messages_to_string(60, 20, &[], None);
+        assert!(text.contains("steve"), "welcome should show 'steve', got:\n{text}");
+        assert!(text.contains("Type a message"), "welcome should show subtitle, got:\n{text}");
+    }
+
+    #[test]
+    fn buffer_activity_spinner_message_queued() {
+        let text = render_messages_to_string(
+            80, 10, &[],
+            Some(('\u{280b}', "Running edit...".to_string(), true)),
+        );
+        assert!(text.contains("Running edit..."), "activity text should appear");
+        assert!(text.contains("message queued"), "should show '(message queued)' when has_pending_input, got:\n{text}");
+    }
+
+    #[test]
+    fn buffer_system_message_has_rule() {
+        let messages = vec![MessageBlock::System {
+            text: "Session started".to_string(),
+        }];
+        let text = render_messages_to_string(60, 10, &messages, None);
+        assert!(text.contains("Session started"), "system text should appear");
+        assert!(text.contains("\u{2500}\u{2500}"), "system message should have ── rule prefix, got:\n{text}");
+    }
+
+    #[test]
+    fn buffer_question_shows_selecting_badge() {
+        let messages = vec![MessageBlock::Question {
+            question: "Pick one".to_string(),
+            options: vec!["A".to_string(), "B".to_string()],
+            selected: Some(0),
+            free_text: String::new(),
+            answered: None,
+        }];
+        let text = render_messages_to_string(80, 15, &messages, None);
+        assert!(text.contains("[selecting]"), "unanswered with selection should show [selecting], got:\n{text}");
+    }
+
+    #[test]
+    fn buffer_question_shows_typing_badge() {
+        let messages = vec![MessageBlock::Question {
+            question: "What?".to_string(),
+            options: vec![],
+            selected: None,
+            free_text: "typing here".to_string(),
+            answered: None,
+        }];
+        let text = render_messages_to_string(80, 15, &messages, None);
+        assert!(text.contains("[typing]"), "free-text mode should show [typing], got:\n{text}");
+    }
+
+    #[test]
+    fn buffer_question_answered_no_badge() {
+        let messages = vec![MessageBlock::Question {
+            question: "Pick one".to_string(),
+            options: vec!["A".to_string()],
+            selected: Some(0),
+            free_text: String::new(),
+            answered: Some("A".to_string()),
+        }];
+        let text = render_messages_to_string(80, 15, &messages, None);
+        assert!(!text.contains("[selecting]"), "answered should not show badge");
+        assert!(!text.contains("[typing]"), "answered should not show badge");
+    }
+
+    #[test]
+    fn buffer_tool_call_drop_parens_format() {
+        let messages = vec![MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::ToolGroup(ToolGroup {
+                calls: vec![ToolCall {
+                    tool_name: ToolName::Read,
+                    args_summary: "src/main.rs".to_string(),
+                    full_output: Some("content".to_string()),
+                    result_summary: Some("50 lines".to_string()),
+                    diff_content: None,
+                    is_error: false,
+                    expanded: false,
+                }],
+                status: ToolGroupStatus::Complete,
+            })],
+        }];
+        let text = render_messages_to_string(80, 10, &messages, None);
+        // New format: tool name followed by space and args (no parens)
+        assert!(!text.contains("read("), "should NOT have parens format 'read(', got:\n{text}");
+        assert!(text.contains("read"), "should show tool name");
+        assert!(text.contains("src/main.rs"), "should show args");
+    }
+
+    #[test]
+    fn buffer_scroll_indicator_not_shown_at_bottom() {
+        // When auto_scroll is true (default), no indicator should appear
+        let text = render_messages_to_string(60, 10, &[], None);
+        assert!(!text.contains("lines above"), "should not show scroll indicator when at bottom");
+    }
+
+    #[test]
+    fn buffer_user_message_has_bg_tint() {
+        let messages = vec![MessageBlock::User {
+            text: "Hello".to_string(),
+        }];
+        let theme = Theme::default();
+        let mut state = MessageAreaState::default();
+        let buf = super::super::render_to_buffer(60, 10, |frame| {
+            render_message_blocks(
+                frame,
+                Rect::new(0, 0, 60, 10),
+                &messages,
+                &mut state,
+                &theme,
+                None,
+                0,
+                &SelectionState::default(),
+            );
+        });
+        // Find a cell in the user message row that has the user_msg_bg color
+        let mut found_bg = false;
+        for y in 0..10 {
+            for x in 0..60 {
+                let cell = &buf[(x, y)];
+                if cell.bg == theme.user_msg_bg {
+                    found_bg = true;
+                    break;
+                }
+            }
+            if found_bg { break; }
+        }
+        assert!(found_bg, "user message should have theme.user_msg_bg background");
     }
 }

@@ -1174,4 +1174,107 @@ mod tests {
         }
         assert!(has_border, "row 0 should contain a horizontal border character");
     }
+
+    // -- paste_preview_visible reset tests --
+
+    #[test]
+    fn take_text_resets_paste_preview() {
+        let mut state = InputState::default();
+        state.collapse_paste("a\nb\nc");
+        state.paste_preview_visible = true;
+        let _ = state.take_text();
+        assert!(!state.paste_preview_visible);
+    }
+
+    #[test]
+    fn set_text_resets_paste_preview() {
+        let mut state = InputState::default();
+        state.collapse_paste("a\nb\nc");
+        state.paste_preview_visible = true;
+        state.set_text("new text");
+        assert!(!state.paste_preview_visible);
+    }
+
+    #[test]
+    fn expand_paste_resets_paste_preview() {
+        let mut state = InputState::default();
+        state.collapse_paste("a\nb\nc");
+        state.paste_preview_visible = true;
+        state.expand_paste();
+        assert!(!state.paste_preview_visible);
+    }
+
+    // -- paste preview rendering tests --
+
+    #[test]
+    fn paste_preview_not_rendered_when_invisible() {
+        let state = InputState::default();
+        let theme = Theme::default();
+        let buf = super::super::render_to_buffer(60, 20, |frame| {
+            render_paste_preview(
+                frame,
+                Rect::new(0, 0, 60, 20),
+                &state,
+                &theme,
+                0,
+            );
+        });
+        let mut text = String::new();
+        for y in 0..20 {
+            for x in 0..60 {
+                text.push_str(buf[(x, y)].symbol());
+            }
+        }
+        assert!(!text.contains("Paste Preview"), "should not render when not visible");
+    }
+
+    #[test]
+    fn paste_preview_rendered_when_visible() {
+        let mut state = InputState::default();
+        state.collapse_paste("line1\nline2\nline3\nline4");
+        state.paste_preview_visible = true;
+        let theme = Theme::default();
+        let buf = super::super::render_to_buffer(60, 20, |frame| {
+            render_paste_preview(
+                frame,
+                Rect::new(0, 0, 60, 20),
+                &state,
+                &theme,
+                0,
+            );
+        });
+        let mut text = String::new();
+        for y in 0..20 {
+            for x in 0..60 {
+                text.push_str(buf[(x, y)].symbol());
+            }
+        }
+        assert!(text.contains("Paste Preview"), "should show title, got:\n{text}");
+        assert!(text.contains("line1"), "should show paste content, got:\n{text}");
+    }
+
+    #[test]
+    fn paste_preview_truncates_long_content() {
+        let mut state = InputState::default();
+        let long_paste = (1..=30).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        state.collapse_paste(&long_paste);
+        state.paste_preview_visible = true;
+        let theme = Theme::default();
+        let buf = super::super::render_to_buffer(60, 30, |frame| {
+            render_paste_preview(
+                frame,
+                Rect::new(0, 0, 60, 30),
+                &state,
+                &theme,
+                0,
+            );
+        });
+        let mut text = String::new();
+        for y in 0..30 {
+            for x in 0..60 {
+                text.push_str(buf[(x, y)].symbol());
+            }
+        }
+        assert!(text.contains("more lines"), "should show truncation indicator, got:\n{text}");
+    }
 }

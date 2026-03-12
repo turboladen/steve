@@ -261,8 +261,8 @@ pub fn render_sidebar(
             )));
         }
         let max_branch = max_branch_display(sidebar_width);
-        let truncated_branch = if branch.chars().count() > max_branch {
-            let s: String = branch.chars().take(max_branch - 1).collect();
+        let truncated_branch = if max_branch > 0 && branch.chars().count() > max_branch {
+            let s: String = branch.chars().take(max_branch.saturating_sub(1)).collect();
             format!("{s}…")
         } else {
             branch.clone()
@@ -417,8 +417,8 @@ pub fn render_sidebar(
             ]));
             // Line 2: truncated title
             let max_title = max_task_title_chars(sidebar_width);
-            let title = if task.title.chars().count() > max_title {
-                let truncated: String = task.title.chars().take(max_title - 3).collect();
+            let title = if max_title > 3 && task.title.chars().count() > max_title {
+                let truncated: String = task.title.chars().take(max_title.saturating_sub(3)).collect();
                 format!("{truncated}...")
             } else {
                 task.title.clone()
@@ -1017,6 +1017,22 @@ mod tests {
         let git_pos = text.find("Git").expect("Git header not found");
         let lsp_pos = text.find("LSP").expect("LSP header not found");
         assert!(git_pos < lsp_pos, "Git should render above LSP");
+    }
+
+    #[test]
+    fn max_branch_display_values() {
+        assert_eq!(max_branch_display(36), 24);
+        assert_eq!(max_branch_display(44), 32);
+        assert_eq!(max_branch_display(12), 0);
+        assert_eq!(max_branch_display(0), 0);
+    }
+
+    #[test]
+    fn max_task_title_chars_values() {
+        assert_eq!(max_task_title_chars(36), 30);
+        assert_eq!(max_task_title_chars(44), 38);
+        assert_eq!(max_task_title_chars(6), 0);
+        assert_eq!(max_task_title_chars(0), 0);
     }
 }
 

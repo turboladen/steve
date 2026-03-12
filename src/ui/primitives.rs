@@ -13,22 +13,26 @@ pub fn horizontal_rule(width: usize, color: ratatui::style::Color) -> Line<'stat
     ))
 }
 
-/// Diff box top border: `  ┌` followed by `─` repeated to fill remaining width.
+/// Diff box top border: `  ┌` followed by `─` repeated.
+///
+/// `width` is the number of dashes to draw after the `┌` corner.
+/// The total output is `2 (spaces) + 1 (corner) + width (dashes)` characters.
 pub fn diff_border_top(width: usize, color: ratatui::style::Color) -> Line<'static> {
     let prefix = "  \u{250c}";
-    let dash_count = width.saturating_sub(1); // subtract the ┌
     Line::from(Span::styled(
-        format!("{prefix}{}", "\u{2500}".repeat(dash_count)),
+        format!("{prefix}{}", "\u{2500}".repeat(width)),
         Style::default().fg(color),
     ))
 }
 
-/// Diff box bottom border: `  └` followed by `─` repeated to fill remaining width.
+/// Diff box bottom border: `  └` followed by `─` repeated.
+///
+/// `width` is the number of dashes to draw after the `└` corner.
+/// The total output is `2 (spaces) + 1 (corner) + width (dashes)` characters.
 pub fn diff_border_bottom(width: usize, color: ratatui::style::Color) -> Line<'static> {
     let prefix = "  \u{2514}";
-    let dash_count = width.saturating_sub(1); // subtract the └
     Line::from(Span::styled(
-        format!("{prefix}{}", "\u{2500}".repeat(dash_count)),
+        format!("{prefix}{}", "\u{2500}".repeat(width)),
         Style::default().fg(color),
     ))
 }
@@ -77,6 +81,8 @@ mod tests {
         let line = diff_border_top(30, theme.border);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.starts_with("  \u{250c}"), "should start with '  ┌', got: {text}");
+        // Total: 2 spaces + 1 corner + 30 dashes = 33
+        assert_eq!(text.chars().count(), 33);
     }
 
     #[test]
@@ -85,6 +91,8 @@ mod tests {
         let line = diff_border_bottom(30, theme.border);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.starts_with("  \u{2514}"), "should start with '  └', got: {text}");
+        // Total: 2 spaces + 1 corner + 30 dashes = 33
+        assert_eq!(text.chars().count(), 33);
     }
 
     #[test]
@@ -94,7 +102,8 @@ mod tests {
         let bottom = diff_border_bottom(40, theme.border);
         let top_text: String = top.spans.iter().map(|s| s.content.as_ref()).collect();
         let bottom_text: String = bottom.spans.iter().map(|s| s.content.as_ref()).collect();
-        // Same length (corners + dashes)
+        // Same length: 2 spaces + 1 corner + 40 dashes = 43
+        assert_eq!(top_text.chars().count(), 43);
         assert_eq!(top_text.chars().count(), bottom_text.chars().count(),
             "top and bottom borders should have same char count");
     }

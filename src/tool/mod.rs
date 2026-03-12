@@ -39,7 +39,7 @@ pub enum ToolVisualCategory {
     Read,
     /// Write tools + memory — uses `tool_write` color, `✎` marker.
     Write,
-    /// Bash, question, task — uses `accent` color, `$` or `!` marker.
+    /// Bash, question, task — uses `accent` color, `$`/`?`/`!` gutter chars.
     Accent,
 }
 
