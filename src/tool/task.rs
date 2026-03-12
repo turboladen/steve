@@ -590,6 +590,7 @@ mod tests {
             project_root: dir.path().to_path_buf(),
             storage_dir: None,
             task_store: Some(Arc::new(store)),
+            lsp_manager: None,
         };
         (ctx, dir)
     }
@@ -951,6 +952,7 @@ mod tests {
             project_root: std::path::PathBuf::from("/tmp"),
             storage_dir: None,
             task_store: None,
+            lsp_manager: None,
         };
         let result = execute(serde_json::json!({"action": "list"}), ctx).unwrap();
         assert!(result.is_error);

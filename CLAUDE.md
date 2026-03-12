@@ -35,7 +35,7 @@ Run `cargo test` after every change.
 - **UI rendering**: `render_to_buffer(width, height, draw_fn)` in `ui/mod.rs` creates a headless `TestBackend`. `make_test_app()` in `app.rs` for rendering tests
 - **Storage**: `Storage::with_base(path)` for temp-dir-based tests. For UI tests: `Storage::new("test-name").expect("test storage")`
 - **Stream**: `MockChatStream` in `stream.rs` — canned SSE responses. Use `with_test_manager(|mgr| { ... })` for `SessionManager` tests
-- **Integration tests** (`tests/`): `permission_integration`, `config_integration`, `tool_integration`. Use `ToolRegistry::new(root)` + `ToolContext { project_root, storage_dir: None }`
+- **Integration tests** (`tests/`): `permission_integration`, `config_integration`, `tool_integration`. Use `ToolRegistry::new(root)` + `ToolContext { project_root, storage_dir: None, task_store: None, lsp_manager: None }`. LSP integration tests use `#[ignore]` for tests requiring language servers on PATH
 - **Assertions**: Never use trivially-true assertions — verify the specific behavior under test
 
 Logs: `{data_dir}/logs/steve.log.YYYY-MM-DD` (daily rolling via `tracing-appender`).
@@ -144,7 +144,7 @@ Two phases: (1) parallel — read-only `Allow` tools via `spawn_blocking`, (2) s
 
 ### Tool System (`tool/mod.rs`)
 
-Tools: `read`, `grep`, `glob`, `list`, `edit`, `write`, `patch`, `move`, `copy`, `delete`, `mkdir`, `bash`, `question`, `task`, `webfetch`, `memory`. Synchronous handlers via `Fn(Value, ToolContext) -> Result<ToolOutput>`.
+Tools: `read`, `grep`, `glob`, `list`, `symbols`, `lsp`, `edit`, `write`, `patch`, `move`, `copy`, `delete`, `mkdir`, `bash`, `question`, `task`, `webfetch`, `memory`. Synchronous handlers via `Fn(Value, ToolContext) -> Result<ToolOutput>`.
 
 **Tool argument names vary**: `read`/`list`/`grep`/`glob`/`delete`/`mkdir` use `"path"`. `edit`/`write`/`patch` use `"file_path"`. `move`/`copy` use `"from_path"`/`"to_path"`. `edit` ops: `find_replace` (default), `multi_find_replace`, `insert_lines`, `delete_lines`, `replace_range`.
 
@@ -152,13 +152,23 @@ Tools: `read`, `grep`, `glob`, `list`, `edit`, `write`, `patch`, `move`, `copy`,
 
 **Bash interception**: `check_native_tool_redirect()` rejects `cat`→read, `ls`→list, `find`→glob, `grep`→grep, `sed`→edit. Compound commands pass through.
 
-**Exhaustive `ToolName` match locations** (all must update when adding variants): `extract_args_summary()` and `extract_diff_content()` in `app.rs`, `extract_tool_summary()` in `export.rs`, `cache_key()` and `extract_path()` in `context/cache.rs`, `compress_tool_output()` in `context/compressor.rs`, `build_permission_summary()` and `extract_tool_path()` in `stream.rs`, `is_write_tool()`/`intent_category()`/`tool_marker()` in `tool/mod.rs`. Inner operation dispatches (e.g., edit `operation`) must also list all values explicitly.
+**Exhaustive `ToolName` match locations** (all must update when adding variants): `extract_args_summary()` and `extract_diff_content()` in `app.rs`, `extract_tool_summary()` in `export.rs`, `cache_key()` and `extract_path()` in `context/cache.rs`, `compress_tool_output()` in `context/compressor.rs`, `build_permission_summary()` and `extract_tool_path()` in `stream.rs`, `is_write_tool()`/`intent_category()`/`tool_marker()` in `tool/mod.rs`, `tool_color()` and `gutter_marker()` in `ui/message_area.rs`, `build_mode_rules()` and `plan_mode_rules()` in `permission/mod.rs`. Inner operation dispatches (e.g., edit `operation`) must also list all values explicitly.
 
 When adding edit operations: update `extract_diff_content()` in `app.rs` and `build_permission_summary()` in `stream.rs`.
 
 ### Task System (`task/`, `tool/task.rs`, `cli/mod.rs`)
 
 IDs: `{project_name}-{kind_char}{4_hex}` (e.g., `steve-ta3f0`). Kind chars: `t` (task), `b` (bug), `e` (epic). Legacy IDs (`task-*`/`bug-*`/`epic-*`) still recognized. Three interfaces must stay in sync: TUI tool handler (`tool/task.rs`), CLI (`cli/mod.rs`), and `app.rs` (`Command::TaskNew`).
+
+### LSP Integration (`lsp/`)
+
+`LspManager` behind `Arc<std::sync::Mutex>` manages per-language `LspServer` instances. Background init at app startup via `spawn_blocking`. Custom JSON-RPC transport over stdio with Content-Length framing (no heavy client framework). Five languages: Rust, Python, TypeScript, JSON, Ruby — detected from project marker files, servers resolved from PATH.
+
+**Tool operations**: `diagnostics`, `definition`, `references`, `rename` (read-only plan). Single `ToolName::Lsp` variant, not cached, not read-only (spawns external process), categorized as `Exploring`.
+
+**Key types**: `lsp-types` 0.97 uses `Uri` (not `Url`). `path_to_uri()` and `uri_to_path()` (pub) in `lsp/mod.rs` handle conversion. `root_uri` field is `#[deprecated]` but still widely supported — suppress with `#[allow(deprecated)]`.
+
+**Adding languages**: Add variant to `Language` enum in `lsp/types.rs`, implement `from_extension()`, `detect_from_project()`, `server_candidates()`. Existing tests use `Language::iter()` so compiler catches missing arms.
 
 ### Storage (`storage/mod.rs`)
 
@@ -171,7 +181,7 @@ ratatui 0.30 + crossterm 0.29 + ratatui-textarea 0.8. Sidebar at width >= 120. T
 **Key patterns**:
 - `MessageBlock` variants: `User`, `Assistant` (with `parts: Vec<AssistantPart>`), `System`, `Error`, `Permission`
 - `complete_tool_call()` uses **forward** search — stream emits events in original order
-- Tool colors: `tool_read` (read-only + webfetch), `tool_write` (write tools + memory), `accent` (bash/question/todo). Markers: `·`/`✎`/`$`/`⚡`
+- Tool colors: `tool_read` (read-only + webfetch + lsp), `tool_write` (write tools + memory), `accent` (bash/question/todo). Markers: `·`/`✎`/`$`/`⚡`
 - Intent labels (`exploring`/`editing`/`executing`) derived at render time via `infer_group_intent()`. Consecutive same-category groups deduplicated
 - Code blocks rendered via `render_text_with_code_blocks()` using `CodeFence::classify()` from `message_block.rs`
 - Auto-scroll uses wrapped line widths (not `lines.len()`) — critical for `Wrap { trim: false }`
@@ -194,7 +204,7 @@ ratatui 0.30 + crossterm 0.29 + ratatui-textarea 0.8. Sidebar at width >= 120. T
 - **`move` is a Rust keyword**: Module is `move_`, variant uses `#[strum(serialize = "move")]` + `#[serde(rename = "move")]`
 - **Unicode width**: Box-drawing `─` is 3 bytes UTF-8 but 1 display char — use `.chars().count()` not `.len()`
 - **`all_commands()` ordering** affects autocomplete prefix matching — update autocomplete tests when adding commands
-- **`ToolContext` fields**: `project_root: PathBuf`, `storage_dir: Option<PathBuf>`. Use `storage_dir: None` in tests unless testing memory tool
+- **`ToolContext` fields**: `project_root: PathBuf`, `storage_dir: Option<PathBuf>`, `task_store: Option<Arc<TaskStore>>`, `lsp_manager: Option<Arc<std::sync::Mutex<LspManager>>>`. Use `None` for optional fields in tests unless testing that specific feature
 - No `dirs` crate — use `std::env::var("HOME")` or `directories::ProjectDirs`. Global config uses `$HOME/.config/steve/` directly
 - `AGENTS.md` optional — loaded at startup if present, injected into system prompt
 

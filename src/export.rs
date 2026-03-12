@@ -248,6 +248,17 @@ fn extract_tool_summary(tool_name: ToolName, input: &serde_json::Value) -> Strin
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
+        ToolName::Lsp => {
+            let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("(no path)");
+            let op = input.get("operation").and_then(|v| v.as_str()).unwrap_or("diagnostics");
+            match op {
+                "diagnostics" => format!("{path} diagnostics"),
+                _ => {
+                    let line = input.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
+                    format!("{path} {op}@{line}")
+                }
+            }
+        }
     }
 }
 

@@ -5,6 +5,7 @@ pub mod edit;
 pub mod glob;
 pub mod grep;
 pub mod list;
+pub mod lsp;
 pub mod memory;
 pub mod mkdir;
 pub mod move_;
@@ -25,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use strum::{Display, EnumIter, EnumString, IntoStaticStr};
 
+use crate::lsp::LspManager;
 use crate::task::TaskStore;
 
 /// High-level intent category for UI intent indicators.
@@ -68,6 +70,7 @@ pub enum ToolName {
     Webfetch,
     Memory,
     Symbols,
+    Lsp,
 }
 
 impl ToolName {
@@ -119,7 +122,8 @@ impl ToolName {
     pub fn intent_category(self) -> IntentCategory {
         match self {
             ToolName::Read | ToolName::Grep | ToolName::Glob
-            | ToolName::List | ToolName::Webfetch | ToolName::Symbols => IntentCategory::Exploring,
+            | ToolName::List | ToolName::Webfetch | ToolName::Symbols
+            | ToolName::Lsp => IntentCategory::Exploring,
             ToolName::Edit | ToolName::Write | ToolName::Patch
             | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
             | ToolName::Memory => IntentCategory::Editing,
@@ -136,7 +140,8 @@ impl ToolName {
     pub fn tool_marker(self) -> &'static str {
         match self {
             ToolName::Read | ToolName::Grep | ToolName::Glob
-            | ToolName::List | ToolName::Webfetch | ToolName::Symbols => "\u{00b7}",       // ·
+            | ToolName::List | ToolName::Webfetch | ToolName::Symbols
+            | ToolName::Lsp => "\u{00b7}",       // ·
             ToolName::Edit | ToolName::Write | ToolName::Patch
             | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
             | ToolName::Memory => "\u{270e}",                           // ✎
@@ -172,6 +177,8 @@ pub struct ToolContext {
     pub storage_dir: Option<PathBuf>,
     /// The task store for persistent task management.
     pub task_store: Option<Arc<TaskStore>>,
+    /// The LSP manager for language server queries.
+    pub lsp_manager: Option<Arc<std::sync::Mutex<LspManager>>>,
 }
 
 /// Definition of a tool (for sending to the LLM as a function schema).
@@ -208,6 +215,7 @@ impl ToolRegistry {
         registry.register(glob::tool());
         registry.register(list::tool());
         registry.register(symbols::tool());
+        registry.register(lsp::tool());
 
         // Register write/execute tools
         registry.register(edit::tool());
@@ -331,6 +339,7 @@ mod tests {
             ToolName::Webfetch,
             ToolName::Memory,
             ToolName::Symbols,
+            ToolName::Lsp,
         ];
         for t in write_tools {
             assert!(t.is_write_tool(), "{t} should be a write tool");
@@ -356,6 +365,7 @@ mod tests {
             ToolName::Task,
             ToolName::Webfetch,
             ToolName::Memory,
+            ToolName::Lsp,
         ];
         for t in read_only {
             assert!(t.is_read_only(), "{t} should be read-only");
@@ -381,6 +391,7 @@ mod tests {
             ToolName::Task,
             ToolName::Webfetch,
             ToolName::Memory,
+            ToolName::Lsp,
         ];
         for t in cacheable {
             assert!(t.is_cacheable(), "{t} should be cacheable");
@@ -399,7 +410,7 @@ mod tests {
         }
 
         // Read tools get ·
-        for t in [ToolName::Read, ToolName::Grep, ToolName::Glob, ToolName::List, ToolName::Webfetch, ToolName::Symbols] {
+        for t in [ToolName::Read, ToolName::Grep, ToolName::Glob, ToolName::List, ToolName::Webfetch, ToolName::Symbols, ToolName::Lsp] {
             assert_eq!(t.tool_marker(), "\u{00b7}", "{t} should have read marker ·");
         }
 
@@ -451,7 +462,7 @@ mod tests {
     fn intent_category_exhaustive() {
         for t in ToolName::iter() {
             let cat = t.intent_category();
-            if t.is_read_only() || t == ToolName::Webfetch {
+            if t.is_read_only() || t == ToolName::Webfetch || t == ToolName::Lsp {
                 assert_eq!(cat, IntentCategory::Exploring, "{t} should be Exploring");
             } else if t.is_write_tool() || t.is_memory() {
                 assert_eq!(cat, IntentCategory::Editing, "{t} should be Editing");

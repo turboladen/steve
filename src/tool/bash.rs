@@ -284,7 +284,7 @@ mod tests {
             "command": "sleep 60",
             "timeout": 1
         });
-        let ctx = ToolContext { project_root: Path::new("/tmp").to_path_buf(), storage_dir: None, task_store: None };
+        let ctx = ToolContext { project_root: Path::new("/tmp").to_path_buf(), storage_dir: None, task_store: None, lsp_manager: None };
         let err = execute(args, ctx).unwrap_err();
         assert!(err.to_string().contains("timed out"));
     }
@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn execute_rejects_simple_cat() {
         let args = serde_json::json!({ "command": "cat src/main.rs" });
-        let ctx = ToolContext { project_root: Path::new("/tmp").to_path_buf(), storage_dir: None, task_store: None };
+        let ctx = ToolContext { project_root: Path::new("/tmp").to_path_buf(), storage_dir: None, task_store: None, lsp_manager: None };
         let output = execute(args, ctx).unwrap();
         assert!(output.is_error);
         assert!(output.output.contains("`read`"));

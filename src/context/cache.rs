@@ -279,7 +279,8 @@ impl ToolResultCache {
             // Don't cache tools with side effects or dynamic content
             ToolName::Bash | ToolName::Edit | ToolName::Write | ToolName::Patch
             | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
-            | ToolName::Question | ToolName::Task | ToolName::Webfetch | ToolName::Memory => None,
+            | ToolName::Question | ToolName::Task | ToolName::Webfetch | ToolName::Memory
+            | ToolName::Lsp => None,
         }
     }
 
@@ -293,7 +294,7 @@ impl ToolResultCache {
             ToolName::Grep | ToolName::Glob | ToolName::Edit | ToolName::Write
             | ToolName::Patch | ToolName::Move | ToolName::Copy | ToolName::Delete
             | ToolName::Mkdir | ToolName::Bash | ToolName::Question | ToolName::Task
-            | ToolName::Webfetch | ToolName::Memory => None,
+            | ToolName::Webfetch | ToolName::Memory | ToolName::Lsp => None,
         }
     }
 

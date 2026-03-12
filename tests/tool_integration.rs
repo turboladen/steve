@@ -15,6 +15,7 @@ fn tool_context(project_root: PathBuf) -> ToolContext {
         project_root,
         storage_dir: None,
         task_store: None,
+        lsp_manager: None,
     }
 }
 
@@ -319,6 +320,221 @@ fn edit_replace_range_through_registry() {
     assert!(content.contains("eprintln!"));
     assert!(content.contains("println!(\"world\")"));
     assert!(!content.contains("println!(\"hello\")"));
+}
+
+// ── LSP tool ──
+
+/// Check if rust-analyzer is installed; skip tests if not.
+fn has_rust_analyzer() -> bool {
+    std::process::Command::new("rust-analyzer")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Helper to create a minimal Cargo project that rust-analyzer can analyze.
+fn create_cargo_project() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"lsp-test\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/main.rs"),
+        "fn greet() -> &'static str {\n    \"hello\"\n}\n\nfn main() {\n    let msg = greet();\n    println!(\"{}\", msg);\n}\n",
+    )
+    .unwrap();
+
+    (dir, root)
+}
+
+#[test]
+fn lsp_tool_no_manager_returns_error() {
+    let (_dir, root) = create_test_project();
+    let registry = ToolRegistry::new(root.clone());
+    // ToolContext without lsp_manager
+    let ctx = tool_context(root.clone());
+
+    let result = registry.execute(
+        ToolName::Lsp,
+        json!({ "path": root.join("src/main.rs").to_string_lossy().to_string() }),
+        ctx,
+    );
+
+    // Should fail because lsp_manager is None
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("LSP not available"));
+}
+
+#[test]
+fn lsp_tool_file_not_found() {
+    let (_dir, root) = create_test_project();
+    let registry = ToolRegistry::new(root.clone());
+    let lsp_mgr = std::sync::Arc::new(std::sync::Mutex::new(
+        steve::lsp::LspManager::new(root.clone()),
+    ));
+    let ctx = ToolContext {
+        project_root: root.clone(),
+        storage_dir: None,
+        task_store: None,
+        lsp_manager: Some(lsp_mgr),
+    };
+
+    let output = registry.execute(
+        ToolName::Lsp,
+        json!({ "path": root.join("nonexistent.rs").to_string_lossy().to_string() }),
+        ctx,
+    ).unwrap();
+
+    assert!(output.is_error);
+    assert!(output.output.contains("not found"));
+}
+
+#[test]
+fn lsp_tool_unknown_operation() {
+    let (_dir, root) = create_test_project();
+    let registry = ToolRegistry::new(root.clone());
+    let lsp_mgr = std::sync::Arc::new(std::sync::Mutex::new(
+        steve::lsp::LspManager::new(root.clone()),
+    ));
+    let ctx = ToolContext {
+        project_root: root.clone(),
+        storage_dir: None,
+        task_store: None,
+        lsp_manager: Some(lsp_mgr),
+    };
+
+    let output = registry.execute(
+        ToolName::Lsp,
+        json!({
+            "path": root.join("src/main.rs").to_string_lossy().to_string(),
+            "operation": "bogus"
+        }),
+        ctx,
+    ).unwrap();
+
+    assert!(output.is_error);
+    assert!(output.output.contains("Unknown operation"));
+}
+
+#[test]
+fn lsp_tool_definition_missing_position() {
+    let (_dir, root) = create_test_project();
+    let registry = ToolRegistry::new(root.clone());
+    let lsp_mgr = std::sync::Arc::new(std::sync::Mutex::new(
+        steve::lsp::LspManager::new(root.clone()),
+    ));
+    let ctx = ToolContext {
+        project_root: root.clone(),
+        storage_dir: None,
+        task_store: None,
+        lsp_manager: Some(lsp_mgr),
+    };
+
+    let result = registry.execute(
+        ToolName::Lsp,
+        json!({
+            "path": root.join("src/main.rs").to_string_lossy().to_string(),
+            "operation": "definition"
+        }),
+        ctx,
+    );
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("line"));
+}
+
+/// Integration test with real rust-analyzer — skipped if not installed.
+#[test]
+#[ignore = "requires rust-analyzer on PATH"]
+fn lsp_diagnostics_with_rust_analyzer() {
+    if !has_rust_analyzer() {
+        eprintln!("skipping: rust-analyzer not found on PATH");
+        return;
+    }
+
+    let (_dir, root) = create_cargo_project();
+    // Write a file with a deliberate error
+    std::fs::write(
+        root.join("src/main.rs"),
+        "fn main() {\n    let x: i32 = \"not a number\";\n    println!(\"{}\", x);\n}\n",
+    ).unwrap();
+
+    let registry = ToolRegistry::new(root.clone());
+    let lsp_mgr = std::sync::Arc::new(std::sync::Mutex::new(
+        steve::lsp::LspManager::new(root.clone()),
+    ));
+    let ctx = ToolContext {
+        project_root: root.clone(),
+        storage_dir: None,
+        task_store: None,
+        lsp_manager: Some(lsp_mgr),
+    };
+
+    let output = registry.execute(
+        ToolName::Lsp,
+        json!({
+            "path": root.join("src/main.rs").to_string_lossy().to_string(),
+            "operation": "diagnostics"
+        }),
+        ctx,
+    ).unwrap();
+
+    assert!(!output.is_error, "diagnostics call should succeed: {}", output.output);
+    // rust-analyzer should report a type mismatch error
+    assert!(
+        output.output.contains("error") || output.output.contains("mismatched"),
+        "expected error diagnostic, got: {}",
+        output.output
+    );
+}
+
+/// Integration test: go-to-definition with real rust-analyzer.
+#[test]
+#[ignore = "requires rust-analyzer on PATH"]
+fn lsp_definition_with_rust_analyzer() {
+    if !has_rust_analyzer() {
+        eprintln!("skipping: rust-analyzer not found on PATH");
+        return;
+    }
+
+    let (_dir, root) = create_cargo_project();
+    let registry = ToolRegistry::new(root.clone());
+    let lsp_mgr = std::sync::Arc::new(std::sync::Mutex::new(
+        steve::lsp::LspManager::new(root.clone()),
+    ));
+    let ctx = ToolContext {
+        project_root: root.clone(),
+        storage_dir: None,
+        task_store: None,
+        lsp_manager: Some(lsp_mgr),
+    };
+
+    // Query definition of `greet` on line 6, column 14 (the call site)
+    // "    let msg = greet();" — greet starts at column 14
+    let output = registry.execute(
+        ToolName::Lsp,
+        json!({
+            "path": root.join("src/main.rs").to_string_lossy().to_string(),
+            "operation": "definition",
+            "line": 6,
+            "character": 14
+        }),
+        ctx,
+    ).unwrap();
+
+    assert!(!output.is_error, "definition call should succeed: {}", output.output);
+    // Should find the definition at line 1 of main.rs
+    assert!(
+        output.output.contains("main.rs") || output.output.contains("Definition"),
+        "expected definition result, got: {}",
+        output.output
+    );
 }
 
 // ── Symbols tool ──

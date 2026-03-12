@@ -199,7 +199,7 @@ mod tests {
             "file_path": file.to_str().unwrap(),
             "patch": "--- a/test.txt\n+++ b/test.txt\n@@ -1,2 +1,2 @@\n-hello\n+goodbye\n world\n"
         });
-        let ctx = ToolContext { project_root: dir.path().to_path_buf(), storage_dir: None, task_store: None };
+        let ctx = ToolContext { project_root: dir.path().to_path_buf(), storage_dir: None, task_store: None, lsp_manager: None };
         let result = execute(args, ctx).unwrap();
         assert!(!result.is_error);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "goodbye\nworld\n");

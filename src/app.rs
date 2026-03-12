@@ -92,7 +92,12 @@ Piped/compound commands (e.g., `cat file | wc -l`) are allowed since they go bey
 - **Record discoveries**: Use the `memory` tool to save important project context (architecture, patterns, key files) that persists across sessions. \
 Your project memory is automatically loaded into context — you don't need to read it manually. \
 When memory gets long, use 'replace' to consolidate into a curated summary. Worth remembering: \
-architecture decisions, key file locations, recurring patterns, user preferences, gotchas encountered.";
+architecture decisions, key file locations, recurring patterns, user preferences, gotchas encountered.\n\
+- **Language intelligence**: Use the `lsp` tool for compiler-grade diagnostics, go-to-definition, find-references, and rename planning. \
+It connects to real language servers (rust-analyzer, pyright, typescript-language-server, etc.) for accurate, cross-file analysis. \
+Use `diagnostics` to check for compile errors after edits, `definition` to jump to a symbol's source, \
+`references` to find all usages, and `rename` to get a safe rename plan (then apply with `edit`). \
+Prefer `lsp` over `grep` when you need semantic accuracy (e.g., distinguishing a type from a variable with the same name).";
 
 /// A permission prompt waiting for user input.
 struct PendingPermission {
@@ -192,6 +197,17 @@ fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
+        ToolName::Lsp => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let op = args.get("operation").and_then(|v| v.as_str()).unwrap_or("diagnostics");
+            match op {
+                "diagnostics" => format!("{path} diagnostics"),
+                _ => {
+                    let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
+                    format!("{path} {op}@{line}")
+                }
+            }
+        }
     }
 }
 
@@ -322,7 +338,8 @@ fn extract_diff_content(tool_name: ToolName, args: &Value) -> Option<DiffContent
         | ToolName::Copy
         | ToolName::Delete
         | ToolName::Mkdir
-        | ToolName::Symbols => None,
+        | ToolName::Symbols
+        | ToolName::Lsp => None,
     }
 }
 
@@ -438,6 +455,9 @@ pub struct App {
     /// Message area rect from last render (for mouse hit-testing).
     pub last_message_area: ratatui::layout::Rect,
 
+    /// LSP manager (shared with tool handlers via ToolContext).
+    lsp_manager: Arc<std::sync::Mutex<crate::lsp::LspManager>>,
+
     /// Usage analytics writer (SQLite background thread).
     usage_writer: UsageWriter,
 
@@ -485,6 +505,11 @@ impl App {
         let repo_name = crate::project::git_repo_name(&project.root)
             .unwrap_or_else(|| "proj".to_string());
         let task_store = crate::task::TaskStore::new(storage.clone(), repo_name);
+
+        // Build LSP manager (servers started in background after app init)
+        let lsp_manager = Arc::new(std::sync::Mutex::new(
+            crate::lsp::LspManager::new(project.root.clone()),
+        ));
 
         // Build startup messages
         let mut messages = Vec::new();
@@ -545,6 +570,7 @@ impl App {
             model_picker: ModelPickerState::default(),
             selection_state: SelectionState::default(),
             last_message_area: ratatui::layout::Rect::default(),
+            lsp_manager,
             usage_writer,
             event_tx,
             event_rx,
@@ -560,6 +586,24 @@ impl App {
         self.theme = ui::terminal_detect::resolve_theme(self.config.theme, detected);
         let mut crossterm_events = crossterm::event::EventStream::new();
         let mut tick_interval = tokio::time::interval(Duration::from_millis(100));
+
+        // Start LSP servers in background (non-blocking)
+        {
+            let lsp = self.lsp_manager.clone();
+            let tx = self.event_tx.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Ok(mut mgr) = lsp.lock() {
+                    mgr.start_servers();
+                    let langs = mgr.running_languages();
+                    if !langs.is_empty() {
+                        let names: Vec<&str> = langs.iter().map(|l| l.into()).collect();
+                        let _ = tx.send(AppEvent::StreamNotice {
+                            text: format!("LSP servers started: {}", names.join(", ")),
+                        });
+                    }
+                }
+            });
+        }
 
         // Initial render
         terminal.draw(|frame| ui::render(frame, self))?;
@@ -1827,6 +1871,7 @@ impl App {
                 project_root: self.project.root.clone(),
                 storage_dir: Some(self.storage.base_dir().clone()),
                 task_store: Some(Arc::new(self.task_store.clone())),
+                lsp_manager: Some(self.lsp_manager.clone()),
             }),
             permission_engine: Some(self.permission_engine.clone()),
             tool_cache: self.tool_cache.clone(),

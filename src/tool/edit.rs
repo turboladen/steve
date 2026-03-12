@@ -546,6 +546,7 @@ mod tests {
             project_root: dir.path().to_path_buf(),
             storage_dir: None,
             task_store: None,
+            lsp_manager: None,
         }
     }
 

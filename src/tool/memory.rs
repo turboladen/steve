@@ -199,6 +199,7 @@ mod tests {
             project_root: dir.to_path_buf(),
             storage_dir: Some(dir.to_path_buf()),
             task_store: None,
+            lsp_manager: None,
         }
     }
 
@@ -301,6 +302,7 @@ mod tests {
             project_root: std::path::PathBuf::from("/tmp"),
             storage_dir: None,
             task_store: None,
+            lsp_manager: None,
         };
         let result = execute(serde_json::json!({"action": "read"}), ctx).unwrap();
         assert!(result.is_error);
