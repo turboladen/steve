@@ -21,6 +21,7 @@ use types::Language;
 pub struct LspServer {
     _process: Child,
     transport: JsonRpcTransport,
+    language: Language,
     capabilities: ServerCapabilities,
     open_files: HashSet<Uri>,
     /// Buffered diagnostics from publishDiagnostics notifications.
@@ -111,6 +112,7 @@ impl LspManager {
         Ok(LspServer {
             _process: child,
             transport,
+            language: lang,
             capabilities: init_result.capabilities,
             open_files: HashSet::new(),
             diagnostics: HashMap::new(),
@@ -172,7 +174,7 @@ impl LspServer {
             let params = DidOpenTextDocumentParams {
                 text_document: TextDocumentItem {
                     uri: uri.clone(),
-                    language_id: String::new(), // server infers from extension
+                    language_id: self.language.language_id().to_string(),
                     version: 0,
                     text: content,
                 },
@@ -326,31 +328,91 @@ impl LspServer {
 
     /// Gracefully shut down the server.
     fn transport_shutdown(mut self) -> Result<()> {
+        // Send shutdown request (server prepares to exit)
         let _ = self.transport.send_request("shutdown", Value::Null);
+        // Send exit notification (server should exit now)
         let _ = self.transport.send_notification("exit", Value::Null);
-        let _ = self._process.kill();
+
+        // Give the server a moment to exit cleanly, then force-kill if needed.
+        // Drop stdin to signal EOF, which helps servers that watch for it.
+        drop(self.transport);
+
+        // Wait briefly for the process to exit on its own
+        match self._process.try_wait() {
+            Ok(Some(_status)) => {} // Already exited
+            _ => {
+                // Not exited yet — give it 500ms then kill
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                match self._process.try_wait() {
+                    Ok(Some(_)) => {}
+                    _ => {
+                        let _ = self._process.kill();
+                        let _ = self._process.wait(); // Reap to avoid zombie
+                    }
+                }
+            }
+        }
         Ok(())
     }
 }
 
 /// Convert a filesystem path to a `file://` URI.
+///
+/// Canonicalizes the path to resolve symlinks and `..` components,
+/// ensuring the URI matches what the language server expects.
 fn path_to_uri(path: &Path) -> Result<Uri> {
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()?.join(path)
     };
-    let uri_string = format!("file://{}", abs.display());
+    // Canonicalize to resolve symlinks and .. components
+    let canonical = std::fs::canonicalize(&abs).unwrap_or(abs);
+    let uri_string = format!("file://{}", canonical.display());
     uri_string
         .parse()
-        .map_err(|e| anyhow::anyhow!("invalid URI for path {}: {e}", abs.display()))
+        .map_err(|e| anyhow::anyhow!("invalid URI for path {}: {e}", canonical.display()))
 }
 
 /// Extract a filesystem path from a `file://` URI string.
 pub fn uri_to_path(uri_str: &str) -> Option<PathBuf> {
     uri_str
         .strip_prefix("file://")
-        .map(|p| PathBuf::from(p.replace("%20", " ")))
+        .map(|p| PathBuf::from(percent_decode(p)))
+}
+
+/// Percent-decode a URI path component.
+///
+/// Handles `%XX` sequences (e.g., `%20` → space, `%23` → `#`).
+fn percent_decode(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.bytes();
+    while let Some(b) = chars.next() {
+        if b == b'%' {
+            let hi = chars.next();
+            let lo = chars.next();
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                if let (Some(h), Some(l)) = (hex_val(hi), hex_val(lo)) {
+                    result.push((h << 4 | l) as char);
+                    continue;
+                }
+            }
+            // Malformed sequence — pass through
+            result.push('%');
+        } else {
+            result.push(b as char);
+        }
+    }
+    result
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Parse a definition/references response into a list of `Location`s.
@@ -476,5 +538,74 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].range.start.line, 5);
         assert_eq!(result[0].range.start.character, 4);
+    }
+
+    #[test]
+    fn uri_to_path_percent_encoded_hash() {
+        let path = uri_to_path("file:///home/user/C%23/test.cs").unwrap();
+        assert_eq!(path, PathBuf::from("/home/user/C#/test.cs"));
+    }
+
+    #[test]
+    fn uri_to_path_percent_encoded_parens() {
+        let path = uri_to_path("file:///home/%28old%29/test.rs").unwrap();
+        assert_eq!(path, PathBuf::from("/home/(old)/test.rs"));
+    }
+
+    #[test]
+    fn percent_decode_passthrough() {
+        assert_eq!(percent_decode("no-encoding"), "no-encoding");
+        assert_eq!(percent_decode(""), "");
+    }
+
+    #[test]
+    fn percent_decode_malformed() {
+        // Incomplete sequence at end — % is passed through, trailing bytes consumed
+        assert_eq!(percent_decode("abc%"), "abc%");
+        // %2G has invalid hex digit G — passes through %
+        assert_eq!(percent_decode("abc%2G"), "abc%");
+    }
+
+    #[test]
+    fn process_notifications_buffers_diagnostics() {
+        use client::JsonRpcNotification;
+
+        let notif = JsonRpcNotification {
+            method: "textDocument/publishDiagnostics".to_string(),
+            params: Some(serde_json::json!({
+                "uri": "file:///test.rs",
+                "diagnostics": [
+                    {
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 5}
+                        },
+                        "severity": 1,
+                        "message": "test error"
+                    }
+                ]
+            })),
+        };
+
+        // Create a minimal LspServer-like struct to test process_notifications.
+        // We can't construct a full LspServer without a running process, but we
+        // can test the notification processing logic directly.
+        let mut diagnostics: HashMap<Uri, Vec<Diagnostic>> = HashMap::new();
+        // Inline the same logic as process_notifications
+        if notif.method == "textDocument/publishDiagnostics" {
+            if let Some(params) = notif.params {
+                if let Ok(diag_params) =
+                    serde_json::from_value::<PublishDiagnosticsParams>(params)
+                {
+                    diagnostics.insert(diag_params.uri, diag_params.diagnostics);
+                }
+            }
+        }
+
+        assert_eq!(diagnostics.len(), 1);
+        let uri: Uri = "file:///test.rs".parse().unwrap();
+        let diags = diagnostics.get(&uri).unwrap();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].message, "test error");
     }
 }

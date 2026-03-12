@@ -128,7 +128,7 @@ Stream task sends `PermissionRequest` with `oneshot::Sender`, awaits reply. Perm
 - **Compressor** (`compressor.rs`): Replaces already-seen tool results with compact summaries. Aggressive pruning at 60% context. Summaries must NOT invite re-reading
 - **Cache** (`cache.rs`): Session-scoped `ToolResultCache` behind `Arc<Mutex>`. Path-normalized keys. Auto-invalidates on mtime changes. After `REPEAT_THRESHOLD` (2) hits returns short summary to break feedback loops
 
-**Critical invariant**: Write tools (`edit`, `write`, `patch`, `move`, `copy`, `delete`, `mkdir`) and `memory` must never run in parallel execution phase — sequential only for cache invalidation.
+**Critical invariant**: Write tools (`edit`, `write`, `patch`, `move`, `copy`, `delete`, `mkdir`), `memory`, and `lsp` must never run in parallel execution phase — sequential only. Write/memory for cache invalidation; LSP because it holds a `std::sync::Mutex` across blocking I/O.
 
 ### Token Pipeline
 

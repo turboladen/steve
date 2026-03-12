@@ -7,10 +7,14 @@
 
 use std::io::{BufRead, BufReader, BufWriter, Read as IoRead, Write as IoWrite};
 use std::process::{ChildStdin, ChildStdout};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// Timeout for waiting for a response from the language server.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A JSON-RPC message (request, response, or notification).
 #[derive(Debug, Clone, Deserialize)]
@@ -85,9 +89,17 @@ impl JsonRpcTransport {
 
         self.write_message(&request)?;
 
-        // Read messages until we get the matching response
+        // Read messages until we get the matching response (with timeout)
         let mut notifications = Vec::new();
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
         loop {
+            if Instant::now() > deadline {
+                return Err(anyhow::anyhow!(
+                    "LSP request '{method}' timed out after {}s",
+                    REQUEST_TIMEOUT.as_secs()
+                ));
+            }
+
             let msg = self.read_message()?;
             match msg {
                 JsonRpcMessage::Response(resp) => {

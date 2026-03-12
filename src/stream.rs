@@ -763,9 +763,9 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         }
 
         // Partition: auto-allowed read-only tools can run in parallel.
-        // Write tools (edit, write, patch), memory tool (append action), and
-        // task tool (writes to storage) always go to sequential phase for
-        // cache invalidation and permission prompts.
+        // Write tools (edit, write, patch), memory tool (append action),
+        // task tool (writes to storage), and LSP tool (holds mutex across
+        // blocking I/O) always go to sequential phase.
         let (auto_allowed, needs_interaction): (Vec<_>, Vec<_>) = prepared
             .into_iter()
             .partition(|tc| {
@@ -773,7 +773,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                     && !tc.tool_name.is_write_tool()
                     && !tc.tool_name.is_memory()
                     && !tc.tool_name.is_task()
-                    && !matches!(tc.tool_name, ToolName::Question)
+                    && !matches!(tc.tool_name, ToolName::Question | ToolName::Lsp)
             });
 
         // Log partition results for diagnostics

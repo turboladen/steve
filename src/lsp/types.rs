@@ -23,6 +23,17 @@ pub struct ServerCandidate {
 }
 
 impl Language {
+    /// The LSP language identifier string (used in `textDocument/didOpen`).
+    pub fn language_id(self) -> &'static str {
+        match self {
+            Language::Rust => "rust",
+            Language::Python => "python",
+            Language::TypeScript => "typescript",
+            Language::Json => "json",
+            Language::Ruby => "ruby",
+        }
+    }
+
     /// Determine the language from a file extension.
     pub fn from_extension(ext: &str) -> Option<Language> {
         match ext {
@@ -245,6 +256,16 @@ mod tests {
             let s: &'static str = lang.into();
             let parsed: Language = s.parse().unwrap();
             assert_eq!(parsed, lang, "round-trip failed for {s}");
+        }
+    }
+
+    #[test]
+    fn language_id_all_non_empty() {
+        for lang in Language::iter() {
+            let id = lang.language_id();
+            assert!(!id.is_empty(), "{lang} should have a non-empty language_id");
+            // Language IDs should be lowercase per LSP convention
+            assert_eq!(id, id.to_lowercase(), "{lang} language_id should be lowercase");
         }
     }
 }

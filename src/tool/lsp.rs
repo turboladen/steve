@@ -292,9 +292,54 @@ fn execute_rename(
     let server = mgr.server_for_file(path)?;
     let edit = server.rename(path, line, character, new_name)?;
 
-    // Format the workspace edit as a readable plan
-    let changes = edit.changes.unwrap_or_default();
-    if changes.is_empty() {
+    // Format the workspace edit as a readable plan.
+    // Servers may return changes in `changes` (simple) or `document_changes` (rich).
+    // Normalize to a common (uri, edits) list.
+    let file_edits: Vec<(String, Vec<lsp_types::TextEdit>)> =
+        if let Some(changes) = edit.changes {
+            changes
+                .into_iter()
+                .map(|(uri, edits)| (uri.as_str().to_string(), edits))
+                .collect()
+        } else if let Some(doc_changes) = edit.document_changes {
+            match doc_changes {
+                lsp_types::DocumentChanges::Edits(edits) => edits
+                    .into_iter()
+                    .map(|e| {
+                        (
+                            e.text_document.uri.as_str().to_string(),
+                            e.edits
+                                .into_iter()
+                                .map(|edit| match edit {
+                                    lsp_types::OneOf::Left(te) => te,
+                                    lsp_types::OneOf::Right(ate) => ate.text_edit,
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+                lsp_types::DocumentChanges::Operations(ops) => ops
+                    .into_iter()
+                    .filter_map(|op| match op {
+                        lsp_types::DocumentChangeOperation::Edit(e) => Some((
+                            e.text_document.uri.as_str().to_string(),
+                            e.edits
+                                .into_iter()
+                                .map(|edit| match edit {
+                                    lsp_types::OneOf::Left(te) => te,
+                                    lsp_types::OneOf::Right(ate) => ate.text_edit,
+                                })
+                                .collect(),
+                        )),
+                        lsp_types::DocumentChangeOperation::Op(_) => None, // file create/rename/delete
+                    })
+                    .collect(),
+            }
+        } else {
+            Vec::new()
+        };
+
+    if file_edits.is_empty() {
         return Ok(ToolOutput {
             title: format!("lsp {path_str} rename@{}", line + 1),
             output: format!("No changes needed for rename at {path_str}:{}:{character}.", line + 1),
@@ -302,14 +347,14 @@ fn execute_rename(
         });
     }
 
-    let total_edits: usize = changes.values().map(|v| v.len()).sum();
+    let total_edits: usize = file_edits.iter().map(|(_, v)| v.len()).sum();
     let mut output = format!(
         "Rename plan: → `{new_name}` ({total_edits} edit(s) across {} file(s))\n\n",
-        changes.len()
+        file_edits.len()
     );
 
-    for (uri, edits) in &changes {
-        let file = uri_to_display(uri.as_str());
+    for (uri, edits) in &file_edits {
+        let file = uri_to_display(uri);
         output.push_str(&format!("{file}:\n"));
         for edit in edits {
             let edit_line = edit.range.start.line + 1;
@@ -330,12 +375,10 @@ fn execute_rename(
 
 /// Convert a file URI to a display-friendly path.
 fn uri_to_display(uri: &str) -> String {
-    if let Some(path) = uri.strip_prefix("file://") {
-        // URL-decode common sequences
-        path.replace("%20", " ")
-    } else {
-        uri.to_string()
-    }
+    // Reuse uri_to_path for proper percent-decoding, fall back to raw URI
+    crate::lsp::uri_to_path(uri)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| uri.to_string())
 }
 
 /// Read a few lines of context from a file around a given 0-indexed line.
