@@ -47,24 +47,20 @@ impl Language {
     }
 
     /// Detect which languages are used in a project by scanning for marker files.
+    ///
+    /// Phase 1 checks the project root (zero overhead for single-project repos).
+    /// Phase 2 walks subdirectories for any languages not yet found (monorepo support).
+    /// Files up to 3 directories deep are detected (`max_depth(4)`, root = depth 0).
+    /// The walk respects `.gitignore` via `WalkBuilder`.
     pub fn detect_from_project(root: &Path) -> Vec<Language> {
-        let mut langs = Vec::new();
-
-        if root.join("Cargo.toml").exists() {
-            langs.push(Language::Rust);
-        }
-        if root.join("pyproject.toml").exists()
+        // Phase 1: fast root-level checks
+        let mut found_rust = root.join("Cargo.toml").exists();
+        let mut found_python = root.join("pyproject.toml").exists()
             || root.join("setup.py").exists()
-            || root.join("requirements.txt").exists()
-        {
-            langs.push(Language::Python);
-        }
-        if root.join("package.json").exists() || root.join("tsconfig.json").exists() {
-            langs.push(Language::TypeScript);
-        }
-        // JSON is always available (lightweight, common)
-        langs.push(Language::Json);
-        if root.join("Gemfile").exists()
+            || root.join("requirements.txt").exists();
+        let mut found_ts = root.join("package.json").exists()
+            || root.join("tsconfig.json").exists();
+        let mut found_ruby = root.join("Gemfile").exists()
             || std::fs::read_dir(root)
                 .ok()
                 .map(|entries| {
@@ -76,11 +72,51 @@ impl Language {
                                 .is_some_and(|ext| ext == "gemspec")
                         })
                 })
-                .unwrap_or(false)
-        {
-            langs.push(Language::Ruby);
+                .unwrap_or(false);
+
+        // Phase 2: subdirectory walk for any languages still undetected
+        if !found_rust || !found_python || !found_ts || !found_ruby {
+            let walker = ignore::WalkBuilder::new(root)
+                .hidden(true)
+                .git_ignore(true)
+                .max_depth(Some(4))
+                .build();
+
+            for entry in walker.flatten() {
+                let Some(name) = entry.file_name().to_str() else {
+                    continue;
+                };
+                match name {
+                    "Cargo.toml" if !found_rust => found_rust = true,
+                    "pyproject.toml" | "setup.py" | "requirements.txt" if !found_python => {
+                        found_python = true;
+                    }
+                    "package.json" | "tsconfig.json" if !found_ts => found_ts = true,
+                    "Gemfile" if !found_ruby => found_ruby = true,
+                    _ if !found_ruby && name.ends_with(".gemspec") => found_ruby = true,
+                    _ => {}
+                }
+                if found_rust && found_python && found_ts && found_ruby {
+                    break;
+                }
+            }
         }
 
+        let mut langs = Vec::new();
+        if found_rust {
+            langs.push(Language::Rust);
+        }
+        if found_python {
+            langs.push(Language::Python);
+        }
+        if found_ts {
+            langs.push(Language::TypeScript);
+        }
+        // JSON is always available (lightweight, common)
+        langs.push(Language::Json);
+        if found_ruby {
+            langs.push(Language::Ruby);
+        }
         langs
     }
 
@@ -257,6 +293,66 @@ mod tests {
             let parsed: Language = s.parse().unwrap();
             assert_eq!(parsed, lang, "round-trip failed for {s}");
         }
+    }
+
+    #[test]
+    fn detect_from_project_subdir_python() {
+        let dir = tempdir().unwrap();
+        let subdir = dir.path().join("services").join("api");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("pyproject.toml"), "").unwrap();
+        let langs = Language::detect_from_project(dir.path());
+        assert!(langs.contains(&Language::Python), "Python not detected in subdir");
+        assert!(langs.contains(&Language::Json)); // always included
+    }
+
+    #[test]
+    fn detect_from_project_monorepo_multiple() {
+        let dir = tempdir().unwrap();
+        // Rust at root
+        std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();
+        // Python in a subdirectory
+        let py_dir = dir.path().join("svc").join("api");
+        std::fs::create_dir_all(&py_dir).unwrap();
+        std::fs::write(py_dir.join("pyproject.toml"), "").unwrap();
+        // TypeScript in a subdirectory
+        let ts_dir = dir.path().join("pkg").join("ui");
+        std::fs::create_dir_all(&ts_dir).unwrap();
+        std::fs::write(ts_dir.join("package.json"), "{}").unwrap();
+
+        let langs = Language::detect_from_project(dir.path());
+        assert!(langs.contains(&Language::Rust), "Rust not detected at root");
+        assert!(langs.contains(&Language::Python), "Python not detected in svc/api");
+        assert!(langs.contains(&Language::TypeScript), "TS not detected in pkg/ui");
+        assert!(langs.contains(&Language::Json), "JSON always included");
+    }
+
+    #[test]
+    fn detect_from_project_at_max_depth() {
+        let dir = tempdir().unwrap();
+        // a/b/c/ is depth 3 — file inside is depth 4 (at max_depth boundary)
+        let at_boundary = dir.path().join("a").join("b").join("c");
+        std::fs::create_dir_all(&at_boundary).unwrap();
+        std::fs::write(at_boundary.join("pyproject.toml"), "").unwrap();
+        let langs = Language::detect_from_project(dir.path());
+        assert!(
+            langs.contains(&Language::Python),
+            "Python should be detected at max_depth boundary"
+        );
+    }
+
+    #[test]
+    fn detect_from_project_beyond_max_depth() {
+        let dir = tempdir().unwrap();
+        // a/b/c/d/ is depth 4, file inside is depth 5 — beyond max_depth(4)
+        let beyond = dir.path().join("a").join("b").join("c").join("d");
+        std::fs::create_dir_all(&beyond).unwrap();
+        std::fs::write(beyond.join("pyproject.toml"), "").unwrap();
+        let langs = Language::detect_from_project(dir.path());
+        assert!(
+            !langs.contains(&Language::Python),
+            "Python should NOT be detected beyond max_depth"
+        );
     }
 
     #[test]
