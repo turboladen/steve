@@ -6,7 +6,8 @@
 
 - [ ] **Exhaustive matching**: No `_ =>` wildcards — explicit variant lists in all match arms
 - [ ] **Test coverage**: New behavior has unit tests; new enums have round-trip tests
-- [ ] **ToolName locations updated**: If a new tool variant was added, all exhaustive match locations updated:
+- [ ] **ToolName locations updated**: If a new tool variant was added, all exhaustive match
+      locations updated:
   - `extract_args_summary()` (app.rs)
   - `extract_diff_content()` (app.rs)
   - `extract_tool_summary()` (export.rs)
