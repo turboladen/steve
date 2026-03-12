@@ -31,6 +31,8 @@ pub struct LspServer {
 /// Manages multiple language server processes for a project.
 pub struct LspManager {
     servers: HashMap<Language, LspServer>,
+    /// Languages detected from project marker files (populated by `start_servers()`).
+    detected_languages: Vec<Language>,
     project_root: PathBuf,
 }
 
@@ -38,6 +40,7 @@ impl LspManager {
     pub fn new(project_root: PathBuf) -> Self {
         Self {
             servers: HashMap::new(),
+            detected_languages: Vec::new(),
             project_root,
         }
     }
@@ -45,6 +48,7 @@ impl LspManager {
     /// Detect languages in the project and start their servers.
     pub fn start_servers(&mut self) {
         let languages = Language::detect_from_project(&self.project_root);
+        self.detected_languages = languages.clone();
         for lang in languages {
             if self.servers.contains_key(&lang) {
                 continue;
@@ -159,6 +163,15 @@ impl LspManager {
     /// List running server languages.
     pub fn running_languages(&self) -> Vec<Language> {
         self.servers.keys().copied().collect()
+    }
+
+    /// Return all detected languages with their running status.
+    /// Each entry is `(Language, running: bool)`.
+    pub fn language_status(&self) -> Vec<(Language, bool)> {
+        self.detected_languages
+            .iter()
+            .map(|&lang| (lang, self.servers.contains_key(&lang)))
+            .collect()
     }
 }
 
@@ -464,6 +477,21 @@ mod tests {
         let mgr = LspManager::new(dir.path().to_path_buf());
         assert!(!mgr.has_servers());
         assert!(mgr.running_languages().is_empty());
+        assert!(mgr.language_status().is_empty());
+    }
+
+    #[test]
+    fn language_status_detected_but_not_running() {
+        let dir = tempdir().unwrap();
+        // Create a Cargo.toml so Rust is detected
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"\n").unwrap();
+        let mut mgr = LspManager::new(dir.path().to_path_buf());
+        // Populate detected_languages without starting servers
+        mgr.detected_languages = Language::detect_from_project(dir.path());
+        let status = mgr.language_status();
+        // Rust should be detected but not running; Json is always detected
+        assert!(status.iter().any(|(l, r)| *l == Language::Rust && !r));
+        assert!(status.iter().any(|(l, r)| *l == Language::Json && !r));
     }
 
     #[test]

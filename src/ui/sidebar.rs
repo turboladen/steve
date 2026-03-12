@@ -6,6 +6,7 @@ use ratatui::{
     widgets::{Block, Paragraph, Wrap},
 };
 
+use crate::lsp::types::Language;
 use crate::task::types::{Priority, TaskKind, TaskStatus};
 use crate::ui::message_block::{DiffContent, DiffLine};
 
@@ -27,6 +28,15 @@ pub struct FileChange {
     pub additions: usize,
     /// Total lines removed across all changes to this file.
     pub removals: usize,
+}
+
+/// LSP server status for sidebar display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidebarLsp {
+    /// Language name (e.g., "rust", "python").
+    pub language: Language,
+    /// Whether the server is currently running.
+    pub running: bool,
 }
 
 /// Lightweight task summary for sidebar display.
@@ -70,6 +80,8 @@ pub struct SidebarState {
     pub session_closed_task_ids: Vec<String>,
     /// Accumulated file changes from write tools this session.
     pub changes: Vec<FileChange>,
+    /// LSP servers detected in the project.
+    pub lsp_servers: Vec<SidebarLsp>,
     /// Current git branch name (None if not in a git repo).
     pub git_branch: Option<String>,
     /// Whether the repo has uncommitted changes (None if not in a git repo).
@@ -94,6 +106,7 @@ impl Default for SidebarState {
             tasks: Vec::new(),
             session_closed_task_ids: Vec::new(),
             changes: Vec::new(),
+            lsp_servers: Vec::new(),
             git_branch: None,
             git_dirty: None,
             git_repo_name: None,
@@ -265,6 +278,29 @@ pub fn render_sidebar(
             Span::styled(format!(" {truncated_branch}"), Style::default().fg(theme.fg)),
             Span::styled(status_text, Style::default().fg(status_color)),
         ]));
+        lines.push(Line::from(""));
+    }
+
+    // -- LSP section (if any servers detected) --
+    if !state.lsp_servers.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "LSP",
+            Style::default()
+                .fg(header_color)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for server in &state.lsp_servers {
+            let (icon, icon_color) = if server.running {
+                ("\u{25cf}", theme.success) // ● green — running
+            } else {
+                ("\u{25cb}", theme.dim) // ○ dim — detected but not running
+            };
+            let name: &str = (&server.language).into();
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {icon} "), Style::default().fg(icon_color)),
+                Span::styled(name, Style::default().fg(theme.fg)),
+            ]));
+        }
         lines.push(Line::from(""));
     }
 
@@ -883,6 +919,85 @@ mod tests {
         assert!(state.git_repo_name.is_none());
         assert_eq!(state.context_window, 0);
         assert_eq!(state.last_prompt_tokens, 0);
+    }
+
+    // -- LSP section tests --
+
+    #[test]
+    fn default_sidebar_state_has_no_lsp_servers() {
+        let state = SidebarState::default();
+        assert!(state.lsp_servers.is_empty());
+    }
+
+    #[test]
+    fn buffer_sidebar_no_lsp_no_section() {
+        let state = SidebarState::default();
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(!text.contains("LSP"), "no LSP servers = no 'LSP' header");
+    }
+
+    #[test]
+    fn buffer_sidebar_lsp_section_shows_running_servers() {
+        let state = SidebarState {
+            lsp_servers: vec![
+                SidebarLsp { language: Language::Rust, running: true },
+                SidebarLsp { language: Language::Python, running: true },
+            ],
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(text.contains("LSP"), "should show 'LSP' header");
+        assert!(text.contains("rust"), "should show rust language");
+        assert!(text.contains("python"), "should show python language");
+        // Running servers get filled circle
+        assert!(text.contains("\u{25cf}"), "running server should show ● icon");
+    }
+
+    #[test]
+    fn buffer_sidebar_lsp_section_shows_not_running() {
+        let state = SidebarState {
+            lsp_servers: vec![
+                SidebarLsp { language: Language::Rust, running: true },
+                SidebarLsp { language: Language::Ruby, running: false },
+            ],
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(text.contains("\u{25cf}"), "running server should show ● icon");
+        assert!(text.contains("\u{25cb}"), "not-running server should show ○ icon");
+        assert!(text.contains("rust"), "should show rust");
+        assert!(text.contains("ruby"), "should show ruby");
+    }
+
+    #[test]
+    fn buffer_sidebar_lsp_renders_above_changes() {
+        let mut state = SidebarState {
+            lsp_servers: vec![
+                SidebarLsp { language: Language::Rust, running: true },
+            ],
+            ..Default::default()
+        };
+        state.record_file_change("file.rs".into(), 1, 0);
+        let text = render_sidebar_to_string(40, 25, &state);
+        let lsp_pos = text.find("LSP").expect("LSP header not found");
+        let changes_pos = text.find("Changes").expect("Changes header not found");
+        assert!(lsp_pos < changes_pos, "LSP should render above Changes");
+    }
+
+    #[test]
+    fn buffer_sidebar_lsp_renders_below_git() {
+        let state = SidebarState {
+            git_branch: Some("main".to_string()),
+            git_dirty: Some(false),
+            lsp_servers: vec![
+                SidebarLsp { language: Language::TypeScript, running: true },
+            ],
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 25, &state);
+        let git_pos = text.find("Git").expect("Git header not found");
+        let lsp_pos = text.find("LSP").expect("LSP header not found");
+        assert!(git_pos < lsp_pos, "Git should render above LSP");
     }
 }
 

@@ -40,7 +40,7 @@ use crate::ui::message_block::{
 };
 use crate::ui::selection::SelectionState;
 use crate::task::types::{Priority, TaskKind, TaskStatus};
-use crate::ui::sidebar::{SidebarState, SidebarTask, count_diff_lines, MAX_SIDEBAR_TASKS};
+use crate::ui::sidebar::{SidebarLsp, SidebarState, SidebarTask, count_diff_lines, MAX_SIDEBAR_TASKS};
 use crate::ui::status_line::{Activity, StatusLineState};
 use crate::ui::theme::Theme;
 
@@ -594,12 +594,22 @@ impl App {
             tokio::task::spawn_blocking(move || {
                 if let Ok(mut mgr) = lsp.lock() {
                     mgr.start_servers();
-                    let langs = mgr.running_languages();
-                    if !langs.is_empty() {
-                        let names: Vec<&str> = langs.iter().map(|l| l.into()).collect();
-                        let _ = tx.send(AppEvent::StreamNotice {
-                            text: format!("LSP servers started: {}", names.join(", ")),
-                        });
+                    let status = mgr.language_status();
+                    if !status.is_empty() {
+                        let running: Vec<&str> = status
+                            .iter()
+                            .filter(|(_, r)| *r)
+                            .map(|(l, _)| <&str>::from(l))
+                            .collect();
+                        if !running.is_empty() {
+                            let _ = tx.send(AppEvent::StreamNotice {
+                                text: format!(
+                                    "LSP servers started: {}",
+                                    running.join(", ")
+                                ),
+                            });
+                        }
+                        let _ = tx.send(AppEvent::LspStatus { servers: status });
                     }
                 }
             });
@@ -1077,6 +1087,12 @@ impl App {
             AppEvent::StreamNotice { text } => {
                 self.messages.push(MessageBlock::System { text });
                 self.message_area_state.scroll_to_bottom();
+            }
+            AppEvent::LspStatus { servers } => {
+                self.sidebar_state.lsp_servers = servers
+                    .into_iter()
+                    .map(|(language, running)| SidebarLsp { language, running })
+                    .collect();
             }
             AppEvent::PermissionRequest(req) => {
                 // Show permission prompt to user, with diff preview if available

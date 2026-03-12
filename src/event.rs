@@ -1,6 +1,7 @@
 use crossterm::event::Event;
 use serde_json::Value;
 
+use crate::lsp::types::Language;
 use crate::permission::types::PermissionRequest;
 use crate::tool::{ToolName, ToolOutput};
 
@@ -65,6 +66,8 @@ pub enum AppEvent {
     /// System-level notification from the stream task (e.g., tool loop warnings).
     /// Displayed as a MessageBlock::System in the TUI.
     StreamNotice { text: String },
+    /// LSP servers have been initialized; carries detected languages with running status.
+    LspStatus { servers: Vec<(Language, bool)> },
 
     // -- Permission events --
 
