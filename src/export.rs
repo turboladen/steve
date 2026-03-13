@@ -259,6 +259,11 @@ fn extract_tool_summary(tool_name: ToolName, input: &serde_json::Value) -> Strin
                 }
             }
         }
+        ToolName::Agent => {
+            let agent_type = input.get("agent_type").and_then(|v| v.as_str()).unwrap_or("explore");
+            let task = input.get("task").and_then(|v| v.as_str()).unwrap_or("(no task)");
+            format!("{agent_type}: {task}")
+        }
     }
 }
 

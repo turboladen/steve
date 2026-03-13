@@ -841,11 +841,14 @@ fn infer_group_intent(group: &ToolGroup) -> Option<IntentCategory> {
     let mut has_editing = false;
     let mut has_executing = false;
 
+    let mut has_delegating = false;
+
     for call in &group.calls {
         match call.tool_name.intent_category() {
             IntentCategory::Exploring => has_exploring = true,
             IntentCategory::Editing => has_editing = true,
             IntentCategory::Executing => has_executing = true,
+            IntentCategory::Delegating => has_delegating = true,
             IntentCategory::Asking => {} // doesn't influence the label
         }
     }
@@ -854,6 +857,8 @@ fn infer_group_intent(group: &ToolGroup) -> Option<IntentCategory> {
         Some(IntentCategory::Editing)
     } else if has_executing {
         Some(IntentCategory::Executing)
+    } else if has_delegating {
+        Some(IntentCategory::Delegating)
     } else if has_exploring {
         Some(IntentCategory::Exploring)
     } else {
@@ -871,6 +876,7 @@ fn render_intent_line(category: IntentCategory, width: usize, theme: &Theme) -> 
         IntentCategory::Exploring => ("exploring", theme.tool_read),
         IntentCategory::Editing => ("editing", theme.tool_write),
         IntentCategory::Executing => ("executing", theme.accent),
+        IntentCategory::Delegating => ("delegating", theme.accent),
         // Asking is never passed here (infer_group_intent returns None for asking-only groups),
         // but the arm is kept for exhaustive coverage so new variants force an update.
         IntentCategory::Asking => ("asking", theme.dim),
@@ -1674,6 +1680,31 @@ mod tests {
         assert_eq!(infer_group_intent(&group), Some(IntentCategory::Editing), "editing has highest priority");
     }
 
+    #[test]
+    fn infer_group_intent_agent_tool() {
+        let group = make_tool_group(&[ToolName::Agent]);
+        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Delegating), "agent should produce Delegating");
+    }
+
+    #[test]
+    fn infer_group_intent_agent_plus_read() {
+        let group = make_tool_group(&[ToolName::Read, ToolName::Agent]);
+        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Delegating), "delegating takes priority over exploring");
+    }
+
+    #[test]
+    fn infer_group_intent_agent_priority() {
+        // editing > executing > delegating > exploring
+        let group = make_tool_group(&[ToolName::Agent, ToolName::Read]);
+        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Delegating));
+
+        let group = make_tool_group(&[ToolName::Agent, ToolName::Bash]);
+        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Executing), "executing takes priority over delegating");
+
+        let group = make_tool_group(&[ToolName::Agent, ToolName::Edit]);
+        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Editing), "editing takes priority over delegating");
+    }
+
     // -- render_intent_line tests --
 
     #[test]
@@ -1699,6 +1730,15 @@ mod tests {
     fn render_intent_line_executing_color() {
         let theme = Theme::default();
         let line = render_intent_line(IntentCategory::Executing, 30, &theme);
+        assert_eq!(line.spans[0].style.fg, Some(theme.accent));
+    }
+
+    #[test]
+    fn render_intent_line_delegating() {
+        let theme = Theme::default();
+        let line = render_intent_line(IntentCategory::Delegating, 40, &theme);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("delegating"));
         assert_eq!(line.spans[0].style.fg, Some(theme.accent));
     }
 

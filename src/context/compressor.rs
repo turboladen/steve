@@ -139,7 +139,7 @@ fn compress_tool_output(tool_name: ToolName, content: &str) -> String {
         ToolName::Patch => compress_patch(content),
         ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
         | ToolName::Question | ToolName::Task | ToolName::Webfetch | ToolName::Memory
-        | ToolName::Symbols | ToolName::Lsp => {
+        | ToolName::Symbols | ToolName::Lsp | ToolName::Agent => {
             compress_generic(content)
         }
     }

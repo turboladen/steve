@@ -268,6 +268,8 @@ pub fn build_mode_rules() -> Vec<PermissionRule> {
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Bash), pattern: "*".into(), action: Ask },
         // Network tools: require permission (external side effects)
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Webfetch), pattern: "*".into(), action: Ask },
+        // Agent tool: requires permission (spawns sub-agents with their own tool loops)
+        PermissionRule { tool: ToolMatcher::Specific(ToolName::Agent), pattern: "*".into(), action: Ask },
     ]
 }
 
@@ -299,6 +301,8 @@ pub fn plan_mode_rules() -> Vec<PermissionRule> {
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Bash), pattern: "*".into(), action: Ask },
         // Network tools: require permission (external side effects)
         PermissionRule { tool: ToolMatcher::Specific(ToolName::Webfetch), pattern: "*".into(), action: Ask },
+        // Agent tool: denied in Plan mode (could spawn General agents that write)
+        PermissionRule { tool: ToolMatcher::Specific(ToolName::Agent), pattern: "*".into(), action: Deny },
     ]
 }
 

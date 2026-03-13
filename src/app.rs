@@ -97,7 +97,12 @@ architecture decisions, key file locations, recurring patterns, user preferences
 It connects to real language servers (rust-analyzer, pyright, typescript-language-server, etc.) for accurate, cross-file analysis. \
 Use `diagnostics` to check for compile errors after edits, `definition` to jump to a symbol's source, \
 `references` to find all usages, and `rename` to get a safe rename plan (then apply with `edit`). \
-Prefer `lsp` over `grep` when you need semantic accuracy (e.g., distinguishing a type from a variable with the same name).";
+Prefer `lsp` over `grep` when you need semantic accuracy (e.g., distinguishing a type from a variable with the same name).\n\
+- **Delegate to sub-agents**: Use the `agent` tool to spawn child agents with their own context windows. \
+Choose `explore` for fast read-only searches (uses smaller model), `plan` for architecture analysis (read + LSP), \
+or `general` for full tool access including writes. Sub-agents run autonomously and return a summary. \
+Use agents to protect your context from large exploration results, parallelize independent searches, \
+or isolate complex subtasks.";
 
 /// A permission prompt waiting for user input.
 struct PendingPermission {
@@ -207,6 +212,17 @@ fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
                     format!("{path} {op}@{line}")
                 }
             }
+        }
+        ToolName::Agent => {
+            let agent_type = args.get("agent_type").and_then(|v| v.as_str()).unwrap_or("explore");
+            let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
+            let truncated = if task.chars().count() > 30 {
+                let t: String = task.chars().take(27).collect();
+                format!("{t}...")
+            } else {
+                task.to_string()
+            };
+            format!("{agent_type}: {truncated}")
         }
     }
 }
@@ -339,7 +355,8 @@ fn extract_diff_content(tool_name: ToolName, args: &Value) -> Option<DiffContent
         | ToolName::Delete
         | ToolName::Mkdir
         | ToolName::Symbols
-        | ToolName::Lsp => None,
+        | ToolName::Lsp
+        | ToolName::Agent => None,
     }
 }
 
@@ -1936,7 +1953,7 @@ impl App {
             }),
             permission_engine: Some(self.permission_engine.clone()),
             tool_cache: self.tool_cache.clone(),
-            cancel_token,
+            cancel_token: cancel_token.clone(),
             context_window: if self.status_line_state.context_window > 0 {
                 Some(self.status_line_state.context_window)
             } else {
@@ -1951,6 +1968,32 @@ impl App {
                 use crate::ui::input::AgentMode;
                 self.input.mode == AgentMode::Plan
             },
+            agent_spawner: Some(stream::AgentSpawner {
+                stream_provider: std::sync::Arc::new(stream::OpenAIChatStream::new(
+                    client.inner().clone(),
+                )),
+                primary_model: resolved.api_model_id().to_string(),
+                small_model: self.config.small_model.as_ref().and_then(|model_ref| {
+                    self.provider_registry.as_ref()?.resolve_model(model_ref).ok().map(|r| r.api_model_id().to_string())
+                }),
+                project_root: self.project.root.clone(),
+                tool_context: ToolContext {
+                    project_root: self.project.root.clone(),
+                    storage_dir: Some(self.storage.base_dir().clone()),
+                    task_store: Some(Arc::new(self.task_store.clone())),
+                    lsp_manager: Some(self.lsp_manager.clone()),
+                },
+                permission_engine: Some(self.permission_engine.clone()),
+                context_window: if self.status_line_state.context_window > 0 {
+                    Some(self.status_line_state.context_window)
+                } else {
+                    None
+                },
+                usage_writer: self.usage_writer.clone(),
+                usage_project_id: self.project.id.clone(),
+                usage_session_id: session_id.clone(),
+                cancel_token: cancel_token.clone(),
+            }),
         });
 
         Ok(())

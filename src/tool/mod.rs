@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod bash;
 pub mod copy;
 pub mod delete;
@@ -46,7 +47,7 @@ pub enum ToolVisualCategory {
 /// High-level intent category for UI intent indicators.
 ///
 /// Derived from the tool calls in an assistant turn to show what the agent
-/// is *doing* (exploring, editing, executing). Used purely at render time.
+/// is *doing* (exploring, editing, executing, delegating). Used purely at render time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntentCategory {
     /// Read-only observation (read, grep, glob, list, webfetch).
@@ -57,6 +58,8 @@ pub enum IntentCategory {
     Executing,
     /// Interactive/utility (question, task).
     Asking,
+    /// Delegating work to child agents.
+    Delegating,
 }
 
 /// Names of all registered tools.
@@ -85,6 +88,7 @@ pub enum ToolName {
     Memory,
     Symbols,
     Lsp,
+    Agent,
 }
 
 impl ToolName {
@@ -143,6 +147,7 @@ impl ToolName {
             | ToolName::Memory => IntentCategory::Editing,
             ToolName::Bash => IntentCategory::Executing,
             ToolName::Question | ToolName::Task => IntentCategory::Asking,
+            ToolName::Agent => IntentCategory::Delegating,
         }
     }
 
@@ -157,7 +162,8 @@ impl ToolName {
             ToolName::Edit | ToolName::Write | ToolName::Patch
             | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
             | ToolName::Memory => ToolVisualCategory::Write,
-            ToolName::Bash | ToolName::Question | ToolName::Task => ToolVisualCategory::Accent,
+            ToolName::Bash | ToolName::Question | ToolName::Task
+            | ToolName::Agent => ToolVisualCategory::Accent,
         }
     }
 
@@ -175,6 +181,7 @@ impl ToolName {
             | ToolName::Memory => "\u{270e}",     // ✎ (1 col)
             ToolName::Bash => "$",
             ToolName::Question | ToolName::Task => "!",
+            ToolName::Agent => ">",
         }
     }
 
@@ -193,6 +200,7 @@ impl ToolName {
             | ToolName::Memory => "\u{270e}",                           // ✎
             ToolName::Bash => "$",
             ToolName::Question | ToolName::Task => "\u{26a1}",          // ⚡
+            ToolName::Agent => ">",
         }
     }
 }
@@ -279,6 +287,9 @@ impl ToolRegistry {
         registry.register(webfetch::tool());
         registry.register(memory::tool());
 
+        // Register agent tool (sub-agent delegation)
+        registry.register(agent::tool());
+
         let _ = project_root; // Will be used by tools that need it
 
         registry
@@ -322,9 +333,52 @@ impl ToolRegistry {
         (entry.handler)(args, ctx)
     }
 
+    /// Build a registry containing only the specified tools.
+    ///
+    /// Used by sub-agents to get a restricted tool set. Each tool is
+    /// freshly constructed from its module's `tool()` factory.
+    pub fn filtered(_project_root: PathBuf, allowed: &[ToolName]) -> Self {
+        let mut registry = Self {
+            tools: HashMap::new(),
+            order: Vec::new(),
+        };
+
+        for &name in allowed {
+            let entry = match name {
+                ToolName::Read => read::tool(),
+                ToolName::Grep => grep::tool(),
+                ToolName::Glob => glob::tool(),
+                ToolName::List => list::tool(),
+                ToolName::Symbols => symbols::tool(),
+                ToolName::Lsp => lsp::tool(),
+                ToolName::Edit => edit::tool(),
+                ToolName::Write => write::tool(),
+                ToolName::Patch => patch::tool(),
+                ToolName::Move => move_::tool(),
+                ToolName::Copy => copy::tool(),
+                ToolName::Delete => delete::tool(),
+                ToolName::Mkdir => mkdir::tool(),
+                ToolName::Bash => bash::tool(),
+                ToolName::Question => question::tool(),
+                ToolName::Task => task::tool(),
+                ToolName::Webfetch => webfetch::tool(),
+                ToolName::Memory => memory::tool(),
+                ToolName::Agent => agent::tool(),
+            };
+            registry.register(entry);
+        }
+
+        registry
+    }
+
     /// Check if a tool exists.
     pub fn has_tool(&self, name: ToolName) -> bool {
         self.tools.contains_key(&name)
+    }
+
+    /// Return the ordered list of tool names in this registry.
+    pub fn tool_names(&self) -> &[ToolName] {
+        &self.order
     }
 }
 
@@ -386,6 +440,7 @@ mod tests {
             ToolName::Memory,
             ToolName::Symbols,
             ToolName::Lsp,
+            ToolName::Agent,
         ];
         for t in write_tools {
             assert!(t.is_write_tool(), "{t} should be a write tool");
@@ -412,6 +467,7 @@ mod tests {
             ToolName::Webfetch,
             ToolName::Memory,
             ToolName::Lsp,
+            ToolName::Agent,
         ];
         for t in read_only {
             assert!(t.is_read_only(), "{t} should be read-only");
@@ -438,6 +494,7 @@ mod tests {
             ToolName::Webfetch,
             ToolName::Memory,
             ToolName::Lsp,
+            ToolName::Agent,
         ];
         for t in cacheable {
             assert!(t.is_cacheable(), "{t} should be cacheable");
@@ -476,6 +533,9 @@ mod tests {
         for t in [ToolName::Question, ToolName::Task] {
             assert_eq!(t.tool_marker(), "\u{26a1}", "{t} should have interactive marker ⚡");
         }
+
+        // Agent gets >
+        assert_eq!(ToolName::Agent.tool_marker(), ">");
     }
 
     /// Read-only tools get the read marker, write tools + memory get the
@@ -489,9 +549,9 @@ mod tests {
             } else if t.is_write_tool() || t.is_memory() {
                 assert_eq!(t.tool_marker(), "\u{270e}", "{t} is write/memory but doesn't have write marker");
             } else {
-                // Bash, Question, Task, Webfetch — not covered by predicates
+                // Bash, Question, Task, Webfetch, Agent — not covered by predicates
                 assert!(
-                    ["\u{00b7}", "$", "\u{26a1}"].contains(&t.tool_marker()),
+                    ["\u{00b7}", "$", "\u{26a1}", ">"].contains(&t.tool_marker()),
                     "{t} has unexpected marker '{}'", t.tool_marker()
                 );
             }
@@ -514,6 +574,8 @@ mod tests {
                 assert_eq!(cat, IntentCategory::Editing, "{t} should be Editing");
             } else if t == ToolName::Bash {
                 assert_eq!(cat, IntentCategory::Executing, "{t} should be Executing");
+            } else if t == ToolName::Agent {
+                assert_eq!(cat, IntentCategory::Delegating, "{t} should be Delegating");
             } else {
                 assert_eq!(cat, IntentCategory::Asking, "{t} should be Asking");
             }
@@ -557,6 +619,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn filtered_registry_contains_only_allowed_tools() {
+        use crate::tool::agent::AgentType;
+
+        for at in AgentType::iter() {
+            let allowed = at.allowed_tools();
+            let registry = ToolRegistry::filtered(std::path::PathBuf::from("/tmp"), &allowed);
+            // All allowed tools present
+            for &name in &allowed {
+                assert!(registry.has_tool(name), "{at} registry should contain {name}");
+            }
+            // Agent is never present
+            assert!(!registry.has_tool(ToolName::Agent),
+                "{at} registry should not contain Agent");
+            // No extra tools beyond what's allowed
+            assert_eq!(registry.tool_names().len(), allowed.len(),
+                "{at} registry has wrong number of tools");
+        }
+    }
+
     /// visual_category is consistent with tool_marker groupings.
     #[test]
     fn visual_category_consistent_with_markers() {
@@ -570,8 +652,8 @@ mod tests {
                 }
                 ToolVisualCategory::Accent => {
                     assert!(
-                        ["$", "!"].contains(&t.gutter_char()),
-                        "{t} Accent should have $ or ! gutter, got '{}'", t.gutter_char()
+                        ["$", "!", ">"].contains(&t.gutter_char()),
+                        "{t} Accent should have $, !, or > gutter, got '{}'", t.gutter_char()
                     );
                 }
             }

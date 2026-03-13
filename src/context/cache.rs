@@ -280,7 +280,7 @@ impl ToolResultCache {
             ToolName::Bash | ToolName::Edit | ToolName::Write | ToolName::Patch
             | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
             | ToolName::Question | ToolName::Task | ToolName::Webfetch | ToolName::Memory
-            | ToolName::Lsp => None,
+            | ToolName::Lsp | ToolName::Agent => None,
         }
     }
 
@@ -294,7 +294,8 @@ impl ToolResultCache {
             ToolName::Grep | ToolName::Glob | ToolName::Edit | ToolName::Write
             | ToolName::Patch | ToolName::Move | ToolName::Copy | ToolName::Delete
             | ToolName::Mkdir | ToolName::Bash | ToolName::Question | ToolName::Task
-            | ToolName::Webfetch | ToolName::Memory | ToolName::Lsp => None,
+            | ToolName::Webfetch | ToolName::Memory | ToolName::Lsp
+            | ToolName::Agent => None,
         }
     }
 

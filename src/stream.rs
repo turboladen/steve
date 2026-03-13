@@ -36,6 +36,7 @@ use crate::event::{AppEvent, StreamUsage};
 use crate::permission::PermissionEngine;
 use crate::permission::types::{PermissionAction, PermissionReply, PermissionRequest};
 use crate::tool::{ToolContext, ToolName, ToolRegistry};
+use crate::tool::agent::AgentType;
 use crate::usage::UsageWriter;
 use crate::usage::types::ApiCallRecord;
 
@@ -69,6 +70,25 @@ impl ChatStreamProvider for OpenAIChatStream {
     }
 }
 
+/// Captures the shared resources needed to spawn sub-agent streams.
+///
+/// Constructed in `app.rs` alongside the parent `StreamRequest`, then passed
+/// into `run_stream()`. When a sub-agent is spawned, a fresh `StreamRequest`
+/// is built from these fields with `agent_spawner: None` to prevent recursion.
+pub struct AgentSpawner {
+    pub stream_provider: Arc<dyn ChatStreamProvider>,
+    pub primary_model: String,
+    pub small_model: Option<String>,
+    pub project_root: std::path::PathBuf,
+    pub tool_context: ToolContext,
+    pub permission_engine: Option<Arc<tokio::sync::Mutex<PermissionEngine>>>,
+    pub context_window: Option<u64>,
+    pub usage_writer: UsageWriter,
+    pub usage_project_id: String,
+    pub usage_session_id: String,
+    pub cancel_token: CancellationToken,
+}
+
 /// Parameters for launching a streaming LLM request.
 pub struct StreamRequest {
     pub stream_provider: Arc<dyn ChatStreamProvider>,
@@ -98,6 +118,8 @@ pub struct StreamRequest {
     /// Whether the agent is in Plan mode (read-only analysis) — uses a lower iteration limit.
     /// Snapshotted at stream launch; toggling mode mid-stream does not change the limit.
     pub is_plan_mode: bool,
+    /// Resources for spawning sub-agents. `None` in sub-agent streams to prevent recursion.
+    pub agent_spawner: Option<AgentSpawner>,
 }
 
 /// Spawn a tokio task that streams the LLM response and sends events.
@@ -138,6 +160,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         usage_session_id,
         usage_model_cost,
         is_plan_mode,
+        agent_spawner,
     } = req;
 
     tracing::info!(model = %model, "starting LLM stream");
@@ -773,7 +796,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                     && !tc.tool_name.is_write_tool()
                     && !tc.tool_name.is_memory()
                     && !tc.tool_name.is_task()
-                    && !matches!(tc.tool_name, ToolName::Question | ToolName::Lsp)
+                    && !matches!(tc.tool_name, ToolName::Question | ToolName::Lsp | ToolName::Agent)
             });
 
         // Log partition results for diagnostics
@@ -969,6 +992,136 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                     title: "Question".to_string(),
                     output: answer,
                     is_error: false,
+                };
+
+                let _ = event_tx.send(AppEvent::ToolResult {
+                    call_id: tc.id.clone(),
+                    tool_name: tc.tool_name,
+                    output: output.clone(),
+                });
+
+                messages.push(ChatCompletionRequestMessage::Tool(
+                    ChatCompletionRequestToolMessage {
+                        content: ChatCompletionRequestToolMessageContent::Text(output.output),
+                        tool_call_id: tc.id.clone(),
+                    },
+                ));
+                current_iteration_tool_count += 1;
+                continue;
+            }
+
+            // Agent tool: spawn a sub-agent with its own conversation context
+            if matches!(tc.tool_name, ToolName::Agent) {
+                let _ = event_tx.send(AppEvent::LlmToolCall {
+                    call_id: tc.id.clone(),
+                    tool_name: tc.tool_name,
+                    arguments: tc.args.clone(),
+                });
+
+                let agent_type_str = tc.args.get("agent_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("explore");
+                let task_str = tc.args.get("task")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(no task provided)")
+                    .to_string();
+                let context_str = tc.args.get("context")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+
+                let output = if let Some(ref spawner) = agent_spawner {
+                    let agent_type: AgentType = agent_type_str.parse().unwrap_or(AgentType::Explore);
+
+                    // For General agents in Ask mode, we still need permission
+                    if agent_type == AgentType::General && matches!(tc.action, PermissionAction::Ask) {
+                        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                        let summary = build_permission_summary(tc.tool_name, &tc.args);
+
+                        let _ = event_tx.send(AppEvent::PermissionRequest(PermissionRequest {
+                            call_id: tc.id.clone(),
+                            tool_name: tc.tool_name,
+                            arguments_summary: summary,
+                            tool_args: tc.args.clone(),
+                            response_tx,
+                        }));
+
+                        let permitted = tokio::select! {
+                            _ = cancel_token.cancelled() => {
+                                let _ = event_tx.send(AppEvent::LlmFinish { usage: Some(total_usage) });
+                                return Ok(());
+                            }
+                            reply = response_rx => {
+                                match reply {
+                                    Ok(PermissionReply::AllowOnce) | Ok(PermissionReply::AllowAlways) => {
+                                        user_interacted_this_iteration = true;
+                                        if let Ok(PermissionReply::AllowAlways) = reply.as_ref() {
+                                            if let Some(ref engine) = permission_engine {
+                                                engine.lock().await.grant_session(tc.tool_name);
+                                            }
+                                        }
+                                        true
+                                    }
+                                    _ => false,
+                                }
+                            }
+                        };
+
+                        if !permitted {
+                            crate::tool::ToolOutput {
+                                title: "Agent".to_string(),
+                                output: "Permission denied by user for agent tool.".to_string(),
+                                is_error: true,
+                            }
+                        } else {
+                            match run_sub_agent(
+                                spawner,
+                                agent_type,
+                                &task_str,
+                                context_str.as_deref(),
+                                &event_tx,
+                                &tc.id,
+                            ).await {
+                                Ok(text) => crate::tool::ToolOutput {
+                                    title: format!("Agent ({agent_type})"),
+                                    output: text,
+                                    is_error: false,
+                                },
+                                Err(e) => crate::tool::ToolOutput {
+                                    title: format!("Agent ({agent_type})"),
+                                    output: format!("Agent error: {e}"),
+                                    is_error: true,
+                                },
+                            }
+                        }
+                    } else {
+                        // Explore/Plan agents or already-allowed General agents
+                        match run_sub_agent(
+                            spawner,
+                            agent_type,
+                            &task_str,
+                            context_str.as_deref(),
+                            &event_tx,
+                            &tc.id,
+                        ).await {
+                            Ok(text) => crate::tool::ToolOutput {
+                                title: format!("Agent ({agent_type})"),
+                                output: text,
+                                is_error: false,
+                            },
+                            Err(e) => crate::tool::ToolOutput {
+                                title: format!("Agent ({agent_type})"),
+                                output: format!("Agent error: {e}"),
+                                is_error: true,
+                            },
+                        }
+                    }
+                } else {
+                    // No agent_spawner — we're already a sub-agent, can't recurse
+                    crate::tool::ToolOutput {
+                        title: "Agent".to_string(),
+                        output: "Error: agent tool is not available in sub-agent context.".to_string(),
+                        is_error: true,
+                    }
                 };
 
                 let _ = event_tx.send(AppEvent::ToolResult {
@@ -1226,6 +1379,154 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
     }
 }
 
+/// Build a focused system prompt for a sub-agent.
+fn build_sub_agent_prompt(agent_type: AgentType, task: &str, context: Option<&str>) -> String {
+    let type_label = match agent_type {
+        AgentType::Explore => "exploration",
+        AgentType::Plan => "architecture analysis",
+        AgentType::General => "implementation",
+    };
+
+    let tool_guidance = match agent_type {
+        AgentType::Explore => "\
+You have read-only tools: read, grep, glob, list, symbols. \
+Search efficiently — use grep to find relevant code, then read specific sections. \
+Use glob for file discovery. Use symbols for structural queries.",
+        AgentType::Plan => "\
+You have read-only tools plus LSP for semantic analysis: read, grep, glob, list, symbols, lsp. \
+Use LSP diagnostics, go-to-definition, and find-references for accurate cross-file analysis. \
+Focus on architecture, design, and feasibility.",
+        AgentType::General => "\
+You have full tool access (read, write, edit, bash, etc.). \
+Follow the same safety practices as the parent agent. \
+Write operations may require user permission.",
+    };
+
+    let ctx_section = context
+        .map(|c| format!("\n\nAdditional context:\n{c}"))
+        .unwrap_or_default();
+
+    format!(
+        "You are a focused {type_label} sub-agent. Your task:\n\n\
+         {task}{ctx_section}\n\n\
+         {tool_guidance}\n\n\
+         Be concise and thorough. When done, provide a clear summary of your findings or work."
+    )
+}
+
+/// Run a sub-agent stream, collecting its final text response.
+///
+/// Creates a fresh conversation with a focused system prompt and restricted tools.
+/// Sub-agent events are monitored on a private channel — only usage updates and
+/// permission requests are forwarded to the parent.
+async fn run_sub_agent(
+    spawner: &AgentSpawner,
+    agent_type: AgentType,
+    task: &str,
+    context: Option<&str>,
+    parent_event_tx: &mpsc::UnboundedSender<AppEvent>,
+    call_id: &str,
+) -> Result<String, String> {
+    let model = match agent_type {
+        AgentType::Explore => spawner
+            .small_model
+            .clone()
+            .unwrap_or_else(|| spawner.primary_model.clone()),
+        AgentType::Plan | AgentType::General => spawner.primary_model.clone(),
+    };
+
+    let allowed = agent_type.allowed_tools();
+    let registry = ToolRegistry::filtered(spawner.project_root.clone(), &allowed);
+    let child_cancel = spawner.cancel_token.child_token();
+
+    let system_prompt = build_sub_agent_prompt(agent_type, task, context);
+
+    // Private event channel for the sub-agent
+    let (sub_tx, mut sub_rx) = mpsc::unbounded_channel::<AppEvent>();
+    let (_interjection_tx, interjection_rx) = mpsc::unbounded_channel();
+
+    let sub_request = StreamRequest {
+        stream_provider: spawner.stream_provider.clone(),
+        model: model.clone(),
+        system_prompt: Some(system_prompt),
+        history: vec![],
+        user_message: task.to_string(),
+        event_tx: sub_tx,
+        tool_registry: Some(Arc::new(registry)),
+        tool_context: Some(spawner.tool_context.clone()),
+        permission_engine: if agent_type == AgentType::General {
+            spawner.permission_engine.clone()
+        } else {
+            // Explore/Plan: auto-allow everything (all tools are read-only)
+            Some(Arc::new(tokio::sync::Mutex::new(
+                crate::permission::PermissionEngine::new(vec![
+                    crate::permission::types::PermissionRule {
+                        tool: crate::permission::types::ToolMatcher::All,
+                        pattern: "*".into(),
+                        action: crate::permission::types::PermissionActionSerde::Allow,
+                    },
+                ]),
+            )))
+        },
+        tool_cache: Arc::new(std::sync::Mutex::new(
+            crate::context::cache::ToolResultCache::new(spawner.project_root.clone()),
+        )),
+        cancel_token: child_cancel.clone(),
+        context_window: spawner.context_window,
+        interjection_rx,
+        usage_writer: spawner.usage_writer.clone(),
+        usage_project_id: spawner.usage_project_id.clone(),
+        usage_session_id: spawner.usage_session_id.clone(),
+        usage_model_cost: None,
+        is_plan_mode: matches!(agent_type, AgentType::Plan),
+        agent_spawner: None, // No recursion
+    };
+
+    // Run the sub-agent stream inline. Events accumulate in the unbounded
+    // channel and are drained after completion.
+    // Box::pin breaks the recursive async type (run_stream → run_sub_agent → run_stream).
+    let _ = Box::pin(run_stream(sub_request)).await;
+
+    // Drain sub-agent events, collecting the final text response and
+    // forwarding usage/progress events to the parent.
+    let mut final_text = String::new();
+    let mut tool_count = 0u32;
+    let mut last_error: Option<String> = None;
+
+    while let Ok(event) = sub_rx.try_recv() {
+        match event {
+            AppEvent::LlmDelta { text } => {
+                final_text.push_str(&text);
+            }
+            AppEvent::LlmUsageUpdate { usage } => {
+                let _ = parent_event_tx.send(AppEvent::LlmUsageUpdate { usage });
+            }
+            AppEvent::LlmToolCall { tool_name, .. } => {
+                tool_count += 1;
+                let _ = parent_event_tx.send(AppEvent::StreamNotice {
+                    text: format!("> agent ({agent_type}): {tool_name} [{tool_count}]"),
+                });
+            }
+            AppEvent::LlmError { error } => {
+                tracing::error!(call_id, %error, "sub-agent error");
+                last_error = Some(error);
+            }
+            // Permission requests were already forwarded via the shared
+            // permission_engine (General agents use the parent's engine).
+            // Other events (ToolResult, Tick, etc.) are discarded.
+            _ => {}
+        }
+    }
+
+    if let Some(error) = last_error {
+        Err(error)
+    } else if final_text.is_empty() {
+        Ok(format!("Sub-agent ({agent_type}) completed with {tool_count} tool calls but produced no text response."))
+    } else {
+        Ok(final_text)
+    }
+}
+
 /// Warning thresholds as percentages of the max iteration limit.
 const WARN_NUDGE_PCT: u32 = 20;
 const WARN_WARNING_PCT: u32 = 47;
@@ -1313,7 +1614,7 @@ fn extract_tool_path(tool_name: ToolName, args: &Value) -> Option<String> {
         }
         // Tools without file paths
         ToolName::Bash | ToolName::Question | ToolName::Task
-        | ToolName::Webfetch | ToolName::Memory => None,
+        | ToolName::Webfetch | ToolName::Memory | ToolName::Agent => None,
     }
 }
 
@@ -1396,6 +1697,11 @@ fn build_permission_summary(tool_name: ToolName, args: &Value) -> String {
         | ToolName::Question | ToolName::Task | ToolName::Webfetch | ToolName::Memory
         | ToolName::Symbols | ToolName::Lsp => {
             format!("{tool_name}: {}", serde_json::to_string(args).unwrap_or_default())
+        }
+        ToolName::Agent => {
+            let agent_type = args.get("agent_type").and_then(|v| v.as_str()).unwrap_or("explore");
+            let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("(no task)");
+            format!("Spawn {agent_type} agent: {task}")
         }
     }
 }
@@ -1831,6 +2137,7 @@ mod tests {
             usage_session_id: "test-session".to_string(),
             usage_model_cost: None,
             is_plan_mode: false,
+            agent_spawner: None,
         }
     }
 
@@ -2098,6 +2405,7 @@ mod tests {
             usage_session_id: "test-session".to_string(),
             usage_model_cost: None,
             is_plan_mode: false,
+            agent_spawner: None,
         };
 
         run_stream(req).await.expect("cache hit stream should succeed");
