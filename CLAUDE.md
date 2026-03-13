@@ -175,8 +175,9 @@ Priority: path rules > allow_tools > profile defaults.
   to break feedback loops
 
 **Critical invariant**: Write tools (`edit`, `write`, `patch`, `move`, `copy`, `delete`, `mkdir`),
-`memory`, and `lsp` must never run in parallel execution phase — sequential only. Write/memory for
-cache invalidation; LSP because it holds a `std::sync::Mutex` across blocking I/O.
+`memory`, `lsp`, `question`, and `agent` must never run in parallel execution phase — sequential
+only. Write/memory for cache invalidation; LSP because it holds a `std::sync::Mutex` across
+blocking I/O; question/agent because they are intercepted stubs requiring async handling.
 
 ### Token Pipeline
 
@@ -199,8 +200,13 @@ this.
 ### Tool System (`tool/mod.rs`)
 
 Tools: `read`, `grep`, `glob`, `list`, `symbols`, `lsp`, `edit`, `write`, `patch`, `move`, `copy`,
-`delete`, `mkdir`, `bash`, `question`, `task`, `webfetch`, `memory`. Synchronous handlers via
-`Fn(Value, ToolContext) -> Result<ToolOutput>`.
+`delete`, `mkdir`, `bash`, `question`, `task`, `webfetch`, `memory`, `agent`. Synchronous handlers
+via `Fn(Value, ToolContext) -> Result<ToolOutput>`.
+
+**Intercepted tools**: `question` and `agent` have stub `execute()` handlers that return errors.
+`stream.rs` intercepts these by `ToolName` before calling `execute()`, handling them with full async
+capabilities (permission prompts, sub-agent spawning). New intercepted tools must be excluded from
+the parallel execution phase alongside `Question`, `Lsp`, and `Agent`.
 
 **Tool argument names vary**: `read`/`list`/`grep`/`glob`/`delete`/`mkdir` use `"path"`.
 `edit`/`write`/`patch` use `"file_path"`. `move`/`copy` use `"from_path"`/`"to_path"`. `edit` ops:
@@ -248,6 +254,19 @@ suppress with `#[allow(deprecated)]`.
 `from_extension()`, `detect_from_project()`, `server_candidates()`. Existing tests use
 `Language::iter()` so compiler catches missing arms.
 
+### Agent System (`tool/agent.rs`, `stream.rs`)
+
+`AgentSpawner` struct on `StreamRequest` captures shared resources for spawning child agents.
+Three types: Explore (read-only, `small_model`), Plan (read-only + LSP, primary model), General
+(full tools, inherits permissions). `AgentType::allowed_tools()` defines tool sets per type.
+
+Sub-agents reuse `run_stream()` with `ToolRegistry::filtered()` and `agent_spawner: None` (prevents
+recursive spawning). Recursive async requires `Box::pin(run_stream(...)).await`. Sub-agent events
+flow through a private channel — only usage updates forwarded to parent.
+
+Permission: `Ask` in Build mode, `Deny` in Plan mode. General agents forward `PermissionRequest`
+to parent for user approval of writes.
+
 ### Storage (`storage/mod.rs`)
 
 Flat JSON files under `{data_dir}/storage/{project_id}/`. Key paths → filesystem paths. `fs2` file
@@ -265,9 +284,10 @@ logging to file.
   `Error`, `Permission`
 - `complete_tool_call()` uses **forward** search — stream emits events in original order
 - Tool colors: `tool_read` (read-only + webfetch + lsp), `tool_write` (write tools + memory),
-  `accent` (bash/question/todo). Markers: `·`/`✎`/`$`/`⚡`
-- Intent labels (`exploring`/`editing`/`executing`) derived at render time via
-  `infer_group_intent()`. Consecutive same-category groups deduplicated
+  `accent` (bash/question/todo/agent). Markers: `·`/`✎`/`$`/`⚡`/`>`
+- Intent labels (`exploring`/`editing`/`executing`/`delegating`) derived at render time via
+  `infer_group_intent()`. Priority: editing > executing > delegating > exploring. Consecutive
+  same-category groups deduplicated
 - Code blocks rendered via `render_text_with_code_blocks()` using `CodeFence::classify()` from
   `message_block.rs`
 - Auto-scroll uses wrapped line widths (not `lines.len()`) — critical for `Wrap { trim: false }`
