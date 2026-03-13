@@ -344,6 +344,11 @@ impl ToolRegistry {
         };
 
         for &name in allowed {
+            // Agent is excluded from sub-agent registries to prevent recursion.
+            // Skip silently rather than panicking, so callers don't need to pre-filter.
+            if name == ToolName::Agent {
+                continue;
+            }
             let entry = match name {
                 ToolName::Read => read::tool(),
                 ToolName::Grep => grep::tool(),
@@ -363,7 +368,7 @@ impl ToolRegistry {
                 ToolName::Task => task::tool(),
                 ToolName::Webfetch => webfetch::tool(),
                 ToolName::Memory => memory::tool(),
-                ToolName::Agent => agent::tool(),
+                ToolName::Agent => unreachable!("Agent is filtered above"),
             };
             registry.register(entry);
         }

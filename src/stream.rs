@@ -1482,44 +1482,69 @@ async fn run_sub_agent(
         agent_spawner: None, // No recursion
     };
 
-    // Run the sub-agent stream inline. Events accumulate in the unbounded
-    // channel and are drained after completion.
+    // Run the sub-agent stream concurrently with event processing.
+    // Events must be drained during execution (not after) because
+    // PermissionRequest events contain oneshot senders that the UI must
+    // reply to — draining post-hoc would deadlock on Ask permissions.
     // Box::pin breaks the recursive async type (run_stream → run_sub_agent → run_stream).
-    let _ = Box::pin(run_stream(sub_request)).await;
-
-    // Drain sub-agent events, collecting the final text response and
-    // forwarding usage/progress events to the parent.
     let mut final_text = String::new();
     let mut tool_count = 0u32;
     let mut last_error: Option<String> = None;
+    let mut stream_done = false;
 
-    while let Ok(event) = sub_rx.try_recv() {
-        match event {
-            AppEvent::LlmDelta { text } => {
-                final_text.push_str(&text);
+    let mut stream_future = Box::pin(run_stream(sub_request));
+
+    loop {
+        tokio::select! {
+            result = &mut stream_future, if !stream_done => {
+                let _ = result;
+                stream_done = true;
             }
-            AppEvent::LlmUsageUpdate { usage } => {
-                let _ = parent_event_tx.send(AppEvent::LlmUsageUpdate { usage });
+            event = sub_rx.recv() => {
+                match event {
+                    Some(AppEvent::LlmDelta { text }) => {
+                        final_text.push_str(&text);
+                    }
+                    Some(AppEvent::LlmUsageUpdate { usage }) => {
+                        let _ = parent_event_tx.send(AppEvent::LlmUsageUpdate { usage });
+                    }
+                    Some(AppEvent::LlmToolCall { tool_name, .. }) => {
+                        tool_count += 1;
+                        let _ = parent_event_tx.send(AppEvent::StreamNotice {
+                            text: format!("> agent ({agent_type}): {tool_name} [{tool_count}]"),
+                        });
+                    }
+                    Some(AppEvent::LlmError { error }) => {
+                        tracing::error!(call_id, %error, "sub-agent error");
+                        last_error = Some(error);
+                    }
+                    Some(AppEvent::PermissionRequest(req)) => {
+                        // Forward permission requests to parent so the UI can prompt the user.
+                        let _ = parent_event_tx.send(AppEvent::PermissionRequest(req));
+                    }
+                    // Other events (ToolResult, Tick, etc.) are discarded.
+                    Some(_) => {}
+                    None => {
+                        // Channel closed — sub-agent dropped its sender.
+                        break;
+                    }
+                }
             }
-            AppEvent::LlmToolCall { tool_name, .. } => {
-                tool_count += 1;
-                let _ = parent_event_tx.send(AppEvent::StreamNotice {
-                    text: format!("> agent ({agent_type}): {tool_name} [{tool_count}]"),
-                });
-            }
-            AppEvent::LlmError { error } => {
-                tracing::error!(call_id, %error, "sub-agent error");
-                last_error = Some(error);
-            }
-            // Permission requests were already forwarded via the shared
-            // permission_engine (General agents use the parent's engine).
-            // Other events (ToolResult, Tick, etc.) are discarded.
-            _ => {}
+        }
+
+        // Once stream is done and channel is drained, exit.
+        if stream_done && sub_rx.is_empty() {
+            break;
         }
     }
 
     if let Some(error) = last_error {
-        Err(error)
+        if !final_text.is_empty() {
+            // Prefer returning text even if there was a transient error.
+            Ok(format!("{final_text}\n\n[Agent encountered an error: {error}]"))
+        } else {
+            Err(error)
+        }
     } else if final_text.is_empty() {
         Ok(format!("Sub-agent ({agent_type}) completed with {tool_count} tool calls but produced no text response."))
     } else {
