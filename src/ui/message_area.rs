@@ -2494,8 +2494,12 @@ mod tests {
         // The progress line should show the sub-agent's current tool and args
         assert!(text.contains("read"), "should show sub-agent tool name 'read', got:\n{text}");
         assert!(text.contains("src/main.rs"), "should show sub-agent args, got:\n{text}");
-        // Should show "..." since no result yet
-        assert!(text.contains("..."), "should show '...' for in-progress tool, got:\n{text}");
+        // Progress sub-line format: "    read src/main.rs ..."
+        // (must match the specific format, not just "..." which appears in "running...")
+        assert!(
+            text.contains("read src/main.rs ..."),
+            "progress sub-line should show 'tool args ...' format, got:\n{text}"
+        );
     }
 
     #[test]

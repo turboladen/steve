@@ -208,7 +208,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
     let mut total_usage = StreamUsage::default();
     let mut current_iteration_tool_count: usize = 0;
-    let mut current_iteration_cache_repeats: usize = 0;
+    let mut current_iteration_cache_repeats: usize;
 
     // Tool result cache — shared across stream tasks within a session.
     // Avoids re-executing identical read operations across messages.
@@ -1394,6 +1394,8 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 let _ = event_tx.send(AppEvent::StreamNotice {
                     text: "⚙ Cache loop detected — forcing response".to_string(),
                 });
+                // Reset so the stop message doesn't fire every subsequent iteration
+                consecutive_cached_iterations = 0;
             }
         } else {
             consecutive_cached_iterations = 0;
@@ -2924,5 +2926,87 @@ mod tests {
         let text = check_iteration_warning(69, 75, &mut sent).unwrap();
         assert!(text.contains("6 tool calls remain"));
         assert!(text.contains("FINAL WARNING:"));
+    }
+
+    #[tokio::test]
+    async fn stream_cache_loop_emits_stop_notice() {
+        // Pre-populate the cache and exhaust the repeat threshold so all
+        // subsequent gets return the cache-repeat summary.
+        let cache = Arc::new(std::sync::Mutex::new(
+            ToolResultCache::new(std::path::PathBuf::from("/tmp/test"))
+        ));
+
+        let glob_args = serde_json::json!({"pattern": "*.rs"});
+        {
+            let mut c = cache.lock().unwrap();
+            let output = crate::tool::ToolOutput {
+                title: "glob '*.rs'".to_string(),
+                output: "src/main.rs".to_string(),
+                is_error: false,
+            };
+            c.put(ToolName::Glob, &glob_args, &output);
+            // Exhaust threshold (2 hits) so next gets return cache-repeat summary
+            for _ in 0..2 {
+                c.get(ToolName::Glob, &glob_args);
+            }
+        }
+
+        // 3 iterations of the same cached tool call, then final text.
+        // MAX_CONSECUTIVE_CACHED = 2, so the stop notice should fire on
+        // the 2nd all-cached iteration.
+        let mut streams = Vec::new();
+        for i in 0..3 {
+            streams.push(vec![
+                Ok(tool_call_chunk(
+                    0,
+                    Some(&format!("call_{i}")),
+                    Some("glob"),
+                    Some(r#"{"pattern":"*.rs"}"#),
+                )),
+                Ok(finish_chunk(FinishReason::ToolCalls, 50, 20)),
+            ]);
+        }
+        streams.push(vec![
+            Ok(text_delta("Here is my answer.")),
+            Ok(finish_chunk(FinishReason::Stop, 100, 10)),
+        ]);
+
+        let mock = Arc::new(MockChatStream::new(streams));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut req = mock_stream_request(mock, tx);
+        req.tool_cache = cache;
+        req.tool_registry = Some(Arc::new(ToolRegistry::new(
+            std::path::PathBuf::from("/tmp/test"),
+        )));
+        req.tool_context = Some(ToolContext {
+            project_root: std::path::PathBuf::from("/tmp/test"),
+            storage_dir: None,
+            task_store: None,
+            lsp_manager: None,
+        });
+        req.permission_engine = Some(Arc::new(tokio::sync::Mutex::new(
+            crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
+        )));
+
+        run_stream(req).await.expect("cache loop stream should succeed");
+        let events = collect_events(rx).await;
+
+        // Should have a StreamNotice about cache loop detection
+        let notices: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::StreamNotice { text } if text.contains("Cache loop")))
+            .collect();
+        assert!(
+            !notices.is_empty(),
+            "should emit StreamNotice about cache loop, events: {:?}",
+            events.iter().filter(|e| matches!(e, AppEvent::StreamNotice { .. })).collect::<Vec<_>>()
+        );
+
+        // Should still complete normally with LlmFinish
+        let finishes: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
+            .collect();
+        assert_eq!(finishes.len(), 1);
     }
 }
