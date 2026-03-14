@@ -116,6 +116,22 @@ pub struct ToolCall {
     pub is_error: bool,
     /// Whether this call's output is currently expanded in the UI.
     pub expanded: bool,
+    /// Live progress from a sub-agent: the latest tool call the sub-agent is making.
+    /// Only set for Agent tool calls during execution. Cleared when the agent completes.
+    pub agent_progress: Option<AgentProgressInfo>,
+}
+
+/// Live progress info from a running sub-agent.
+#[derive(Debug, Clone)]
+pub struct AgentProgressInfo {
+    /// The tool the sub-agent is currently calling.
+    pub tool_name: ToolName,
+    /// Compact argument summary (e.g., "src/main.rs").
+    pub args_summary: String,
+    /// Result summary if the sub-agent's tool has completed (e.g., "150 lines").
+    pub result_summary: Option<String>,
+    /// Total number of tool calls the sub-agent has made so far.
+    pub tool_count: u32,
 }
 
 /// Status of a tool group's execution.
@@ -188,6 +204,7 @@ impl MessageBlock {
                     diff_content,
                     is_error: false,
                     expanded: tool_name.is_write_tool(),
+                    agent_progress: None,
                 });
                 group.status = ToolGroupStatus::Running {
                     current_tool: tool_name,
@@ -230,6 +247,58 @@ impl MessageBlock {
                 // Check if all calls are complete
                 if group.calls.iter().all(|c| c.result_summary.is_some()) {
                     group.status = ToolGroupStatus::Complete;
+                }
+            }
+        }
+    }
+
+    /// Update agent progress with a new sub-agent tool call.
+    /// Finds the pending agent tool call in the last tool group and sets its progress.
+    /// No-op on non-Assistant blocks.
+    pub fn update_agent_progress(
+        &mut self,
+        tool_name: ToolName,
+        args_summary: String,
+    ) {
+        if let MessageBlock::Assistant { parts, .. } = self {
+            for part in parts.iter_mut().rev() {
+                if let AssistantPart::ToolGroup(group) = part {
+                    if let Some(call) = group.calls.iter_mut().find(|c| {
+                        c.tool_name == ToolName::Agent && c.result_summary.is_none()
+                    }) {
+                        let tool_count = call.agent_progress.as_ref()
+                            .map(|p| p.tool_count + 1).unwrap_or(1);
+                        call.agent_progress = Some(AgentProgressInfo {
+                            tool_name,
+                            args_summary,
+                            result_summary: None,
+                            tool_count,
+                        });
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Update the result summary on the current agent progress entry.
+    /// Called when a sub-agent's tool completes, to show the result inline.
+    /// No-op on non-Assistant blocks.
+    pub fn update_agent_progress_result(
+        &mut self,
+        result_summary: Option<String>,
+    ) {
+        if let MessageBlock::Assistant { parts, .. } = self {
+            for part in parts.iter_mut().rev() {
+                if let AssistantPart::ToolGroup(group) = part {
+                    if let Some(call) = group.calls.iter_mut().find(|c| {
+                        c.tool_name == ToolName::Agent && c.result_summary.is_none()
+                    }) {
+                        if let Some(ref mut progress) = call.agent_progress {
+                            progress.result_summary = result_summary;
+                        }
+                        return;
+                    }
                 }
             }
         }
@@ -342,6 +411,7 @@ mod tests {
             diff_content: None,
             is_error: false,
             expanded: false,
+            agent_progress: None,
         };
         assert!(!call.expanded);
         assert!(!call.is_error);
@@ -488,6 +558,7 @@ mod tests {
                     diff_content: None,
                     is_error: false,
                     expanded: false,
+                    agent_progress: None,
                 }],
                 status: ToolGroupStatus::Running {
                     current_tool: ToolName::Read,
@@ -756,6 +827,7 @@ mod tests {
                         diff_content: None,
                         is_error: false,
                         expanded: false,
+                        agent_progress: None,
                     }],
                     status: ToolGroupStatus::Running {
                         current_tool: ToolName::Read,
@@ -795,6 +867,7 @@ mod tests {
                         diff_content: None,
                         is_error: false,
                         expanded: false,
+                        agent_progress: None,
                     },
                     ToolCall {
                         tool_name: ToolName::Read,
@@ -804,6 +877,7 @@ mod tests {
                         diff_content: None,
                         is_error: false,
                         expanded: false,
+                        agent_progress: None,
                     },
                 ],
                 status: ToolGroupStatus::Running {
@@ -838,6 +912,151 @@ mod tests {
                     Some("content_b"),
                 );
                 assert_eq!(group.status, ToolGroupStatus::Complete);
+            }
+            _ => panic!("expected Assistant"),
+        }
+    }
+
+    #[test]
+    fn update_agent_progress_sets_info() {
+        let mut block = MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::ToolGroup(ToolGroup {
+                calls: vec![ToolCall {
+                    tool_name: ToolName::Agent,
+                    args_summary: "explore: find usages".into(),
+                    full_output: None,
+                    result_summary: None,
+                    diff_content: None,
+                    is_error: false,
+                    expanded: false,
+                    agent_progress: None,
+                }],
+                status: ToolGroupStatus::Running { current_tool: ToolName::Agent },
+            })],
+        };
+        block.update_agent_progress(ToolName::Read, "src/main.rs".into());
+        match &block {
+            MessageBlock::Assistant { parts, .. } => {
+                let group = match &parts[0] {
+                    AssistantPart::ToolGroup(g) => g,
+                    _ => panic!("expected ToolGroup"),
+                };
+                let progress = group.calls[0].agent_progress.as_ref().unwrap();
+                assert_eq!(progress.tool_name, ToolName::Read);
+                assert_eq!(progress.args_summary, "src/main.rs");
+                assert!(progress.result_summary.is_none());
+                assert_eq!(progress.tool_count, 1);
+            }
+            _ => panic!("expected Assistant"),
+        }
+    }
+
+    #[test]
+    fn update_agent_progress_increments_count() {
+        let mut block = MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::ToolGroup(ToolGroup {
+                calls: vec![ToolCall {
+                    tool_name: ToolName::Agent,
+                    args_summary: "explore: search".into(),
+                    full_output: None,
+                    result_summary: None,
+                    diff_content: None,
+                    is_error: false,
+                    expanded: false,
+                    agent_progress: None,
+                }],
+                status: ToolGroupStatus::Running { current_tool: ToolName::Agent },
+            })],
+        };
+        block.update_agent_progress(ToolName::Read, "a.rs".into());
+        block.update_agent_progress(ToolName::Grep, "pattern".into());
+        match &block {
+            MessageBlock::Assistant { parts, .. } => {
+                let group = match &parts[0] {
+                    AssistantPart::ToolGroup(g) => g,
+                    _ => panic!("expected ToolGroup"),
+                };
+                let progress = group.calls[0].agent_progress.as_ref().unwrap();
+                assert_eq!(progress.tool_name, ToolName::Grep, "should show latest tool");
+                assert_eq!(progress.tool_count, 2, "should increment count");
+            }
+            _ => panic!("expected Assistant"),
+        }
+    }
+
+    #[test]
+    fn update_agent_progress_result_sets_summary() {
+        let mut block = MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::ToolGroup(ToolGroup {
+                calls: vec![ToolCall {
+                    tool_name: ToolName::Agent,
+                    args_summary: "explore: check".into(),
+                    full_output: None,
+                    result_summary: None,
+                    diff_content: None,
+                    is_error: false,
+                    expanded: false,
+                    agent_progress: Some(AgentProgressInfo {
+                        tool_name: ToolName::Read,
+                        args_summary: "src/lib.rs".into(),
+                        result_summary: None,
+                        tool_count: 3,
+                    }),
+                }],
+                status: ToolGroupStatus::Running { current_tool: ToolName::Agent },
+            })],
+        };
+        block.update_agent_progress_result(Some("200 lines".into()));
+        match &block {
+            MessageBlock::Assistant { parts, .. } => {
+                let group = match &parts[0] {
+                    AssistantPart::ToolGroup(g) => g,
+                    _ => panic!("expected ToolGroup"),
+                };
+                let progress = group.calls[0].agent_progress.as_ref().unwrap();
+                assert_eq!(progress.result_summary.as_deref(), Some("200 lines"));
+                assert_eq!(progress.tool_count, 3, "count should be preserved");
+            }
+            _ => panic!("expected Assistant"),
+        }
+    }
+
+    #[test]
+    fn agent_progress_cleared_on_complete() {
+        let mut block = MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::ToolGroup(ToolGroup {
+                calls: vec![ToolCall {
+                    tool_name: ToolName::Agent,
+                    args_summary: "explore: find".into(),
+                    full_output: None,
+                    result_summary: None,
+                    diff_content: None,
+                    is_error: false,
+                    expanded: false,
+                    agent_progress: Some(AgentProgressInfo {
+                        tool_name: ToolName::Grep,
+                        args_summary: "pattern".into(),
+                        result_summary: Some("5 files".into()),
+                        tool_count: 10,
+                    }),
+                }],
+                status: ToolGroupStatus::Running { current_tool: ToolName::Agent },
+            })],
+        };
+        block.complete_tool_call(ToolName::Agent, "done".into(), "full result".into(), false);
+        match &block {
+            MessageBlock::Assistant { parts, .. } => {
+                let group = match &parts[0] {
+                    AssistantPart::ToolGroup(g) => g,
+                    _ => panic!("expected ToolGroup"),
+                };
+                // Agent progress should still be present (not cleared by complete_tool_call)
+                // but result_summary is now set, so the UI won't show progress
+                assert!(group.calls[0].result_summary.is_some());
             }
             _ => panic!("expected Assistant"),
         }

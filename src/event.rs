@@ -65,6 +65,16 @@ pub enum AppEvent {
     /// System-level notification from the stream task (e.g., tool loop warnings).
     /// Displayed as a MessageBlock::System in the TUI.
     StreamNotice { text: String },
+    /// Progress update from a sub-agent — updates the agent tool call's inline progress.
+    /// Unlike `StreamNotice`, this does NOT push a new `MessageBlock::System` — it
+    /// modifies the existing `ToolCall` in the assistant block, keeping the assistant
+    /// block as the last message so follow-up text remains visible.
+    AgentProgress {
+        call_id: String,
+        tool_name: ToolName,
+        args_summary: String,
+        result_summary: Option<String>,
+    },
     /// LSP servers have been initialized; carries detected server binaries with running status.
     LspStatus { servers: Vec<(String, bool)> },
 

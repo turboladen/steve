@@ -378,6 +378,21 @@ pub fn render_message_blocks(
                                     ),
                                 ]), GutterMark::ToolMarker(call.tool_name));
 
+                                // Sub-agent live progress — show what tool the agent is calling
+                                if let Some(progress) = &call.agent_progress {
+                                    let progress_text = if let Some(ref result) = progress.result_summary {
+                                        format!("    {} {} \u{2192} {result}",
+                                            progress.tool_name, progress.args_summary)
+                                    } else {
+                                        format!("    {} {} ...",
+                                            progress.tool_name, progress.args_summary)
+                                    };
+                                    glines.push(Line::from(Span::styled(
+                                        progress_text,
+                                        Style::default().fg(theme.dim),
+                                    )), GutterMark::Continuation(call.tool_name));
+                                }
+
                                 // Expanded output — diff content or raw output fallback
                                 if call.expanded {
                                     if let Some(diff) = &call.diff_content {
@@ -1454,6 +1469,7 @@ mod tests {
                     diff_content: None,
                     is_error: false,
                     expanded: false,
+                    agent_progress: None,
                 }],
                 status: ToolGroupStatus::Preparing,
             })],
@@ -1475,6 +1491,7 @@ mod tests {
                     diff_content: None,
                     is_error: false,
                     expanded: false,
+                    agent_progress: None,
                 }],
                 status: ToolGroupStatus::Complete,
             })],
@@ -1504,6 +1521,7 @@ mod tests {
                     }),
                     is_error: false,
                     expanded: true,
+                    agent_progress: None,
                 }],
                 status: ToolGroupStatus::Complete,
             })],
@@ -1609,6 +1627,7 @@ mod tests {
                     diff_content: None,
                     is_error: false,
                     expanded: false,
+                    agent_progress: None,
                 })
                 .collect(),
             status: ToolGroupStatus::Complete,
@@ -1778,6 +1797,7 @@ mod tests {
                         diff_content: None,
                         is_error: false,
                         expanded: false,
+                        agent_progress: None,
                     }],
                     status: ToolGroupStatus::Complete,
                 }),
@@ -1791,6 +1811,7 @@ mod tests {
                         diff_content: None,
                         is_error: false,
                         expanded: false,
+                        agent_progress: None,
                     }],
                     status: ToolGroupStatus::Complete,
                 }),
@@ -1830,6 +1851,7 @@ mod tests {
                     diff_content: None,
                     is_error: false,
                     expanded: false,
+                    agent_progress: None,
                 }],
                 status: ToolGroupStatus::Complete,
             })],
@@ -1856,6 +1878,7 @@ mod tests {
                         diff_content: None,
                         is_error: false,
                         expanded: false,
+                        agent_progress: None,
                     }],
                     status: ToolGroupStatus::Complete,
                 }),
@@ -1868,6 +1891,7 @@ mod tests {
                         diff_content: None,
                         is_error: false,
                         expanded: false,
+                        agent_progress: None,
                     }],
                     status: ToolGroupStatus::Complete,
                 }),
@@ -1880,6 +1904,7 @@ mod tests {
                         diff_content: None,
                         is_error: false,
                         expanded: false,
+                        agent_progress: None,
                     }],
                     status: ToolGroupStatus::Complete,
                 }),
@@ -1907,6 +1932,7 @@ mod tests {
                         diff_content: None,
                         is_error: false,
                         expanded: false,
+                        agent_progress: None,
                     }],
                     status: ToolGroupStatus::Complete,
                 }),
@@ -1920,6 +1946,7 @@ mod tests {
                         diff_content: None,
                         is_error: false,
                         expanded: false,
+                        agent_progress: None,
                     }],
                     status: ToolGroupStatus::Complete,
                 }),
@@ -1945,6 +1972,7 @@ mod tests {
                         diff_content: None,
                         is_error: false,
                         expanded: false,
+                        agent_progress: None,
                     }],
                     status: ToolGroupStatus::Complete,
                 }),
@@ -1957,6 +1985,7 @@ mod tests {
                         diff_content: None,
                         is_error: false,
                         expanded: false,
+                        agent_progress: None,
                     }],
                     status: ToolGroupStatus::Complete,
                 }),
@@ -1986,6 +2015,7 @@ mod tests {
                         diff_content: None,
                         is_error: false,
                         expanded: false,
+                        agent_progress: None,
                     }],
                     status: ToolGroupStatus::Complete,
                 }),
@@ -1998,6 +2028,7 @@ mod tests {
                         diff_content: None,
                         is_error: false,
                         expanded: false,
+                        agent_progress: None,
                     }],
                     status: ToolGroupStatus::Complete,
                 }),
@@ -2010,6 +2041,7 @@ mod tests {
                         diff_content: None,
                         is_error: false,
                         expanded: false,
+                        agent_progress: None,
                     }],
                     status: ToolGroupStatus::Complete,
                 }),
@@ -2377,6 +2409,7 @@ mod tests {
                     diff_content: None,
                     is_error: false,
                     expanded: false,
+                    agent_progress: None,
                 }],
                 status: ToolGroupStatus::Complete,
             })],
@@ -2427,5 +2460,78 @@ mod tests {
             if found_bg { break; }
         }
         assert!(found_bg, "user message should have theme.user_msg_bg background");
+    }
+
+    #[test]
+    fn buffer_agent_progress_shows_tool_info() {
+        use crate::ui::message_block::AgentProgressInfo;
+
+        // Agent tool call with live progress (no result yet)
+        let messages = vec![MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::ToolGroup(ToolGroup {
+                calls: vec![ToolCall {
+                    tool_name: ToolName::Agent,
+                    args_summary: "(explore): analyze codebase".to_string(),
+                    full_output: None,
+                    result_summary: None,
+                    diff_content: None,
+                    is_error: false,
+                    expanded: false,
+                    agent_progress: Some(AgentProgressInfo {
+                        tool_name: ToolName::Read,
+                        args_summary: "src/main.rs".into(),
+                        result_summary: None,
+                        tool_count: 3,
+                    }),
+                }],
+                status: ToolGroupStatus::Running { current_tool: ToolName::Agent },
+            })],
+        }];
+        let text = render_messages_to_string(80, 10, &messages, None);
+        // The agent tool call header should be present
+        assert!(text.contains("agent"), "should show agent tool name, got:\n{text}");
+        // The progress line should show the sub-agent's current tool and args
+        assert!(text.contains("read"), "should show sub-agent tool name 'read', got:\n{text}");
+        assert!(text.contains("src/main.rs"), "should show sub-agent args, got:\n{text}");
+        // Should show "..." since no result yet
+        assert!(text.contains("..."), "should show '...' for in-progress tool, got:\n{text}");
+    }
+
+    #[test]
+    fn buffer_agent_progress_shows_result() {
+        use crate::ui::message_block::AgentProgressInfo;
+
+        // Agent tool call with completed sub-tool (has result summary)
+        let messages = vec![MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::ToolGroup(ToolGroup {
+                calls: vec![ToolCall {
+                    tool_name: ToolName::Agent,
+                    args_summary: "(explore): find usages".to_string(),
+                    full_output: None,
+                    result_summary: None,
+                    diff_content: None,
+                    is_error: false,
+                    expanded: false,
+                    agent_progress: Some(AgentProgressInfo {
+                        tool_name: ToolName::Grep,
+                        args_summary: "ToolName".into(),
+                        result_summary: Some("12 matches".into()),
+                        tool_count: 5,
+                    }),
+                }],
+                status: ToolGroupStatus::Running { current_tool: ToolName::Agent },
+            })],
+        }];
+        let text = render_messages_to_string(80, 10, &messages, None);
+        // Should show the arrow and result instead of "..."
+        assert!(text.contains("grep"), "should show sub-agent tool name 'grep', got:\n{text}");
+        assert!(text.contains("ToolName"), "should show sub-agent args, got:\n{text}");
+        assert!(text.contains("\u{2192}"), "should show arrow for completed result, got:\n{text}");
+        assert!(text.contains("12 matches"), "should show result summary, got:\n{text}");
+        // The progress line itself should use arrow, not "..."
+        // (Note: the header "running..." is separate from the progress line)
+        assert!(text.contains("\u{2192} 12 matches"), "progress line should show arrow + result, got:\n{text}");
     }
 }

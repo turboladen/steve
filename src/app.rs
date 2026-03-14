@@ -124,7 +124,9 @@ struct PendingQuestion {
 }
 
 /// Extract a compact argument summary for display in tool call lines.
-fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
+/// Build a compact argument summary for a tool call (e.g., path for read, pattern for grep).
+/// Public so `stream.rs` can use it for sub-agent progress updates.
+pub fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
     match tool_name {
         ToolName::Read | ToolName::List => args
             .get("path")
@@ -224,6 +226,18 @@ fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
             };
             format!("{agent_type}: {truncated}")
         }
+    }
+}
+
+/// Build a compact result summary for a tool output (truncated to 80 chars).
+/// Public so `stream.rs` can use it for sub-agent progress updates.
+pub fn extract_result_summary(tool_name: ToolName, output: &crate::tool::ToolOutput) -> String {
+    let _ = tool_name; // All tools use the same truncation logic for now
+    if output.output.chars().count() > 80 {
+        let truncated: String = output.output.chars().take(77).collect();
+        format!("{truncated}...")
+    } else {
+        output.output.clone()
     }
 }
 
@@ -1118,6 +1132,19 @@ impl App {
             AppEvent::StreamNotice { text } => {
                 self.messages.push(MessageBlock::System { text });
                 self.message_area_state.scroll_to_bottom();
+            }
+            AppEvent::AgentProgress { call_id: _, tool_name, args_summary, result_summary } => {
+                // Update the agent tool call's inline progress — no new MessageBlock,
+                // so the assistant block stays at the bottom and follow-up text is visible.
+                if let Some(last) = self.last_assistant_mut() {
+                    if result_summary.is_some() {
+                        // ToolResult: just update the result on the existing progress
+                        last.update_agent_progress_result(result_summary);
+                    } else {
+                        // LlmToolCall: new tool call, update with tool_name + args
+                        last.update_agent_progress(tool_name, args_summary);
+                    }
+                }
             }
             AppEvent::LspStatus { servers } => {
                 self.sidebar_state.lsp_servers = servers

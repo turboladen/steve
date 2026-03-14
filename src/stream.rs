@@ -1508,10 +1508,24 @@ async fn run_sub_agent(
                     Some(AppEvent::LlmUsageUpdate { usage }) => {
                         let _ = parent_event_tx.send(AppEvent::LlmUsageUpdate { usage });
                     }
-                    Some(AppEvent::LlmToolCall { tool_name, .. }) => {
+                    Some(AppEvent::LlmToolCall { tool_name, arguments, .. }) => {
                         tool_count += 1;
-                        let _ = parent_event_tx.send(AppEvent::StreamNotice {
-                            text: format!("> agent ({agent_type}): {tool_name} [{tool_count}]"),
+                        let args_summary = crate::app::extract_args_summary(tool_name, &arguments);
+                        let _ = parent_event_tx.send(AppEvent::AgentProgress {
+                            call_id: call_id.to_string(),
+                            tool_name,
+                            args_summary,
+                            result_summary: None,
+                        });
+                    }
+                    Some(AppEvent::ToolResult { tool_name, output, .. }) => {
+                        // Update progress with the result summary
+                        let summary = crate::app::extract_result_summary(tool_name, &output);
+                        let _ = parent_event_tx.send(AppEvent::AgentProgress {
+                            call_id: call_id.to_string(),
+                            tool_name,
+                            args_summary: String::new(),
+                            result_summary: Some(summary),
                         });
                     }
                     Some(AppEvent::LlmError { error }) => {
@@ -1522,7 +1536,7 @@ async fn run_sub_agent(
                         // Forward permission requests to parent so the UI can prompt the user.
                         let _ = parent_event_tx.send(AppEvent::PermissionRequest(req));
                     }
-                    // Other events (ToolResult, Tick, etc.) are discarded.
+                    // Other events (LlmFinish, Tick, etc.) are discarded.
                     Some(_) => {}
                     None => {
                         // Channel closed — sub-agent dropped its sender.
