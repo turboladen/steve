@@ -43,6 +43,10 @@ pub struct ToolResultCache {
     misses: u32,
 }
 
+/// Prefix of the cache-repeat summary message. Stream code uses this to detect
+/// when the LLM is stuck re-reading cached content and should stop looping.
+pub const CACHE_REPEAT_PREFIX: &str = "[Content unchanged";
+
 impl ToolResultCache {
     /// Number of cache hits on the same key before `get()` returns a summary
     /// instead of the full cached content.
@@ -106,13 +110,14 @@ impl ToolResultCache {
             if *count >= Self::REPEAT_THRESHOLD {
                 // Break the compressor/cache feedback loop: after repeated
                 // hits the LLM is clearly stuck re-reading the same content.
-                let prior_hits = *count - 1;
-                let time_word = if prior_hits == 1 { "time" } else { "times" };
+                // Use a directive message that tells the LLM to proceed,
+                // not just that content was "already provided".
                 Some(ToolOutput {
                     title: cached.output.title.clone(),
-                    output: format!(
-                        "[This content was already provided {prior_hits} {time_word}. It has not changed.]"
-                    ),
+                    output: "[Content unchanged — you already have this in your conversation. \
+                             Do NOT re-read this file. Proceed with the information you have \
+                             and answer the user's question.]"
+                        .to_string(),
                     is_error: false,
                 })
             } else {
@@ -436,11 +441,17 @@ mod tests {
         // Next hit should return a summary, not the full content
         let r = cache.get(ToolName::Read, &args).unwrap();
         assert!(
-            r.output.contains("already provided"),
-            "expected summary after threshold, got: {}",
+            r.output.starts_with(CACHE_REPEAT_PREFIX),
+            "expected cache-repeat summary after threshold, got: {}",
             r.output
         );
         assert!(!r.is_error);
+        // Verify the message is directive (tells LLM what to DO)
+        assert!(
+            r.output.contains("Do NOT re-read"),
+            "cache repeat message should be directive, got: {}",
+            r.output
+        );
     }
 
     #[test]
@@ -525,5 +536,26 @@ mod tests {
         // Next hit — file mtime changed, should be a cache miss
         let r = cache.get(ToolName::Read, &args);
         assert!(r.is_none(), "should miss cache when file modified externally");
+    }
+
+    #[test]
+    fn test_cache_repeat_prefix_matches_actual_message() {
+        // Ensure the public CACHE_REPEAT_PREFIX matches what get() actually returns.
+        let mut cache = test_cache();
+        let args = json!({"path": "src/foo.rs"});
+        cache.put(ToolName::Read, &args, &test_output("content"));
+
+        // Exhaust threshold
+        for _ in 0..ToolResultCache::REPEAT_THRESHOLD {
+            cache.get(ToolName::Read, &args);
+        }
+        // This hit should return the summary
+        let r = cache.get(ToolName::Read, &args).unwrap();
+        assert!(
+            r.output.starts_with(CACHE_REPEAT_PREFIX),
+            "CACHE_REPEAT_PREFIX '{}' must match start of actual message: '{}'",
+            CACHE_REPEAT_PREFIX,
+            &r.output[..r.output.len().min(40)]
+        );
     }
 }

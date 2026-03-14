@@ -31,7 +31,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::types::ModelCost;
-use crate::context::cache::ToolResultCache;
+use crate::context::cache::{ToolResultCache, CACHE_REPEAT_PREFIX};
 use crate::event::{AppEvent, StreamUsage};
 use crate::permission::PermissionEngine;
 use crate::permission::types::{PermissionAction, PermissionReply, PermissionRequest};
@@ -208,6 +208,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
     let mut total_usage = StreamUsage::default();
     let mut current_iteration_tool_count: usize = 0;
+    let mut current_iteration_cache_repeats: usize = 0;
 
     // Tool result cache — shared across stream tasks within a session.
     // Avoids re-executing identical read operations across messages.
@@ -225,6 +226,11 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
     // Bitmask tracks which escalating warnings have fired this cycle
     // (resets with iteration_count on user interaction).
     let mut warnings_sent: u8 = 0;
+
+    // Track consecutive iterations where ALL tool calls were cache-repeat hits.
+    // When this reaches the threshold, inject a strong "stop looping" message.
+    let mut consecutive_cached_iterations: u32 = 0;
+    const MAX_CONSECUTIVE_CACHED: u32 = 2;
 
     // Mid-stream error retry limit (separate from stream creation retries).
     const MAX_STREAM_RETRIES: u32 = 2;
@@ -302,8 +308,9 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             }
         }
 
-        // Reset counter for the next iteration
+        // Reset counters for the next iteration
         current_iteration_tool_count = 0;
+        current_iteration_cache_repeats = 0;
 
         // Estimate payload size for diagnostics
         let payload_chars: usize = messages.iter().map(|m| {
@@ -825,6 +832,9 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         for tc in &auto_allowed {
             if let Some(cached) = tool_cache.lock().unwrap().get(tc.tool_name, &tc.args) {
                 tracing::debug!(tool = %tc.tool_name, "using cached result (parallel)");
+                if cached.output.starts_with(CACHE_REPEAT_PREFIX) {
+                    current_iteration_cache_repeats += 1;
+                }
                 parallel_results.insert(tc.id.clone(), cached);
             } else {
                 tasks_to_spawn.push(ParallelTask {
@@ -1240,6 +1250,9 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                     tracing::info!(tool = %tc.tool_name, "executing tool");
 
                     let output = if let Some(cached) = tool_cache.lock().unwrap().get(tc.tool_name, &tc.args) {
+                        if cached.output.starts_with(CACHE_REPEAT_PREFIX) {
+                            current_iteration_cache_repeats += 1;
+                        }
                         cached
                     } else {
                         let result = match registry.execute(tc.tool_name, tc.args.clone(), ctx.clone()) {
@@ -1293,6 +1306,9 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                     tracing::info!(tool = %tc.tool_name, "executing allowed tool (sequential)");
 
                     let output = if let Some(cached) = tool_cache.lock().unwrap().get(tc.tool_name, &tc.args) {
+                        if cached.output.starts_with(CACHE_REPEAT_PREFIX) {
+                            current_iteration_cache_repeats += 1;
+                        }
                         cached
                     } else {
                         let result = match registry.execute(tc.tool_name, tc.args.clone(), ctx.clone()) {
@@ -1346,6 +1362,41 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             );
             iteration_count = 0;
             warnings_sent = 0;
+            consecutive_cached_iterations = 0;
+        }
+
+        // Detect "stuck in cache" loops: if ALL tool calls in this iteration
+        // returned cache-repeat summaries, the LLM is re-reading content it
+        // already has. After MAX_CONSECUTIVE_CACHED such iterations, inject
+        // a strong directive to stop looping and respond.
+        if current_iteration_tool_count > 0
+            && current_iteration_cache_repeats == current_iteration_tool_count
+        {
+            consecutive_cached_iterations += 1;
+            tracing::warn!(
+                consecutive = consecutive_cached_iterations,
+                tools = current_iteration_tool_count,
+                "all tool calls returned cache-repeat summaries"
+            );
+            if consecutive_cached_iterations >= MAX_CONSECUTIVE_CACHED {
+                let stop_msg = "\n\n[STOP: You are re-reading files you already have. All tool \
+                                calls returned cached content. You MUST respond to the user NOW \
+                                with the information already in your conversation. Do NOT make \
+                                any more tool calls.]";
+                for msg in messages.iter_mut().rev() {
+                    if let ChatCompletionRequestMessage::Tool(tool_msg) = msg {
+                        if let ChatCompletionRequestToolMessageContent::Text(content) = &mut tool_msg.content {
+                            content.push_str(stop_msg);
+                        }
+                        break;
+                    }
+                }
+                let _ = event_tx.send(AppEvent::StreamNotice {
+                    text: "⚙ Cache loop detected — forcing response".to_string(),
+                });
+            }
+        } else {
+            consecutive_cached_iterations = 0;
         }
 
         // Escalating warnings: append a nudge to the last tool result message

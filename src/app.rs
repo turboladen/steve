@@ -87,7 +87,9 @@ Piped/compound commands (e.g., `cat file | wc -l`) are allowed since they go bey
 - **Glob for discovery**: Use `glob` to find files by pattern before reading them.\n\
 - **Batch related reads**: If you need multiple files, request them in a single response to enable parallel execution.\n\
 - **Respond literally**: When the user asks to see, show, or display content, output the actual content in a fenced code block — do not summarize or paraphrase. In general, follow the user's request directly rather than reinterpreting what they want.\n\
-- **Avoid re-reading**: Files you've already read are cached. The system will tell you if content is unchanged.\n\
+- **Avoid re-reading**: Files you've already read are cached. If a tool returns a message saying content is unchanged, \
+that means you already have this information in your conversation context. Do NOT try to work around it — \
+proceed with the information you already have and answer the user's question.\n\
 - **Code structure**: Use the `symbols` tool to list functions/structs/classes in a file, find what scope contains a line, or locate a symbol definition. Faster and more accurate than grepping for structural queries.\n\
 - **Record discoveries**: Use the `memory` tool to save important project context (architecture, patterns, key files) that persists across sessions. \
 Your project memory is automatically loaded into context — you don't need to read it manually. \
