@@ -169,7 +169,23 @@ fn write_message_part(out: &mut String, part: &MessagePart) {
 /// Extract a short summary from tool call arguments (similar to `extract_args_summary` in app.rs).
 fn extract_tool_summary(tool_name: ToolName, input: &serde_json::Value) -> String {
     match tool_name {
-        ToolName::Read | ToolName::List => input
+        ToolName::Read => {
+            if let Some(paths) = input.get("paths").and_then(|v| v.as_array()) {
+                format!("{} files", paths.len())
+            } else {
+                let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("(no path)");
+                let is_count = input.get("count").and_then(|v| v.as_bool()).unwrap_or(false);
+                let tail_n = input.get("tail").and_then(|v| v.as_u64());
+                if is_count {
+                    format!("{path} (count)")
+                } else if let Some(n) = tail_n {
+                    format!("{path} (tail {n})")
+                } else {
+                    path.to_string()
+                }
+            }
+        }
+        ToolName::List => input
             .get("path")
             .and_then(|v| v.as_str())
             .unwrap_or("(no path)")
@@ -675,6 +691,31 @@ mod tests {
         let result = extract_tool_summary(ToolName::Bash, &json!({"command": long_cmd}));
         assert!(result.ends_with("..."));
         assert_eq!(result.chars().count(), 60); // 57 + "..."
+    }
+
+    #[test]
+    fn extract_tool_summary_read_count() {
+        assert_eq!(
+            extract_tool_summary(ToolName::Read, &json!({"path": "src/main.rs", "count": true})),
+            "src/main.rs (count)"
+        );
+    }
+
+    #[test]
+    fn extract_tool_summary_read_tail() {
+        assert_eq!(
+            extract_tool_summary(ToolName::Read, &json!({"path": "src/main.rs", "tail": 20})),
+            "src/main.rs (tail 20)"
+        );
+    }
+
+    #[test]
+    fn extract_tool_summary_read_multi_file() {
+        let result = extract_tool_summary(
+            ToolName::Read,
+            &json!({"paths": ["a.rs", "b.rs", "c.rs"]}),
+        );
+        assert_eq!(result, "3 files");
     }
 
     use chrono::Datelike;

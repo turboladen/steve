@@ -216,28 +216,62 @@ impl ToolResultCache {
     fn cache_key(&self, tool_name: ToolName, args: &Value) -> Option<String> {
         match tool_name {
             ToolName::Read => {
+                let is_count = args.get("count").and_then(|v| v.as_bool()).unwrap_or(false);
+                let tail_n = args.get("tail").and_then(|v| v.as_u64());
+
+                // Multi-file mode
+                if let Some(paths_arr) = args.get("paths").and_then(|v| v.as_array()) {
+                    let mut sorted: Vec<String> = paths_arr
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|p| self.normalize_path(p).display().to_string())
+                        .collect();
+                    sorted.sort();
+                    return Some(format!(
+                        "read-multi:{}:count={}",
+                        sorted.join(","),
+                        is_count
+                    ));
+                }
+
                 let path = args.get("path")?.as_str()?;
                 let normalized = self.normalize_path(path);
-                let offset = args
-                    .get("offset")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(1);
-                let limit = args
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "all".to_string());
-                let max_lines = args
-                    .get("max_lines")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(2000);
-                Some(format!(
-                    "read:{}:{}:{}:{}",
-                    normalized.display(),
-                    offset,
-                    limit,
-                    max_lines
-                ))
+
+                if is_count {
+                    Some(format!("read:{}:count", normalized.display()))
+                } else if let Some(n) = tail_n {
+                    let max_lines = args
+                        .get("max_lines")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(2000);
+                    Some(format!(
+                        "read:{}:tail={}:{}",
+                        normalized.display(),
+                        n,
+                        max_lines
+                    ))
+                } else {
+                    let offset = args
+                        .get("offset")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(1);
+                    let limit = args
+                        .get("limit")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "all".to_string());
+                    let max_lines = args
+                        .get("max_lines")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(2000);
+                    Some(format!(
+                        "read:{}:{}:{}:{}",
+                        normalized.display(),
+                        offset,
+                        limit,
+                        max_lines
+                    ))
+                }
             }
             ToolName::Grep => {
                 let pattern = args.get("pattern")?.as_str()?;
@@ -292,7 +326,15 @@ impl ToolResultCache {
     /// Extract the primary file path referenced by a tool invocation.
     fn extract_path(&self, tool_name: ToolName, args: &Value) -> Option<PathBuf> {
         match tool_name {
-            ToolName::Read | ToolName::List | ToolName::Symbols => {
+            ToolName::Read => {
+                // Multi-file: can't track mtime of multiple files with single path
+                if args.get("paths").and_then(|v| v.as_array()).is_some() {
+                    return None;
+                }
+                let path = args.get("path")?.as_str()?;
+                Some(self.normalize_path(path))
+            }
+            ToolName::List | ToolName::Symbols => {
                 let path = args.get("path")?.as_str()?;
                 Some(self.normalize_path(path))
             }
@@ -556,6 +598,81 @@ mod tests {
             "CACHE_REPEAT_PREFIX '{}' must match start of actual message: '{}'",
             CACHE_REPEAT_PREFIX,
             &r.output[..r.output.len().min(40)]
+        );
+    }
+
+    // -- Cache key format tests for new read modes --
+
+    #[test]
+    fn test_cache_key_read_count_mode() {
+        let cache = test_cache();
+        let args = json!({"path": "src/main.rs", "count": true});
+        let key = cache.cache_key(ToolName::Read, &args).unwrap();
+        assert!(
+            key.contains(":count"),
+            "count mode key should contain ':count', got: {key}"
+        );
+        // Should NOT contain offset/limit format
+        assert!(!key.contains(":1:all:"));
+    }
+
+    #[test]
+    fn test_cache_key_read_tail_mode() {
+        let cache = test_cache();
+        let args = json!({"path": "src/main.rs", "tail": 20});
+        let key = cache.cache_key(ToolName::Read, &args).unwrap();
+        assert!(
+            key.contains(":tail=20:"),
+            "tail mode key should contain ':tail=20:', got: {key}"
+        );
+    }
+
+    #[test]
+    fn test_cache_key_read_multi_file() {
+        let cache = test_cache();
+        let args = json!({"paths": ["b.rs", "a.rs"]});
+        let key = cache.cache_key(ToolName::Read, &args).unwrap();
+        assert!(
+            key.starts_with("read-multi:"),
+            "multi-file key should start with 'read-multi:', got: {key}"
+        );
+        // Paths should be sorted
+        let a_pos = key.find("a.rs").unwrap();
+        let b_pos = key.find("b.rs").unwrap();
+        assert!(
+            a_pos < b_pos,
+            "paths should be sorted in key: {key}"
+        );
+    }
+
+    #[test]
+    fn test_cache_key_read_multi_file_count() {
+        let cache = test_cache();
+        let args = json!({"paths": ["a.rs"], "count": true});
+        let key = cache.cache_key(ToolName::Read, &args).unwrap();
+        assert!(
+            key.contains("count=true"),
+            "multi-file count key should contain 'count=true', got: {key}"
+        );
+    }
+
+    #[test]
+    fn test_extract_path_returns_none_for_multi_file() {
+        let cache = test_cache();
+        let args = json!({"paths": ["a.rs", "b.rs"]});
+        assert!(
+            cache.extract_path(ToolName::Read, &args).is_none(),
+            "extract_path should return None for multi-file reads"
+        );
+    }
+
+    #[test]
+    fn test_extract_path_returns_some_for_single_file() {
+        let cache = test_cache();
+        let args = json!({"path": "src/main.rs"});
+        assert!(
+            cache.extract_path(ToolName::Read, &args).is_some(),
+            "extract_path should return Some for single-file reads"
         );
     }
 }

@@ -209,14 +209,16 @@ capabilities (permission prompts, sub-agent spawning). New intercepted tools mus
 the parallel execution phase alongside `Question`, `Lsp`, and `Agent`.
 
 **Tool argument names vary**: `read`/`list`/`grep`/`glob`/`delete`/`mkdir` use `"path"`.
-`edit`/`write`/`patch` use `"file_path"`. `move`/`copy` use `"from_path"`/`"to_path"`. `edit` ops:
-`find_replace` (default), `multi_find_replace`, `insert_lines`, `delete_lines`, `replace_range`.
+`edit`/`write`/`patch` use `"file_path"`. `move`/`copy` use `"from_path"`/`"to_path"`. `read` also
+accepts `"paths"` (array, multi-file), `"tail"` (last N lines), `"count"` (line count only), and
+`"max_lines"` (cap output, default 2000). `edit` ops: `find_replace` (default),
+`multi_find_replace`, `insert_lines`, `delete_lines`, `replace_range`.
 
 **Ropey gotcha**: `Rope::from_str("").len_lines()` returns 1. `total_lines()` helper checks
 `len_chars() == 0` first and subtracts 1 for trailing `\n`.
 
 **Bash interception**: `check_native_tool_redirect()` rejects `cat`→read, `ls`→list, `find`→glob,
-`grep`→grep, `sed`→edit. Compound commands pass through.
+`grep`→grep, `sed`→edit, `wc -l`→read(count). Compound commands pass through.
 
 **Exhaustive `ToolName` match locations** (all must update when adding variants):
 `extract_args_summary()` and `extract_diff_content()` in `app.rs`, `extract_tool_summary()` in

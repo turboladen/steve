@@ -72,7 +72,7 @@ You have a limited number of tool calls per response. Plan your exploration effi
 Do NOT use `bash` for simple file operations — use the dedicated tool instead:\n\
 | Instead of... | Use |\n\
 |---|---|\n\
-| `cat`, `head`, `tail` | `read` (with `offset`/`limit`) |\n\
+| `cat`, `head`, `tail`, `wc -l` | `read` (with `offset`/`limit`, `tail`, or `count`) |\n\
 | `ls`, `find` | `list`, `glob` |\n\
 | `grep`, `rg` | `grep` |\n\
 | `sed`, `awk` | `edit`, `patch` |\n\n\
@@ -82,7 +82,8 @@ Piped/compound commands (e.g., `cat file | wc -l`) are allowed since they go bey
 - **Verify CLI tools before recommending**: When suggesting an external CLI tool (e.g., `pdftotext`, `jq`, `ffmpeg`), first check if it's installed by running `command -v <tool>` via `bash`. If it's not available, say so explicitly and suggest how to install it (e.g., `brew install poppler` on macOS). Never assume a tool is on the user's PATH.\n\
 - **Line-based edits**: The `edit` tool supports `insert_lines`, `delete_lines`, and `replace_range` operations with 1-indexed line numbers matching `read` output. Use these when you know the exact line numbers instead of find_replace.\n\
 - **Search before reading**: Use `grep` to find relevant code, then `read` with specific line ranges. Avoid reading entire large files.\n\
-- **Use line ranges**: The `read` tool supports `offset` and `limit` parameters. For files over 200 lines, read only the relevant section.\n\
+- **Use line ranges**: The `read` tool supports `offset`/`limit` for ranges, `tail` for last N lines, and `count` for line counts without content. For files over 200 lines, read only the relevant section.\n\
+- **Read multiple files**: Use `read` with `paths` (array) to read several files in one call instead of separate reads.\n\
 - **Be context-efficient**: Each tool result consumes context window space. Prefer targeted searches over broad reads.\n\
 - **Glob for discovery**: Use `glob` to find files by pattern before reading them.\n\
 - **Batch related reads**: If you need multiple files, request them in a single response to enable parallel execution.\n\
@@ -130,7 +131,23 @@ struct PendingQuestion {
 /// Public so `stream.rs` can use it for sub-agent progress updates.
 pub fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
     match tool_name {
-        ToolName::Read | ToolName::List => args
+        ToolName::Read => {
+            if let Some(paths) = args.get("paths").and_then(|v| v.as_array()) {
+                format!("{} files", paths.len())
+            } else {
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let is_count = args.get("count").and_then(|v| v.as_bool()).unwrap_or(false);
+                let tail_n = args.get("tail").and_then(|v| v.as_u64());
+                if is_count {
+                    format!("{path} (count)")
+                } else if let Some(n) = tail_n {
+                    format!("{path} (tail {n})")
+                } else {
+                    path.to_string()
+                }
+            }
+        }
+        ToolName::List => args
             .get("path")
             .and_then(|v| v.as_str())
             .unwrap_or("")

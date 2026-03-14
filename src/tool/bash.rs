@@ -75,8 +75,20 @@ fn check_native_tool_redirect(command: &str) -> Option<String> {
 
     match base {
         "cat" | "head" | "tail" | "less" | "more" => Some(
-            "Use the `read` tool instead. It supports `offset` and `limit` for line ranges.".into(),
+            "Use the `read` tool instead. It supports `offset`/`limit` for ranges, `tail` for last N lines, `count` for line counts, and `paths` for multiple files.".into(),
         ),
+        "wc" => {
+            // Only redirect wc -l (line count) or bare wc — not wc -w, wc -c, etc.
+            let rest: Vec<&str> = words.collect();
+            let has_non_l_flags = rest.iter().any(|w| {
+                w.starts_with('-') && *w != "-l"
+            });
+            if has_non_l_flags {
+                None
+            } else {
+                Some("Use the `read` tool with `count: true` to get file line counts.".into())
+            }
+        }
         "ls" | "dir" => Some("Use the `list` tool instead.".into()),
         "find" => Some(
             "Use the `glob` tool instead. It supports patterns like `**/*.rs`.".into(),
@@ -352,6 +364,27 @@ mod tests {
         let msg = check_native_tool_redirect("head -20 src/main.rs");
         assert!(msg.is_some());
         assert!(msg.unwrap().contains("`read`"));
+    }
+
+    #[test]
+    fn redirect_wc_l_to_read_count() {
+        let msg = check_native_tool_redirect("wc -l src/main.rs");
+        assert!(msg.is_some());
+        assert!(msg.unwrap().contains("`read`"));
+    }
+
+    #[test]
+    fn redirect_bare_wc_to_read_count() {
+        let msg = check_native_tool_redirect("wc src/main.rs");
+        assert!(msg.is_some());
+        assert!(msg.unwrap().contains("`read`"));
+    }
+
+    #[test]
+    fn allow_wc_w_and_wc_c() {
+        assert!(check_native_tool_redirect("wc -w src/main.rs").is_none());
+        assert!(check_native_tool_redirect("wc -c src/main.rs").is_none());
+        assert!(check_native_tool_redirect("wc -m src/main.rs").is_none());
     }
 
     #[test]
