@@ -760,36 +760,59 @@ fn apply_selection_highlight(
             continue;
         }
 
-        // Walk through spans, skipping gutter spans and highlighting content spans
+        // Build new spans list, splitting at selection boundaries
         let mut char_pos: usize = 0;
         let mut in_gutter = true;
         let mut gutter_chars = 0;
+        let mut new_spans: Vec<Span<'_>> = Vec::new();
 
         let line = &mut lines[line_idx];
-        for span in &mut line.spans {
-            let span_len = span.content.chars().count();
+        for span in line.spans.drain(..) {
+            let span_char_count = span.content.chars().count();
 
             if in_gutter {
-                gutter_chars += span_len;
+                gutter_chars += span_char_count;
                 if gutter_chars >= GUTTER_WIDTH {
                     in_gutter = false;
                 }
+                new_spans.push(span);
                 continue;
             }
 
             let span_start = char_pos;
-            let span_end = char_pos + span_len;
+            let span_end = char_pos + span_char_count;
 
-            // Check if this span overlaps the selection range
-            if span_start < line_end && span_end > line_start {
-                // Full or partial overlap — for simplicity, highlight the entire span
-                // if it overlaps at all. True character-level splitting would require
-                // reconstructing spans, which is complex for marginal benefit.
-                span.style = span.style.bg(theme.selection_bg);
+            if span_start >= line_end || span_end <= line_start {
+                // No overlap — keep original
+                new_spans.push(span);
+            } else {
+                // Overlap — split the span at selection boundaries
+                let sel_start_in_span = line_start.saturating_sub(span_start);
+                let sel_end_in_span = (line_end - span_start).min(span_char_count);
+                let chars: Vec<char> = span.content.chars().collect();
+
+                // Before selection
+                if sel_start_in_span > 0 {
+                    let before: String = chars[..sel_start_in_span].iter().collect();
+                    new_spans.push(Span::styled(before, span.style));
+                }
+                // Selected portion
+                let selected: String =
+                    chars[sel_start_in_span..sel_end_in_span].iter().collect();
+                new_spans.push(Span::styled(
+                    selected,
+                    span.style.bg(theme.selection_bg),
+                ));
+                // After selection
+                if sel_end_in_span < span_char_count {
+                    let after: String = chars[sel_end_in_span..].iter().collect();
+                    new_spans.push(Span::styled(after, span.style));
+                }
             }
 
-            char_pos += span_len;
+            char_pos += span_char_count;
         }
+        line.spans = new_spans;
     }
 }
 
@@ -2537,5 +2560,156 @@ mod tests {
         // The progress line itself should use arrow, not "..."
         // (Note: the header "running..." is separate from the progress line)
         assert!(text.contains("\u{2192} 12 matches"), "progress line should show arrow + result, got:\n{text}");
+    }
+
+    // --- apply_selection_highlight tests ---
+
+    use ratatui::style::Color;
+
+    /// Helper: build a line with a gutter (3 chars) + content spans
+    fn make_line_with_gutter<'a>(content_spans: Vec<Span<'a>>) -> Line<'a> {
+        let mut spans = vec![Span::raw(" · ")]; // 3-char gutter
+        spans.extend(content_spans);
+        Line::from(spans)
+    }
+
+    #[test]
+    fn selection_highlight_partial_span_splits_correctly() {
+        let theme = Theme::default();
+        // Single content span: "Hello World" (11 chars)
+        let mut lines = vec![make_line_with_gutter(vec![Span::raw("Hello World")])];
+
+        // Select chars 2..5 ("llo") within the content
+        let start = ContentPos { line: 0, char_offset: 2 };
+        let end = ContentPos { line: 0, char_offset: 5 };
+        apply_selection_highlight(&mut lines, &start, &end, 80, &theme);
+
+        // Gutter (1 span) + before "He" + selected "llo" + after " World" = 4 spans
+        assert_eq!(lines[0].spans.len(), 4, "expected 4 spans: gutter + before + selected + after");
+        assert_eq!(lines[0].spans[1].content, "He");
+        assert_eq!(lines[0].spans[2].content, "llo");
+        assert_eq!(lines[0].spans[2].style.bg, Some(theme.selection_bg));
+        assert_eq!(lines[0].spans[3].content, " World");
+        // Before and after should NOT have selection_bg
+        assert_ne!(lines[0].spans[1].style.bg, Some(theme.selection_bg));
+        assert_ne!(lines[0].spans[3].style.bg, Some(theme.selection_bg));
+    }
+
+    #[test]
+    fn selection_highlight_across_span_boundary() {
+        let theme = Theme::default();
+        let style_a = Style::default().fg(Color::Red);
+        let style_b = Style::default().fg(Color::Blue);
+        // Two content spans: "Hello" (5 chars) + " World" (6 chars)
+        let mut lines = vec![make_line_with_gutter(vec![
+            Span::styled("Hello", style_a),
+            Span::styled(" World", style_b),
+        ])];
+
+        // Select chars 3..8 → "lo" from first span + " Wor" from second
+        let start = ContentPos { line: 0, char_offset: 3 };
+        let end = ContentPos { line: 0, char_offset: 8 };
+        apply_selection_highlight(&mut lines, &start, &end, 80, &theme);
+
+        // "Hello" spans chars 0..5, " World" spans chars 5..11
+        // Selection 3..8 → "lo" (chars 3-4) from first, " Wo" (chars 5-7) from second
+        // gutter + "Hel" + "lo" (selected) + " Wo" (selected) + "rld" = 5 spans
+        assert_eq!(lines[0].spans.len(), 5, "expected 5 spans, got: {:?}",
+            lines[0].spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>());
+        assert_eq!(lines[0].spans[1].content, "Hel");
+        assert_eq!(lines[0].spans[1].style.bg, None); // original style_a, no bg
+        assert_eq!(lines[0].spans[2].content, "lo");
+        assert_eq!(lines[0].spans[2].style.bg, Some(theme.selection_bg));
+        assert_eq!(lines[0].spans[2].style.fg, Some(Color::Red)); // preserves fg
+        assert_eq!(lines[0].spans[3].content, " Wo");
+        assert_eq!(lines[0].spans[3].style.bg, Some(theme.selection_bg));
+        assert_eq!(lines[0].spans[3].style.fg, Some(Color::Blue)); // preserves fg
+        assert_eq!(lines[0].spans[4].content, "rld");
+        assert_eq!(lines[0].spans[4].style.bg, None);
+    }
+
+    #[test]
+    fn selection_highlight_full_span_no_split() {
+        let theme = Theme::default();
+        // Content span: "Hello" (5 chars)
+        let mut lines = vec![make_line_with_gutter(vec![Span::raw("Hello")])];
+
+        // Select entire span: chars 0..5
+        let start = ContentPos { line: 0, char_offset: 0 };
+        let end = ContentPos { line: 0, char_offset: 5 };
+        apply_selection_highlight(&mut lines, &start, &end, 80, &theme);
+
+        // gutter + single fully-highlighted span = 2 spans
+        assert_eq!(lines[0].spans.len(), 2);
+        assert_eq!(lines[0].spans[1].content, "Hello");
+        assert_eq!(lines[0].spans[1].style.bg, Some(theme.selection_bg));
+    }
+
+    #[test]
+    fn selection_highlight_gutter_untouched() {
+        let theme = Theme::default();
+        let gutter_style = Style::default().fg(Color::DarkGray);
+        let mut lines = vec![Line::from(vec![
+            Span::styled(" · ", gutter_style),
+            Span::raw("content here"),
+        ])];
+
+        // Select all content
+        let start = ContentPos { line: 0, char_offset: 0 };
+        let end = ContentPos { line: 0, char_offset: 100 };
+        apply_selection_highlight(&mut lines, &start, &end, 80, &theme);
+
+        // Gutter span should retain original style — no selection_bg
+        assert_eq!(lines[0].spans[0].content, " · ");
+        assert_eq!(lines[0].spans[0].style, gutter_style);
+        assert_ne!(lines[0].spans[0].style.bg, Some(theme.selection_bg));
+    }
+
+    #[test]
+    fn selection_highlight_multiline_highlights_middle_lines_fully() {
+        let theme = Theme::default();
+        let mut lines = vec![
+            make_line_with_gutter(vec![Span::raw("first line")]),
+            make_line_with_gutter(vec![Span::raw("middle line")]),
+            make_line_with_gutter(vec![Span::raw("third line")]),
+        ];
+
+        // Select from char 6 on line 0 to char 5 on line 2
+        // Middle line (line 1) should use line_end=usize::MAX, highlighting everything
+        let start = ContentPos { line: 0, char_offset: 6 };
+        let end = ContentPos { line: 2, char_offset: 5 };
+        apply_selection_highlight(&mut lines, &start, &end, 80, &theme);
+
+        // Line 0: "first " (no highlight) + "line" (highlighted)
+        assert_eq!(lines[0].spans[1].content, "first ");
+        assert_ne!(lines[0].spans[1].style.bg, Some(theme.selection_bg));
+        assert_eq!(lines[0].spans[2].content, "line");
+        assert_eq!(lines[0].spans[2].style.bg, Some(theme.selection_bg));
+
+        // Line 1 (middle): entire content highlighted, no split
+        assert_eq!(lines[1].spans[1].content, "middle line");
+        assert_eq!(lines[1].spans[1].style.bg, Some(theme.selection_bg));
+
+        // Line 2: "third" (highlighted) + " line" (no highlight)
+        assert_eq!(lines[2].spans[1].content, "third");
+        assert_eq!(lines[2].spans[1].style.bg, Some(theme.selection_bg));
+        assert_eq!(lines[2].spans[2].content, " line");
+        assert_ne!(lines[2].spans[2].style.bg, Some(theme.selection_bg));
+    }
+
+    #[test]
+    fn selection_highlight_zero_width_does_nothing() {
+        let theme = Theme::default();
+        let mut lines = vec![make_line_with_gutter(vec![Span::raw("Hello")])];
+
+        // Zero-width selection (start == end on same line) should skip
+        let start = ContentPos { line: 0, char_offset: 3 };
+        let end = ContentPos { line: 0, char_offset: 3 };
+        apply_selection_highlight(&mut lines, &start, &end, 80, &theme);
+
+        // Should remain unchanged: gutter + original span
+        assert_eq!(lines[0].spans.len(), 2);
+        assert_eq!(lines[0].spans[1].content, "Hello");
+        assert_ne!(lines[0].spans[1].style.bg, Some(theme.selection_bg));
     }
 }
