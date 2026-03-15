@@ -51,6 +51,22 @@ what was done, what is currently being worked on, which files are being modified
 decisions that were made, and what the next steps are. \
 Preserve specific technical details, file paths, and code patterns.";
 
+/// System prompt for AGENTS.md generation/update.
+const AGENTS_UPDATE_SYSTEM_PROMPT: &str = "You are analyzing a software project to produce an AGENTS.md file — \
+project-specific instructions for AI coding assistants working in this codebase.\n\n\
+Output raw markdown only — no code fences wrapping the entire response.\n\n\
+Focus on:\n\
+- Build, test, and run commands\n\
+- Project architecture and key abstractions\n\
+- Coding conventions and patterns specific to this project\n\
+- Common gotchas and things an AI assistant should know\n\
+- Important file paths and their purposes\n\n\
+If an existing AGENTS.md is provided, preserve valuable existing content while improving \
+and extending it with new insights from the project context. Do not remove useful information \
+that was already there.\n\n\
+Keep the document concise and actionable — focus on what an AI assistant needs to know \
+to be effective in this codebase.";
+
 /// System prompt for LLM-generated session titles.
 const TITLE_SYSTEM_PROMPT: &str = "Generate a concise 3-7 word title for this conversation \
 based on the user's first message. Output only the title — no punctuation at the end, \
@@ -472,6 +488,9 @@ pub struct App {
     /// Active question prompt awaiting user input.
     pending_question: Option<PendingQuestion>,
 
+    /// Proposed AGENTS.md content awaiting user approval (y/n).
+    pending_agents_update: Option<String>,
+
     /// Active session browser list (populated by /sessions, cleared on selection or dismiss).
     session_browse_list: Option<Vec<SessionInfo>>,
 
@@ -615,6 +634,7 @@ impl App {
             exchange_count: 0,
             pending_permission: None,
             pending_question: None,
+            pending_agents_update: None,
             session_browse_list: None,
             stream_cancel: None,
             interjection_tx: None,
@@ -788,6 +808,7 @@ impl App {
         self.exchange_count = 0;
         self.pending_permission = None;
         self.pending_question = None;
+        self.pending_agents_update = None;
         self.model_picker.close();
         *self.tool_cache.lock().unwrap() = ToolResultCache::new(self.project.root.clone());
 
@@ -1263,6 +1284,36 @@ impl App {
                 self.message_area_state.scroll_to_bottom();
                 tracing::error!("compaction failed, auto-compact disabled for this session");
             }
+            AppEvent::AgentsUpdateFinish { proposed_content } => {
+                // Guard: if cancelled (is_loading already cleared), discard the late result
+                if !self.is_loading {
+                    tracing::info!("AGENTS.md update result arrived after cancellation, discarding");
+                } else {
+                    self.is_loading = false;
+                    self.status_line_state.activity = Activity::Idle;
+                    self.pending_agents_update = Some(proposed_content.clone());
+                    self.messages.push(MessageBlock::System {
+                        text: "Proposed AGENTS.md update \u{2014} press **y** to apply, **n** to discard:".to_string(),
+                    });
+                    self.messages.push(MessageBlock::Assistant {
+                        thinking: None,
+                        parts: vec![AssistantPart::Text(proposed_content)],
+                    });
+                    self.message_area_state.scroll_to_bottom();
+                    tracing::info!("AGENTS.md update proposed, awaiting user approval");
+                }
+            }
+            AppEvent::AgentsUpdateError { error } => {
+                if !self.is_loading {
+                    tracing::info!("AGENTS.md update error arrived after cancellation, discarding");
+                } else {
+                    self.is_loading = false;
+                    self.status_line_state.activity = Activity::Idle;
+                    self.messages.push(MessageBlock::Error { text: error });
+                    self.message_area_state.scroll_to_bottom();
+                    tracing::error!("AGENTS.md update failed");
+                }
+            }
             AppEvent::TitleGenerated { session_id, title } => {
                 self.apply_title_if_current(&session_id, &title);
             }
@@ -1498,6 +1549,40 @@ impl App {
                     return Ok(());
                 }
             }
+        }
+
+        // If there's a pending AGENTS.md update awaiting approval, intercept y/n
+        if self.pending_agents_update.is_some() {
+            match (key.code, key.modifiers) {
+                (KeyCode::Char('y'), _) | (KeyCode::Char('Y'), _) => {
+                    let content = self.pending_agents_update.take().unwrap();
+                    let agents_path = self.project.root.join("AGENTS.md");
+                    match std::fs::write(&agents_path, &content) {
+                        Ok(_) => {
+                            self.agents_md = Some(content);
+                            self.messages.push(MessageBlock::System {
+                                text: format!("AGENTS.md updated at {}", agents_path.display()),
+                            });
+                        }
+                        Err(e) => {
+                            self.messages.push(MessageBlock::Error {
+                                text: format!("Failed to write AGENTS.md: {e}"),
+                            });
+                        }
+                    }
+                    self.message_area_state.scroll_to_bottom();
+                }
+                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
+                    self.discard_pending_agents_update();
+                }
+                (KeyCode::Char('n'), _) | (KeyCode::Char('N'), _) | (KeyCode::Esc, _) => {
+                    self.discard_pending_agents_update();
+                }
+                _ => {
+                    // Ignore other keys
+                }
+            }
+            return Ok(());
         }
 
         // If the model picker overlay is open, intercept keystrokes
@@ -1749,6 +1834,15 @@ impl App {
     /// Invalidate the file index (called after write tools complete).
     fn invalidate_file_index(&mut self) {
         self.file_index = None;
+    }
+
+    /// Discard a pending AGENTS.md update and notify the user.
+    fn discard_pending_agents_update(&mut self) {
+        self.pending_agents_update = None;
+        self.messages.push(MessageBlock::System {
+            text: "AGENTS.md update discarded.".to_string(),
+        });
+        self.message_area_state.scroll_to_bottom();
     }
 
     /// Cancel the current streaming task.
@@ -2608,6 +2702,83 @@ impl App {
         transcript
     }
 
+    /// Gather project context for AGENTS.md generation.
+    ///
+    /// Collects file tree, key config files, current AGENTS.md, and recent
+    /// conversation messages to give the LLM enough context to produce a
+    /// useful AGENTS.md.
+    fn gather_project_context(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+
+        // 1. File tree (max_depth 4 = root + 3 subdirectory levels, max 200 entries)
+        let mut entries: Vec<String> = Vec::new();
+        if let Ok(walker) = ignore::WalkBuilder::new(&self.project.root)
+            .hidden(true)
+            .git_ignore(true)
+            .max_depth(Some(4))
+            .build()
+            .take(200)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            for entry in walker {
+                if let Some(path) = entry.path().strip_prefix(&self.project.root).ok() {
+                    entries.push(path.display().to_string());
+                }
+            }
+        }
+        if !entries.is_empty() {
+            parts.push(format!("## File Tree\n\n```\n{}\n```", entries.join("\n")));
+        }
+
+        // 2. Key config files (first 100 lines each)
+        let config_files = [
+            "Cargo.toml", "package.json", "pyproject.toml", "go.mod",
+            "Makefile", "Dockerfile", ".gitignore",
+        ];
+        for name in &config_files {
+            let path = self.project.root.join(name);
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let truncated: String = content.lines().take(100).collect::<Vec<_>>().join("\n");
+                parts.push(format!("## {name}\n\n```\n{truncated}\n```"));
+            }
+        }
+
+        // 3. Current AGENTS.md
+        if let Some(agents) = &self.agents_md {
+            parts.push(format!("## Current AGENTS.md\n\n{agents}"));
+        } else {
+            parts.push("## Current AGENTS.md\n\n(No AGENTS.md exists yet)".to_string());
+        }
+
+        // 4. Recent conversation (last 5 user messages)
+        let user_msgs: Vec<&Message> = self.stored_messages.iter()
+            .filter(|m| m.role == Role::User)
+            .collect();
+        let recent: Vec<&Message> = user_msgs.iter().rev().take(5).rev().copied().collect();
+        if !recent.is_empty() {
+            let mut convo = String::from("## Recent Conversation\n\n");
+            for msg in recent {
+                let text = msg.text_content();
+                if !text.is_empty() {
+                    convo.push_str(&format!("[User]: {text}\n\n"));
+                }
+            }
+            parts.push(convo);
+        }
+
+        // Cap total output at ~10K chars
+        let mut result = parts.join("\n\n");
+        if result.len() > 10_000 {
+            let mut end = 10_000;
+            while end > 0 && !result.is_char_boundary(end) {
+                end -= 1;
+            }
+            result.truncate(end);
+            result.push_str("\n\n(truncated)");
+        }
+        result
+    }
+
     /// Check if the session is approaching the context window limit and
     /// auto-compact should be triggered.
     fn check_context_warning(&mut self) {
@@ -2711,6 +2882,7 @@ impl App {
                 self.sidebar_state.session_closed_task_ids.clear();
                 self.selection_state.clear();
                 self.pending_question = None;
+                self.pending_agents_update = None;
                 self.model_picker.close();
                 self.diagnostics_overlay.close();
                 self.compaction_count = 0;
@@ -2813,6 +2985,98 @@ impl App {
                         }
                     }
                 }
+            }
+            Command::AgentsUpdate => {
+                // Guard: must not already be streaming/loading
+                if self.is_loading || self.streaming_active {
+                    self.messages.push(MessageBlock::Error {
+                        text: "Cannot update AGENTS.md while streaming.".to_string(),
+                    });
+                    return Ok(());
+                }
+
+                // Guard: must not already have a pending update
+                if self.pending_agents_update.is_some() {
+                    self.messages.push(MessageBlock::Error {
+                        text: "An AGENTS.md update is already pending approval.".to_string(),
+                    });
+                    return Ok(());
+                }
+
+                // Use primary model (not compact/small model — this is analytical work)
+                let model_ref = match &self.current_model {
+                    Some(r) => r.clone(),
+                    None => {
+                        self.messages.push(MessageBlock::Error {
+                            text: "No model available.".to_string(),
+                        });
+                        return Ok(());
+                    }
+                };
+
+                let Some(registry) = &self.provider_registry else {
+                    self.messages.push(MessageBlock::Error {
+                        text: "No provider configured.".to_string(),
+                    });
+                    return Ok(());
+                };
+
+                let resolved = match registry.resolve_model(&model_ref) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        self.messages.push(MessageBlock::Error {
+                            text: format!("Failed to resolve model: {e}"),
+                        });
+                        return Ok(());
+                    }
+                };
+
+                let client = match registry.client(&resolved.provider_id) {
+                    Ok(c) => c.clone(),
+                    Err(e) => {
+                        self.messages.push(MessageBlock::Error {
+                            text: format!("{e}"),
+                        });
+                        return Ok(());
+                    }
+                };
+
+                // Gather project context
+                let context = self.gather_project_context();
+
+                // Show feedback
+                self.messages.push(MessageBlock::System {
+                    text: "Analyzing project...".to_string(),
+                });
+                self.message_area_state.scroll_to_bottom();
+                self.is_loading = true;
+                self.status_line_state.activity = Activity::UpdatingAgents;
+
+                let api_model_id = resolved.api_model_id().to_string();
+                let event_tx = self.event_tx.clone();
+
+                tracing::info!(
+                    model = %api_model_id,
+                    context_len = context.len(),
+                    "starting AGENTS.md update"
+                );
+
+                // Spawn background LLM task
+                tokio::spawn(async move {
+                    match client
+                        .simple_chat(&api_model_id, Some(AGENTS_UPDATE_SYSTEM_PROMPT), &context)
+                        .await
+                    {
+                        Ok(proposed_content) => {
+                            let _ = event_tx.send(AppEvent::AgentsUpdateFinish { proposed_content });
+                        }
+                        Err(e) => {
+                            let _ = event_tx.send(AppEvent::AgentsUpdateError {
+                                error: format!("AGENTS.md update failed: {e}"),
+                            });
+                        }
+                    }
+                });
             }
             Command::Sessions => {
                 if self.is_loading || self.streaming_active {
@@ -2986,7 +3250,7 @@ impl App {
             }
             Command::Help => {
                 self.messages.push(MessageBlock::System {
-                    text: "Commands:\n  /new            \u{2014} Start a new session\n  /rename <t>     \u{2014} Rename current session\n  /models         \u{2014} List available models\n  /model <r>      \u{2014} Switch to a model\n  /compact        \u{2014} Compact conversation into a summary\n  /sessions       \u{2014} Browse sessions\n  /tasks          \u{2014} List all tasks\n  /task-new <t>   \u{2014} Create a task\n  /task-done <id> \u{2014} Complete a task\n  /task-show <id> \u{2014} Show task details\n  /task-edit <id> \u{2014} Edit a task (field=value)\n  /epics          \u{2014} List epics\n  /epic-new <t>   \u{2014} Create an epic\n  /export-debug   \u{2014} Export session with logs\n  /init           \u{2014} Create AGENTS.md in project root\n  /help           \u{2014} Show this help\n  /exit           \u{2014} Quit\n\nKeys:\n  Enter       \u{2014} Send message\n  Shift+Enter \u{2014} Insert newline\n  Tab         \u{2014} Accept autocomplete / toggle Build\u{2013}Plan mode\n  Up/Down     \u{2014} Navigate autocomplete list\n  Ctrl+C      \u{2014} Cancel stream / quit\n  Ctrl+B      \u{2014} Toggle sidebar\n  Mouse wheel \u{2014} Scroll messages\n  Click+drag  \u{2014} Select text (auto-copies to clipboard)".to_string(),
+                    text: "Commands:\n  /new            \u{2014} Start a new session\n  /rename <t>     \u{2014} Rename current session\n  /models         \u{2014} List available models\n  /model <r>      \u{2014} Switch to a model\n  /compact        \u{2014} Compact conversation into a summary\n  /sessions       \u{2014} Browse sessions\n  /tasks          \u{2014} List all tasks\n  /task-new <t>   \u{2014} Create a task\n  /task-done <id> \u{2014} Complete a task\n  /task-show <id> \u{2014} Show task details\n  /task-edit <id> \u{2014} Edit a task (field=value)\n  /epics          \u{2014} List epics\n  /epic-new <t>   \u{2014} Create an epic\n  /export-debug   \u{2014} Export session with logs\n  /init           \u{2014} Create AGENTS.md in project root\n  /agents-update  \u{2014} Update AGENTS.md with LLM analysis\n  /help           \u{2014} Show this help\n  /exit           \u{2014} Quit\n\nKeys:\n  Enter       \u{2014} Send message\n  Shift+Enter \u{2014} Insert newline\n  Tab         \u{2014} Accept autocomplete / toggle Build\u{2013}Plan mode\n  Up/Down     \u{2014} Navigate autocomplete list\n  Ctrl+C      \u{2014} Cancel stream / quit\n  Ctrl+B      \u{2014} Toggle sidebar\n  Mouse wheel \u{2014} Scroll messages\n  Click+drag  \u{2014} Select text (auto-copies to clipboard)".to_string(),
                 });
             }
             // -- Task management commands --

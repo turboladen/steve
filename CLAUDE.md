@@ -90,6 +90,7 @@ triggers at 80% context), `permission_profile` (`"trust"`/`"standard"`/`"cautiou
 | `/compact`         | Compact conversation (frees context window) |
 | `/export-debug`    | Export session as markdown for debugging    |
 | `/init`            | Create AGENTS.md in project root            |
+| `/agents-update`   | Update AGENTS.md via LLM analysis            |
 | `/help`            | Show help                                   |
 | `/quit` or `/exit` | Quit                                        |
 
@@ -296,7 +297,7 @@ logging to file.
 - Scroll: Map `ScrollDown`→`scroll_down()` directly — do NOT invert (macOS already applies natural
   scrolling)
 - `/new` resets ALL session state: messages, tool cache, changeset, todos, tokens, context warning,
-  auto-compact flag. When adding session-scoped state, add its reset here
+  auto-compact flag, `pending_agents_update`. When adding session-scoped state, add its reset here
 
 **Sidebar**: Changes (file diffs), Session (model/tokens/cost), Todos. Changeset recorded at
 `ToolResult` time, gated on `!output.is_error`. `strip_project_root()` takes `&str` not `&Path`.

@@ -93,6 +93,13 @@ pub enum AppEvent {
     /// Compaction failed.
     CompactError { error: String },
 
+    // -- AGENTS.md update events --
+
+    /// LLM has generated a proposed AGENTS.md update.
+    AgentsUpdateFinish { proposed_content: String },
+    /// AGENTS.md update generation failed.
+    AgentsUpdateError { error: String },
+
     // -- Title generation events --
 
     /// Async LLM title generation completed.

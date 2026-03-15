@@ -22,6 +22,7 @@ pub enum Command {
     Epics,
     EpicNew(String),
     Diagnostics,
+    AgentsUpdate,
 }
 
 /// Metadata for a known slash command, used for autocomplete.
@@ -84,6 +85,7 @@ impl Command {
                 _ => Err("Usage: /task-edit <task-id> <field>=<value> ...".to_string()),
             },
             "/diagnostics" => Ok(Command::Diagnostics),
+            "/agents-update" => Ok(Command::AgentsUpdate),
             "/epics" => Ok(Command::Epics),
             "/epic-new" => match arg {
                 Some(title) if !title.is_empty() => Ok(Command::EpicNew(title)),
@@ -110,6 +112,7 @@ impl Command {
             CommandInfo { name: "/epics", description: "List epics" },
             CommandInfo { name: "/epic-new", description: "Create an epic" },
             CommandInfo { name: "/diagnostics", description: "Show health dashboard" },
+            CommandInfo { name: "/agents-update", description: "Update AGENTS.md" },
             CommandInfo { name: "/init", description: "Create AGENTS.md" },
             CommandInfo { name: "/export-debug", description: "Export session with logs" },
             CommandInfo { name: "/help", description: "Show help" },
@@ -204,7 +207,8 @@ mod tests {
         assert!(names.contains(&"/task-edit"));
         assert!(names.contains(&"/epic-new"));
         assert!(names.contains(&"/diagnostics"));
-        assert_eq!(cmds.len(), 19);
+        assert!(names.contains(&"/agents-update"));
+        assert_eq!(cmds.len(), 20);
     }
 
     #[test]
@@ -227,7 +231,7 @@ mod tests {
     #[test]
     fn filter_commands_slash_only() {
         let matches = Command::matching_commands("/");
-        assert_eq!(matches.len(), 19);
+        assert_eq!(matches.len(), 20);
     }
 
     #[test]
@@ -311,6 +315,11 @@ mod tests {
     #[test]
     fn parse_diagnostics_command() {
         assert_eq!(Command::parse("/diagnostics").unwrap(), Command::Diagnostics);
+    }
+
+    #[test]
+    fn parse_agents_update_command() {
+        assert_eq!(Command::parse("/agents-update").unwrap(), Command::AgentsUpdate);
     }
 
     #[test]
