@@ -3009,4 +3009,347 @@ mod tests {
             .collect();
         assert_eq!(finishes.len(), 1);
     }
+
+    // ── Step 5: Stream tool-loop integration tests ──
+
+    #[tokio::test]
+    async fn stream_multi_tool_chain_with_filesystem() {
+        // Set up a real temp dir with files, then have the mock LLM call glob then read
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() { println!(\"hello\"); }\n").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn greet() -> &'static str { \"hi\" }\n").unwrap();
+
+        let mock = Arc::new(MockChatStream::new(vec![
+            // First stream: glob to find .rs files
+            vec![
+                Ok(tool_call_chunk(0, Some("call_glob"), Some("glob"), Some(
+                    &format!(r#"{{"pattern":"**/*.rs","path":"{}"}}"#, root.to_string_lossy())
+                ))),
+                Ok(finish_chunk(FinishReason::ToolCalls, 50, 20)),
+            ],
+            // Second stream: read main.rs after seeing glob results
+            vec![
+                Ok(tool_call_chunk(0, Some("call_read"), Some("read"), Some(
+                    &format!(r#"{{"path":"{}"}}"#, root.join("src/main.rs").to_string_lossy())
+                ))),
+                Ok(finish_chunk(FinishReason::ToolCalls, 80, 30)),
+            ],
+            // Third stream: final text response
+            vec![
+                Ok(text_delta("Found and read the files.")),
+                Ok(finish_chunk(FinishReason::Stop, 120, 15)),
+            ],
+        ]));
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut req = mock_stream_request(mock, tx);
+        req.tool_registry = Some(Arc::new(ToolRegistry::new(root.clone())));
+        req.tool_context = Some(ToolContext {
+            project_root: root,
+            storage_dir: None,
+            task_store: None,
+            lsp_manager: None,
+        });
+        req.permission_engine = Some(Arc::new(tokio::sync::Mutex::new(
+            crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
+        )));
+
+        run_stream(req).await.expect("multi-tool chain should succeed");
+        let events = collect_events(rx).await;
+
+        // Should have tool results for both glob and read
+        let tool_results: Vec<&AppEvent> = events.iter()
+            .filter(|e| matches!(e, AppEvent::ToolResult { .. }))
+            .collect();
+        assert_eq!(tool_results.len(), 2, "should have 2 tool results (glob + read)");
+
+        // Verify glob result contains .rs files
+        if let AppEvent::ToolResult { output, .. } = tool_results[0] {
+            assert!(
+                output.output.contains("main.rs"),
+                "glob result should contain main.rs, got: {}", output.output
+            );
+        }
+
+        // Verify read result contains file content
+        if let AppEvent::ToolResult { output, .. } = tool_results[1] {
+            assert!(
+                output.output.contains("fn main()"),
+                "read result should contain fn main(), got: {}", output.output
+            );
+        }
+
+        // Should finish normally
+        let finishes: Vec<&AppEvent> = events.iter()
+            .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
+            .collect();
+        assert_eq!(finishes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stream_write_tool_emits_permission_request() {
+        // Mock LLM tries to call edit tool in standard mode — should trigger permission request.
+        // We spawn a listener that grants permission so the stream completes.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let file_path = root.join("src/main.rs").to_string_lossy().to_string();
+
+        let mock = Arc::new(MockChatStream::new(vec![
+            vec![
+                Ok(tool_call_chunk(0, Some("call_edit"), Some("edit"), Some(
+                    &format!(r#"{{"file_path":"{}","old_string":"fn main() {{}}","new_string":"fn main() {{ println!(\"hi\"); }}"}}"#, file_path)
+                ))),
+                Ok(finish_chunk(FinishReason::ToolCalls, 50, 20)),
+            ],
+            // After permission granted, LLM sees tool result and responds
+            vec![
+                Ok(text_delta("Edit complete.")),
+                Ok(finish_chunk(FinishReason::Stop, 100, 10)),
+            ],
+        ]));
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut req = mock_stream_request(mock, tx);
+        req.tool_registry = Some(Arc::new(ToolRegistry::new(root.clone())));
+        req.tool_context = Some(ToolContext {
+            project_root: root,
+            storage_dir: None,
+            task_store: None,
+            lsp_manager: None,
+        });
+        // Standard mode: writes require Ask
+        req.permission_engine = Some(Arc::new(tokio::sync::Mutex::new(
+            crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
+        )));
+
+        // Spawn the stream, then drain events auto-granting any permission requests
+        let mut perm_rx = rx;
+        let stream_handle = tokio::spawn(async move {
+            run_stream(req).await
+        });
+
+        let mut events = Vec::new();
+        let mut saw_permission = false;
+        loop {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                perm_rx.recv(),
+            ).await {
+                Ok(Some(event)) => {
+                    // Must move out of event to access response_tx (oneshot::Sender)
+                    if let AppEvent::PermissionRequest(pr) = event {
+                        saw_permission = true;
+                        let _ = pr.response_tx.send(crate::permission::types::PermissionReply::AllowOnce);
+                        continue;
+                    }
+                    let is_finish = matches!(event, AppEvent::LlmFinish { .. });
+                    events.push(event);
+                    if is_finish { break; }
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+        stream_handle.await.unwrap().expect("stream should succeed");
+
+        assert!(saw_permission, "edit tool should trigger PermissionRequest in standard mode");
+
+        // Should have tool result (edit was allowed)
+        let tool_results: Vec<&AppEvent> = events.iter()
+            .filter(|e| matches!(e, AppEvent::ToolResult { .. }))
+            .collect();
+        assert!(!tool_results.is_empty(), "should have tool result after permission grant");
+    }
+
+    #[tokio::test]
+    async fn stream_plan_mode_denies_write_tools() {
+        // In plan mode, write tools should be denied entirely
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let file_path = root.join("src/main.rs").to_string_lossy().to_string();
+
+        let mock = Arc::new(MockChatStream::new(vec![
+            // LLM tries to edit in plan mode
+            vec![
+                Ok(tool_call_chunk(0, Some("call_edit"), Some("edit"), Some(
+                    &format!(r#"{{"file_path":"{}","old_string":"fn main() {{}}","new_string":"fn main() {{ changed(); }}"}}"#, file_path)
+                ))),
+                Ok(finish_chunk(FinishReason::ToolCalls, 50, 20)),
+            ],
+            // LLM responds after seeing denied tool result
+            vec![
+                Ok(text_delta("Edit denied in plan mode.")),
+                Ok(finish_chunk(FinishReason::Stop, 100, 10)),
+            ],
+        ]));
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (_interjection_tx, interjection_rx) = mpsc::unbounded_channel();
+        let req = StreamRequest {
+            stream_provider: mock,
+            model: "test-model".to_string(),
+            system_prompt: None,
+            history: vec![],
+            user_message: "test".to_string(),
+            event_tx: tx,
+            tool_registry: Some(Arc::new(ToolRegistry::new(root.clone()))),
+            tool_context: Some(ToolContext {
+                project_root: root.clone(),
+                storage_dir: None,
+                task_store: None,
+                lsp_manager: None,
+            }),
+            permission_engine: Some(Arc::new(tokio::sync::Mutex::new(
+                crate::permission::PermissionEngine::new(crate::permission::plan_mode_rules()),
+            ))),
+            tool_cache: Arc::new(std::sync::Mutex::new(
+                ToolResultCache::new(root)
+            )),
+            cancel_token: CancellationToken::new(),
+            context_window: None,
+            interjection_rx,
+            usage_writer: crate::usage::test_usage_writer(),
+            usage_project_id: "test-project".to_string(),
+            usage_session_id: "test-session".to_string(),
+            usage_model_cost: None,
+            is_plan_mode: true,
+            agent_spawner: None,
+        };
+
+        run_stream(req).await.expect("plan mode stream should succeed");
+        let events = collect_events(rx).await;
+
+        // Should have a tool result that indicates denial
+        let tool_results: Vec<&AppEvent> = events.iter()
+            .filter(|e| matches!(e, AppEvent::ToolResult { .. }))
+            .collect();
+        assert!(!tool_results.is_empty(), "should have tool result for denied edit");
+
+        if let AppEvent::ToolResult { output, .. } = tool_results[0] {
+            assert!(output.is_error, "denied tool result should be an error");
+            assert!(
+                output.output.to_lowercase().contains("denied") || output.output.to_lowercase().contains("not allowed"),
+                "tool result should mention denial, got: {}", output.output
+            );
+        }
+
+        // File should be unchanged
+        let content = std::fs::read_to_string(dir.path().join("src/main.rs")).unwrap();
+        assert_eq!(content, "fn main() {}\n", "file should be unchanged in plan mode");
+    }
+
+    #[tokio::test]
+    async fn stream_cache_invalidation_after_write() {
+        // Pre-populate cache, then run a stream where trust-mode allows a write,
+        // and verify the cache entry is invalidated.
+        use crate::permission::types::{PermissionActionSerde, ToolMatcher};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() { println!(\"hello\"); }\n").unwrap();
+        let file_path = root.join("src/main.rs").to_string_lossy().to_string();
+
+        // Pre-populate cache with a read result
+        let cache = Arc::new(std::sync::Mutex::new(ToolResultCache::new(root.clone())));
+        {
+            let mut c = cache.lock().unwrap();
+            let args = serde_json::json!({"path": &file_path});
+            let output = crate::tool::ToolOutput {
+                title: "read".to_string(),
+                output: "fn main() { println!(\"hello\"); }".to_string(),
+                is_error: false,
+            };
+            c.put(ToolName::Read, &args, &output);
+            // Verify it's cached
+            assert!(c.get(ToolName::Read, &args).is_some());
+        }
+
+        // Trust mode: all tools allowed
+        let trust_rules = vec![
+            crate::permission::types::PermissionRule {
+                tool: ToolMatcher::All,
+                pattern: "*".into(),
+                action: PermissionActionSerde::Allow,
+            },
+        ];
+
+        let mock = Arc::new(MockChatStream::new(vec![
+            // Edit the file
+            vec![
+                Ok(tool_call_chunk(0, Some("call_edit"), Some("edit"), Some(
+                    &format!(r#"{{"file_path":"{}","old_string":"println!(\"hello\")","new_string":"println!(\"world\")"}}"#, file_path)
+                ))),
+                Ok(finish_chunk(FinishReason::ToolCalls, 50, 20)),
+            ],
+            // Final response
+            vec![
+                Ok(text_delta("Done.")),
+                Ok(finish_chunk(FinishReason::Stop, 100, 10)),
+            ],
+        ]));
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (_interjection_tx, interjection_rx) = mpsc::unbounded_channel();
+        let req = StreamRequest {
+            stream_provider: mock,
+            model: "test-model".to_string(),
+            system_prompt: None,
+            history: vec![],
+            user_message: "test".to_string(),
+            event_tx: tx,
+            tool_registry: Some(Arc::new(ToolRegistry::new(root.clone()))),
+            tool_context: Some(ToolContext {
+                project_root: root.clone(),
+                storage_dir: None,
+                task_store: None,
+                lsp_manager: None,
+            }),
+            permission_engine: Some(Arc::new(tokio::sync::Mutex::new(
+                crate::permission::PermissionEngine::new(trust_rules),
+            ))),
+            tool_cache: cache.clone(),
+            cancel_token: CancellationToken::new(),
+            context_window: None,
+            interjection_rx,
+            usage_writer: crate::usage::test_usage_writer(),
+            usage_project_id: "test-project".to_string(),
+            usage_session_id: "test-session".to_string(),
+            usage_model_cost: None,
+            is_plan_mode: false,
+            agent_spawner: None,
+        };
+
+        run_stream(req).await.expect("trust-mode edit stream should succeed");
+        let events = collect_events(rx).await;
+
+        // Edit should have succeeded
+        let tool_results: Vec<&AppEvent> = events.iter()
+            .filter(|e| matches!(e, AppEvent::ToolResult { .. }))
+            .collect();
+        assert!(!tool_results.is_empty(), "should have tool result for edit");
+        if let AppEvent::ToolResult { output, .. } = tool_results[0] {
+            assert!(!output.is_error, "edit should succeed in trust mode: {}", output.output);
+        }
+
+        // Cache should be invalidated for the edited file
+        {
+            let mut c = cache.lock().unwrap();
+            let args = serde_json::json!({"path": &file_path});
+            assert!(
+                c.get(ToolName::Read, &args).is_none(),
+                "cache entry for edited file should be invalidated"
+            );
+        }
+
+        // File should actually be changed
+        let content = std::fs::read_to_string(dir.path().join("src/main.rs")).unwrap();
+        assert!(content.contains("println!(\"world\")"), "file should be updated");
+    }
 }
