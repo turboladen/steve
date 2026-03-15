@@ -850,7 +850,7 @@ fn edit_large_file_line_operations() {
     // Verify the file is roughly the right size
     let final_content = std::fs::read_to_string(&file_path).unwrap();
     let line_count = final_content.lines().count();
-    // Started with 10000, +1 insert, -11 delete, -6 lines replaced with 1 = net -16
+    // Started with 10000, +1 insert, -11 delete, -5 replace (6→1) = net -15
     assert!(
         (9980..=9990).contains(&line_count),
         "expected ~9985 lines, got {line_count}"
@@ -1075,7 +1075,7 @@ fn cache_read_then_move_invalidates_source() {
     let a_path = root.join("src/lib.rs");
     let a_fp = a_path.to_string_lossy().to_string();
 
-    // Read a.txt and cache
+    // Read lib.rs and cache
     let mut cache = ToolResultCache::new(root.clone());
     let ctx = tool_context(root.clone());
     let read_output = registry.execute(
@@ -1138,37 +1138,30 @@ fn cache_grep_invalidated_by_any_edit() {
 #[test]
 fn explore_agent_has_only_read_tools() {
     use steve::tool::agent::AgentType;
+    use strum::IntoEnumIterator;
 
     let tools = AgentType::Explore.allowed_tools();
     let filtered = ToolRegistry::filtered(PathBuf::from("/tmp"), &tools);
 
-    // Verify read-only tools are present
+    // Every allowed tool must be read-only
     for t in &tools {
         assert!(t.is_read_only(), "Explore tool {t} should be read-only");
     }
 
-    // Verify write tools are absent
-    let write_tools = [ToolName::Edit, ToolName::Write, ToolName::Bash, ToolName::Agent];
-    for wt in write_tools {
-        assert!(
-            !filtered.has_tool(wt),
-            "Explore registry should not have {wt}"
-        );
-    }
-
-    // Verify expected tools are present
-    let expected = [ToolName::Read, ToolName::Grep, ToolName::Glob, ToolName::List, ToolName::Symbols];
-    for t in expected {
-        assert!(
-            filtered.has_tool(t),
-            "Explore registry should have {t}"
-        );
+    // Every non-allowed variant must be absent from the filtered registry
+    for t in ToolName::iter() {
+        if tools.contains(&t) {
+            assert!(filtered.has_tool(t), "Explore registry should have {t}");
+        } else {
+            assert!(!filtered.has_tool(t), "Explore registry should not have {t}");
+        }
     }
 }
 
 #[test]
 fn plan_agent_includes_lsp_no_writes() {
     use steve::tool::agent::AgentType;
+    use strum::IntoEnumIterator;
 
     let tools = AgentType::Plan.allowed_tools();
     let filtered = ToolRegistry::filtered(PathBuf::from("/tmp"), &tools);
@@ -1176,15 +1169,22 @@ fn plan_agent_includes_lsp_no_writes() {
     // Has LSP
     assert!(filtered.has_tool(ToolName::Lsp), "Plan should have LSP");
 
-    // No write tools
-    let write_tools = [ToolName::Edit, ToolName::Write, ToolName::Patch, ToolName::Move,
-        ToolName::Copy, ToolName::Delete, ToolName::Mkdir, ToolName::Bash];
-    for wt in write_tools {
-        assert!(!filtered.has_tool(wt), "Plan registry should not have {wt}");
+    // Every allowed tool must be read-only or LSP
+    for t in &tools {
+        assert!(
+            t.is_read_only() || *t == ToolName::Lsp,
+            "Plan tool {t} should be read-only or LSP"
+        );
     }
 
-    // No Agent
-    assert!(!filtered.has_tool(ToolName::Agent), "Plan should not have Agent");
+    // Every non-allowed variant must be absent
+    for t in ToolName::iter() {
+        if tools.contains(&t) {
+            assert!(filtered.has_tool(t), "Plan registry should have {t}");
+        } else {
+            assert!(!filtered.has_tool(t), "Plan registry should not have {t}");
+        }
+    }
 }
 
 #[test]
@@ -1203,11 +1203,12 @@ fn general_agent_excludes_only_agent() {
         tools.len()
     );
 
-    assert!(!filtered.has_tool(ToolName::Agent), "General should not have Agent");
-
-    // Spot-check key tools are present
-    assert!(filtered.has_tool(ToolName::Edit));
-    assert!(filtered.has_tool(ToolName::Bash));
-    assert!(filtered.has_tool(ToolName::Write));
-    assert!(filtered.has_tool(ToolName::Read));
+    // Exhaustively verify every variant: present if not Agent, absent if Agent
+    for t in ToolName::iter() {
+        if t == ToolName::Agent {
+            assert!(!filtered.has_tool(t), "General should not have Agent");
+        } else {
+            assert!(filtered.has_tool(t), "General should have {t}");
+        }
+    }
 }

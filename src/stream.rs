@@ -3010,7 +3010,7 @@ mod tests {
         assert_eq!(finishes.len(), 1);
     }
 
-    // ── Step 5: Stream tool-loop integration tests ──
+    // -- Step 5: Stream tool-loop integration tests --
 
     #[tokio::test]
     async fn stream_multi_tool_chain_with_filesystem() {
@@ -3066,20 +3066,22 @@ mod tests {
         assert_eq!(tool_results.len(), 2, "should have 2 tool results (glob + read)");
 
         // Verify glob result contains .rs files
-        if let AppEvent::ToolResult { output, .. } = tool_results[0] {
-            assert!(
-                output.output.contains("main.rs"),
-                "glob result should contain main.rs, got: {}", output.output
-            );
-        }
+        let AppEvent::ToolResult { output, .. } = tool_results[0] else {
+            panic!("expected ToolResult, got {:?}", tool_results[0]);
+        };
+        assert!(
+            output.output.contains("main.rs"),
+            "glob result should contain main.rs, got: {}", output.output
+        );
 
         // Verify read result contains file content
-        if let AppEvent::ToolResult { output, .. } = tool_results[1] {
-            assert!(
-                output.output.contains("fn main()"),
-                "read result should contain fn main(), got: {}", output.output
-            );
-        }
+        let AppEvent::ToolResult { output, .. } = tool_results[1] else {
+            panic!("expected ToolResult, got {:?}", tool_results[1]);
+        };
+        assert!(
+            output.output.contains("fn main()"),
+            "read result should contain fn main(), got: {}", output.output
+        );
 
         // Should finish normally
         let finishes: Vec<&AppEvent> = events.iter()
@@ -3231,13 +3233,14 @@ mod tests {
             .collect();
         assert!(!tool_results.is_empty(), "should have tool result for denied edit");
 
-        if let AppEvent::ToolResult { output, .. } = tool_results[0] {
-            assert!(output.is_error, "denied tool result should be an error");
-            assert!(
-                output.output.to_lowercase().contains("denied") || output.output.to_lowercase().contains("not allowed"),
-                "tool result should mention denial, got: {}", output.output
-            );
-        }
+        let AppEvent::ToolResult { output, .. } = tool_results[0] else {
+            panic!("expected ToolResult, got {:?}", tool_results[0]);
+        };
+        assert!(output.is_error, "denied tool result should be an error");
+        assert!(
+            output.output.to_lowercase().contains("denied") || output.output.to_lowercase().contains("not allowed"),
+            "tool result should mention denial, got: {}", output.output
+        );
 
         // File should be unchanged
         let content = std::fs::read_to_string(dir.path().join("src/main.rs")).unwrap();
@@ -3334,9 +3337,10 @@ mod tests {
             .filter(|e| matches!(e, AppEvent::ToolResult { .. }))
             .collect();
         assert!(!tool_results.is_empty(), "should have tool result for edit");
-        if let AppEvent::ToolResult { output, .. } = tool_results[0] {
-            assert!(!output.is_error, "edit should succeed in trust mode: {}", output.output);
-        }
+        let AppEvent::ToolResult { output, .. } = tool_results[0] else {
+            panic!("expected ToolResult, got {:?}", tool_results[0]);
+        };
+        assert!(!output.is_error, "edit should succeed in trust mode: {}", output.output);
 
         // Cache should be invalidated for the edited file
         {
