@@ -56,16 +56,64 @@ pub struct SidebarTask {
     pub priority: Priority,
     /// Current lifecycle status.
     pub status: TaskStatus,
+    /// Short summary from description (first sentence or ~80 chars).
+    pub summary: Option<String>,
+}
+
+/// Extract a short summary from a task description: first sentence or first ~80 chars.
+fn summarize_description(desc: &str) -> Option<String> {
+    let trimmed = desc.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Take first sentence (up to first `. ` or `.\n` or end-of-string `.`)
+    let first_sentence = trimmed
+        .find(". ")
+        .or_else(|| trimmed.find(".\n"))
+        .or_else(|| {
+            if trimmed.ends_with('.') {
+                Some(trimmed.len() - 1)
+            } else {
+                None
+            }
+        });
+    let snippet = match first_sentence {
+        // pos is a byte offset from find() — compare character count, not bytes
+        Some(pos) if trimmed[..pos].chars().count() <= 80 => &trimmed[..pos],
+        _ => {
+            // No short sentence — take first ~80 chars at a word boundary
+            if trimmed.chars().count() <= 80 {
+                trimmed
+            } else {
+                // Find byte offset of the 80th character (safe for multi-byte)
+                let char80 = trimmed
+                    .char_indices()
+                    .nth(80)
+                    .map(|(i, _)| i)
+                    .unwrap_or(trimmed.len());
+                let boundary = trimmed[..char80].rfind(' ').unwrap_or(char80);
+                &trimmed[..boundary]
+            }
+        }
+    };
+    let snippet = snippet.trim();
+    if snippet.is_empty() {
+        None
+    } else {
+        Some(snippet.to_string())
+    }
 }
 
 impl From<crate::task::Task> for SidebarTask {
     fn from(t: crate::task::Task) -> Self {
+        let summary = t.description.as_deref().and_then(summarize_description);
         Self {
             id: t.id,
             kind: t.kind,
             title: t.title,
             priority: t.priority,
             status: t.status,
+            summary,
         }
     }
 }
@@ -393,7 +441,7 @@ pub fn render_sidebar(
         header_parts.push(')');
         lines.push(primitives::section_header(&header_parts, header_color));
 
-        // Individual task lines (2 lines each, pre-capped at MAX_SIDEBAR_TASKS by update_sidebar)
+        // Individual task lines (2-3 lines each, pre-capped at MAX_SIDEBAR_TASKS by update_sidebar)
         for task in &state.tasks {
             let (icon, icon_color) = match (task.kind, task.status) {
                 (_, TaskStatus::Done) => ("\u{2713}", theme.success),           // ✓
@@ -402,16 +450,10 @@ pub fn render_sidebar(
                 (TaskKind::Task, TaskStatus::Open) => ("\u{25cb}", theme.dim),  // ○
                 (TaskKind::Task, TaskStatus::InProgress) => ("\u{25cf}", theme.accent), // ●
             };
-            let priority_abbr = match task.priority {
-                Priority::High => "hi",
-                Priority::Medium => "med",
-                Priority::Low => "lo",
-            };
-            // Line 1: icon + short ID + priority
+            // Line 1: icon + short ID
             lines.push(Line::from(vec![
                 Span::styled(format!(" {icon} "), Style::default().fg(icon_color)),
                 Span::styled(&task.id, Style::default().fg(theme.dim)),
-                Span::styled(format!(" {priority_abbr}"), Style::default().fg(theme.dim)),
             ]));
             // Line 2: truncated title
             let max_title = max_task_title_chars(sidebar_width);
@@ -430,6 +472,20 @@ pub fn render_sidebar(
                 format!("   {title}"),
                 Style::default().fg(title_color),
             )));
+            // Line 3: summary (if available) — same indent as title, same width limit
+            if let Some(summary) = &task.summary {
+                let max_summary = max_task_title_chars(sidebar_width);
+                let display_summary = if max_summary > 3 && summary.chars().count() > max_summary {
+                    let truncated: String = summary.chars().take(max_summary.saturating_sub(3)).collect();
+                    format!("{truncated}...")
+                } else {
+                    summary.clone()
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("   {display_summary}"),
+                    Style::default().fg(theme.dim),
+                )));
+            }
         }
     }
 
@@ -719,6 +775,18 @@ mod tests {
             title: title.to_string(),
             priority,
             status,
+            summary: None,
+        }
+    }
+
+    fn make_sidebar_task_with_summary(id: &str, title: &str, summary: &str, kind: TaskKind, priority: Priority, status: TaskStatus) -> SidebarTask {
+        SidebarTask {
+            id: id.to_string(),
+            kind,
+            title: title.to_string(),
+            priority,
+            status,
+            summary: Some(summary.to_string()),
         }
     }
 
@@ -734,7 +802,6 @@ mod tests {
         let text = render_sidebar_to_string(40, 30, &state);
         assert!(text.contains("Tasks (2 open)"), "should show header with count, got:\n{text}");
         assert!(text.contains("task-a1b2c3d4"), "should show task ID");
-        assert!(text.contains("hi"), "should show priority abbreviation");
         assert!(text.contains("Fix sidebar rendering"), "should show task title");
         assert!(text.contains("task-e5f6g7h8"), "should show second task ID");
         assert!(text.contains("Add new feature"), "should show second task title");
@@ -779,6 +846,46 @@ mod tests {
         assert!(text.contains("\u{25cb}"), "should show open icon (○)");
         assert!(text.contains("\u{25cf}"), "should show in-progress icon (●)");
         assert!(text.contains("\u{2713}"), "should show done icon (✓)");
+    }
+
+    #[test]
+    fn buffer_sidebar_task_with_summary_renders_3_lines() {
+        let state = SidebarState {
+            tasks: vec![make_sidebar_task_with_summary(
+                "task-sum00001",
+                "Refactor sidebar",
+                "Break into smaller fns",
+                TaskKind::Task,
+                Priority::Medium,
+                TaskStatus::InProgress,
+            )],
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 30, &state);
+        assert!(text.contains("task-sum00001"), "should show task ID");
+        assert!(text.contains("Refactor sidebar"), "should show title");
+        assert!(
+            text.contains("Break into smaller fns"),
+            "should show summary, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn buffer_sidebar_task_without_summary_renders_2_lines() {
+        let state = SidebarState {
+            tasks: vec![make_sidebar_task(
+                "task-nosm0001",
+                "Simple task",
+                TaskKind::Task,
+                Priority::Low,
+                TaskStatus::Open,
+            )],
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 30, &state);
+        assert!(text.contains("task-nosm0001"), "should show task ID");
+        assert!(text.contains("Simple task"), "should show title");
+        // No extra blank line where summary would be — just ID + title
     }
 
     #[test]
@@ -1031,6 +1138,125 @@ mod tests {
         assert_eq!(max_task_title_chars(44), 38);
         assert_eq!(max_task_title_chars(6), 0);
         assert_eq!(max_task_title_chars(0), 0);
+    }
+
+    // -- summarize_description tests --
+
+    #[test]
+    fn summarize_description_first_sentence() {
+        let result = summarize_description("Fix the sidebar. Then clean up tests.");
+        assert_eq!(result, Some("Fix the sidebar".to_string()));
+    }
+
+    #[test]
+    fn summarize_description_short_text_no_period() {
+        let result = summarize_description("Quick fix for layout");
+        assert_eq!(result, Some("Quick fix for layout".to_string()));
+    }
+
+    #[test]
+    fn summarize_description_long_text_word_boundary() {
+        let long = "This is a description that goes well beyond eighty characters and should be truncated at a word boundary somewhere around here";
+        let result = summarize_description(long).unwrap();
+        assert!(result.chars().count() <= 80, "should truncate to ~80 chars, got len {}", result.chars().count());
+        assert!(!result.ends_with(' '), "should not end with space");
+    }
+
+    #[test]
+    fn summarize_description_multibyte_no_panic() {
+        // 40 ASCII + 50 é (2 bytes each) = 90 chars, 140 bytes — must not panic on slice
+        let desc = "a".repeat(40) + &"\u{00e9}".repeat(50);
+        let result = summarize_description(&desc).unwrap();
+        assert!(result.chars().count() <= 80, "should truncate multi-byte text safely");
+    }
+
+    #[test]
+    fn summarize_description_long_single_word() {
+        // No spaces — falls back to truncating at exactly 80 chars
+        let word = "x".repeat(100);
+        let result = summarize_description(&word).unwrap();
+        assert_eq!(result.chars().count(), 80);
+    }
+
+    #[test]
+    fn summarize_description_empty_string() {
+        assert_eq!(summarize_description(""), None);
+    }
+
+    #[test]
+    fn summarize_description_whitespace_only() {
+        assert_eq!(summarize_description("   \n  "), None);
+    }
+
+    #[test]
+    fn summarize_description_trailing_period() {
+        let result = summarize_description("Single sentence ending with period.");
+        assert_eq!(result, Some("Single sentence ending with period".to_string()));
+    }
+
+    #[test]
+    fn summarize_description_newline_sentence_boundary() {
+        let result = summarize_description("First line.\nSecond line.");
+        assert_eq!(result, Some("First line".to_string()));
+    }
+
+    // -- From<Task> summary extraction --
+
+    #[test]
+    fn sidebar_task_from_task_with_description() {
+        let task = crate::task::Task {
+            id: "steve-ta001".to_string(),
+            kind: TaskKind::Task,
+            title: "Test task".to_string(),
+            description: Some("Implement the widget. Then test it.".to_string()),
+            epic_id: None,
+            session_id: None,
+            priority: Priority::Medium,
+            status: TaskStatus::Open,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let sidebar: SidebarTask = task.into();
+        assert_eq!(sidebar.summary, Some("Implement the widget".to_string()));
+    }
+
+    #[test]
+    fn sidebar_task_from_task_without_description() {
+        let task = crate::task::Task {
+            id: "steve-ta002".to_string(),
+            kind: TaskKind::Task,
+            title: "No desc".to_string(),
+            description: None,
+            epic_id: None,
+            session_id: None,
+            priority: Priority::Low,
+            status: TaskStatus::Open,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let sidebar: SidebarTask = task.into();
+        assert_eq!(sidebar.summary, None);
+    }
+
+    #[test]
+    fn buffer_sidebar_task_no_priority_abbreviation() {
+        let state = SidebarState {
+            tasks: vec![make_sidebar_task(
+                "task-nopr0001",
+                "My task",
+                TaskKind::Task,
+                Priority::High,
+                TaskStatus::Open,
+            )],
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 30, &state);
+        // Priority abbreviation was removed from line 1
+        assert!(text.contains("task-nopr0001"), "should show task ID");
+        // "hi" appears in "Health" header, so check it doesn't appear on the task ID line
+        // by checking the line doesn't contain " hi" after the ID
+        let id_line = text.lines().find(|l| l.contains("task-nopr0001")).unwrap();
+        assert!(!id_line.contains(" hi"), "should not show priority abbreviation on ID line");
     }
 }
 
