@@ -44,7 +44,9 @@ Run `cargo test` after every change.
 **Test infrastructure**:
 
 - **UI rendering**: `render_to_buffer(width, height, draw_fn)` in `ui/mod.rs` creates a headless
-  `TestBackend`. `make_test_app()` in `app.rs` for rendering tests
+  `TestBackend`. `make_test_app()` in `app.rs` for rendering tests.
+  `ProjectInfo` requires `cwd: PathBuf` field (typically `root.clone()` in tests).
+  `App::new()` takes `agents_files: Vec<config::AgentsFile>` (use `Vec::new()` in tests)
 - **Storage**: `Storage::with_base(path)` for temp-dir-based tests. For UI tests:
   `Storage::new("test-name").expect("test storage")`
 - **Stream**: `MockChatStream` in `stream.rs` — canned SSE responses. Use
@@ -89,7 +91,7 @@ triggers at 80% context), `permission_profile` (`"trust"`/`"standard"`/`"cautiou
 | `/model <ref>`     | Switch model (e.g., `/model openai/gpt-4o`) |
 | `/compact`         | Compact conversation (frees context window) |
 | `/export-debug`    | Export session as markdown for debugging    |
-| `/init`            | Create AGENTS.md in project root            |
+| `/init`            | Create AGENTS.md at CWD (not necessarily project root) |
 | `/agents-update`   | Update AGENTS.md via LLM analysis            |
 | `/help`            | Show help                                   |
 | `/quit` or `/exit` | Quit                                        |
@@ -123,7 +125,7 @@ Single `AppEvent` enum through one `mpsc::UnboundedSender`. Main loop in `app.rs
 `tokio::select!` across terminal input, LLM streaming, tool execution, and tick timer (100ms).
 
 **System prompt** (`build_system_prompt()` in `app.rs`): Steve identity, environment context,
-permission model, AGENTS.md (if present), and `TOOL_GUIDANCE`.
+permission model, AGENTS.md chain (labeled sections, root-first), and `TOOL_GUIDANCE`.
 
 ### LLM Stream + Tool Call Loop (`stream.rs`)
 
@@ -331,7 +333,9 @@ gray→amber→yellow→red at 40/60/80% thresholds.
   Use `None` for optional fields in tests unless testing that specific feature
 - No `dirs` crate — use `std::env::var("HOME")` or `directories::ProjectDirs`. Global config uses
   `$HOME/.config/steve/` directly
-- `AGENTS.md` optional — loaded at startup if present, injected into system prompt
+- **AGENTS.md chain**: Walk-up discovery from CWD to project root collects all `AGENTS.md` files.
+  `load_agents_md_chain()` returns `Vec<AgentsFile>` (root-first). `App.agents_files` replaces old
+  `agents_md: Option<String>`. `combined_agents_content()` helper for contexts needing a single string
 
 ## Provider Compatibility
 

@@ -10,6 +10,8 @@ pub struct ProjectInfo {
     pub root: PathBuf,
     /// Deterministic project ID derived from the git root commit hash.
     pub id: String,
+    /// The user's actual working directory (may be a subdirectory of `root`).
+    pub cwd: PathBuf,
 }
 
 /// Detect the project root by walking up from `start_dir` looking for `.git/`.
@@ -26,7 +28,7 @@ pub fn detect(start_dir: &Path) -> Result<ProjectInfo> {
         if git_dir.exists() {
             let root = dir.to_path_buf();
             let id = root_commit_hash(&root)?;
-            return Ok(ProjectInfo { root, id });
+            return Ok(ProjectInfo { root, id, cwd: start.to_path_buf() });
         }
         match dir.parent() {
             Some(parent) => dir = parent,
@@ -41,12 +43,16 @@ pub fn detect(start_dir: &Path) -> Result<ProjectInfo> {
 /// Detect project from current directory, falling back to CWD with a hash-based ID.
 pub fn detect_or_cwd() -> ProjectInfo {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let canonical_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
     match detect(&cwd) {
-        Ok(info) => info,
+        Ok(mut info) => {
+            info.cwd = canonical_cwd;
+            info
+        }
         Err(_) => {
             // Fallback: use CWD as root, hash of path as ID
-            let id = format!("{:x}", hash_path(&cwd));
-            ProjectInfo { root: cwd, id }
+            let id = format!("{:x}", hash_path(&canonical_cwd));
+            ProjectInfo { root: canonical_cwd.clone(), id, cwd: canonical_cwd }
         }
     }
 }
@@ -170,7 +176,19 @@ mod tests {
         let info = detect(&sub).expect("detect should find git root from subdirectory");
 
         assert_eq!(info.root, tmp.path().canonicalize().unwrap());
+        assert_eq!(info.cwd, sub.canonicalize().unwrap(), "cwd should be the start directory, not root");
         assert!(!info.id.is_empty());
+    }
+
+    #[test]
+    fn detect_sets_cwd_to_root_when_started_at_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+
+        let info = detect(tmp.path()).expect("detect should succeed");
+        let canonical = tmp.path().canonicalize().unwrap();
+        assert_eq!(info.root, canonical);
+        assert_eq!(info.cwd, canonical, "cwd should equal root when started from root");
     }
 
     #[test]

@@ -35,14 +35,16 @@ use steve::ui::autocomplete::render_autocomplete;
 
 /// Mirror of `make_test_app()` from `app.rs` using only public APIs.
 fn make_test_app() -> App {
+    let root = PathBuf::from("/tmp/test");
     let project = ProjectInfo {
-        root: PathBuf::from("/tmp/test"),
+        root: root.clone(),
         id: "test-ui-integration".to_string(),
+        cwd: root,
     };
     let config = Config::default();
     let storage = Storage::new("test-ui-integration").expect("test storage");
     let usage_writer = steve::usage::test_usage_writer();
-    App::new(project, config, storage, None, None, None, Vec::new(), usage_writer)
+    App::new(project, config, storage, Vec::new(), None, None, Vec::new(), usage_writer)
 }
 
 /// Render a draw closure into a headless test buffer.

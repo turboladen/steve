@@ -438,7 +438,7 @@ pub struct App {
     pub project: ProjectInfo,
     pub config: Config,
     pub storage: Storage,
-    pub agents_md: Option<String>,
+    pub agents_files: Vec<crate::config::AgentsFile>,
     pub provider_registry: Option<ProviderRegistry>,
 
     /// Persistent task store (epics + tasks).
@@ -547,7 +547,7 @@ impl App {
         project: ProjectInfo,
         config: Config,
         storage: Storage,
-        agents_md: Option<String>,
+        agents_files: Vec<crate::config::AgentsFile>,
         provider_registry: Option<ProviderRegistry>,
         provider_error: Option<String>,
         config_warnings: Vec<String>,
@@ -612,7 +612,7 @@ impl App {
             project,
             config,
             storage,
-            agents_md,
+            agents_files,
             provider_registry,
             task_store,
             current_model,
@@ -1559,7 +1559,15 @@ impl App {
                     let agents_path = self.project.root.join("AGENTS.md");
                     match std::fs::write(&agents_path, &content) {
                         Ok(_) => {
-                            self.agents_md = Some(content);
+                            // Update or insert root-level entry in the chain
+                            if let Some(existing) = self.agents_files.iter_mut().find(|f| f.path == agents_path) {
+                                existing.content = content;
+                            } else {
+                                self.agents_files.insert(0, crate::config::AgentsFile {
+                                    path: agents_path.clone(),
+                                    content,
+                                });
+                            }
                             self.messages.push(MessageBlock::System {
                                 text: format!("AGENTS.md updated at {}", agents_path.display()),
                             });
@@ -2451,8 +2459,9 @@ impl App {
             .as_ref()
             .map(|s| s.token_usage.total_tokens)
             .unwrap_or(0);
+        let combined_agents = self.combined_agents_content();
         let input = crate::diagnostics::DiagnosticInput {
-            agents_md: self.agents_md.as_deref(),
+            agents_md: combined_agents.as_deref(),
             system_prompt_len,
             config: &self.config,
             lsp_servers: &lsp_servers,
@@ -2562,6 +2571,15 @@ impl App {
         });
     }
 
+    /// Combine all loaded AGENTS.md files into a single string (for diagnostics).
+    fn combined_agents_content(&self) -> Option<String> {
+        if self.agents_files.is_empty() {
+            None
+        } else {
+            Some(self.agents_files.iter().map(|f| f.content.as_str()).collect::<Vec<_>>().join("\n\n"))
+        }
+    }
+
     fn build_system_prompt(&self) -> Option<String> {
         use crate::ui::input::AgentMode;
 
@@ -2629,8 +2647,15 @@ impl App {
             parts.push(format!("\n## Active Tasks\n\n{task_summary}"));
         }
 
-        if let Some(agents_md) = &self.agents_md {
-            parts.push(format!("\n---\n\n{agents_md}"));
+        if !self.agents_files.is_empty() {
+            let mut section = String::from("\n---\n\n## Project Instructions (AGENTS.md)\n");
+            for file in &self.agents_files {
+                let label = file.path.strip_prefix(&self.project.root)
+                    .unwrap_or(&file.path)
+                    .display();
+                section.push_str(&format!("\n### {label}\n\n{}\n", file.content));
+            }
+            parts.push(section);
         }
 
         if self.input.mode == AgentMode::Plan {
@@ -2744,8 +2769,10 @@ impl App {
         }
 
         // 3. Current AGENTS.md
-        if let Some(agents) = &self.agents_md {
-            parts.push(format!("## Current AGENTS.md\n\n{agents}"));
+        if !self.agents_files.is_empty() {
+            for file in &self.agents_files {
+                parts.push(format!("## Current AGENTS.md ({})\n\n{}", file.path.display(), file.content));
+            }
         } else {
             parts.push("## Current AGENTS.md\n\n(No AGENTS.md exists yet)".to_string());
         }
@@ -2964,7 +2991,7 @@ impl App {
                 self.diagnostics_overlay.open(checks);
             }
             Command::Init => {
-                let agents_path = self.project.root.join("AGENTS.md");
+                let agents_path = self.project.cwd.join("AGENTS.md");
                 if agents_path.exists() {
                     self.messages.push(MessageBlock::System {
                         text: format!("AGENTS.md already exists at {}", agents_path.display()),
@@ -2973,7 +3000,16 @@ impl App {
                     let default_content = "# AGENTS.md\n\nProject-specific instructions for AI coding assistants.\n\n## Guidelines\n\n- Follow existing code style and conventions.\n- Write clear, concise commit messages.\n- Add tests for new functionality.\n";
                     match std::fs::write(&agents_path, default_content) {
                         Ok(_) => {
-                            self.agents_md = Some(default_content.to_string());
+                            let new_entry = crate::config::AgentsFile {
+                                path: agents_path.clone(),
+                                content: default_content.to_string(),
+                            };
+                            // Maintain root-first ordering: root-level inserts at front
+                            if self.project.cwd == self.project.root {
+                                self.agents_files.insert(0, new_entry);
+                            } else {
+                                self.agents_files.push(new_entry);
+                            }
                             self.messages.push(MessageBlock::System {
                                 text: format!("Created AGENTS.md at {}", agents_path.display()),
                             });
@@ -4132,14 +4168,16 @@ pub(crate) mod tests {
         use crate::storage::Storage;
         use std::path::PathBuf;
 
+        let root = PathBuf::from("/tmp/test");
         let project = ProjectInfo {
-            root: PathBuf::from("/tmp/test"),
+            root: root.clone(),
             id: "test".to_string(),
+            cwd: root,
         };
         let config = Config::default();
         let storage = Storage::new("test-sidebar").expect("test storage");
         let usage_writer = crate::usage::test_usage_writer();
-        App::new(project, config, storage, None, None, None, Vec::new(), usage_writer)
+        App::new(project, config, storage, Vec::new(), None, None, Vec::new(), usage_writer)
     }
 
     // -- interjection tests --
@@ -4341,13 +4379,15 @@ pub(crate) mod tests {
 
         let dir = tempfile::tempdir().expect("temp dir");
         let storage = Storage::with_base(dir.path().to_path_buf()).expect("storage");
+        let root = PathBuf::from("/tmp/test");
         let project = ProjectInfo {
-            root: PathBuf::from("/tmp/test"),
+            root: root.clone(),
             id: "test-title".to_string(),
+            cwd: root,
         };
         let config = Config::default();
         let usage_writer = crate::usage::test_usage_writer();
-        let app = App::new(project, config, storage, None, None, None, Vec::new(), usage_writer);
+        let app = App::new(project, config, storage, Vec::new(), None, None, Vec::new(), usage_writer);
         (app, dir)
     }
 

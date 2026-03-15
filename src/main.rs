@@ -78,10 +78,10 @@ async fn main() -> Result<()> {
     // Initialize storage
     let store = steve::storage::Storage::new(&project_info.id)?;
 
-    // Load AGENTS.md (if present)
-    let agents_md = steve::config::load_agents_md(&project_info.root);
-    if agents_md.is_some() {
-        tracing::info!("AGENTS.md loaded");
+    // Load AGENTS.md chain (walk from CWD up to project root)
+    let agents_files = steve::config::load_agents_md_chain(&project_info.root, &project_info.cwd);
+    if !agents_files.is_empty() {
+        tracing::info!(count = agents_files.len(), "AGENTS.md file(s) loaded");
     }
 
     // Build provider registry (may fail if env vars not set)
@@ -110,7 +110,7 @@ async fn main() -> Result<()> {
         root_path: project_info.root.display().to_string(),
     });
 
-    let mut app = steve::app::App::new(project_info, cfg, store, agents_md, provider_registry, provider_error, config_warnings, usage_handle.writer.clone());
+    let mut app = steve::app::App::new(project_info, cfg, store, agents_files, provider_registry, provider_error, config_warnings, usage_handle.writer.clone());
     app.run().await?;
 
     usage_handle.shutdown_and_wait();
