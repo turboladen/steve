@@ -7,6 +7,8 @@
 //! 4. When the stream finishes with tool calls, executes them and loops back
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use async_openai::{
@@ -24,7 +26,6 @@ use async_openai::{
     },
     Client,
 };
-use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -41,12 +42,11 @@ use crate::usage::UsageWriter;
 use crate::usage::types::ApiCallRecord;
 
 /// Abstraction over LLM stream creation — enables mock testing of the tool loop.
-#[async_trait]
 pub trait ChatStreamProvider: Send + Sync {
-    async fn create_stream(
+    fn create_stream(
         &self,
         request: CreateChatCompletionRequest,
-    ) -> Result<ChatCompletionResponseStream, async_openai::error::OpenAIError>;
+    ) -> Pin<Box<dyn Future<Output = Result<ChatCompletionResponseStream, async_openai::error::OpenAIError>> + Send + '_>>;
 }
 
 /// Production implementation wrapping async-openai's Client.
@@ -60,13 +60,14 @@ impl OpenAIChatStream {
     }
 }
 
-#[async_trait]
 impl ChatStreamProvider for OpenAIChatStream {
-    async fn create_stream(
+    fn create_stream(
         &self,
         request: CreateChatCompletionRequest,
-    ) -> Result<ChatCompletionResponseStream, async_openai::error::OpenAIError> {
-        self.client.chat().create_stream(request).await
+    ) -> Pin<Box<dyn Future<Output = Result<ChatCompletionResponseStream, async_openai::error::OpenAIError>> + Send + '_>> {
+        Box::pin(async move {
+            self.client.chat().create_stream(request).await
+        })
     }
 }
 
@@ -2088,16 +2089,17 @@ mod tests {
         }
     }
 
-    #[async_trait]
     impl ChatStreamProvider for MockChatStream {
-        async fn create_stream(
+        fn create_stream(
             &self,
             _request: CreateChatCompletionRequest,
-        ) -> Result<ChatCompletionResponseStream, OpenAIError> {
-            let chunks = self.streams.lock().unwrap().pop_front()
-                .unwrap_or_default();
-            let stream = futures::stream::iter(chunks);
-            Ok(Box::pin(stream))
+        ) -> Pin<Box<dyn Future<Output = Result<ChatCompletionResponseStream, OpenAIError>> + Send + '_>> {
+            Box::pin(async move {
+                let chunks = self.streams.lock().unwrap().pop_front()
+                    .unwrap_or_default();
+                let stream = futures::stream::iter(chunks);
+                Ok(Box::pin(stream) as ChatCompletionResponseStream)
+            })
         }
     }
 

@@ -142,7 +142,7 @@ loop until none remain. Safety limits: `MAX_TOOL_ITERATIONS = 75` (build),
   interleave
 - No `unreachable!()` in stream tasks — panics crash silently. Use `tracing::error!`
 
-Stream decoupled via `ChatStreamProvider` trait (`#[async_trait]`). Tests use `MockChatStream`.
+Stream decoupled via `ChatStreamProvider` trait (returns `Pin<Box<dyn Future>>`). Tests use `MockChatStream`.
 
 ### Permission System
 
