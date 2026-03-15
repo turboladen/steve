@@ -195,7 +195,7 @@ fn build_resolved(
 /// Search for a unique file matching `basename` in the project tree.
 fn find_unique_basename(basename: &str, project_root: &Path) -> Option<PathBuf> {
     let walker = WalkBuilder::new(project_root)
-        .hidden(true)
+        .hidden(false)
         .git_ignore(true)
         .build();
 
@@ -311,7 +311,7 @@ pub fn augment_message(text: &str, resolved: &[ResolvedFileRef]) -> (String, Str
 /// Build a file index for autocomplete by walking the project tree.
 pub fn build_file_index(project_root: &Path) -> Vec<String> {
     let walker = WalkBuilder::new(project_root)
-        .hidden(true)
+        .hidden(false)
         .git_ignore(true)
         .build();
 
@@ -453,6 +453,13 @@ mod tests {
         fs::write(root.join("Cargo.toml"), "[package]\nname = \"test\"\n").unwrap();
         // Binary file
         fs::write(root.join("binary.bin"), b"\x00\x01\x02\x03").unwrap();
+        // Dot-directory (e.g. .github/workflows)
+        fs::create_dir_all(root.join(".github/workflows")).unwrap();
+        fs::write(
+            root.join(".github/workflows/deploy.yml"),
+            "name: Deploy\non:\n  push:\n    branches: [main]\n",
+        )
+        .unwrap();
 
         dir
     }
@@ -633,6 +640,31 @@ mod tests {
         assert!(index.contains(&"src/main.rs".to_string()));
         assert!(index.contains(&"src/lib.rs".to_string()));
         assert!(index.contains(&"Cargo.toml".to_string()));
+    }
+
+    #[test]
+    fn build_file_index_includes_dot_dirs() {
+        let dir = setup_test_project();
+        let index = build_file_index(dir.path());
+        assert!(
+            index.contains(&".github/workflows/deploy.yml".to_string()),
+            "file index should include files in dot-directories; got: {index:?}"
+        );
+    }
+
+    #[test]
+    fn find_unique_basename_in_dot_dir() {
+        let dir = setup_test_project();
+        let r = FileRef {
+            raw: "@deploy.yml".into(),
+            path: "deploy.yml".into(),
+            inject: false,
+            start: 0,
+            end: 11,
+        };
+        let resolved = resolve_ref(&r, dir.path()).unwrap();
+        assert_eq!(resolved.rel_path, ".github/workflows/deploy.yml");
+        assert_eq!(resolved.language, Some("YAML".into()));
     }
 
     #[test]
