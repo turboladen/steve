@@ -3093,7 +3093,10 @@ mod tests {
     #[tokio::test]
     async fn stream_write_tool_emits_permission_request() {
         // Mock LLM tries to call edit tool in standard mode — should trigger permission request.
-        // We spawn a listener that grants permission so the stream completes.
+        // We can't use collect_events() here because PermissionRequest carries a oneshot::Sender
+        // that blocks run_stream until replied to. We must drain the channel from outside the
+        // stream task, intercept the PermissionRequest, send AllowOnce, then let the stream
+        // continue. A 5-second timeout guards against hangs.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         std::fs::create_dir_all(root.join("src")).unwrap();
@@ -3152,8 +3155,8 @@ mod tests {
                     events.push(event);
                     if is_finish { break; }
                 }
-                Ok(None) => break,
-                Err(_) => break,
+                Ok(None) => break, // Channel closed — stream finished
+                Err(_) => panic!("timed out waiting for stream events — stream likely hung on unanswered PermissionRequest"),
             }
         }
         stream_handle.await.unwrap().expect("stream should succeed");

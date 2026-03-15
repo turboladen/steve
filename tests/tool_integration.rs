@@ -679,9 +679,10 @@ fn delete_project_root_refused() {
     );
 
     assert!(result.is_err(), "deleting project root should fail");
+    let err_msg = result.unwrap_err().to_string();
     assert!(
-        result.unwrap_err().to_string().contains("refusing"),
-        "error should mention refusing"
+        err_msg.contains("refusing") && err_msg.contains("project root"),
+        "error should mention refusing to delete project root, got: {err_msg}"
     );
 }
 
@@ -975,7 +976,12 @@ fn symbols_ruby_file() {
     assert!(output.output.contains("greet"), "should find greet method");
 }
 
-// ── Step 4: Cache Invalidation Integration ──
+// ── Step 4: Cache API + Real Tool Execution ──
+//
+// These tests verify ToolResultCache behavior (put/get/invalidate_path)
+// using real tool outputs from ToolRegistry. They do NOT test stream-level
+// auto-invalidation — that is covered by stream_cache_invalidation_after_write
+// in src/stream.rs.
 
 #[test]
 fn cache_read_then_edit_invalidates() {
@@ -1143,7 +1149,9 @@ fn explore_agent_has_only_read_tools() {
     let tools = AgentType::Explore.allowed_tools();
     let filtered = ToolRegistry::filtered(PathBuf::from("/tmp"), &tools);
 
-    // Every allowed tool must be read-only
+    // Every allowed tool must be read-only.
+    // Note: Webfetch is categorized as Exploring (UI) but is_read_only() == false,
+    // so it is deliberately excluded from the Explore agent's tool set.
     for t in &tools {
         assert!(t.is_read_only(), "Explore tool {t} should be read-only");
     }
