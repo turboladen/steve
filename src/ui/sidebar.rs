@@ -227,7 +227,7 @@ impl SidebarState {
 
 /// Maximum visible characters for branch name (derived from sidebar width).
 fn max_branch_display(sidebar_width: usize) -> usize {
-    sidebar_width.saturating_sub(12) // indent + " · dirty" suffix
+    sidebar_width.saturating_sub(2) // 1 indent + 1 margin
 }
 
 /// Render the sidebar into the given area.
@@ -314,20 +314,21 @@ pub fn render_sidebar(
         } else {
             branch.clone()
         };
-        let status_text = match state.git_dirty {
-            Some(true) => " · dirty",
-            Some(false) => " · clean",
-            None => "",
-        };
-        let status_color = match state.git_dirty {
-            Some(true) => theme.warning,
-            Some(false) => theme.success,
-            None => theme.dim,
-        };
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {truncated_branch}"), Style::default().fg(theme.fg)),
-            Span::styled(status_text, Style::default().fg(status_color)),
-        ]));
+        lines.push(Line::from(Span::styled(
+            format!(" {truncated_branch}"),
+            Style::default().fg(theme.fg),
+        )));
+        if let Some(dirty) = state.git_dirty {
+            let (status_text, status_color) = if dirty {
+                ("dirty", theme.warning)
+            } else {
+                ("clean", theme.success)
+            };
+            lines.push(Line::from(Span::styled(
+                format!(" {status_text}"),
+                Style::default().fg(status_color),
+            )));
+        }
         lines.push(primitives::section_separator(sidebar_width, theme));
     }
 
@@ -1126,9 +1127,9 @@ mod tests {
 
     #[test]
     fn max_branch_display_values() {
-        assert_eq!(max_branch_display(36), 24);
-        assert_eq!(max_branch_display(44), 32);
-        assert_eq!(max_branch_display(12), 0);
+        assert_eq!(max_branch_display(36), 34);
+        assert_eq!(max_branch_display(44), 42);
+        assert_eq!(max_branch_display(12), 10);
         assert_eq!(max_branch_display(0), 0);
     }
 
