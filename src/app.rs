@@ -611,7 +611,7 @@ impl App {
             });
         }
 
-        Self {
+        let mut app = Self {
             project,
             config,
             storage,
@@ -656,7 +656,9 @@ impl App {
             event_tx,
             event_rx,
             should_quit: false,
-        }
+        };
+        app.sync_context_window();
+        app
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -843,6 +845,7 @@ impl App {
         let _ = mgr.save_project_meta(&meta);
 
         self.current_model = Some(self.validated_model_ref(&session.model_ref));
+        self.sync_context_window();
         self.usage_writer.upsert_session(SessionRecord {
             session_id: session.id.clone(),
             project_id: self.project.id.clone(),
@@ -2443,6 +2446,16 @@ impl App {
         self.status_line_state.last_prompt_tokens = self.last_prompt_tokens;
     }
 
+    /// Eagerly resolve the current model's context window for border color display.
+    /// Call after any change to `current_model` (startup, `/model`, session switch).
+    fn sync_context_window(&mut self) {
+        if let (Some(model_ref), Some(registry)) = (&self.current_model, &self.provider_registry) {
+            if let Ok(resolved) = registry.resolve_model(model_ref) {
+                self.status_line_state.context_window = resolved.config.context_window as u64;
+            }
+        }
+    }
+
     /// Sync sidebar token counters from the authoritative session data.
     /// Call after `add_usage()` (LlmFinish) or session reset (/new).
     fn sync_sidebar_tokens(&mut self) {
@@ -2958,6 +2971,7 @@ impl App {
                     match registry.resolve_model(&model_ref) {
                         Ok(_) => {
                             self.current_model = Some(model_ref.to_string());
+                            self.sync_context_window();
                             self.messages.push(MessageBlock::System {
                                 text: format!("Switched to model: {model_ref}"),
                             });
