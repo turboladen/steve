@@ -121,3 +121,11 @@ pub struct StreamUsage {
     pub completion_tokens: u32,
     pub total_tokens: u32,
 }
+
+impl std::ops::AddAssign for StreamUsage {
+    fn add_assign(&mut self, rhs: Self) {
+        self.prompt_tokens += rhs.prompt_tokens;
+        self.completion_tokens += rhs.completion_tokens;
+        self.total_tokens += rhs.total_tokens;
+    }
+}

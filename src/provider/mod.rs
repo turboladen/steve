@@ -29,9 +29,12 @@ impl ResolvedModel {
     }
 
     /// Session cost based on token usage and model pricing.
-    /// Returns None if model has no pricing configured.
+    /// Returns None if model has no pricing configured or no tokens have been used.
     pub fn session_cost(&self, prompt_tokens: u64, completion_tokens: u64) -> Option<f64> {
         let cost = self.config.cost.as_ref()?;
+        if prompt_tokens == 0 && completion_tokens == 0 {
+            return None; // No usage reported — show N/A, not $0.0000
+        }
         let input_cost = prompt_tokens as f64 * cost.input_per_million / 1_000_000.0;
         let output_cost = completion_tokens as f64 * cost.output_per_million / 1_000_000.0;
         Some(input_cost + output_cost)
@@ -176,5 +179,16 @@ mod tests {
     fn session_cost_none_without_pricing() {
         let model = make_test_resolved_model();
         assert!(model.session_cost(1_000_000, 500_000).is_none());
+    }
+
+    #[test]
+    fn session_cost_none_with_zero_tokens() {
+        let mut model = make_test_resolved_model();
+        model.config.cost = Some(ModelCost {
+            input_per_million: 0.50,
+            output_per_million: 2.00,
+        });
+        // Zero tokens should return None (N/A), not Some(0.0)
+        assert!(model.session_cost(0, 0).is_none());
     }
 }

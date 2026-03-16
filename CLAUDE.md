@@ -302,7 +302,9 @@ Three types: Explore (read-only, `small_model`), Plan (read-only + LSP, primary 
 
 Sub-agents reuse `run_stream()` with `ToolRegistry::filtered()` and `agent_spawner: None` (prevents
 recursive spawning). Recursive async requires `Box::pin(run_stream(...)).await`. Sub-agent events
-flow through a private channel — only usage updates forwarded to parent.
+flow through a private channel — `LlmUsageUpdate` forwarded to parent for live display,
+`LlmFinish` captured for usage accumulation. `run_sub_agent()` returns `(String, StreamUsage)` —
+callers must add the returned usage to parent `total_usage` for correct cost/token accounting.
 
 Permission: `Ask` in Build mode, `Deny` in Plan mode. General agents forward `PermissionRequest`
 to parent for user approval of writes.

@@ -1267,14 +1267,16 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                                 is_error: true,
                             }
                         } else {
-                            match run_sub_agent(
+                            let (result, usage) = run_sub_agent(
                                 spawner,
                                 agent_type,
                                 &task_str,
                                 context_str.as_deref(),
                                 &event_tx,
                                 &tc.id,
-                            ).await {
+                            ).await;
+                            total_usage += usage;
+                            match result {
                                 Ok(text) => crate::tool::ToolOutput {
                                     title: format!("Agent ({agent_type})"),
                                     output: text,
@@ -1289,14 +1291,16 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                         }
                     } else {
                         // Explore/Plan agents or already-allowed General agents
-                        match run_sub_agent(
+                        let (result, usage) = run_sub_agent(
                             spawner,
                             agent_type,
                             &task_str,
                             context_str.as_deref(),
                             &event_tx,
                             &tc.id,
-                        ).await {
+                        ).await;
+                        total_usage += usage;
+                        match result {
                             Ok(text) => crate::tool::ToolOutput {
                                 title: format!("Agent ({agent_type})"),
                                 output: text,
@@ -1690,7 +1694,7 @@ async fn run_sub_agent(
     context: Option<&str>,
     parent_event_tx: &mpsc::UnboundedSender<AppEvent>,
     call_id: &str,
-) -> Result<String, String> {
+) -> (Result<String, String>, StreamUsage) {
     let model = match agent_type {
         AgentType::Explore => spawner
             .small_model
@@ -1755,6 +1759,7 @@ async fn run_sub_agent(
     let mut tool_count = 0u32;
     let mut last_error: Option<String> = None;
     let mut stream_done = false;
+    let mut sub_agent_usage = StreamUsage::default();
 
     let mut stream_future = Box::pin(run_stream(sub_request));
 
@@ -1800,7 +1805,12 @@ async fn run_sub_agent(
                         // Forward permission requests to parent so the UI can prompt the user.
                         let _ = parent_event_tx.send(AppEvent::PermissionRequest(req));
                     }
-                    // Other events (LlmFinish, Tick, etc.) are discarded.
+                    Some(AppEvent::LlmFinish { usage }) => {
+                        if let Some(u) = usage {
+                            sub_agent_usage += u;
+                        }
+                    }
+                    // Other events (Tick, StreamNotice, etc.) are discarded.
                     Some(_) => {}
                     None => {
                         // Channel closed — sub-agent dropped its sender.
@@ -1816,7 +1826,7 @@ async fn run_sub_agent(
         }
     }
 
-    if let Some(error) = last_error {
+    let result = if let Some(error) = last_error {
         if !final_text.is_empty() {
             // Prefer returning text even if there was a transient error.
             Ok(format!("{final_text}\n\n[Agent encountered an error: {error}]"))
@@ -1827,7 +1837,8 @@ async fn run_sub_agent(
         Ok(format!("Sub-agent ({agent_type}) completed with {tool_count} tool calls but produced no text response."))
     } else {
         Ok(final_text)
-    }
+    };
+    (result, sub_agent_usage)
 }
 
 /// Context pressure threshold: if prompt_tokens > this % of context_window,
