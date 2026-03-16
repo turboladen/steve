@@ -200,10 +200,10 @@ pub fn profile_plan_rules(
         rules.push(rule.clone());
     }
 
-    // Per-tool overrides, but only for non-write tools in Plan mode
-    // (write tools are always denied in Plan mode)
+    // Per-tool overrides, but only for non-write, non-Agent tools in Plan mode
+    // (write tools and Agent are always denied in Plan mode)
     for &tool in allow_overrides {
-        if !tool.is_write_tool() {
+        if !tool.is_write_tool() && tool != ToolName::Agent {
             rules.push(PermissionRule {
                 tool: ToolMatcher::Specific(tool),
                 pattern: "*".into(),
@@ -462,13 +462,15 @@ mod tests {
     }
 
     #[test]
-    fn plan_mode_ignores_write_overrides() {
+    fn plan_mode_ignores_write_and_agent_overrides() {
         let engine = PermissionEngine::new(
-            profile_plan_rules(PermissionProfile::Standard, &[ToolName::Edit, ToolName::Bash], &[]),
+            profile_plan_rules(PermissionProfile::Standard, &[ToolName::Edit, ToolName::Bash, ToolName::Agent], &[]),
         );
         // Write tool override is stripped in Plan mode
         assert_eq!(engine.check(ToolName::Edit, None), PermissionAction::Deny);
-        // Bash override IS applied (bash isn't a write tool, it's Ask in plan mode)
+        // Agent override is also stripped in Plan mode
+        assert_eq!(engine.check(ToolName::Agent, None), PermissionAction::Deny);
+        // Bash override IS applied (bash isn't a write tool or agent, it's Ask in plan mode)
         assert_eq!(engine.check(ToolName::Bash, None), PermissionAction::Allow);
     }
 

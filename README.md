@@ -201,9 +201,9 @@ export OPENAI_API_KEY="sk-..."
 ### Agent Modes
 
 - **Build mode** (default) — The LLM can read, write, and execute code. Write/execute tools require
-  your permission.
-- **Plan mode** — Read-only. The LLM can explore your code but cannot modify it. Press Tab to
-  toggle.
+  your permission (varies by profile).
+- **Plan mode** — The LLM can explore and analyze your code but cannot modify it. Write tools and
+  Agent are denied; Bash and Webfetch still require permission. Press Tab to toggle.
 
 The input bar shows the current mode, working directory, token usage, and context pressure
 percentage.
@@ -251,13 +251,22 @@ Steve gives the LLM access to 18 tools, grouped by category.
 
 Steve uses a layered permission system to control tool access:
 
-**Profiles** determine the baseline behavior:
+**Profiles** determine the baseline behavior in Build mode:
 
-| Profile              | Behavior                                               |
-| -------------------- | ------------------------------------------------------ |
-| `trust`              | All tools auto-allowed                                 |
-| `standard` (default) | Reads auto-allowed, writes and bash require permission |
-| `cautious`           | Nearly all tools require permission                    |
+| Profile              | Auto-allowed                                  | Requires permission                      |
+| -------------------- | --------------------------------------------- | ---------------------------------------- |
+| `trust`              | All tools                                     | None                                     |
+| `standard` (default) | Read tools, LSP, Memory, Task, Question       | Write tools, Bash, Webfetch, Agent       |
+| `cautious`           | Question, Task                                | Everything else (including reads)        |
+
+**Modes** control what the LLM can do:
+
+| Mode                 | Auto-allowed                            | Ask              | Denied              |
+| -------------------- | --------------------------------------- | ---------------- | ------------------- |
+| **Build** (default)  | Per profile above                       | Per profile above | None               |
+| **Plan**             | Read tools, LSP, Memory, Task, Question | Bash, Webfetch   | Write tools, Agent  |
+
+Note: Plan mode rules are the same regardless of profile — the profile only affects Build mode.
 
 **Path rules** provide fine-grained control over specific paths:
 

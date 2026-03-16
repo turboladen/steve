@@ -152,10 +152,20 @@ matches `(key.code, key.modifiers)` tuples — new `Ctrl+<key>` bindings must no
 
 **Modes** (Tab toggles):
 
-- **Build** (default): read auto-allowed, write/execute require Ask
-- **Plan**: read auto-allowed, writes denied entirely, bash requires Ask
+- **Build** (default): permissions determined by profile (see below)
+- **Plan**: read tools + LSP/Memory/Task/Question auto-allowed, Bash/Webfetch require Ask, write
+  tools + Agent denied. Plan mode ignores the profile — rules are always the same
 
-**Profiles**: Trust (all allowed), Standard (default), Cautious (almost everything asks).
+**Profiles** (Build mode only):
+
+- **Trust**: all tools auto-allowed
+- **Standard** (default): read tools + LSP/Memory/Task/Question auto-allowed; write tools + Bash +
+  Webfetch + Agent require Ask
+- **Cautious**: only Question/Task auto-allowed; everything else (including reads) requires Ask
+
+Rule composition via `profile_build_rules(profile, overrides, path_rules)` and
+`profile_plan_rules(profile, overrides, path_rules)` (3-arg). `profile_plan_rules()` ignores the
+profile param.
 `allow_tools` overrides insert rules before profile defaults (first-match-wins). Plan mode strips
 write overrides. Both `build_mode_rules()` and `plan_mode_rules()` explicitly list every `ToolName`
 variant.

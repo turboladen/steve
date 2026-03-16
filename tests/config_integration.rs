@@ -5,6 +5,7 @@
 
 use steve::config;
 use steve::config::types::Config;
+use steve::permission::PermissionProfile;
 use steve::permission::types::{PermissionActionSerde, PermissionRule, ToolMatcher};
 use steve::tool::ToolName;
 use tempfile::tempdir;
@@ -107,4 +108,83 @@ fn missing_permission_rules_defaults_to_empty() {
 
     let (config, _warnings) = config::load(dir.path()).unwrap();
     assert!(config.permission_rules.is_empty());
+}
+
+/// Persisting the same tool twice should not create duplicates.
+#[test]
+fn duplicate_persist_is_idempotent() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join(".steve.jsonc"), "{}").unwrap();
+
+    config::persist_allow_tool(dir.path(), "edit").unwrap();
+    config::persist_allow_tool(dir.path(), "edit").unwrap();
+
+    let (config, _warnings) = config::load(dir.path()).unwrap();
+    assert_eq!(config.allow_tools.len(), 1, "duplicate persist should be idempotent");
+}
+
+/// Project permission_profile overrides global; None preserves global.
+#[test]
+fn merge_permission_profile_override() {
+    let global = Config {
+        permission_profile: Some(PermissionProfile::Trust),
+        ..Default::default()
+    };
+
+    // Project with Cautious overrides global Trust
+    let project = Config {
+        permission_profile: Some(PermissionProfile::Cautious),
+        ..Default::default()
+    };
+    let merged = global.clone().merge(project);
+    assert_eq!(
+        merged.permission_profile,
+        Some(PermissionProfile::Cautious),
+        "project Cautious should override global Trust"
+    );
+
+    // Project with None preserves global Trust
+    let project_none = Config {
+        permission_profile: None,
+        ..Default::default()
+    };
+    let merged = global.merge(project_none);
+    assert_eq!(
+        merged.permission_profile,
+        Some(PermissionProfile::Trust),
+        "None project should preserve global Trust"
+    );
+}
+
+/// Project allow_tools replaces (not appends to) global; empty preserves global.
+#[test]
+fn merge_allow_tools_project_replaces_global() {
+    let global = Config {
+        allow_tools: vec!["bash".to_string(), "write".to_string()],
+        ..Default::default()
+    };
+
+    // Non-empty project replaces global entirely (not appended)
+    let project = Config {
+        allow_tools: vec!["edit".to_string()],
+        ..Default::default()
+    };
+    let merged = global.clone().merge(project);
+    assert_eq!(
+        merged.allow_tools,
+        vec!["edit".to_string()],
+        "project should replace global (2 global entries reduced to 1)"
+    );
+
+    // Empty project preserves global
+    let project_empty = Config {
+        allow_tools: vec![],
+        ..Default::default()
+    };
+    let merged = global.merge(project_empty);
+    assert_eq!(
+        merged.allow_tools,
+        vec!["bash".to_string(), "write".to_string()],
+        "empty project should preserve global"
+    );
 }
