@@ -26,7 +26,7 @@ use async_openai::{
     },
     Client,
 };
-use futures::StreamExt;
+use tokio_stream::StreamExt;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -2097,7 +2097,7 @@ mod tests {
             Box::pin(async move {
                 let chunks = self.streams.lock().unwrap().pop_front()
                     .unwrap_or_default();
-                let stream = futures::stream::iter(chunks);
+                let stream = tokio_stream::iter(chunks);
                 Ok(Box::pin(stream) as ChatCompletionResponseStream)
             })
         }
