@@ -131,7 +131,16 @@ permission model, AGENTS.md chain (labeled sections, root-first), and `TOOL_GUID
 
 Spawned tokio task streams via async-openai, accumulates tool call fragments, executes tools in a
 loop until none remain. Safety limits: `MAX_TOOL_ITERATIONS = 75` (build),
-`MAX_PLAN_ITERATIONS = 40` (plan). Counter resets on user permission grants.
+`MAX_PLAN_ITERATIONS = 55` (plan). Counter resets on user permission grants/interjections.
+
+**Tool stripping**: At ~73% of max iterations (`WARN_CRITICAL_PCT`), tool definitions are removed
+from the API request (`tools = None`) so the LLM structurally cannot make tool calls. At the hard
+limit, one final tool-free API call is made before termination. Both `tools_stripped` and
+`final_chance_taken` flags reset on user interaction (permission grant or interjection).
+
+**Deferred compression**: Normal compression only triggers when estimated context > 40% of window.
+Keeps last 2 iterations of tool results uncompressed (`prev_iteration_tool_count + current`).
+Aggressive pruning at 60% still fires as safety valve.
 
 **Critical gotchas**:
 
@@ -188,7 +197,10 @@ third parameter — `None` for tools without paths.
 ### Context Management (`context/`)
 
 - **Compressor** (`compressor.rs`): Replaces already-seen tool results with compact summaries.
-  Aggressive pruning at 60% context. Summaries must NOT invite re-reading
+  Deferred until >40% context window; aggressive pruning at 60%. `compress_read()` and
+  `compress_grep()` accept optional `tool_args` for richer summaries (file paths, line ranges,
+  search patterns, top match lines). `build_tool_args_map()` extracts args from assistant messages.
+  Summaries must NOT invite re-reading
 - **Cache** (`cache.rs`): Session-scoped `ToolResultCache` behind `Arc<Mutex>`. Path-normalized
   keys. Auto-invalidates on mtime changes. After `REPEAT_THRESHOLD` (2) hits returns short summary
   to break feedback loops

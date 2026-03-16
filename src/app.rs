@@ -84,7 +84,9 @@ Use epics to group related tasks under a larger work item (e.g., a Jira ticket).
 You have a limited number of tool calls per response. Plan your exploration efficiently:\n\
 - **Aim for 10-20 tool calls** per response. Beyond that, you are likely over-exploring.\n\
 - After gathering key files, synthesize your findings and respond. Do not keep exploring.\n\
-- The system will warn you as you approach the hard limit, but you should self-limit well before that.\n\n\
+- The system will warn you as you approach the limit. At ~73% of the budget, **tool access is revoked** — \
+you will not be able to make any more tool calls. Plan accordingly and start synthesizing early.\n\
+- If you hit the hard limit, you get one final chance to respond before the stream is terminated.\n\n\
 ## IMPORTANT: Use Native Tools, Not Bash\n\n\
 Do NOT use `bash` for simple file operations — use the dedicated tool instead:\n\
 | Instead of... | Use |\n\

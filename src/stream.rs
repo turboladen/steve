@@ -188,8 +188,9 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         },
     ));
 
-    // Build tool definitions for the API
-    let tools: Option<Vec<ChatCompletionTools>> = tool_registry.as_ref().map(|registry| {
+    // Build tool definitions for the API (mutable — stripped at CRITICAL threshold).
+    // Helper closure rebuilds tools from the registry (used for initial build + restoration).
+    let build_tools = |registry: &ToolRegistry| -> Vec<ChatCompletionTools> {
         registry
             .tool_definitions()
             .into_iter()
@@ -205,7 +206,8 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 }))
             })
             .collect()
-    });
+    };
+    let mut tools: Option<Vec<ChatCompletionTools>> = tool_registry.as_ref().map(|r| build_tools(r));
 
     let mut total_usage = StreamUsage::default();
     let mut current_iteration_tool_count: usize = 0;
@@ -219,7 +221,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
     // Resets when the user grants a permission (proving active supervision).
     // Plan mode uses a lower limit since it's read-only analysis.
     const MAX_TOOL_ITERATIONS: u32 = 75;
-    const MAX_PLAN_ITERATIONS: u32 = 40;
+    const MAX_PLAN_ITERATIONS: u32 = 55;
     let effective_max = if is_plan_mode { MAX_PLAN_ITERATIONS } else { MAX_TOOL_ITERATIONS };
     let mut iteration_count: u32 = 0;
     let mut total_iteration_count: u32 = 0;
@@ -227,6 +229,17 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
     // Bitmask tracks which escalating warnings have fired this cycle
     // (resets with iteration_count on user interaction).
     let mut warnings_sent: u8 = 0;
+
+    // Tool stripping: at CRITICAL threshold, tools are removed from the API request
+    // so the LLM structurally cannot make tool calls — it must produce text.
+    let mut tools_stripped = false;
+
+    // Final chance: at hard limit, one last tool-free API call is made before termination.
+    let mut final_chance_taken = false;
+
+    // Track previous iteration's tool count for keeping 2 iterations uncompressed.
+    // Initialized at top of loop from current_iteration_tool_count before each iteration.
+    let mut prev_iteration_tool_count: usize;
 
     // Track consecutive iterations where ALL tool calls were cache-repeat hits.
     // When this reaches the threshold, inject a strong "stop looping" message.
@@ -259,38 +272,87 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             ));
             iteration_count = 0; // User interaction resets safety counter
             warnings_sent = 0;
+            // Restore tools if they were stripped — user interaction proves supervision
+            if tools_stripped {
+                tools_stripped = false;
+                final_chance_taken = false;
+                tools = tool_registry.as_ref().map(|r| build_tools(r));
+            }
         }
 
         total_iteration_count += 1;
         iteration_count += 1;
+        // Update prev_iteration_tool_count before any early `continue` paths
+        // (final-chance) can skip the normal reset at the bottom of the loop.
+        prev_iteration_tool_count = current_iteration_tool_count;
         let mut user_interacted_this_iteration = false;
         let call_start = std::time::Instant::now();
         if iteration_count > effective_max {
-            tracing::error!(
-                iterations = iteration_count,
-                total_iterations = total_iteration_count,
-                effective_max,
-                "tool loop exceeded max iterations"
-            );
-            let _ = event_tx.send(AppEvent::LlmError {
-                error: format!(
-                    "Tool loop exceeded {effective_max} iterations. Try /compact or /new."
-                ),
-            });
-            let _ = event_tx.send(AppEvent::LlmFinish {
-                usage: Some(total_usage),
-            });
-            return Ok(());
+            if !final_chance_taken {
+                final_chance_taken = true;
+                tools = None;
+                tools_stripped = true;
+                messages.push(ChatCompletionRequestMessage::User(
+                    ChatCompletionRequestUserMessage {
+                        content: ChatCompletionRequestUserMessageContent::Text(
+                            "[SYSTEM: Maximum tool calls exceeded. Provide your complete response \
+                             NOW. Summarize everything you found and answer the user's question. \
+                             This is your final opportunity to respond.]".to_string(),
+                        ),
+                        name: None,
+                    },
+                ));
+                let _ = event_tx.send(AppEvent::StreamNotice {
+                    text: "⚙ Tool limit reached — requesting final response".to_string(),
+                });
+                tracing::warn!(
+                    iterations = iteration_count,
+                    total_iterations = total_iteration_count,
+                    effective_max,
+                    "tool loop hit max iterations — making final-chance API call"
+                );
+                continue; // One more API call with no tools
+            } else {
+                // Final chance already taken — truly done
+                tracing::error!(
+                    iterations = iteration_count,
+                    total_iterations = total_iteration_count,
+                    effective_max,
+                    "tool loop exceeded max iterations (final chance exhausted)"
+                );
+                let _ = event_tx.send(AppEvent::LlmError {
+                    error: format!(
+                        "Tool loop exceeded {effective_max} iterations. Try /compact or /new."
+                    ),
+                });
+                let _ = event_tx.send(AppEvent::LlmFinish {
+                    usage: Some(total_usage),
+                });
+                return Ok(());
+            }
         }
 
         // Compress old tool results from prior iterations to reduce token usage.
-        // Only tool results from the current iteration (which the LLM hasn't seen yet)
-        // are kept uncompressed.
-        if current_iteration_tool_count > 0 || messages.iter().any(|m| matches!(m, ChatCompletionRequestMessage::Tool(_))) {
-            crate::context::compressor::compress_old_tool_results(
-                &mut messages,
-                current_iteration_tool_count,
-            );
+        // Deferred: only compress when context usage exceeds 40% of the window.
+        // This prevents destroying tool results the LLM still needs early on.
+        // Keep the last 2 iterations uncompressed so the LLM has recent context.
+        let has_tool_messages = messages.iter().any(|m| matches!(m, ChatCompletionRequestMessage::Tool(_)));
+        let keep_recent = current_iteration_tool_count + prev_iteration_tool_count;
+        if has_tool_messages || current_iteration_tool_count > 0 {
+            let payload_estimate: usize = messages.iter().map(|m| estimate_message_chars(m)).sum();
+            // Rough heuristic: ~4 chars/token. Underestimates for code-heavy content,
+            // but the 60% aggressive pruning safety valve catches underestimates.
+            let estimated_tokens = payload_estimate / 4;
+            let should_compress = context_window
+                .map(|cw| cw > 0 && estimated_tokens as u64 > cw * 40 / 100)
+                .unwrap_or(true); // Compress if we don't know the window size
+
+            if should_compress {
+                crate::context::compressor::compress_old_tool_results(
+                    &mut messages,
+                    keep_recent,
+                );
+            }
         }
 
         // Aggressive pruning: if conversation is still large after normal compression,
@@ -310,6 +372,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         }
 
         // Reset counters for the next iteration
+        // (prev_iteration_tool_count already updated at top of loop)
         current_iteration_tool_count = 0;
         current_iteration_cache_repeats = 0;
 
@@ -1376,6 +1439,12 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             iteration_count = 0;
             warnings_sent = 0;
             consecutive_cached_iterations = 0;
+            // Restore tools if they were stripped — permission grant proves supervision
+            if tools_stripped {
+                tools_stripped = false;
+                final_chance_taken = false;
+                tools = tool_registry.as_ref().map(|r| build_tools(r));
+            }
         }
 
         // Detect "stuck in cache" loops: if ALL tool calls in this iteration
@@ -1439,6 +1508,27 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 total_iteration_count,
                 "tool loop warning injected"
             );
+        }
+
+        // Tool stripping: at CRITICAL threshold, remove tool definitions from the
+        // API request so the LLM structurally cannot make tool calls.
+        // The CRITICAL warning message is already injected by check_iteration_warning()
+        // above — this block just does the structural enforcement.
+        if !tools_stripped {
+            let critical_at = effective_max * WARN_CRITICAL_PCT / 100;
+            if iteration_count >= critical_at {
+                tools_stripped = true;
+                tools = None;
+                let _ = event_tx.send(AppEvent::StreamNotice {
+                    text: "⚙ Tool access revoked — forcing response".to_string(),
+                });
+                tracing::warn!(
+                    iteration_count,
+                    total_iteration_count,
+                    critical_at,
+                    "tool definitions stripped from API request"
+                );
+            }
         }
 
         // Loop back to send the messages (with tool results) to the LLM again
@@ -1661,29 +1751,26 @@ fn check_iteration_warning(
         *warnings_sent |= WARN_FINAL_BIT;
         let remaining = max_iterations.saturating_sub(iteration_count);
         Some(format!(
-            "\n\n[FINAL WARNING: {remaining} tool calls remain before forced termination. \
-             RESPOND NOW.]"
+            "\n\n[FINAL: {remaining} iterations before forced termination. Tools are already \
+             revoked. RESPOND NOW with your complete answer.]"
         ))
     } else if iteration_count >= critical_at && (*warnings_sent & WARN_CRITICAL_BIT) == 0 {
         *warnings_sent |= WARN_CRITICAL_BIT;
-        let remaining = max_iterations.saturating_sub(iteration_count);
         Some(format!(
-            "\n\n[CRITICAL: {remaining} tool calls remain before FORCED TERMINATION. \
-             Your next response MUST be your final answer. Any further tool calls will \
-             be terminated.]"
+            "\n\n[CRITICAL: Tools REMOVED from next request. You cannot make more tool calls. \
+             Respond with your findings immediately.]"
         ))
     } else if iteration_count >= warning_at && (*warnings_sent & WARN_WARNING_BIT) == 0 {
         *warnings_sent |= WARN_WARNING_BIT;
         Some(format!(
-            "\n\n[WARNING: {iteration_count} of {max_iterations} tool calls used. You MUST \
-             respond to the user in your next message. Do NOT make any more tool calls. \
-             Work with what you have.]"
+            "\n\n[WARNING: {iteration_count}/{max_iterations} tool calls used. Tool access \
+             will be REVOKED at ~{critical_at} calls. Wrap up NOW.]"
         ))
     } else if iteration_count >= nudge_at && (*warnings_sent & WARN_NUDGE_BIT) == 0 {
         *warnings_sent |= WARN_NUDGE_BIT;
         Some(format!(
-            "\n\n[You have made {iteration_count} tool calls. Begin synthesizing your \
-             findings. Do not open more files unless critical information is missing.]"
+            "\n\n[You have made {iteration_count} tool calls. Begin synthesizing. \
+             The system will revoke tool access at ~{critical_at} calls.]"
         ))
     } else {
         None
@@ -2869,7 +2956,7 @@ mod tests {
         // Final at 93% (75 * 93 / 100 = 69)
         let fin = check_iteration_warning(69, 75, &mut sent);
         assert!(fin.is_some());
-        assert!(fin.unwrap().contains("FINAL WARNING:"));
+        assert!(fin.unwrap().contains("FINAL:"));
         // All bits set
         assert_eq!(sent, WARN_NUDGE_BIT | WARN_WARNING_BIT | WARN_CRITICAL_BIT | WARN_FINAL_BIT);
     }
@@ -2879,7 +2966,7 @@ mod tests {
         let mut sent = 0u8;
         // Jump straight to critical at 54 (75 * 73 / 100 = 54)
         let text = check_iteration_warning(54, 75, &mut sent).unwrap();
-        assert!(text.contains("21 tool calls remain"));
+        assert!(text.contains("Tools REMOVED"));
     }
 
     #[test]
@@ -2907,7 +2994,7 @@ mod tests {
         let mut sent = 0u8;
         // Jump from 0 to 70 — should fire final (highest), not nudge
         let text = check_iteration_warning(70, 75, &mut sent).unwrap();
-        assert!(text.contains("FINAL WARNING:"));
+        assert!(text.contains("FINAL:"));
         assert_eq!(sent & WARN_FINAL_BIT, WARN_FINAL_BIT);
     }
 
@@ -2930,7 +3017,7 @@ mod tests {
         // Final at 93% (40 * 93 / 100 = 37)
         let fin = check_iteration_warning(37, 40, &mut sent);
         assert!(fin.is_some());
-        assert!(fin.unwrap().contains("FINAL WARNING:"));
+        assert!(fin.unwrap().contains("FINAL:"));
     }
 
     #[test]
@@ -2938,8 +3025,48 @@ mod tests {
         let mut sent = 0u8;
         // At 75 max, final fires at 69 (75 * 93 / 100)
         let text = check_iteration_warning(69, 75, &mut sent).unwrap();
-        assert!(text.contains("6 tool calls remain"));
-        assert!(text.contains("FINAL WARNING:"));
+        assert!(text.contains("6 iterations"));
+        assert!(text.contains("FINAL:"));
+    }
+
+    #[test]
+    fn warning_nudge_includes_critical_threshold() {
+        let mut sent = 0u8;
+        let text = check_iteration_warning(15, 75, &mut sent).unwrap();
+        // Nudge should tell the LLM when tools will be revoked
+        assert!(text.contains("revoke tool access"));
+        // Should include the critical threshold (~54 for max 75)
+        assert!(text.contains("54"));
+    }
+
+    #[test]
+    fn warning_at_level_includes_critical_threshold() {
+        let mut sent = 0u8;
+        let text = check_iteration_warning(35, 75, &mut sent).unwrap();
+        // Warning should mention when tools will be REVOKED
+        assert!(text.contains("REVOKED"));
+        assert!(text.contains("54"));
+    }
+
+    #[test]
+    fn warning_critical_mentions_tools_removed() {
+        let mut sent = 0u8;
+        let text = check_iteration_warning(54, 75, &mut sent).unwrap();
+        assert!(text.contains("CRITICAL:"));
+        assert!(text.contains("Tools REMOVED"));
+    }
+
+    #[test]
+    fn plan_mode_critical_at_40_iterations() {
+        // Plan mode max is 55. At 73%, tools strip at iteration 40
+        // (same as old hard limit), giving graceful degradation.
+        let plan_max = 55u32;
+        let critical_at = plan_max * WARN_CRITICAL_PCT / 100;
+        assert_eq!(critical_at, 40);
+        // Verify warnings fire at expected plan-mode thresholds
+        let mut sent = 0u8;
+        let nudge = check_iteration_warning(11, plan_max, &mut sent);
+        assert!(nudge.is_some()); // 55 * 20 / 100 = 11
     }
 
     #[tokio::test]

@@ -23,10 +23,10 @@ pub fn compress_old_tool_results(
     messages: &mut Vec<ChatCompletionRequestMessage>,
     keep_recent: usize,
 ) {
-    // Build a mapping from tool_call_id → tool_name by scanning assistant messages.
-    // The OpenAI format stores tool names in the assistant's tool_calls, not in the
-    // tool result messages themselves.
-    let tool_name_map = build_tool_name_map(messages);
+    // Build mappings from tool_call_id → tool_name and tool_call_id → args
+    // in a single pass over assistant messages. The OpenAI format stores tool names
+    // and arguments in the assistant's tool_calls, not in tool result messages.
+    let (tool_name_map, tool_args_map) = build_tool_maps(messages);
 
     // Find all tool result message indices
     let tool_indices: Vec<usize> = messages
@@ -62,8 +62,9 @@ pub fn compress_old_tool_results(
             }
 
             let tool_call_id = tool_msg.tool_call_id.clone();
+            let tool_args = tool_args_map.get(&tool_call_id);
             let compressed = match tool_name_map.get(&tool_call_id) {
-                Some(&name) => compress_tool_output(name, &content),
+                Some(&name) => compress_tool_output(name, &content, tool_args),
                 None => compress_generic(&content),
             };
 
@@ -106,31 +107,39 @@ fn extract_text(msg: &ChatCompletionRequestToolMessage) -> String {
     }
 }
 
-/// Build a mapping from tool_call_id to tool_name by scanning assistant messages.
-fn build_tool_name_map(messages: &[ChatCompletionRequestMessage]) -> HashMap<String, ToolName> {
-    let mut map = HashMap::new();
+/// Build mappings from tool_call_id → (tool_name, args) in a single pass.
+fn build_tool_maps(
+    messages: &[ChatCompletionRequestMessage],
+) -> (HashMap<String, ToolName>, HashMap<String, serde_json::Value>) {
+    let mut name_map = HashMap::new();
+    let mut args_map = HashMap::new();
     for msg in messages {
         if let ChatCompletionRequestMessage::Assistant(assistant) = msg {
             if let Some(tool_calls) = &assistant.tool_calls {
                 for tc in tool_calls {
                     if let ChatCompletionMessageToolCalls::Function(func_call) = tc {
                         if let Ok(name) = func_call.function.name.parse::<ToolName>() {
-                            map.insert(func_call.id.clone(), name);
+                            name_map.insert(func_call.id.clone(), name);
+                        }
+                        if let Ok(args) = serde_json::from_str::<serde_json::Value>(
+                            &func_call.function.arguments,
+                        ) {
+                            args_map.insert(func_call.id.clone(), args);
                         }
                     }
                 }
             }
         }
     }
-    map
+    (name_map, args_map)
 }
 
 
 /// Compress a tool output into a compact summary based on the tool type.
-fn compress_tool_output(tool_name: ToolName, content: &str) -> String {
+fn compress_tool_output(tool_name: ToolName, content: &str, tool_args: Option<&serde_json::Value>) -> String {
     match tool_name {
-        ToolName::Read => compress_read(content),
-        ToolName::Grep => compress_grep(content),
+        ToolName::Read => compress_read(content, tool_args),
+        ToolName::Grep => compress_grep(content, tool_args),
         ToolName::Glob => compress_glob(content),
         ToolName::List => compress_list(content),
         ToolName::Bash => compress_bash(content),
@@ -147,7 +156,7 @@ fn compress_tool_output(tool_name: ToolName, content: &str) -> String {
 
 /// Compress read tool output.
 /// Input format: "   4 | line content\n" with line numbers
-fn compress_read(content: &str) -> String {
+fn compress_read(content: &str, tool_args: Option<&serde_json::Value>) -> String {
     let lines: Vec<&str> = content.lines().collect();
     // Exclude truncation footer lines from the count (e.g., "... (showing N of M lines ...)")
     let line_count = lines
@@ -155,41 +164,85 @@ fn compress_read(content: &str) -> String {
         .filter(|l| !l.starts_with("... ("))
         .count();
 
-    // Try to extract the file path from the numbered-line format.
-    // We can detect the language from the content patterns.
+    // Extract file path and line range from tool args if available
+    let file_path = tool_args
+        .and_then(|a| a.get("file_path").or_else(|| a.get("path")))
+        .and_then(|v| v.as_str())
+        .unwrap_or("(unknown)");
+    let offset = tool_args.and_then(|a| a.get("offset")).and_then(|v| v.as_u64());
+    let limit = tool_args.and_then(|a| a.get("limit")).and_then(|v| v.as_u64());
+    let range_str = match (offset, limit) {
+        (Some(o), Some(l)) => format!(" lines {}-{}", o, o + l),
+        (Some(o), None) => format!(" from line {}", o),
+        _ => String::new(),
+    };
+
     let lang = detect_language_from_content(content);
+
+    // Extract first few "important" lines (imports, module declarations)
+    let key_lines: Vec<String> = lines.iter()
+        .filter_map(|line| {
+            let stripped = if let Some(pipe_pos) = line.find(" | ") {
+                &line[pipe_pos + 3..]
+            } else {
+                line
+            };
+            let trimmed = stripped.trim();
+            if trimmed.starts_with("use ") || trimmed.starts_with("import ")
+                || trimmed.starts_with("from ") || trimmed.starts_with("mod ")
+                || trimmed.starts_with("#include") || trimmed.starts_with("package ")
+            {
+                let truncated: String = trimmed.chars().take(60).collect();
+                Some(truncated)
+            } else {
+                None
+            }
+        })
+        .take(3)
+        .collect();
 
     // Extract key definitions (fn, struct, impl, class, def, etc.)
     let definitions = extract_definitions(content);
-    let defs_str = if definitions.is_empty() {
-        String::new()
-    } else {
-        let truncated: Vec<&str> = definitions.iter().take(5).map(|s| s.as_str()).collect();
-        let suffix = if definitions.len() > 5 {
-            format!(", +{} more", definitions.len() - 5)
+
+    let key_items = if !key_lines.is_empty() || !definitions.is_empty() {
+        let mut items: Vec<String> = key_lines;
+        items.extend(definitions.into_iter().take(5));
+        let total = items.len();
+        let combined: Vec<&str> = items.iter().take(5).map(|s| s.as_str()).collect();
+        let extra_count = total.saturating_sub(5);
+        let extra_str = if extra_count > 0 {
+            format!(", +{extra_count} more")
         } else {
             String::new()
         };
-        format!(" Defines: {}{suffix}.", truncated.join(", "))
+        format!(" Key items: {}{extra_str}.", combined.join(", "))
+    } else {
+        String::new()
     };
 
     format!(
-        "[Previously read: {line_count} lines, {lang}.{defs_str}]"
+        "[Previously read: {file_path}{range_str} ({line_count} lines, {lang}).{key_items}]"
     )
 }
 
 /// Compress grep tool output.
 /// Input format: "path/file.rs:42: matched line\n" per match
-fn compress_grep(content: &str) -> String {
+fn compress_grep(content: &str, tool_args: Option<&serde_json::Value>) -> String {
     if content.starts_with("No matches found") {
-        return format!("[Previously searched: no matches.]");
+        return "[Previously searched: no matches.]".to_string();
     }
+
+    let pattern = tool_args
+        .and_then(|a| a.get("pattern"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
 
     let lines: Vec<&str> = content.lines().collect();
 
-    // Count matches per file
+    // Count matches per file, collect top match lines
     let mut file_counts: HashMap<&str, usize> = HashMap::new();
     let mut total = 0usize;
+    let mut top_matches: Vec<String> = Vec::new();
 
     for line in &lines {
         // Skip the truncation notice
@@ -201,6 +254,11 @@ fn compress_grep(content: &str) -> String {
             let file = &line[..colon_pos];
             *file_counts.entry(file).or_default() += 1;
             total += 1;
+            // Collect first 3 match lines (truncated to ~80 chars)
+            if top_matches.len() < 3 {
+                let truncated: String = line.chars().take(80).collect();
+                top_matches.push(truncated);
+            }
         }
     }
 
@@ -216,8 +274,15 @@ fn compress_grep(content: &str) -> String {
         .map(|(file, count)| format!("{}({})", file, count))
         .collect();
 
+    let matches_str = if top_matches.is_empty() {
+        String::new()
+    } else {
+        format!("\nTop matches: {}", top_matches.join(", "))
+    };
+
     format!(
-        "[Previously searched: {total} matches in {file_count} files ({}).]",
+        "[Previously searched \"{pattern}\": {total} matches in {file_count} files.{matches_str}\n\
+         Full files: {}.]",
         top_files.join(", ")
     )
 }
@@ -497,25 +562,29 @@ mod tests {
             lines.push(format!("{:>4} | // line {i}", i));
         }
         let content = lines.join("\n");
-        let result = compress_read(&content);
+        let args = serde_json::json!({"file_path": "src/main.rs", "offset": 1, "limit": 100});
+        let result = compress_read(&content, Some(&args));
         assert!(result.starts_with("[Previously read:"));
         assert!(result.contains("100 lines"));
         assert!(result.contains("Rust"));
+        assert!(result.contains("src/main.rs"));
         assert!(result.ends_with("]"));
     }
 
     #[test]
     fn test_compress_grep() {
         let content = "src/app.rs:10: let x = 1;\nsrc/app.rs:20: let y = 2;\nsrc/stream.rs:5: let z = 3;";
-        let result = compress_grep(content);
-        assert!(result.starts_with("[Previously searched:"));
+        let args = serde_json::json!({"pattern": "let.*="});
+        let result = compress_grep(content, Some(&args));
+        assert!(result.starts_with("[Previously searched"));
         assert!(result.contains("3 matches"));
         assert!(result.contains("2 files"));
+        assert!(result.contains("let.*="));
     }
 
     #[test]
     fn test_compress_grep_no_matches() {
-        let result = compress_grep("No matches found for pattern: foo");
+        let result = compress_grep("No matches found for pattern: foo", None);
         assert!(result.contains("no matches"));
     }
 
@@ -657,5 +726,90 @@ mod tests {
             .collect();
 
         assert_eq!(tool_ids, vec!["call_a", "call_b"]);
+    }
+
+    #[test]
+    fn test_compress_read_includes_file_path_and_range() {
+        let mut lines = Vec::new();
+        lines.push(format!("{:>4} | use std::collections::HashMap;", 10));
+        lines.push(format!("{:>4} | use std::io;", 11));
+        for i in 12..=50 {
+            lines.push(format!("{:>4} | fn func_{i}() {{}}", i));
+        }
+        // Pad to > 200 chars
+        for i in 51..=100 {
+            lines.push(format!("{:>4} | // padding line {i}", i));
+        }
+        let content = lines.join("\n");
+        let args = serde_json::json!({"file_path": "src/stream.rs", "offset": 10, "limit": 91});
+        let result = compress_read(&content, Some(&args));
+        assert!(result.contains("src/stream.rs"), "should include file path");
+        assert!(result.contains("lines 10-101"), "should include line range");
+        assert!(result.contains("Key items:"), "should include key items");
+        assert!(result.contains("use std::collections::HashMap"), "should include imports");
+    }
+
+    #[test]
+    fn test_compress_read_without_args() {
+        let mut lines = Vec::new();
+        for i in 1..=100 {
+            lines.push(format!("{:>4} | // line {i}", i));
+        }
+        let content = lines.join("\n");
+        let result = compress_read(&content, None);
+        assert!(result.contains("(unknown)"), "should show unknown file");
+        assert!(result.contains("100 lines"), "should include line count");
+    }
+
+    #[test]
+    fn test_compress_grep_includes_pattern_and_matches() {
+        let content = "src/app.rs:10: let x = 1;\nsrc/app.rs:20: let y = 2;\nsrc/stream.rs:5: let z = 3;";
+        let args = serde_json::json!({"pattern": "let\\s+"});
+        let result = compress_grep(content, Some(&args));
+        assert!(result.contains("let\\s+"), "should include search pattern");
+        assert!(result.contains("Top matches:"), "should include top matches");
+        assert!(result.contains("src/app.rs:10"), "should include match lines");
+    }
+
+    #[test]
+    fn test_compress_grep_without_args() {
+        let content = "src/app.rs:10: let x = 1;";
+        let result = compress_grep(content, None);
+        assert!(result.contains("\"?\""), "should show unknown pattern");
+        assert!(result.contains("1 matches"), "should show match count");
+    }
+
+    #[test]
+    fn test_build_tool_maps() {
+        let tool_calls = vec![
+            ChatCompletionMessageToolCalls::Function(
+                async_openai::types::chat::ChatCompletionMessageToolCall {
+                    id: "call_1".to_string(),
+                    function: async_openai::types::chat::FunctionCall {
+                        name: "read".to_string(),
+                        arguments: r#"{"file_path":"src/main.rs"}"#.to_string(),
+                    },
+                },
+            ),
+        ];
+
+        #[allow(deprecated)]
+        let messages = vec![
+            ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
+                content: None,
+                name: None,
+                audio: None,
+                tool_calls: Some(tool_calls),
+                function_call: None,
+                refusal: None,
+            }),
+        ];
+
+        let (name_map, args_map) = build_tool_maps(&messages);
+        assert_eq!(name_map.len(), 1);
+        assert_eq!(*name_map.get("call_1").unwrap(), ToolName::Read);
+        assert_eq!(args_map.len(), 1);
+        let args = args_map.get("call_1").unwrap();
+        assert_eq!(args["file_path"], "src/main.rs");
     }
 }
