@@ -692,10 +692,52 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 total = total_usage.total_tokens,
                 "final usage totals"
             );
-            // Warn user if the model stopped due to context exhaustion
+            // If the model stopped due to context exhaustion, try to recover:
+            // aggressively compress all tool results and retry without tools.
             if matches!(finish_reason, Some(FinishReason::Length)) {
+                if !tools_stripped {
+                    tracing::warn!("finish_reason=Length with no tool calls — compressing and retrying without tools");
+                    tools_stripped = true;
+                    tools = None;
+                    // Aggressive compression to free space
+                    crate::context::compressor::compress_old_tool_results(&mut messages, 0);
+                    // Add any partial assistant text before the retry
+                    if !assistant_content.is_empty() {
+                        #[allow(deprecated)]
+                        messages.push(ChatCompletionRequestMessage::Assistant(
+                            ChatCompletionRequestAssistantMessage {
+                                content: Some(ChatCompletionRequestAssistantMessageContent::Text(
+                                    assistant_content.clone(),
+                                )),
+                                name: None,
+                                audio: None,
+                                tool_calls: None,
+                                function_call: None,
+                                refusal: None,
+                            },
+                        ));
+                    }
+                    messages.push(ChatCompletionRequestMessage::User(
+                        ChatCompletionRequestUserMessage {
+                            content: ChatCompletionRequestUserMessageContent::Text(
+                                "[SYSTEM: Context window nearly full. Your previous response was \
+                                 cut off. Provide a concise but complete response NOW. Do not \
+                                 call any tools.]".to_string(),
+                            ),
+                            name: None,
+                        },
+                    ));
+                    let _ = event_tx.send(AppEvent::StreamNotice {
+                        text: "⚙ Context full — compressing and retrying".to_string(),
+                    });
+                    continue; // Retry with compressed context and no tools
+                }
+                // Already retried — truly out of space
                 let _ = event_tx.send(AppEvent::LlmError {
                     error: "Context window full — response was cut off. Run /compact to free space, or /new to start fresh.".to_string(),
+                });
+                let _ = event_tx.send(AppEvent::LlmFinish {
+                    usage: Some(total_usage),
                 });
                 return Ok(());
             }
@@ -758,9 +800,51 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         }
 
         if sorted_indices.is_empty() {
-            tracing::info!("all tool calls were truncated — finishing stream");
+            if !tools_stripped {
+                tracing::warn!("all tool calls truncated — compressing and retrying without tools");
+                tools_stripped = true;
+                tools = None;
+                // Aggressive compression to free space
+                crate::context::compressor::compress_old_tool_results(&mut messages, 0);
+                // Preserve any partial assistant text from this turn
+                if !assistant_content.is_empty() {
+                    #[allow(deprecated)]
+                    messages.push(ChatCompletionRequestMessage::Assistant(
+                        ChatCompletionRequestAssistantMessage {
+                            content: Some(ChatCompletionRequestAssistantMessageContent::Text(
+                                assistant_content.clone(),
+                            )),
+                            name: None,
+                            audio: None,
+                            tool_calls: None,
+                            function_call: None,
+                            refusal: None,
+                        },
+                    ));
+                }
+                messages.push(ChatCompletionRequestMessage::User(
+                    ChatCompletionRequestUserMessage {
+                        content: ChatCompletionRequestUserMessageContent::Text(
+                            "[SYSTEM: Context window nearly full — your tool calls were \
+                             truncated. Provide a concise but complete response NOW using \
+                             the information you already have. Do not call any tools.]"
+                                .to_string(),
+                        ),
+                        name: None,
+                    },
+                ));
+                let _ = event_tx.send(AppEvent::StreamNotice {
+                    text: "⚙ Tool calls truncated — compressing and retrying".to_string(),
+                });
+                continue; // Retry with compressed context and no tools
+            }
+            // Already retried — truly out of space
+            tracing::error!("all tool calls truncated after retry — giving up");
             let _ = event_tx.send(AppEvent::LlmError {
                 error: "Context window full — tool calls were truncated. Run /compact to free space, or /new to start fresh.".to_string(),
+            });
+            let _ = event_tx.send(AppEvent::LlmFinish {
+                usage: Some(total_usage),
             });
             return Ok(());
         }
@@ -2267,6 +2351,32 @@ mod tests {
         }
     }
 
+    /// Build a text content chunk (assistant text delta).
+    #[allow(deprecated)]
+    fn text_chunk(content: &str) -> CreateChatCompletionStreamResponse {
+        CreateChatCompletionStreamResponse {
+            id: "test".to_string(),
+            choices: vec![ChatChoiceStream {
+                index: 0,
+                delta: ChatCompletionStreamResponseDelta {
+                    content: Some(content.to_string()),
+                    function_call: None,
+                    tool_calls: None,
+                    role: Some(OaiRole::Assistant),
+                    refusal: None,
+                },
+                finish_reason: None,
+                logprobs: None,
+            }],
+            created: 0,
+            model: "test".to_string(),
+            service_tier: None,
+            system_fingerprint: None,
+            object: "chat.completion.chunk".to_string(),
+            usage: None,
+        }
+    }
+
     /// Build a finish chunk with usage stats.
     #[allow(deprecated)]
     fn finish_chunk(
@@ -2450,11 +2560,19 @@ mod tests {
 
     #[tokio::test]
     async fn stream_truncated_tool_call_filtered() {
-        // LLM returns a tool call with truncated JSON (finish_reason: Length)
+        // LLM returns a tool call with truncated JSON (finish_reason: Length).
+        // After our fix, Steve compresses and retries without tools. The retry
+        // produces a text response instead of an error.
         let mock = Arc::new(MockChatStream::new(vec![
+            // First call: tool call with truncated args
             vec![
                 Ok(tool_call_chunk(0, Some("call_1"), Some("read"), Some(r#"{"path":"src/main"#))), // truncated!
                 Ok(finish_chunk(FinishReason::Length, 50, 20)),
+            ],
+            // Retry: tool-free response after compression
+            vec![
+                Ok(text_chunk("Here is my response based on what I found.")),
+                Ok(finish_chunk(FinishReason::Stop, 30, 10)),
             ],
         ]));
         let (tx, rx) = mpsc::unbounded_channel();
@@ -2473,12 +2591,13 @@ mod tests {
         run_stream(req).await.expect("stream should handle truncated tool calls");
         let events = collect_events(rx).await;
 
-        // When all tool calls are truncated (empty sorted_indices), the stream sends
-        // LlmError and returns — no LlmFinish is sent.
-        let errors: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmError { .. })).collect();
+        // The retry should produce a text response and LlmFinish, not an error
+        let notices: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::StreamNotice { .. })).collect();
+        assert!(!notices.is_empty(), "should get a StreamNotice about the retry");
+        let deltas: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmDelta { .. })).collect();
+        assert!(!deltas.is_empty(), "retry should produce text deltas");
         let finishes: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmFinish { .. })).collect();
-        assert!(!errors.is_empty(), "truncated tool call should produce LlmError");
-        assert!(finishes.is_empty(), "should not get LlmFinish when all tool calls are truncated");
+        assert_eq!(finishes.len(), 1, "should get LlmFinish from the retry");
     }
 
     #[tokio::test]
