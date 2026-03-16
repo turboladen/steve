@@ -692,15 +692,29 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 total = total_usage.total_tokens,
                 "final usage totals"
             );
-            // If the model stopped due to context exhaustion, try to recover:
-            // aggressively compress all tool results and retry without tools.
+            // If the model stopped due to length, recover based on cause:
+            // context pressure → compress + strip tools + retry
+            // output truncation → strip tools only + retry
             if matches!(finish_reason, Some(FinishReason::Length)) {
+                let cause = classify_length_cause(total_usage.prompt_tokens, context_window);
+                let msgs = length_recovery_no_tools(&cause);
+
                 if !tools_stripped {
-                    tracing::warn!("finish_reason=Length with no tool calls — compressing and retrying without tools");
                     tools_stripped = true;
                     tools = None;
-                    // Aggressive compression to free space
-                    crate::context::compressor::compress_old_tool_results(&mut messages, 0);
+
+                    if matches!(cause, LengthCause::ContextPressure) {
+                        tracing::warn!("finish_reason=Length with no tool calls (context pressured) — compressing and retrying without tools");
+                        crate::context::compressor::compress_old_tool_results(&mut messages, 0);
+                    } else {
+                        tracing::info!(
+                            prompt = total_usage.prompt_tokens,
+                            completion = total_usage.completion_tokens,
+                            context_window = ?context_window,
+                            "output truncation recovery (context not pressured)"
+                        );
+                    }
+
                     // Add any partial assistant text before the retry
                     if !assistant_content.is_empty() {
                         #[allow(deprecated)]
@@ -717,24 +731,23 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                             },
                         ));
                     }
+
                     messages.push(ChatCompletionRequestMessage::User(
                         ChatCompletionRequestUserMessage {
                             content: ChatCompletionRequestUserMessageContent::Text(
-                                "[SYSTEM: Context window nearly full. Your previous response was \
-                                 cut off. Provide a concise but complete response NOW. Do not \
-                                 call any tools.]".to_string(),
+                                msgs.system_msg.to_string(),
                             ),
                             name: None,
                         },
                     ));
                     let _ = event_tx.send(AppEvent::StreamNotice {
-                        text: "⚙ Context full — compressing and retrying".to_string(),
+                        text: msgs.notice.to_string(),
                     });
-                    continue; // Retry with compressed context and no tools
+                    continue;
                 }
-                // Already retried — truly out of space
+                // Already retried
                 let _ = event_tx.send(AppEvent::LlmError {
-                    error: "Context window full — response was cut off. Run /compact to free space, or /new to start fresh.".to_string(),
+                    error: msgs.error_msg.to_string(),
                 });
                 let _ = event_tx.send(AppEvent::LlmFinish {
                     usage: Some(total_usage),
@@ -800,12 +813,25 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         }
 
         if sorted_indices.is_empty() {
+            let cause = classify_length_cause(total_usage.prompt_tokens, context_window);
+            let msgs = length_recovery_truncated_tools(&cause);
+
             if !tools_stripped {
-                tracing::warn!("all tool calls truncated — compressing and retrying without tools");
                 tools_stripped = true;
                 tools = None;
-                // Aggressive compression to free space
-                crate::context::compressor::compress_old_tool_results(&mut messages, 0);
+
+                if matches!(cause, LengthCause::ContextPressure) {
+                    tracing::warn!("all tool calls truncated (context pressured) — compressing and retrying without tools");
+                    crate::context::compressor::compress_old_tool_results(&mut messages, 0);
+                } else {
+                    tracing::info!(
+                        prompt = total_usage.prompt_tokens,
+                        completion = total_usage.completion_tokens,
+                        context_window = ?context_window,
+                        "output truncation recovery (context not pressured)"
+                    );
+                }
+
                 // Preserve any partial assistant text from this turn
                 if !assistant_content.is_empty() {
                     #[allow(deprecated)]
@@ -822,26 +848,24 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                         },
                     ));
                 }
+
                 messages.push(ChatCompletionRequestMessage::User(
                     ChatCompletionRequestUserMessage {
                         content: ChatCompletionRequestUserMessageContent::Text(
-                            "[SYSTEM: Context window nearly full — your tool calls were \
-                             truncated. Provide a concise but complete response NOW using \
-                             the information you already have. Do not call any tools.]"
-                                .to_string(),
+                            msgs.system_msg.to_string(),
                         ),
                         name: None,
                     },
                 ));
                 let _ = event_tx.send(AppEvent::StreamNotice {
-                    text: "⚙ Tool calls truncated — compressing and retrying".to_string(),
+                    text: msgs.notice.to_string(),
                 });
-                continue; // Retry with compressed context and no tools
+                continue;
             }
-            // Already retried — truly out of space
+            // Already retried
             tracing::error!("all tool calls truncated after retry — giving up");
             let _ = event_tx.send(AppEvent::LlmError {
-                error: "Context window full — tool calls were truncated. Run /compact to free space, or /new to start fresh.".to_string(),
+                error: msgs.error_msg.to_string(),
             });
             let _ = event_tx.send(AppEvent::LlmFinish {
                 usage: Some(total_usage),
@@ -1803,6 +1827,84 @@ async fn run_sub_agent(
         Ok(format!("Sub-agent ({agent_type}) completed with {tool_count} tool calls but produced no text response."))
     } else {
         Ok(final_text)
+    }
+}
+
+/// Context pressure threshold: if prompt_tokens > this % of context_window,
+/// we consider the context full (as opposed to output token limit truncation).
+const CONTEXT_PRESSURE_PCT: u64 = 85;
+
+/// Whether `finish_reason=Length` was caused by context pressure or output truncation.
+enum LengthCause {
+    /// Context window nearly full (prompt_tokens > CONTEXT_PRESSURE_PCT% of window).
+    ContextPressure,
+    /// Model hit output token limit, context is fine.
+    OutputTruncation,
+}
+
+/// Messages for `finish_reason=Length` recovery, parameterized by cause and scenario.
+struct LengthRecoveryMessages {
+    system_msg: &'static str,
+    notice: &'static str,
+    error_msg: &'static str,
+}
+
+/// Determine whether `finish_reason=Length` is due to context pressure or output truncation.
+fn classify_length_cause(
+    prompt_tokens: u32,
+    context_window: Option<u64>,
+) -> LengthCause {
+    let pressured = context_window
+        .map(|cw| cw > 0 && (prompt_tokens as u64) > cw * CONTEXT_PRESSURE_PCT / 100)
+        .unwrap_or(true); // Assume pressured if we don't know the window
+    if pressured {
+        LengthCause::ContextPressure
+    } else {
+        LengthCause::OutputTruncation
+    }
+}
+
+/// Get recovery messages for the "no tool calls" path (response was cut off).
+fn length_recovery_no_tools(cause: &LengthCause) -> LengthRecoveryMessages {
+    match cause {
+        LengthCause::ContextPressure => LengthRecoveryMessages {
+            system_msg: "[SYSTEM: Context window nearly full. Your previous response was \
+                         cut off. Provide a concise but complete response NOW. Do not \
+                         call any tools.]",
+            notice: "⚙ Context nearly full — compressing and retrying",
+            error_msg: "Context window nearly full — response was cut off. \
+                        Run /compact to free space, or /new to start fresh.",
+        },
+        LengthCause::OutputTruncation => LengthRecoveryMessages {
+            system_msg: "[SYSTEM: Your response was cut off (output token limit reached). \
+                         Provide a concise but complete response NOW. Do not call any tools.]",
+            notice: "⚙ Output truncated — retrying without tools",
+            error_msg: "Output was truncated (model may have hit an output token limit). \
+                        Try a shorter query or /compact.",
+        },
+    }
+}
+
+/// Get recovery messages for the "all tool calls truncated" path.
+fn length_recovery_truncated_tools(cause: &LengthCause) -> LengthRecoveryMessages {
+    match cause {
+        LengthCause::ContextPressure => LengthRecoveryMessages {
+            system_msg: "[SYSTEM: Context window nearly full — your tool calls were \
+                         truncated. Provide a concise but complete response NOW using \
+                         the information you already have. Do not call any tools.]",
+            notice: "⚙ Context nearly full — compressing tool calls and retrying",
+            error_msg: "Context window nearly full — tool calls were truncated. \
+                        Run /compact to free space, or /new to start fresh.",
+        },
+        LengthCause::OutputTruncation => LengthRecoveryMessages {
+            system_msg: "[SYSTEM: Your tool calls were truncated (output token limit reached). \
+                         Provide a concise but complete response NOW using the information you \
+                         already have. Do not call any tools.]",
+            notice: "⚙ Output truncated — retrying without tools",
+            error_msg: "Output was truncated — tool calls were cut off \
+                        (model may have hit an output token limit). \
+                        Try a shorter query or /compact.",
+        },
     }
 }
 

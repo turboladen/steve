@@ -170,10 +170,6 @@ pub struct SidebarState {
     pub git_dirty: Option<bool>,
     /// Repository name (last path component of repo root).
     pub git_repo_name: Option<String>,
-    /// Context window size for the current model.
-    pub context_window: u64,
-    /// Last-reported prompt tokens (per-call context pressure).
-    pub last_prompt_tokens: u64,
     /// Diagnostics summary for sidebar indicator.
     pub diagnostics_summary: DiagnosticSummary,
 }
@@ -194,8 +190,6 @@ impl Default for SidebarState {
             git_branch: None,
             git_dirty: None,
             git_repo_name: None,
-            context_window: 0,
-            last_prompt_tokens: 0,
             diagnostics_summary: DiagnosticSummary::default(),
         }
     }
@@ -293,25 +287,19 @@ pub fn render_sidebar(
         format!(" {model}"),
         Style::default().fg(theme.fg),
     )));
-    // Context pressure: Ctx: X/Y (Z%) — replaces verbose in/out/total lines
-    if state.context_window > 0 {
-        let pct = (state.last_prompt_tokens * 100).checked_div(state.context_window).unwrap_or(0);
-        lines.push(Line::from(Span::styled(
-            format!(
-                " Ctx: {}/{} ({}%)",
-                format_tokens(state.last_prompt_tokens),
-                format_tokens(state.context_window),
-                pct,
-            ),
-            Style::default().fg(theme.dim),
-        )));
-    } else {
-        // Fallback when context_window is unknown
-        lines.push(Line::from(Span::styled(
-            format!(" Tokens: {}", format_tokens(state.total_tokens)),
-            Style::default().fg(theme.dim),
-        )));
-    }
+    // Cumulative token breakdown: In/Out/Tot
+    lines.push(Line::from(Span::styled(
+        format!(" In:  {}", format_tokens(state.prompt_tokens)),
+        Style::default().fg(theme.dim),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(" Out: {}", format_tokens(state.completion_tokens)),
+        Style::default().fg(theme.dim),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(" Tot: {}", format_tokens(state.total_tokens)),
+        Style::default().fg(theme.dim),
+    )));
     match state.session_cost {
         Some(cost) => {
             lines.push(Line::from(Span::styled(
@@ -773,15 +761,23 @@ mod tests {
     }
 
     #[test]
-    fn buffer_sidebar_token_display_ctx_format() {
+    fn buffer_sidebar_token_display_cumulative() {
         let state = SidebarState {
-            last_prompt_tokens: 23400,
-            context_window: 128000,
+            prompt_tokens: 23400,
+            completion_tokens: 6600,
             total_tokens: 30000,
             ..Default::default()
         };
         let text = render_sidebar_to_string(40, 20, &state);
-        assert!(text.contains("Ctx: 23.4k/128.0k (18%)"), "should show Ctx: format, got:\n{text}");
+        // Verify each value appears on the correct labeled line
+        let lines: Vec<&str> = text.lines().collect();
+        let in_line = lines.iter().find(|l| l.contains("In:")).expect("should have In: line");
+        assert!(in_line.contains("23.4k"), "In: line should show prompt tokens, got: {in_line}");
+        let out_line = lines.iter().find(|l| l.contains("Out:")).expect("should have Out: line");
+        assert!(out_line.contains("6.6k"), "Out: line should show completion tokens, got: {out_line}");
+        let tot_line = lines.iter().find(|l| l.contains("Tot:")).expect("should have Tot: line");
+        assert!(tot_line.contains("30.0k"), "Tot: line should show total tokens, got: {tot_line}");
+        assert!(!text.contains("Ctx:"), "should not show old Ctx: format");
     }
 
     #[test]
@@ -1059,37 +1055,11 @@ mod tests {
     }
 
     #[test]
-    fn buffer_sidebar_context_display() {
-        let state = SidebarState {
-            last_prompt_tokens: 50000,
-            context_window: 128000,
-            ..Default::default()
-        };
-        let text = render_sidebar_to_string(40, 20, &state);
-        assert!(text.contains("Ctx:"), "should show Ctx: prefix");
-        assert!(text.contains("39%"), "should show percentage");
-    }
-
-    #[test]
-    fn buffer_sidebar_context_zero_window_fallback() {
-        let state = SidebarState {
-            total_tokens: 5000,
-            context_window: 0,
-            ..Default::default()
-        };
-        let text = render_sidebar_to_string(40, 20, &state);
-        assert!(text.contains("Tokens:"), "should fall back to Tokens: format");
-        assert!(text.contains("5.0k"), "should show total tokens");
-    }
-
-    #[test]
     fn default_sidebar_state_has_no_git_info() {
         let state = SidebarState::default();
         assert!(state.git_branch.is_none());
         assert!(state.git_dirty.is_none());
         assert!(state.git_repo_name.is_none());
-        assert_eq!(state.context_window, 0);
-        assert_eq!(state.last_prompt_tokens, 0);
     }
 
     // -- LSP section tests --

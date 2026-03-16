@@ -138,9 +138,12 @@ from the API request (`tools = None`) so the LLM structurally cannot make tool c
 limit, one final tool-free API call is made before termination. Both `tools_stripped` and
 `final_chance_taken` flags reset on user interaction (permission grant or interjection).
 
-**Context exhaustion recovery**: When `finish_reason=Length` truncates tool calls or cuts off the
-response, Steve compresses all tool results, strips tools, and retries once to get a text response.
-Partial assistant text from the truncated turn is preserved. Falls back to error only after retry.
+**`finish_reason=Length` recovery**: Two distinct causes — context pressure vs output truncation.
+`classify_length_cause()` checks `prompt_tokens > CONTEXT_PRESSURE_PCT (85%) of context_window`.
+Context-pressured: compress all tool results + strip tools + retry. Output-truncated: strip tools
+only (no compression — context is fine) + retry. Message strings centralized in
+`length_recovery_no_tools()` and `length_recovery_truncated_tools()`. Both paths preserve partial
+assistant text. Falls back to error after retry.
 
 **Deferred compression**: Normal compression only triggers when estimated context > 40% of window.
 Keeps last 2 iterations of tool results uncompressed (`prev_iteration_tool_count + current`).

@@ -1146,9 +1146,6 @@ impl App {
                 self.sidebar_state.completion_tokens += usage.completion_tokens as u64;
                 self.sidebar_state.total_tokens +=
                     (usage.prompt_tokens + usage.completion_tokens) as u64;
-                // Sync context pressure to sidebar for live Ctx: display
-                self.sidebar_state.context_window = self.status_line_state.context_window;
-                self.sidebar_state.last_prompt_tokens = self.status_line_state.last_prompt_tokens;
                 self.check_context_warning();
             }
             AppEvent::LlmRetry {
@@ -2458,9 +2455,6 @@ impl App {
             self.sidebar_state.completion_tokens = 0;
             self.sidebar_state.total_tokens = 0;
         }
-        // Sync context pressure fields so sidebar can show Ctx: X/Y (Z%)
-        self.sidebar_state.context_window = self.status_line_state.context_window;
-        self.sidebar_state.last_prompt_tokens = self.status_line_state.last_prompt_tokens;
     }
 
     /// Run all diagnostic checks against current app state.
