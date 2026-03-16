@@ -171,7 +171,13 @@ write overrides. Both `build_mode_rules()` and `plan_mode_rules()` explicitly li
 variant.
 
 **Path rules**: `permission_rules` array in `.steve.jsonc` with `{"tool", "pattern", "action"}`.
-Priority: path rules > allow_tools > profile defaults.
+Priority: path rules > allow_tools > profile defaults. Special sentinel `"!project"` matches paths
+outside the project root (e.g., `{"tool": "*", "pattern": "!project", "action": "deny"}`).
+
+**Path normalization**: `normalize_tool_path(raw, project_root)` in `permission/mod.rs` resolves
+raw LLM paths to project-relative form before glob matching. Returns `(normalized_path, inside_project)`.
+Called at the `check()` call site in `stream.rs`. `check()` takes an `inside_project: Option<bool>`
+third parameter — `None` for tools without paths.
 
 **Persistent grants**: `a` (AllowAlways) persists to `.steve.jsonc` via
 `config::persist_allow_tool()` (atomic tmp+rename, background thread).

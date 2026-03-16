@@ -776,10 +776,22 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 }
             };
 
-            let path_hint = extract_tool_path(tool_name, &args);
+            let raw_path = extract_tool_path(tool_name, &args);
+            let (path_hint, inside_project) = match raw_path {
+                Some(raw) => {
+                    if let Some(ref ctx) = tool_context {
+                        let (normalized, inside) =
+                            crate::permission::normalize_tool_path(&raw, &ctx.project_root);
+                        (Some(normalized), Some(inside))
+                    } else {
+                        (Some(raw), None)
+                    }
+                }
+                None => (None, None),
+            };
             let action = if let Some(ref engine) = permission_engine {
                 let engine = engine.lock().await;
-                engine.check(tool_name, path_hint.as_deref())
+                engine.check(tool_name, path_hint.as_deref(), inside_project)
             } else {
                 PermissionAction::Allow
             };

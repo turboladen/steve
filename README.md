@@ -275,9 +275,16 @@ Note: Plan mode rules are the same regardless of profile — the profile only af
   "permission_rules": [
     { "tool": "edit", "pattern": "src/**", "action": "allow" },
     { "tool": "edit", "pattern": "*.lock", "action": "deny" },
+    { "tool": "*", "pattern": "!project", "action": "deny" },
   ],
 }
 ```
+
+The special pattern `!project` matches any path that resolves outside the project root — useful for
+preventing the LLM from reading or writing files outside your project. Paths are normalized against
+the project root before matching, so both relative (`src/main.rs`) and absolute
+(`/Users/.../src/main.rs`) paths work correctly with glob patterns. Note: for `move`/`copy` tools,
+permission checks apply to the destination path only.
 
 Rules are evaluated first-match-wins: path rules take priority over `allow_tools`, which takes
 priority over profile defaults.

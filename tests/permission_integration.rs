@@ -35,35 +35,35 @@ fn full_permission_stack_priority() {
 
     // Path rule: edit in src/ is allowed
     assert_eq!(
-        engine.check(ToolName::Edit, Some("src/main.rs")),
+        engine.check(ToolName::Edit, Some("src/main.rs"), None),
         PermissionAction::Allow,
         "path rule should allow edit in src/"
     );
 
     // No path match: edit outside src/ falls through to profile default
     assert_eq!(
-        engine.check(ToolName::Edit, Some("Cargo.toml")),
+        engine.check(ToolName::Edit, Some("Cargo.toml"), None),
         PermissionAction::Ask,
         "edit outside src/ should require permission"
     );
 
     // Override: bash is allowed everywhere
     assert_eq!(
-        engine.check(ToolName::Bash, None),
+        engine.check(ToolName::Bash, None, None),
         PermissionAction::Allow,
         "bash override should auto-allow"
     );
 
     // Profile default: write tool with no override
     assert_eq!(
-        engine.check(ToolName::Write, None),
+        engine.check(ToolName::Write, None, None),
         PermissionAction::Ask,
         "write should require permission from profile default"
     );
 
     // Profile default: read tools auto-allowed
     assert_eq!(
-        engine.check(ToolName::Read, Some("anything")),
+        engine.check(ToolName::Read, Some("anything"), None),
         PermissionAction::Allow,
         "read should be auto-allowed from profile"
     );
@@ -86,14 +86,14 @@ fn session_grant_overrides_all_rules() {
 
     // Before grant: /etc/ edits are denied
     assert_eq!(
-        engine.check(ToolName::Edit, Some("/etc/passwd")),
+        engine.check(ToolName::Edit, Some("/etc/passwd"), None),
         PermissionAction::Deny,
     );
 
     // After session grant: overrides everything
     engine.grant_session(ToolName::Edit);
     assert_eq!(
-        engine.check(ToolName::Edit, Some("/etc/passwd")),
+        engine.check(ToolName::Edit, Some("/etc/passwd"), None),
         PermissionAction::Allow,
     );
 
@@ -104,7 +104,7 @@ fn session_grant_overrides_all_rules() {
         &path_rules,
     ));
     assert_eq!(
-        engine.check(ToolName::Edit, Some("/etc/passwd")),
+        engine.check(ToolName::Edit, Some("/etc/passwd"), None),
         PermissionAction::Allow,
         "session grant should persist across mode switch"
     );
@@ -136,21 +136,21 @@ fn plan_mode_path_rule_filtering() {
 
     // Allow rule was stripped — edit in src/ is denied (plan mode default)
     assert_eq!(
-        engine.check(ToolName::Edit, Some("src/main.rs")),
+        engine.check(ToolName::Edit, Some("src/main.rs"), None),
         PermissionAction::Deny,
         "write-allow path rules stripped in Plan mode"
     );
 
     // Deny rule kept — /etc/ edits are still explicitly denied
     assert_eq!(
-        engine.check(ToolName::Edit, Some("/etc/passwd")),
+        engine.check(ToolName::Edit, Some("/etc/passwd"), None),
         PermissionAction::Deny,
         "deny path rules should persist in Plan mode"
     );
 
     // Read tools still allowed in Plan mode
     assert_eq!(
-        engine.check(ToolName::Read, Some("src/main.rs")),
+        engine.check(ToolName::Read, Some("src/main.rs"), None),
         PermissionAction::Allow,
     );
 }
@@ -165,7 +165,7 @@ fn all_tool_names_have_defined_permission_behavior() {
     ));
 
     for tool in ToolName::iter() {
-        let action = engine.check(tool, None);
+        let action = engine.check(tool, None, None);
         // Every tool should have a defined action (not panic)
         match action {
             PermissionAction::Allow | PermissionAction::Ask | PermissionAction::Deny => {}
@@ -190,7 +190,7 @@ fn all_profiles_exhaustive_build_mode() {
         let engine = PermissionEngine::new(profile_build_rules(profile, &[], &[]));
 
         for tool in ToolName::iter() {
-            let action = engine.check(tool, None);
+            let action = engine.check(tool, None, None);
 
             match profile {
                 PermissionProfile::Trust => {
@@ -262,7 +262,7 @@ fn plan_mode_denies_writes_regardless_of_profile() {
         let engine = PermissionEngine::new(profile_plan_rules(profile, &[], &[]));
 
         for tool in ToolName::iter() {
-            let action = engine.check(tool, None);
+            let action = engine.check(tool, None, None);
 
             if tool.is_write_tool() || tool == ToolName::Agent {
                 assert_eq!(
@@ -305,26 +305,26 @@ fn allow_overrides_stripped_for_write_tools_in_plan_mode() {
 
     // Write tool overrides are stripped — still denied
     assert_eq!(
-        engine.check(ToolName::Edit, None),
+        engine.check(ToolName::Edit, None, None),
         PermissionAction::Deny,
         "Edit override should be stripped in Plan mode"
     );
     assert_eq!(
-        engine.check(ToolName::Write, None),
+        engine.check(ToolName::Write, None, None),
         PermissionAction::Deny,
         "Write override should be stripped in Plan mode"
     );
 
     // Agent override is also stripped — Agent is denied in Plan mode
     assert_eq!(
-        engine.check(ToolName::Agent, None),
+        engine.check(ToolName::Agent, None, None),
         PermissionAction::Deny,
         "Agent override should be stripped in Plan mode"
     );
 
     // Non-write, non-Agent override is kept — Bash goes from Ask to Allow
     assert_eq!(
-        engine.check(ToolName::Bash, None),
+        engine.check(ToolName::Bash, None, None),
         PermissionAction::Allow,
         "Bash override should be kept in Plan mode"
     );
@@ -356,15 +356,64 @@ fn persisted_config_builds_working_engine() {
 
     // Edit should be auto-allowed (from persisted grant)
     assert_eq!(
-        engine.check(ToolName::Edit, None),
+        engine.check(ToolName::Edit, None, None),
         PermissionAction::Allow,
         "persisted edit grant should auto-allow"
     );
 
     // Write has no grant — still requires permission
     assert_eq!(
-        engine.check(ToolName::Write, None),
+        engine.check(ToolName::Write, None, None),
         PermissionAction::Ask,
         "write with no grant should still ask"
+    );
+}
+
+/// Verify the `!project` sentinel pattern with normalized paths.
+///
+/// Full stack: path rules with src/** allow + !project deny, verify:
+/// - Normalized inside path matches src/** → Allow
+/// - Normalized outside path matches !project → Deny
+/// - Inside path not matching src/** falls through to profile default → Ask
+#[test]
+fn project_boundary_deny_rule() {
+    let path_rules = vec![
+        PermissionRule {
+            tool: ToolMatcher::Specific(ToolName::Edit),
+            pattern: "src/**".into(),
+            action: PermissionActionSerde::Allow,
+        },
+        PermissionRule {
+            tool: ToolMatcher::All,
+            pattern: "!project".into(),
+            action: PermissionActionSerde::Deny,
+        },
+    ];
+
+    let engine = PermissionEngine::new(profile_build_rules(
+        PermissionProfile::Standard,
+        &[],
+        &path_rules,
+    ));
+
+    // Edit in src/ → path rule match → Allow
+    assert_eq!(
+        engine.check(ToolName::Edit, Some("src/main.rs"), Some(true)),
+        PermissionAction::Allow,
+        "edit in src/ should be allowed by path rule"
+    );
+
+    // Edit outside project → !project match → Deny
+    assert_eq!(
+        engine.check(ToolName::Edit, Some("/etc/passwd"), Some(false)),
+        PermissionAction::Deny,
+        "edit outside project should be denied by !project rule"
+    );
+
+    // Edit inside project but not in src/ → falls through to profile default (Ask)
+    assert_eq!(
+        engine.check(ToolName::Edit, Some("Cargo.toml"), Some(true)),
+        PermissionAction::Ask,
+        "edit inside project but outside src/ should fall through to Ask"
     );
 }

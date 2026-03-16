@@ -1,10 +1,56 @@
 pub mod types;
 
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use crate::tool::ToolName;
 use types::{PermissionAction, PermissionRule};
 use types::ToolMatcher;
+
+/// Normalize a raw tool path relative to the project root.
+///
+/// Returns `(normalized_path, inside_project)`:
+/// - Relative paths are joined with project_root, then stripped back to relative
+/// - Absolute paths inside the project are stripped to relative
+/// - Absolute paths outside return as-is with `inside_project = false`
+/// - `..` traversals that escape the project return as-is with `inside_project = false`
+pub fn normalize_tool_path(raw_path: &str, project_root: &Path) -> (String, bool) {
+    let resolved = if Path::new(raw_path).is_absolute() {
+        PathBuf::from(raw_path)
+    } else {
+        project_root.join(raw_path)
+    };
+
+    // Clean path (collapse . and ..) without filesystem access
+    let cleaned = clean_path(&resolved);
+
+    if let Ok(relative) = cleaned.strip_prefix(project_root) {
+        (relative.to_string_lossy().into_owned(), true)
+    } else {
+        (cleaned.to_string_lossy().into_owned(), false)
+    }
+}
+
+/// Collapse `.` and `..` segments in a path without hitting the filesystem.
+///
+/// Guards against `..` underflow: won't pop past `RootDir` or `Prefix` components,
+/// so absolute paths stay absolute even with excessive `..` traversals.
+fn clean_path(path: &Path) -> PathBuf {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                // Only pop Normal components — never pop RootDir or Prefix
+                if components.last().is_some_and(|c| matches!(c, std::path::Component::Normal(_))) {
+                    components.pop();
+                }
+            }
+            std::path::Component::CurDir => {}
+            c => components.push(c),
+        }
+    }
+    components.iter().collect()
+}
 
 /// Evaluates permission rules for tool calls.
 pub struct PermissionEngine {
@@ -27,7 +73,19 @@ impl PermissionEngine {
     /// `path_hint` is the primary file path from the tool arguments (if applicable).
     /// Path-specific rules use glob matching against this hint. Tools without paths
     /// (bash, question, task) pass `None` and skip path-specific rules.
-    pub fn check(&self, tool_name: ToolName, path_hint: Option<&str>) -> PermissionAction {
+    ///
+    /// `inside_project` indicates whether the path is inside the project root:
+    /// - `Some(true)` — path resolves inside the project
+    /// - `Some(false)` — path resolves outside the project
+    /// - `None` — tool has no path (bash, question, etc.)
+    ///
+    /// The special pattern `!project` matches when `inside_project == Some(false)`.
+    pub fn check(
+        &self,
+        tool_name: ToolName,
+        path_hint: Option<&str>,
+        inside_project: Option<bool>,
+    ) -> PermissionAction {
         // If there's a session-level grant, allow immediately
         if self.session_grants.contains(&tool_name) {
             return PermissionAction::Allow;
@@ -38,6 +96,15 @@ impl PermissionEngine {
             if rule.tool.matches(tool_name) {
                 // If the rule has a path pattern (not "*"), only match when we have a path
                 if rule.pattern != "*" {
+                    // Special sentinel: !project matches paths outside the project root
+                    if rule.pattern == "!project" {
+                        if inside_project == Some(false) {
+                            return rule.action.clone().into();
+                        }
+                        // Inside project or no path — skip this rule
+                        continue;
+                    }
+
                     if let Some(path) = path_hint {
                         match glob::Pattern::new(&rule.pattern) {
                             Ok(pat) if pat.matches(path) => {
@@ -314,55 +381,55 @@ mod tests {
     #[test]
     fn build_mode_allows_read_tools() {
         let engine = PermissionEngine::new(build_mode_rules());
-        assert_eq!(engine.check(ToolName::Read, None), PermissionAction::Allow);
-        assert_eq!(engine.check(ToolName::Grep, None), PermissionAction::Allow);
-        assert_eq!(engine.check(ToolName::Glob, None), PermissionAction::Allow);
-        assert_eq!(engine.check(ToolName::List, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Read, None, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Grep, None, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Glob, None, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::List, None, None), PermissionAction::Allow);
         // Utility tools also auto-allowed
-        assert_eq!(engine.check(ToolName::Memory, None), PermissionAction::Allow);
-        assert_eq!(engine.check(ToolName::Task, None), PermissionAction::Allow);
-        assert_eq!(engine.check(ToolName::Question, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Memory, None, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Task, None, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Question, None, None), PermissionAction::Allow);
     }
 
     #[test]
     fn build_mode_asks_for_write_tools() {
         let engine = PermissionEngine::new(build_mode_rules());
-        assert_eq!(engine.check(ToolName::Edit, None), PermissionAction::Ask);
-        assert_eq!(engine.check(ToolName::Write, None), PermissionAction::Ask);
-        assert_eq!(engine.check(ToolName::Patch, None), PermissionAction::Ask);
-        assert_eq!(engine.check(ToolName::Bash, None), PermissionAction::Ask);
+        assert_eq!(engine.check(ToolName::Edit, None, None), PermissionAction::Ask);
+        assert_eq!(engine.check(ToolName::Write, None, None), PermissionAction::Ask);
+        assert_eq!(engine.check(ToolName::Patch, None, None), PermissionAction::Ask);
+        assert_eq!(engine.check(ToolName::Bash, None, None), PermissionAction::Ask);
     }
 
     #[test]
     fn plan_mode_denies_write_tools() {
         let engine = PermissionEngine::new(plan_mode_rules());
-        assert_eq!(engine.check(ToolName::Edit, None), PermissionAction::Deny);
-        assert_eq!(engine.check(ToolName::Write, None), PermissionAction::Deny);
-        assert_eq!(engine.check(ToolName::Patch, None), PermissionAction::Deny);
+        assert_eq!(engine.check(ToolName::Edit, None, None), PermissionAction::Deny);
+        assert_eq!(engine.check(ToolName::Write, None, None), PermissionAction::Deny);
+        assert_eq!(engine.check(ToolName::Patch, None, None), PermissionAction::Deny);
     }
 
     #[test]
     fn plan_mode_allows_read_tools() {
         let engine = PermissionEngine::new(plan_mode_rules());
-        assert_eq!(engine.check(ToolName::Read, None), PermissionAction::Allow);
-        assert_eq!(engine.check(ToolName::Grep, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Read, None, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Grep, None, None), PermissionAction::Allow);
         // Utility tools also auto-allowed in plan mode
-        assert_eq!(engine.check(ToolName::Task, None), PermissionAction::Allow);
-        assert_eq!(engine.check(ToolName::Question, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Task, None, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Question, None, None), PermissionAction::Allow);
     }
 
     #[test]
     fn plan_mode_asks_for_bash() {
         let engine = PermissionEngine::new(plan_mode_rules());
-        assert_eq!(engine.check(ToolName::Bash, None), PermissionAction::Ask);
+        assert_eq!(engine.check(ToolName::Bash, None, None), PermissionAction::Ask);
     }
 
     #[test]
     fn session_grant_overrides_ask() {
         let mut engine = PermissionEngine::new(build_mode_rules());
-        assert_eq!(engine.check(ToolName::Bash, None), PermissionAction::Ask);
+        assert_eq!(engine.check(ToolName::Bash, None, None), PermissionAction::Ask);
         engine.grant_session(ToolName::Bash);
-        assert_eq!(engine.check(ToolName::Bash, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Bash, None, None), PermissionAction::Allow);
     }
 
     #[test]
@@ -371,13 +438,13 @@ mod tests {
         engine.grant_session(ToolName::Bash);
         engine.set_rules(plan_mode_rules());
         // Session grant should still override
-        assert_eq!(engine.check(ToolName::Bash, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Bash, None, None), PermissionAction::Allow);
     }
 
     #[test]
     fn webfetch_requires_permission() {
         let engine = PermissionEngine::new(build_mode_rules());
-        assert_eq!(engine.check(ToolName::Webfetch, None), PermissionAction::Ask);
+        assert_eq!(engine.check(ToolName::Webfetch, None, None), PermissionAction::Ask);
     }
 
     #[test]
@@ -423,30 +490,30 @@ mod tests {
     #[test]
     fn trust_profile_allows_everything() {
         let engine = PermissionEngine::new(profile_build_rules(PermissionProfile::Trust, &[], &[]));
-        assert_eq!(engine.check(ToolName::Edit, None), PermissionAction::Allow);
-        assert_eq!(engine.check(ToolName::Bash, None), PermissionAction::Allow);
-        assert_eq!(engine.check(ToolName::Read, None), PermissionAction::Allow);
-        assert_eq!(engine.check(ToolName::Delete, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Edit, None, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Bash, None, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Read, None, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Delete, None, None), PermissionAction::Allow);
     }
 
     #[test]
     fn standard_profile_matches_build_mode() {
         let standard = PermissionEngine::new(profile_build_rules(PermissionProfile::Standard, &[], &[]));
         let build = PermissionEngine::new(build_mode_rules());
-        assert_eq!(standard.check(ToolName::Read, None), build.check(ToolName::Read, None));
-        assert_eq!(standard.check(ToolName::Edit, None), build.check(ToolName::Edit, None));
-        assert_eq!(standard.check(ToolName::Bash, None), build.check(ToolName::Bash, None));
+        assert_eq!(standard.check(ToolName::Read, None, None), build.check(ToolName::Read, None, None));
+        assert_eq!(standard.check(ToolName::Edit, None, None), build.check(ToolName::Edit, None, None));
+        assert_eq!(standard.check(ToolName::Bash, None, None), build.check(ToolName::Bash, None, None));
     }
 
     #[test]
     fn cautious_profile_asks_for_reads() {
         let engine = PermissionEngine::new(profile_build_rules(PermissionProfile::Cautious, &[], &[]));
-        assert_eq!(engine.check(ToolName::Read, None), PermissionAction::Ask);
-        assert_eq!(engine.check(ToolName::Grep, None), PermissionAction::Ask);
-        assert_eq!(engine.check(ToolName::Edit, None), PermissionAction::Ask);
+        assert_eq!(engine.check(ToolName::Read, None, None), PermissionAction::Ask);
+        assert_eq!(engine.check(ToolName::Grep, None, None), PermissionAction::Ask);
+        assert_eq!(engine.check(ToolName::Edit, None, None), PermissionAction::Ask);
         // Only question/task are auto-allowed
-        assert_eq!(engine.check(ToolName::Question, None), PermissionAction::Allow);
-        assert_eq!(engine.check(ToolName::Task, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Question, None, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Task, None, None), PermissionAction::Allow);
     }
 
     #[test]
@@ -455,10 +522,10 @@ mod tests {
             profile_build_rules(PermissionProfile::Standard, &[ToolName::Edit, ToolName::Bash], &[]),
         );
         // Overridden tools should be auto-allowed
-        assert_eq!(engine.check(ToolName::Edit, None), PermissionAction::Allow);
-        assert_eq!(engine.check(ToolName::Bash, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Edit, None, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Bash, None, None), PermissionAction::Allow);
         // Non-overridden write tools still ask
-        assert_eq!(engine.check(ToolName::Write, None), PermissionAction::Ask);
+        assert_eq!(engine.check(ToolName::Write, None, None), PermissionAction::Ask);
     }
 
     #[test]
@@ -467,11 +534,11 @@ mod tests {
             profile_plan_rules(PermissionProfile::Standard, &[ToolName::Edit, ToolName::Bash, ToolName::Agent], &[]),
         );
         // Write tool override is stripped in Plan mode
-        assert_eq!(engine.check(ToolName::Edit, None), PermissionAction::Deny);
+        assert_eq!(engine.check(ToolName::Edit, None, None), PermissionAction::Deny);
         // Agent override is also stripped in Plan mode
-        assert_eq!(engine.check(ToolName::Agent, None), PermissionAction::Deny);
+        assert_eq!(engine.check(ToolName::Agent, None, None), PermissionAction::Deny);
         // Bash override IS applied (bash isn't a write tool or agent, it's Ask in plan mode)
-        assert_eq!(engine.check(ToolName::Bash, None), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Bash, None, None), PermissionAction::Allow);
     }
 
     #[test]
@@ -515,11 +582,11 @@ mod tests {
             profile_build_rules(PermissionProfile::Standard, &[], &path_rules),
         );
         // Edit in src/ is allowed by path rule
-        assert_eq!(engine.check(ToolName::Edit, Some("src/main.rs")), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Edit, Some("src/main.rs"), None), PermissionAction::Allow);
         // Edit outside src/ falls through to profile default (Ask)
-        assert_eq!(engine.check(ToolName::Edit, Some("config/app.toml")), PermissionAction::Ask);
+        assert_eq!(engine.check(ToolName::Edit, Some("config/app.toml"), None), PermissionAction::Ask);
         // Edit with no path falls through to profile default (Ask)
-        assert_eq!(engine.check(ToolName::Edit, None), PermissionAction::Ask);
+        assert_eq!(engine.check(ToolName::Edit, None, None), PermissionAction::Ask);
     }
 
     #[test]
@@ -534,9 +601,9 @@ mod tests {
         let engine = PermissionEngine::new(
             profile_build_rules(PermissionProfile::Standard, &[], &path_rules),
         );
-        assert_eq!(engine.check(ToolName::Edit, Some("/etc/passwd")), PermissionAction::Deny);
+        assert_eq!(engine.check(ToolName::Edit, Some("/etc/passwd"), None), PermissionAction::Deny);
         // Normal edits still go through standard rules (Ask)
-        assert_eq!(engine.check(ToolName::Edit, Some("src/main.rs")), PermissionAction::Ask);
+        assert_eq!(engine.check(ToolName::Edit, Some("src/main.rs"), None), PermissionAction::Ask);
     }
 
     #[test]
@@ -553,9 +620,9 @@ mod tests {
             profile_build_rules(PermissionProfile::Standard, &[ToolName::Edit], &path_rules),
         );
         // Cargo.toml matches the path rule (Ask), which is higher priority
-        assert_eq!(engine.check(ToolName::Edit, Some("Cargo.toml")), PermissionAction::Ask);
+        assert_eq!(engine.check(ToolName::Edit, Some("Cargo.toml"), None), PermissionAction::Ask);
         // Other files fall through to the allow_override (Allow)
-        assert_eq!(engine.check(ToolName::Edit, Some("src/main.rs")), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Edit, Some("src/main.rs"), None), PermissionAction::Allow);
     }
 
     #[test]
@@ -571,9 +638,9 @@ mod tests {
             profile_build_rules(PermissionProfile::Standard, &[], &path_rules),
         );
         // Read tool unaffected (already allowed by profile)
-        assert_eq!(engine.check(ToolName::Read, Some("src/main.rs")), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Read, Some("src/main.rs"), None), PermissionAction::Allow);
         // Bash unaffected (no path rule for it)
-        assert_eq!(engine.check(ToolName::Bash, None), PermissionAction::Ask);
+        assert_eq!(engine.check(ToolName::Bash, None, None), PermissionAction::Ask);
     }
 
     #[test]
@@ -589,7 +656,7 @@ mod tests {
             profile_plan_rules(PermissionProfile::Standard, &[], &path_rules),
         );
         // Path rule for edit is stripped in Plan mode — edit is denied
-        assert_eq!(engine.check(ToolName::Edit, Some("src/main.rs")), PermissionAction::Deny);
+        assert_eq!(engine.check(ToolName::Edit, Some("src/main.rs"), None), PermissionAction::Deny);
     }
 
     #[test]
@@ -606,7 +673,7 @@ mod tests {
         );
         engine.grant_session(ToolName::Edit);
         // Session grant overrides everything (including path deny)
-        assert_eq!(engine.check(ToolName::Edit, Some("/etc/passwd")), PermissionAction::Allow);
+        assert_eq!(engine.check(ToolName::Edit, Some("/etc/passwd"), None), PermissionAction::Allow);
     }
 
     #[test]
@@ -636,5 +703,148 @@ mod tests {
         let parsed: PermissionRule = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.tool, rule.tool);
         assert_eq!(parsed.pattern, rule.pattern);
+    }
+
+    // -- Path normalization tests --
+
+    #[test]
+    fn normalize_tool_path_relative_inside() {
+        let root = PathBuf::from("/project");
+        let (normalized, inside) = normalize_tool_path("src/main.rs", &root);
+        assert_eq!(normalized, "src/main.rs");
+        assert!(inside);
+    }
+
+    #[test]
+    fn normalize_tool_path_absolute_inside() {
+        let root = PathBuf::from("/project");
+        let (normalized, inside) = normalize_tool_path("/project/src/main.rs", &root);
+        assert_eq!(normalized, "src/main.rs");
+        assert!(inside);
+    }
+
+    #[test]
+    fn normalize_tool_path_absolute_outside() {
+        let root = PathBuf::from("/project");
+        let (normalized, inside) = normalize_tool_path("/etc/passwd", &root);
+        assert_eq!(normalized, "/etc/passwd");
+        assert!(!inside);
+    }
+
+    #[test]
+    fn normalize_tool_path_dotdot_escape() {
+        let root = PathBuf::from("/project/sub");
+        let (normalized, inside) = normalize_tool_path("../../etc/passwd", &root);
+        assert_eq!(normalized, "/etc/passwd");
+        assert!(!inside);
+    }
+
+    #[test]
+    fn normalize_tool_path_dotdot_stays_inside() {
+        let root = PathBuf::from("/project");
+        let (normalized, inside) = normalize_tool_path("src/../lib/foo.rs", &root);
+        assert_eq!(normalized, "lib/foo.rs");
+        assert!(inside);
+    }
+
+    #[test]
+    fn clean_path_collapses_dots() {
+        assert_eq!(clean_path(Path::new("/a/b/../c")), PathBuf::from("/a/c"));
+        assert_eq!(clean_path(Path::new("/a/./b/c")), PathBuf::from("/a/b/c"));
+        assert_eq!(clean_path(Path::new("/a/b/../../c")), PathBuf::from("/c"));
+    }
+
+    #[test]
+    fn clean_path_guards_against_underflow() {
+        // Excessive .. should not pop past root
+        assert_eq!(clean_path(Path::new("/a/../../b")), PathBuf::from("/b"));
+        assert_eq!(clean_path(Path::new("/a/../../../etc/passwd")), PathBuf::from("/etc/passwd"));
+    }
+
+    #[test]
+    fn normalize_tool_path_project_root_itself() {
+        let root = PathBuf::from("/project");
+        let (normalized, inside) = normalize_tool_path(".", &root);
+        // "." resolves to the project root — strip_prefix yields ""
+        assert_eq!(normalized, "");
+        assert!(inside);
+    }
+
+    // -- !project sentinel pattern tests --
+
+    #[test]
+    fn check_not_project_pattern_denies_outside() {
+        let path_rules = vec![
+            PermissionRule {
+                tool: ToolMatcher::All,
+                pattern: "!project".into(),
+                action: types::PermissionActionSerde::Deny,
+            },
+        ];
+        let engine = PermissionEngine::new(
+            profile_build_rules(PermissionProfile::Standard, &[], &path_rules),
+        );
+        // Outside project → !project matches → Deny
+        assert_eq!(
+            engine.check(ToolName::Edit, Some("/etc/passwd"), Some(false)),
+            PermissionAction::Deny,
+        );
+    }
+
+    #[test]
+    fn check_not_project_pattern_skips_inside() {
+        let path_rules = vec![
+            PermissionRule {
+                tool: ToolMatcher::All,
+                pattern: "!project".into(),
+                action: types::PermissionActionSerde::Deny,
+            },
+        ];
+        let engine = PermissionEngine::new(
+            profile_build_rules(PermissionProfile::Standard, &[], &path_rules),
+        );
+        // Inside project → !project does NOT match → falls through to profile
+        assert_eq!(
+            engine.check(ToolName::Edit, Some("src/main.rs"), Some(true)),
+            PermissionAction::Ask,
+        );
+    }
+
+    #[test]
+    fn check_not_project_pattern_preserved_in_plan_mode() {
+        let path_rules = vec![
+            PermissionRule {
+                tool: ToolMatcher::All,
+                pattern: "!project".into(),
+                action: types::PermissionActionSerde::Deny,
+            },
+        ];
+        let engine = PermissionEngine::new(
+            profile_plan_rules(PermissionProfile::Standard, &[], &path_rules),
+        );
+        // !project deny rule should NOT be stripped in Plan mode
+        assert_eq!(
+            engine.check(ToolName::Read, Some("/etc/passwd"), Some(false)),
+            PermissionAction::Deny,
+        );
+    }
+
+    #[test]
+    fn check_not_project_pattern_skips_no_path() {
+        let path_rules = vec![
+            PermissionRule {
+                tool: ToolMatcher::All,
+                pattern: "!project".into(),
+                action: types::PermissionActionSerde::Deny,
+            },
+        ];
+        let engine = PermissionEngine::new(
+            profile_build_rules(PermissionProfile::Standard, &[], &path_rules),
+        );
+        // No path → !project does NOT match → falls through to profile
+        assert_eq!(
+            engine.check(ToolName::Bash, None, None),
+            PermissionAction::Ask,
+        );
     }
 }
