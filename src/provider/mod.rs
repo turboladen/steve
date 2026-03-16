@@ -134,6 +134,18 @@ impl ProviderRegistry {
     pub fn is_empty(&self) -> bool {
         self.providers.is_empty()
     }
+
+    /// Build a registry from pre-constructed entries (no env var lookups).
+    #[cfg(test)]
+    pub fn from_entries(
+        entries: Vec<(String, ProviderConfig, client::LlmClient)>,
+    ) -> Self {
+        let mut providers = HashMap::new();
+        for (id, config, client) in entries {
+            providers.insert(id, ProviderEntry { config, client });
+        }
+        Self { providers }
+    }
 }
 
 #[cfg(test)]

@@ -4650,4 +4650,131 @@ pub(crate) mod tests {
             "overlay title should be visible, got:\n{text}"
         );
     }
+
+    // -- sync_context_window tests --
+
+    /// Helper: build a ProviderRegistry with a single test model.
+    fn make_test_registry(context_window: u32) -> crate::provider::ProviderRegistry {
+        use crate::config::types::{ModelCapabilities, ModelConfig, ProviderConfig};
+        use std::collections::HashMap;
+
+        let mut models = HashMap::new();
+        models.insert(
+            "test-model".to_string(),
+            ModelConfig {
+                id: "test-model".to_string(),
+                name: "Test Model".to_string(),
+                context_window,
+                max_output_tokens: None,
+                cost: None,
+                capabilities: ModelCapabilities {
+                    tool_call: true,
+                    reasoning: false,
+                },
+            },
+        );
+        let provider_config = ProviderConfig {
+            base_url: "https://api.test.com/v1".to_string(),
+            api_key_env: "TEST_KEY".to_string(),
+            models,
+        };
+        let client = crate::provider::client::LlmClient::new("https://api.test.com/v1", "fake");
+        crate::provider::ProviderRegistry::from_entries(vec![
+            ("test".to_string(), provider_config, client),
+        ])
+    }
+
+    #[test]
+    fn sync_context_window_sets_from_registry() {
+        let mut app = make_test_app();
+        assert_eq!(app.status_line_state.context_window, 0);
+
+        app.provider_registry = Some(make_test_registry(128_000));
+        app.current_model = Some("test/test-model".to_string());
+        app.sync_context_window();
+
+        assert_eq!(app.status_line_state.context_window, 128_000);
+    }
+
+    #[test]
+    fn sync_context_window_noop_without_registry() {
+        let mut app = make_test_app();
+        app.current_model = Some("test/test-model".to_string());
+        app.sync_context_window();
+        assert_eq!(app.status_line_state.context_window, 0);
+    }
+
+    #[test]
+    fn sync_context_window_noop_without_model() {
+        let mut app = make_test_app();
+        app.provider_registry = Some(make_test_registry(128_000));
+        app.current_model = None;
+        app.sync_context_window();
+        assert_eq!(app.status_line_state.context_window, 0);
+    }
+
+    #[test]
+    fn sync_context_window_invalid_model_preserves_previous() {
+        let mut app = make_test_app();
+        app.provider_registry = Some(make_test_registry(128_000));
+        app.current_model = Some("test/test-model".to_string());
+        app.sync_context_window();
+        assert_eq!(app.status_line_state.context_window, 128_000);
+
+        // Switch to an invalid model — previous value should be preserved
+        app.current_model = Some("nonexistent/model".to_string());
+        app.sync_context_window();
+        assert_eq!(app.status_line_state.context_window, 128_000);
+    }
+
+    #[test]
+    fn sync_context_window_updates_on_model_change() {
+        let mut app = make_test_app();
+        let mut models = std::collections::HashMap::new();
+        models.insert(
+            "small".to_string(),
+            crate::config::types::ModelConfig {
+                id: "small".to_string(),
+                name: "Small".to_string(),
+                context_window: 32_000,
+                max_output_tokens: None,
+                cost: None,
+                capabilities: crate::config::types::ModelCapabilities {
+                    tool_call: true,
+                    reasoning: false,
+                },
+            },
+        );
+        models.insert(
+            "large".to_string(),
+            crate::config::types::ModelConfig {
+                id: "large".to_string(),
+                name: "Large".to_string(),
+                context_window: 200_000,
+                max_output_tokens: None,
+                cost: None,
+                capabilities: crate::config::types::ModelCapabilities {
+                    tool_call: true,
+                    reasoning: false,
+                },
+            },
+        );
+        let provider_config = crate::config::types::ProviderConfig {
+            base_url: "https://api.test.com/v1".to_string(),
+            api_key_env: "TEST_KEY".to_string(),
+            models,
+        };
+        let client = crate::provider::client::LlmClient::new("https://api.test.com/v1", "fake");
+        app.provider_registry = Some(crate::provider::ProviderRegistry::from_entries(vec![
+            ("test".to_string(), provider_config, client),
+        ]));
+
+        app.current_model = Some("test/small".to_string());
+        app.sync_context_window();
+        assert_eq!(app.status_line_state.context_window, 32_000);
+
+        app.current_model = Some("test/large".to_string());
+        app.sync_context_window();
+        assert_eq!(app.status_line_state.context_window, 200_000);
+    }
 }
