@@ -35,6 +35,7 @@ use crate::ui::autocomplete::{AutocompleteMode, AutocompleteState, apply_file_co
 use crate::ui::input::InputState;
 use crate::ui::message_area::MessageAreaState;
 use crate::ui::model_picker::ModelPickerState;
+use crate::ui::session_picker::SessionPickerState;
 use crate::ui::message_block::{
     AssistantPart, DiffContent, DiffLine, MessageBlock, ToolCall,
 };
@@ -491,8 +492,8 @@ pub struct App {
     /// Proposed AGENTS.md content awaiting user approval (y/n).
     pending_agents_update: Option<String>,
 
-    /// Active session browser list (populated by /sessions, cleared on selection or dismiss).
-    session_browse_list: Option<Vec<SessionInfo>>,
+    /// Session picker overlay state.
+    pub session_picker: SessionPickerState,
 
     /// Cancellation token for the current stream task.
     stream_cancel: Option<CancellationToken>,
@@ -635,7 +636,7 @@ impl App {
             pending_permission: None,
             pending_question: None,
             pending_agents_update: None,
-            session_browse_list: None,
+            session_picker: SessionPickerState::default(),
             stream_cancel: None,
             interjection_tx: None,
             auto_compact_failed: false,
@@ -851,6 +852,7 @@ impl App {
         self.sidebar_state.changes.clear();
         self.sidebar_state.session_closed_task_ids.clear();
         self.model_picker.close();
+        self.session_picker.close();
         self.diagnostics_overlay.close();
         self.compaction_count = 0;
         self.refresh_git_info();
@@ -870,7 +872,7 @@ impl App {
             AppEvent::Input(Event::Mouse(mouse)) => {
                 use crossterm::event::MouseButton;
                 // Block mouse events in the message area when an overlay is active
-                if self.model_picker.visible || self.diagnostics_overlay.visible || self.pending_question.is_some() {
+                if self.model_picker.visible || self.session_picker.visible || self.diagnostics_overlay.visible || self.pending_question.is_some() {
                     return Ok(());
                 }
                 match mouse.kind {
@@ -1629,6 +1631,41 @@ impl App {
             return Ok(());
         }
 
+        // If the session picker overlay is open, intercept keystrokes
+        if self.session_picker.visible {
+            match (key.code, key.modifiers) {
+                (KeyCode::Esc, _) => {
+                    self.session_picker.close();
+                }
+                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
+                    self.session_picker.close();
+                    if self.is_loading || self.streaming_active {
+                        self.cancel_stream();
+                    }
+                }
+                (KeyCode::Up, _) => {
+                    self.session_picker.prev();
+                }
+                (KeyCode::Down, _) => {
+                    self.session_picker.next();
+                }
+                (KeyCode::Enter, _) => {
+                    if let Some(session) = self.session_picker.selected_session() {
+                        self.session_picker.close();
+                        self.switch_to_session(session).await?;
+                    }
+                }
+                (KeyCode::Backspace, _) => {
+                    self.session_picker.backspace();
+                }
+                (KeyCode::Char(c), _) => {
+                    self.session_picker.type_char(c);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         // If the diagnostics overlay is open, intercept keystrokes
         if self.diagnostics_overlay.visible {
             match (key.code, key.modifiers) {
@@ -1954,25 +1991,6 @@ impl App {
     }
 
     async fn handle_input(&mut self, text: String) -> Result<()> {
-        // Handle session browser selection
-        if let Some(ref browse_list) = self.session_browse_list {
-            if let Ok(n) = text.parse::<usize>() {
-                if n >= 1 && n <= browse_list.len() {
-                    let selected = browse_list[n - 1].clone();
-                    self.session_browse_list = None;
-                    return self.switch_to_session(selected).await;
-                } else {
-                    self.messages.push(MessageBlock::Error {
-                        text: format!("Enter 1-{}.", browse_list.len()),
-                    });
-                    self.message_area_state.scroll_to_bottom();
-                    return Ok(());
-                }
-            }
-            // Non-numeric input dismisses browser
-            self.session_browse_list = None;
-        }
-
         if text.starts_with('/') {
             return self.handle_command(&text).await;
         }
@@ -2900,7 +2918,7 @@ impl App {
                 self.context_warned = false;
                 self.last_prompt_tokens = 0;
                 self.current_session = None;
-                self.session_browse_list = None;
+                self.session_picker.close();
                 // Reset tool result cache for the new session
                 *self.tool_cache.lock().unwrap() = ToolResultCache::new(self.project.root.clone());
                 // Clear changeset tracking, session-closed tasks, selection, and reset token counters
@@ -2963,6 +2981,7 @@ impl App {
             }
             Command::Models => {
                 self.diagnostics_overlay.close();
+                self.session_picker.close();
                 if let Some(registry) = &self.provider_registry {
                     let models = registry.list_models();
                     if models.is_empty() {
@@ -2984,8 +3003,9 @@ impl App {
                 }
             }
             Command::Diagnostics => {
-                // Close model picker if open (mutual exclusivity)
+                // Close other overlays (mutual exclusivity)
                 self.model_picker.close();
+                self.session_picker.close();
                 // Run diagnostics and open the overlay
                 let checks = self.collect_diagnostics();
                 self.diagnostics_overlay.open(checks);
@@ -3121,6 +3141,9 @@ impl App {
                     });
                     return Ok(());
                 }
+                // Close other overlays (mutual exclusivity)
+                self.model_picker.close();
+                self.diagnostics_overlay.close();
                 let mgr = SessionManager::new(&self.storage, &self.project.id);
                 match mgr.list_sessions() {
                     Ok(sessions) if sessions.is_empty() => {
@@ -3129,24 +3152,8 @@ impl App {
                         });
                     }
                     Ok(sessions) => {
-                        let display_sessions: Vec<_> = sessions.into_iter().take(20).collect();
-                        let mut list = String::from("Sessions (enter number to switch):\n");
-                        for (i, s) in display_sessions.iter().enumerate() {
-                            let current_marker =
-                                self.current_session.as_ref().is_some_and(|c| c.id == s.id);
-                            let marker = if current_marker { " *" } else { "" };
-                            let date = s.updated_at.format("%m/%d %H:%M");
-                            list.push_str(&format!(
-                                "  {:>2}. {} \u{2014} {}{}\n",
-                                i + 1,
-                                date,
-                                s.title,
-                                marker
-                            ));
-                        }
-                        self.messages.push(MessageBlock::System { text: list });
-                        self.session_browse_list = Some(display_sessions);
-                        self.message_area_state.scroll_to_bottom();
+                        let current_id = self.current_session.as_ref().map(|s| s.id.as_str());
+                        self.session_picker.open(&sessions, current_id);
                     }
                     Err(e) => {
                         self.messages.push(MessageBlock::Error {

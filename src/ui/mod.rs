@@ -8,6 +8,7 @@ pub mod message_block;
 pub mod model_picker;
 pub mod primitives;
 pub mod selection;
+pub mod session_picker;
 pub mod sidebar;
 pub mod status_line;
 pub mod syntax;
@@ -34,6 +35,7 @@ use autocomplete::render_autocomplete;
 use input::{render_input, render_paste_preview, abbreviate_path, InputContext, MIN_INPUT_HEIGHT, MAX_INPUT_PCT, CHEVRON_WIDTH};
 use diagnostics_overlay::render_diagnostics_overlay;
 use model_picker::render_model_picker;
+use session_picker::render_session_picker;
 use sidebar::render_sidebar;
 use status_line::Activity;
 
@@ -190,6 +192,14 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         frame,
         layout.message_area,
         &app.model_picker,
+        &app.theme,
+        pct,
+    );
+
+    render_session_picker(
+        frame,
+        layout.message_area,
+        &app.session_picker,
         &app.theme,
         pct,
     );
