@@ -17,6 +17,36 @@ use super::theme::Theme;
 /// Maximum number of tasks shown in the sidebar.
 pub const MAX_SIDEBAR_TASKS: usize = 10;
 
+/// Shorten a path to fit within `max_width` by abbreviating directory names
+/// to their first character. The filename is always kept in full.
+/// Returns the original path if it already fits.
+fn shorten_path(path: &str, max_width: usize) -> String {
+    if path.chars().count() <= max_width {
+        return path.to_string();
+    }
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.len() <= 1 {
+        return path.to_string(); // No directories to shorten
+    }
+    let filename = parts.last().unwrap();
+    let shortened_dirs: Vec<String> = parts[..parts.len() - 1]
+        .iter()
+        .map(|d| d.chars().next().map(String::from).unwrap_or_default())
+        .collect();
+    let mut result = shortened_dirs.join("/");
+    result.push('/');
+    result.push_str(filename);
+    // If still too wide (long filename), truncate with ellipsis
+    if result.chars().count() > max_width {
+        if max_width <= 1 {
+            return result.chars().take(max_width).collect();
+        }
+        let truncated: String = result.chars().take(max_width.saturating_sub(1)).collect();
+        return format!("{truncated}\u{2026}"); // '…'
+    }
+    result
+}
+
 /// Maximum characters for a task title on a single sidebar line.
 /// Derived at render time from sidebar width.
 fn max_task_title_chars(sidebar_width: usize) -> usize {
@@ -382,9 +412,25 @@ pub fn render_sidebar(
     // -- Changes section (if any files were modified) --
     if !state.changes.is_empty() {
         lines.push(primitives::section_header("Changes", header_color));
-        for change in &state.changes {
+        // Sort changes alphabetically by path
+        let mut sorted_changes = state.changes.clone();
+        sorted_changes.sort_by(|a, b| a.path.cmp(&b.path));
+        for change in &sorted_changes {
+            // Calculate width consumed by stats suffix: " +N" and/or " -N"
+            let mut stats_width = 0;
+            if change.additions > 0 {
+                // " +N" = 2 chars + digit count
+                stats_width += 2 + format!("{}", change.additions).chars().count();
+            }
+            if change.removals > 0 {
+                // " -N" = 2 chars + digit count
+                stats_width += 2 + format!("{}", change.removals).chars().count();
+            }
+            // Available width for path: sidebar_width - 1 (leading space) - stats_width
+            let path_width = sidebar_width.saturating_sub(1 + stats_width);
+            let display_path = shorten_path(&change.path, path_width);
             let mut spans = vec![Span::styled(
-                format!(" {}", change.path),
+                format!(" {display_path}"),
                 Style::default().fg(theme.fg),
             )];
             if change.additions > 0 {
@@ -1258,6 +1304,113 @@ mod tests {
         // by checking the line doesn't contain " hi" after the ID
         let id_line = text.lines().find(|l| l.contains("task-nopr0001")).unwrap();
         assert!(!id_line.contains(" hi"), "should not show priority abbreviation on ID line");
+    }
+
+    // -- shorten_path tests --
+
+    #[test]
+    fn shorten_path_already_fits() {
+        assert_eq!(shorten_path("src/main.rs", 20), "src/main.rs");
+    }
+
+    #[test]
+    fn shorten_path_deeply_nested() {
+        let path = "src/components/dialogs/widgets/chart.rs";
+        let shortened = shorten_path(path, 20);
+        assert_eq!(shortened, "s/c/d/w/chart.rs");
+    }
+
+    #[test]
+    fn shorten_path_no_directories() {
+        assert_eq!(shorten_path("main.rs", 5), "main.rs");
+    }
+
+    #[test]
+    fn shorten_path_single_directory() {
+        // "s/file.rs" is 9 chars, fits in 10 but not 5
+        assert_eq!(shorten_path("src/file.rs", 10), "s/file.rs");
+    }
+
+    #[test]
+    fn shorten_path_single_directory_truncates_when_still_too_long() {
+        // max_width=5, "s/file.rs" (9 chars) still too long → truncated with ellipsis
+        let result = shorten_path("src/file.rs", 5);
+        assert_eq!(result.chars().count(), 5);
+        assert!(result.ends_with('\u{2026}'), "should end with ellipsis, got: {result}");
+    }
+
+    #[test]
+    fn shorten_path_empty() {
+        assert_eq!(shorten_path("", 10), "");
+    }
+
+    #[test]
+    fn shorten_path_exact_fit() {
+        let path = "src/main.rs"; // 11 chars
+        assert_eq!(shorten_path(path, 11), "src/main.rs");
+    }
+
+    #[test]
+    fn shorten_path_one_over() {
+        let path = "src/main.rs"; // 11 chars
+        let shortened = shorten_path(path, 10);
+        assert_eq!(shortened, "s/main.rs");
+    }
+
+    #[test]
+    fn shorten_path_zero_max_width() {
+        // max_width=0 should not panic, returns empty
+        let result = shorten_path("src/main.rs", 0);
+        assert_eq!(result.chars().count(), 0);
+    }
+
+    #[test]
+    fn shorten_path_filename_exceeds_budget() {
+        // Filename alone is longer than max_width — should truncate with ellipsis
+        let result = shorten_path("src/very_long_filename_here.rs", 10);
+        assert!(
+            result.chars().count() <= 10,
+            "result should fit in max_width, got: {result} ({})",
+            result.chars().count()
+        );
+        assert!(result.ends_with('\u{2026}'), "should end with ellipsis, got: {result}");
+    }
+
+    // -- Changes sorting test --
+
+    #[test]
+    fn buffer_sidebar_changes_sorted_alphabetically() {
+        let mut state = SidebarState::default();
+        // Insert in non-alphabetical order
+        state.record_file_change("src/zebra.rs".into(), 1, 0);
+        state.record_file_change("src/alpha.rs".into(), 2, 0);
+        state.record_file_change("src/middle.rs".into(), 3, 0);
+        let text = render_sidebar_to_string(40, 20, &state);
+        let alpha_pos = text.find("alpha.rs").expect("alpha.rs not found");
+        let middle_pos = text.find("middle.rs").expect("middle.rs not found");
+        let zebra_pos = text.find("zebra.rs").expect("zebra.rs not found");
+        assert!(
+            alpha_pos < middle_pos && middle_pos < zebra_pos,
+            "changes should be sorted alphabetically, got:\n{text}"
+        );
+    }
+
+    // -- Changes path shortening test --
+
+    #[test]
+    fn buffer_sidebar_changes_shortens_long_paths() {
+        let mut state = SidebarState::default();
+        state.record_file_change(
+            "src/components/dialogs/widgets/very_long_filename.rs".into(),
+            5,
+            2,
+        );
+        // With a 40-col sidebar, the path should be shortened
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(
+            text.contains("s/c/d/w/very_long_filename.rs"),
+            "long path should be shortened, got:\n{text}"
+        );
     }
 }
 
