@@ -3,7 +3,6 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
-use fs2::FileExt;
 use serde::{Serialize, de::DeserializeOwned};
 
 /// JSON file storage under `~/.local/share/steve/storage/`.
@@ -11,7 +10,7 @@ use serde::{Serialize, de::DeserializeOwned};
 /// Keys are path segments that map to the filesystem:
 ///   `["sessions", "abc123"]` → `{base}/sessions/abc123.json`
 ///
-/// File locking via `fs2` ensures safe concurrent access.
+/// File locking via `std::fs::File` ensures safe concurrent access.
 #[derive(Debug, Clone)]
 pub struct Storage {
     base_dir: PathBuf,
@@ -72,7 +71,7 @@ impl Storage {
             .with_context(|| format!("failed to create: {}", tmp_path.display()))?;
 
         // Exclusive (write) lock
-        file.lock_exclusive()
+        file.lock()
             .with_context(|| format!("failed to lock: {}", tmp_path.display()))?;
 
         serde_json::to_writer_pretty(&file, value)

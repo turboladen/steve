@@ -2,6 +2,7 @@
 name = "steve"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.89"
 
 [dependencies]
 # Async runtime
@@ -59,7 +60,6 @@ base64 = "0.22"
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6"
-fs2 = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 # CLI argument parsing

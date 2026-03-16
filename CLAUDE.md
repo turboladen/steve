@@ -274,7 +274,7 @@ to parent for user approval of writes.
 
 ### Storage (`storage/mod.rs`)
 
-Flat JSON files under `{data_dir}/storage/{project_id}/`. Key paths → filesystem paths. `fs2` file
+Flat JSON files under `{data_dir}/storage/{project_id}/`. Key paths → filesystem paths. Native file
 locking + atomic tmp+rename writes. Project ID from git root commit hash (fallback: CWD hash).
 Messages stored one-per-file under `messages/{session_id}/`.
 
@@ -320,8 +320,6 @@ gray→amber→yellow→red at 40/60/80% thresholds.
 - **mpatch 1.3**: Always appends trailing newline — `apply_unified_diff()` post-processes to
   preserve original behavior
 - **html2text v0.16**: `from_read()` returns `Result<String, Error>`, not `String`
-- **Rust 2024 file locking**: `std::fs::File` has native `lock()`/`lock_shared()`. Importing
-  `fs2::FileExt` triggers warnings for shadowed methods
 - **`move` is a Rust keyword**: Module is `move_`, variant uses `#[strum(serialize = "move")]` +
   `#[serde(rename = "move")]`
 - **Unicode width**: Box-drawing `─` is 3 bytes UTF-8 but 1 display char — use `.chars().count()`
