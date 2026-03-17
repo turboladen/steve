@@ -5,7 +5,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use rusqlite::Connection;
 
 use crate::ui::theme::Theme;
@@ -352,6 +352,9 @@ fn run_event_loop(
         // Poll for events
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
                 app.handle_key(key.code, key.modifiers)?;
             }
         }

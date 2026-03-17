@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 use tokio_stream::StreamExt;
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -1394,6 +1394,11 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Only process key presses — ignore Release/Repeat events from enhanced keyboard protocol
+        if key.kind != KeyEventKind::Press {
+            return Ok(());
+        }
+
         // If there's a pending permission prompt, intercept keystrokes
         if self.pending_permission.is_some() {
             match (key.code, key.modifiers) {
