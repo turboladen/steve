@@ -6,10 +6,13 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
+use std::time::Duration;
+
 use super::markdown::{MarkdownLine, is_table_row, render_markdown_line, render_table};
 use super::message_block::{AssistantPart, CodeFence, DiffContent, DiffLine, MessageBlock, ToolGroup, ToolGroupStatus};
 use super::primitives;
 use super::selection::{ContentMap, ContentPos, SelectionState};
+use super::status_line::format_elapsed_compact;
 use super::syntax;
 use super::theme::Theme;
 use crate::tool::{IntentCategory, ToolName, ToolVisualCategory};
@@ -210,7 +213,7 @@ pub fn render_message_blocks(
     messages: &[MessageBlock],
     state: &mut MessageAreaState,
     theme: &Theme,
-    activity: Option<(char, String, bool)>,
+    activity: Option<(char, String, bool, Option<Duration>)>,
     context_pct: u8,
     selection: &SelectionState,
 ) {
@@ -633,10 +636,15 @@ pub fn render_message_blocks(
     }
 
     // Inline activity spinner (replaces the old "..." and status bar spinner)
-    if let Some((spinner, text, has_pending)) = activity {
+    if let Some((spinner, text, has_pending, activity_elapsed)) = activity {
+        let mut activity_text = format!("{spinner} {text}");
+        if let Some(elapsed) = activity_elapsed {
+            activity_text.push(' ');
+            activity_text.push_str(&format_elapsed_compact(elapsed));
+        }
         let mut spans = vec![
             Span::styled(
-                format!("{spinner} {text}"),
+                activity_text,
                 Style::default().fg(theme.accent),
             ),
         ];
@@ -1095,6 +1103,7 @@ fn style_file_refs<'a>(line: &str, theme: &Theme) -> Vec<Span<'a>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn default_starts_at_zero_with_auto_scroll() {
@@ -1399,7 +1408,7 @@ mod tests {
         width: u16,
         height: u16,
         messages: &[MessageBlock],
-        activity: Option<(char, String, bool)>,
+        activity: Option<(char, String, bool, Option<Duration>)>,
     ) -> String {
         let theme = Theme::default();
         let mut state = MessageAreaState::default();
@@ -1616,7 +1625,7 @@ mod tests {
     #[test]
     fn buffer_activity_spinner_inline() {
         let messages = vec![];
-        let text = render_messages_to_string(60, 10, &messages, Some(('⠋', "Thinking...".to_string(), false)));
+        let text = render_messages_to_string(60, 10, &messages, Some(('⠋', "Thinking...".to_string(), false, None)));
         assert!(text.contains("Thinking..."), "activity text should appear");
     }
 
@@ -2363,7 +2372,7 @@ mod tests {
     fn buffer_activity_spinner_message_queued() {
         let text = render_messages_to_string(
             80, 10, &[],
-            Some(('\u{280b}', "Running edit...".to_string(), true)),
+            Some(('\u{280b}', "Running edit...".to_string(), true, None)),
         );
         assert!(text.contains("Running edit..."), "activity text should appear");
         assert!(text.contains("message queued"), "should show '(message queued)' when has_pending_input, got:\n{text}");
@@ -2711,5 +2720,26 @@ mod tests {
         assert_eq!(lines[0].spans.len(), 2);
         assert_eq!(lines[0].spans[1].content, "Hello");
         assert_ne!(lines[0].spans[1].style.bg, Some(theme.selection_bg));
+    }
+
+    #[test]
+    fn buffer_activity_spinner_with_elapsed() {
+        let messages = vec![];
+        let text = render_messages_to_string(
+            60, 10, &messages,
+            Some(('⠋', "Thinking...".to_string(), false, Some(Duration::from_secs(42)))),
+        );
+        assert!(text.contains("Thinking..."), "activity text should appear");
+        assert!(text.contains("(42s)"), "elapsed should appear after activity, got:\n{text}");
+    }
+
+    #[test]
+    fn buffer_activity_spinner_minute_elapsed() {
+        let messages = vec![];
+        let text = render_messages_to_string(
+            60, 10, &messages,
+            Some(('⠋', "Running read...".to_string(), false, Some(Duration::from_secs(83)))),
+        );
+        assert!(text.contains("(1:23)"), "should show minute format, got:\n{text}");
     }
 }

@@ -37,6 +37,7 @@ use diagnostics_overlay::render_diagnostics_overlay;
 use model_picker::render_model_picker;
 use session_picker::render_session_picker;
 use sidebar::render_sidebar;
+use std::time::Duration;
 use status_line::Activity;
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -124,10 +125,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     // Build activity info for inline display in message area
     let has_pending_input = app.is_loading && !app.input.textarea.lines().join("").is_empty();
-    let activity = if app.is_loading {
+    let activity: Option<(char, String, bool, Option<Duration>)> = if app.is_loading {
         let state = &app.status_line_state;
         if *state.activity() != Activity::Idle {
-            state.spinner_char().map(|ch| (ch, state.activity_text(), has_pending_input))
+            let activity_elapsed = state.activity_start.map(|t| t.elapsed());
+            state.spinner_char().map(|ch| (ch, state.activity_text(), has_pending_input, activity_elapsed))
         } else {
             None
         }
