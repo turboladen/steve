@@ -1,5 +1,7 @@
 //! Status line state for the TUI. Rendering moved to input prompt context line.
 
+use std::time::Duration;
+
 use crate::tool::ToolName;
 
 /// Braille spinner frames, cycled on each 100ms tick.
@@ -103,6 +105,37 @@ impl StatusLineState {
     }
 }
 
+/// Format duration as human-readable: "0s", "5s", "1m 23s", "1h 2m".
+/// Used for the total elapsed timer in the input context line.
+pub fn format_elapsed_human(d: Duration) -> String {
+    let total_secs = d.as_secs();
+    if total_secs < 60 {
+        format!("{}s", total_secs)
+    } else if total_secs < 3600 {
+        format!("{}m {}s", total_secs / 60, total_secs % 60)
+    } else {
+        format!("{}h {}m", total_secs / 3600, (total_secs % 3600) / 60)
+    }
+}
+
+/// Format duration as compact stopwatch: "(5s)", "(1:23)", "(1:02:15)".
+/// Used for the per-activity timer inline with the spinner.
+pub fn format_elapsed_compact(d: Duration) -> String {
+    let total_secs = d.as_secs();
+    if total_secs < 60 {
+        format!("({}s)", total_secs)
+    } else if total_secs < 3600 {
+        format!("({}:{:02})", total_secs / 60, total_secs % 60)
+    } else {
+        format!(
+            "({}:{:02}:{:02})",
+            total_secs / 3600,
+            (total_secs % 3600) / 60,
+            total_secs % 60,
+        )
+    }
+}
+
 /// Format a token count with K/M suffixes.
 pub fn format_tokens(n: u64) -> String {
     if n >= 1_000_000 {
@@ -116,6 +149,8 @@ pub fn format_tokens(n: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -304,5 +339,48 @@ mod tests {
         assert_eq!(format_tokens(1_000_000), "1.0M");
         assert_eq!(format_tokens(2_500_000), "2.5M");
         assert_eq!(format_tokens(10_000_000), "10.0M");
+    }
+
+    #[test]
+    fn format_elapsed_human_seconds() {
+        assert_eq!(format_elapsed_human(Duration::from_secs(0)), "0s");
+        assert_eq!(format_elapsed_human(Duration::from_secs(5)), "5s");
+        assert_eq!(format_elapsed_human(Duration::from_secs(59)), "59s");
+    }
+
+    #[test]
+    fn format_elapsed_human_minutes() {
+        assert_eq!(format_elapsed_human(Duration::from_secs(60)), "1m 0s");
+        assert_eq!(format_elapsed_human(Duration::from_secs(83)), "1m 23s");
+        assert_eq!(format_elapsed_human(Duration::from_secs(3599)), "59m 59s");
+    }
+
+    #[test]
+    fn format_elapsed_human_hours() {
+        assert_eq!(format_elapsed_human(Duration::from_secs(3600)), "1h 0m");
+        assert_eq!(format_elapsed_human(Duration::from_secs(3661)), "1h 1m");
+        assert_eq!(format_elapsed_human(Duration::from_secs(7380)), "2h 3m");
+    }
+
+    #[test]
+    fn format_elapsed_compact_seconds() {
+        assert_eq!(format_elapsed_compact(Duration::from_secs(0)), "(0s)");
+        assert_eq!(format_elapsed_compact(Duration::from_secs(5)), "(5s)");
+        assert_eq!(format_elapsed_compact(Duration::from_secs(59)), "(59s)");
+    }
+
+    #[test]
+    fn format_elapsed_compact_minutes() {
+        assert_eq!(format_elapsed_compact(Duration::from_secs(60)), "(1:00)");
+        assert_eq!(format_elapsed_compact(Duration::from_secs(83)), "(1:23)");
+        assert_eq!(format_elapsed_compact(Duration::from_secs(725)), "(12:05)");
+        assert_eq!(format_elapsed_compact(Duration::from_secs(3599)), "(59:59)");
+    }
+
+    #[test]
+    fn format_elapsed_compact_hours() {
+        assert_eq!(format_elapsed_compact(Duration::from_secs(3600)), "(1:00:00)");
+        assert_eq!(format_elapsed_compact(Duration::from_secs(3661)), "(1:01:01)");
+        assert_eq!(format_elapsed_compact(Duration::from_secs(3735)), "(1:02:15)");
     }
 }
