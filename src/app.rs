@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -478,6 +478,14 @@ pub struct App {
     /// Whether we are currently accumulating an assistant streaming response.
     streaming_active: bool,
 
+    /// When the current streaming request started (wall-clock).
+    /// Set when user sends a message that triggers streaming.
+    stream_start_time: Option<Instant>,
+
+    /// Frozen elapsed duration after streaming ends.
+    /// When present, the UI renders this instead of computing from stream_start_time.
+    frozen_elapsed: Option<Duration>,
+
     /// The in-progress assistant message being built during streaming.
     /// Saved to storage when streaming finishes.
     streaming_message: Option<Message>,
@@ -633,6 +641,8 @@ impl App {
             status_line_state: StatusLineState::default(),
             is_loading: false,
             streaming_active: false,
+            stream_start_time: None,
+            frozen_elapsed: None,
             streaming_message: None,
             exchange_count: 0,
             pending_permission: None,
@@ -806,6 +816,8 @@ impl App {
         self.stored_messages.clear();
         self.streaming_message = None;
         self.streaming_active = false;
+        self.stream_start_time = None;
+        self.frozen_elapsed = None;
         self.is_loading = false;
         self.auto_compact_failed = false;
         self.context_warned = false;
@@ -1086,6 +1098,9 @@ impl App {
             }
 
             AppEvent::LlmFinish { usage } => {
+                if let Some(start) = self.stream_start_time {
+                    self.frozen_elapsed = Some(start.elapsed());
+                }
                 self.is_loading = false;
                 self.streaming_active = false;
                 self.stream_cancel = None;
@@ -1164,6 +1179,9 @@ impl App {
                 self.message_area_state.scroll_to_bottom();
             }
             AppEvent::LlmError { error } => {
+                if let Some(start) = self.stream_start_time {
+                    self.frozen_elapsed = Some(start.elapsed());
+                }
                 self.is_loading = false;
                 self.streaming_active = false;
                 self.stream_cancel = None;
@@ -1916,6 +1934,9 @@ impl App {
             let _ = q.response_tx.send("User cancelled.".to_string());
         }
 
+        if let Some(start) = self.stream_start_time {
+            self.frozen_elapsed = Some(start.elapsed());
+        }
         self.is_loading = false;
         self.streaming_active = false;
         self.interjection_tx = None;
@@ -2005,6 +2026,10 @@ impl App {
         // Ensure we have a session
         self.ensure_session();
 
+        // Clear elapsed timer state from the previous response
+        self.stream_start_time = None;
+        self.frozen_elapsed = None;
+
         let session_id = self
             .current_session
             .as_ref()
@@ -2092,6 +2117,8 @@ impl App {
         let system_prompt = self.build_system_prompt();
         self.is_loading = true;
         self.streaming_active = true;
+        self.frozen_elapsed = None;
+        self.stream_start_time = Some(Instant::now());
         self.status_line_state.set_activity(Activity::Thinking);
         self.status_line_state.context_window = resolved.config.context_window as u64;
 
@@ -2926,6 +2953,8 @@ impl App {
                 self.stored_messages.clear();
                 self.streaming_message = None;
                 self.streaming_active = false;
+                self.stream_start_time = None;
+                self.frozen_elapsed = None;
                 self.is_loading = false;
                 self.exchange_count = 0;
                 self.auto_compact_failed = false;
