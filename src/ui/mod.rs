@@ -170,6 +170,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         last_prompt_tokens: app.status_line_state.last_prompt_tokens,
         context_window: app.status_line_state.context_window,
         context_usage_pct: pct,
+        elapsed: app.frozen_elapsed.or_else(|| app.stream_start_time.map(|t| t.elapsed())),
     };
 
     render_input(

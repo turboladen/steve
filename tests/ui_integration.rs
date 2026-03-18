@@ -141,6 +141,7 @@ fn input_renders_long_text_wrapped() {
         last_prompt_tokens: 0,
         context_window: 128000,
         context_usage_pct: 0,
+        elapsed: None,
     };
 
     let buf = render_to_buffer(width, height, |frame| {
@@ -254,6 +255,7 @@ fn collapsed_paste_renders_summary_in_input() {
         last_prompt_tokens: 0,
         context_window: 128000,
         context_usage_pct: 0,
+        elapsed: None,
     };
 
     let buf = render_to_buffer(width, height, |frame| {

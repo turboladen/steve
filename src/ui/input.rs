@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 
 use ratatui::{
     Frame,
@@ -10,7 +11,7 @@ use ratatui::{
 use ratatui_textarea::TextArea;
 use unicode_width::UnicodeWidthChar;
 
-use super::status_line::format_tokens;
+use super::status_line::{format_elapsed_human, format_tokens};
 use super::theme::Theme;
 
 /// Overhead rows above the textarea: 1 border + 1 context line.
@@ -53,6 +54,8 @@ pub struct InputContext {
     pub last_prompt_tokens: u64,
     pub context_window: u64,
     pub context_usage_pct: u8,
+    /// Total elapsed time for current/last streaming request.
+    pub elapsed: Option<Duration>,
 }
 
 /// A multi-line paste that has been visually collapsed into a summary.
@@ -548,7 +551,22 @@ pub fn render_input(
     ];
 
     let mut right_spans: Vec<Span> = Vec::new();
+
+    // Elapsed timer (shown during/after streaming)
+    if let Some(elapsed) = context.elapsed {
+        right_spans.push(Span::styled(
+            format_elapsed_human(elapsed),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    // Token display
     if context.context_window > 0 {
+        if !right_spans.is_empty() {
+            right_spans.push(Span::styled(" · ", Style::default().fg(theme.dim)));
+        }
         let pct = context.context_usage_pct;
         let token_color = theme.context_color(pct);
         right_spans.push(Span::styled(
@@ -561,6 +579,9 @@ pub fn render_input(
             Style::default().fg(token_color),
         ));
     } else if context.last_prompt_tokens > 0 {
+        if !right_spans.is_empty() {
+            right_spans.push(Span::styled(" · ", Style::default().fg(theme.dim)));
+        }
         right_spans.push(Span::styled(
             format_tokens(context.last_prompt_tokens),
             Style::default().fg(theme.dim),
@@ -743,6 +764,7 @@ mod tests {
             last_prompt_tokens: last_prompt,
             context_window: ctx_window,
             context_usage_pct: pct,
+            elapsed: None,
         };
         let buf = super::super::render_to_buffer(width, height, |frame| {
             render_input(
@@ -1276,5 +1298,95 @@ mod tests {
             }
         }
         assert!(text.contains("more lines"), "should show truncation indicator, got:\n{text}");
+    }
+
+    // -- elapsed timer tests --
+
+    /// Helper: render input area with optional elapsed duration.
+    fn render_input_with_elapsed(
+        width: u16,
+        height: u16,
+        mode: AgentMode,
+        pct: u8,
+        last_prompt: u64,
+        ctx_window: u64,
+        elapsed: Option<Duration>,
+    ) -> (ratatui::buffer::Buffer, String) {
+        let theme = Theme::default();
+        let mut state = InputState::default();
+        state.mode = mode;
+        let context = InputContext {
+            working_dir: "~/projects/steve".to_string(),
+            last_prompt_tokens: last_prompt,
+            context_window: ctx_window,
+            context_usage_pct: pct,
+            elapsed,
+        };
+        let buf = super::super::render_to_buffer(width, height, |frame| {
+            render_input(
+                frame,
+                Rect::new(0, 0, width, height),
+                &mut state,
+                &theme,
+                &context,
+            );
+        });
+        let mut text = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                let cell = &buf[(x, y)];
+                text.push_str(cell.symbol());
+            }
+            text.push('\n');
+        }
+        (buf, text)
+    }
+
+    #[test]
+    fn buffer_elapsed_with_tokens() {
+        let (_buf, text) = render_input_with_elapsed(
+            80,
+            5,
+            AgentMode::Build,
+            10,
+            12800,
+            128000,
+            Some(Duration::from_secs(83)),
+        );
+        assert!(text.contains("1m 23s"), "should show elapsed time, got:\n{text}");
+        assert!(text.contains("12.8k/128.0k"), "should still show tokens, got:\n{text}");
+        let elapsed_pos = text.find("1m 23s").unwrap();
+        let token_pos = text.find("12.8k").unwrap();
+        assert!(elapsed_pos < token_pos, "elapsed should appear before tokens");
+    }
+
+    #[test]
+    fn buffer_elapsed_without_tokens() {
+        let (_buf, text) = render_input_with_elapsed(
+            80,
+            5,
+            AgentMode::Build,
+            0,
+            0,
+            0,
+            Some(Duration::from_secs(5)),
+        );
+        assert!(text.contains("5s"), "should show elapsed time alone, got:\n{text}");
+        assert!(!text.contains("·"), "no separator when no tokens");
+    }
+
+    #[test]
+    fn buffer_no_elapsed_with_tokens() {
+        let (_buf, text) = render_input_with_elapsed(
+            80,
+            5,
+            AgentMode::Build,
+            10,
+            12800,
+            128000,
+            None,
+        );
+        assert!(text.contains("12.8k/128.0k"), "should show tokens, got:\n{text}");
+        assert!(!text.contains("·"), "no separator when no elapsed");
     }
 }

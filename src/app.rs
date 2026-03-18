@@ -480,11 +480,11 @@ pub struct App {
 
     /// When the current streaming request started (wall-clock).
     /// Set when user sends a message that triggers streaming.
-    stream_start_time: Option<Instant>,
+    pub(crate) stream_start_time: Option<Instant>,
 
     /// Frozen elapsed duration after streaming ends.
     /// When present, the UI renders this instead of computing from stream_start_time.
-    frozen_elapsed: Option<Duration>,
+    pub(crate) frozen_elapsed: Option<Duration>,
 
     /// The in-progress assistant message being built during streaming.
     /// Saved to storage when streaming finishes.
