@@ -1,6 +1,6 @@
 //! Status line state for the TUI. Rendering moved to input prompt context line.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::tool::ToolName;
 
@@ -31,8 +31,10 @@ pub enum Activity {
 
 /// State for the status/activity display.
 pub struct StatusLineState {
-    /// Current activity.
-    pub activity: Activity,
+    /// Current activity (use `set_activity()` to change, `activity()` to read).
+    activity: Activity,
+    /// When the current activity started (None when Idle).
+    pub activity_start: Option<Instant>,
     /// Spinner frame index (0..SPINNER_FRAMES.len()), advanced on tick.
     pub spinner_frame: usize,
     /// Model reference string (e.g., "gpt-4o").
@@ -49,6 +51,7 @@ impl Default for StatusLineState {
     fn default() -> Self {
         Self {
             activity: Activity::Idle,
+            activity_start: None,
             spinner_frame: 0,
             model_name: String::new(),
             total_tokens: 0,
@@ -59,6 +62,25 @@ impl Default for StatusLineState {
 }
 
 impl StatusLineState {
+    /// Set the current activity, updating `activity_start` accordingly.
+    ///
+    /// - `Idle`: clears `activity_start`
+    /// - Same activity as current: preserves `activity_start` (timer keeps running)
+    /// - Different non-Idle activity: resets `activity_start` to now
+    pub fn set_activity(&mut self, activity: Activity) {
+        if activity == Activity::Idle {
+            self.activity_start = None;
+        } else if self.activity != activity {
+            self.activity_start = Some(Instant::now());
+        }
+        self.activity = activity;
+    }
+
+    /// Get the current activity.
+    pub fn activity(&self) -> &Activity {
+        &self.activity
+    }
+
     /// Advance the spinner to the next frame. Called on each tick.
     pub fn tick(&mut self) {
         self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
@@ -156,7 +178,7 @@ mod tests {
     #[test]
     fn default_state_is_idle() {
         let state = StatusLineState::default();
-        assert_eq!(state.activity, Activity::Idle);
+        assert_eq!(*state.activity(), Activity::Idle);
         assert_eq!(state.spinner_frame, 0);
         assert!(state.model_name.is_empty());
     }
@@ -164,7 +186,7 @@ mod tests {
     #[test]
     fn tick_advances_spinner() {
         let mut state = StatusLineState::default();
-        state.activity = Activity::Thinking;
+        state.set_activity(Activity::Thinking);
         assert_eq!(state.spinner_frame, 0);
         state.tick();
         assert_eq!(state.spinner_frame, 1);
@@ -184,7 +206,7 @@ mod tests {
     #[test]
     fn spinner_char_some_when_active() {
         let mut state = StatusLineState::default();
-        state.activity = Activity::Thinking;
+        state.set_activity(Activity::Thinking);
         assert_eq!(state.spinner_char(), Some('\u{280b}'));
         state.tick();
         assert_eq!(state.spinner_char(), Some('\u{2819}'));
@@ -192,82 +214,48 @@ mod tests {
 
     #[test]
     fn activity_text_variants() {
-        assert_eq!(
-            StatusLineState {
-                activity: Activity::Idle,
-                ..Default::default()
-            }
-            .activity_text(),
-            ""
-        );
-        assert_eq!(
-            StatusLineState {
-                activity: Activity::Thinking,
-                ..Default::default()
-            }
-            .activity_text(),
-            "Thinking..."
-        );
-        assert_eq!(
-            StatusLineState {
-                activity: Activity::RunningTool {
-                    tool_name: ToolName::Read,
-                    args_summary: "src/main.rs".into(),
-                },
-                ..Default::default()
-            }
-            .activity_text(),
-            "Running read(src/main.rs)..."
-        );
-        assert_eq!(
-            StatusLineState {
-                activity: Activity::RunningTool {
-                    tool_name: ToolName::Bash,
-                    args_summary: String::new(),
-                },
-                ..Default::default()
-            }
-            .activity_text(),
-            "Running bash..."
-        );
-        assert_eq!(
-            StatusLineState {
-                activity: Activity::WaitingForPermission,
-                ..Default::default()
-            }
-            .activity_text(),
-            "Waiting for permission..."
-        );
-        assert_eq!(
-            StatusLineState {
-                activity: Activity::Compacting,
-                ..Default::default()
-            }
-            .activity_text(),
-            "Compacting..."
-        );
-        assert_eq!(
-            StatusLineState {
-                activity: Activity::WaitingForQuestion,
-                ..Default::default()
-            }
-            .activity_text(),
-            "Waiting for answer..."
-        );
-        assert_eq!(
-            StatusLineState {
-                activity: Activity::UpdatingAgents,
-                ..Default::default()
-            }
-            .activity_text(),
-            "Updating AGENTS.md..."
-        );
+        // Idle (default)
+        assert_eq!(StatusLineState::default().activity_text(), "");
+
+        let mut state = StatusLineState::default();
+        state.set_activity(Activity::Thinking);
+        assert_eq!(state.activity_text(), "Thinking...");
+
+        let mut state = StatusLineState::default();
+        state.set_activity(Activity::RunningTool {
+            tool_name: ToolName::Read,
+            args_summary: "src/main.rs".into(),
+        });
+        assert_eq!(state.activity_text(), "Running read(src/main.rs)...");
+
+        let mut state = StatusLineState::default();
+        state.set_activity(Activity::RunningTool {
+            tool_name: ToolName::Bash,
+            args_summary: String::new(),
+        });
+        assert_eq!(state.activity_text(), "Running bash...");
+
+        let mut state = StatusLineState::default();
+        state.set_activity(Activity::WaitingForPermission);
+        assert_eq!(state.activity_text(), "Waiting for permission...");
+
+        let mut state = StatusLineState::default();
+        state.set_activity(Activity::Compacting);
+        assert_eq!(state.activity_text(), "Compacting...");
+
+        let mut state = StatusLineState::default();
+        state.set_activity(Activity::WaitingForQuestion);
+        assert_eq!(state.activity_text(), "Waiting for answer...");
+
+        let mut state = StatusLineState::default();
+        state.set_activity(Activity::UpdatingAgents);
+        assert_eq!(state.activity_text(), "Updating AGENTS.md...");
     }
 
     #[test]
     fn spinner_char_some_when_waiting_for_question() {
         let mut state = StatusLineState::default();
-        state.activity = Activity::WaitingForQuestion;
+        state.set_activity(Activity::WaitingForQuestion);
         assert!(state.spinner_char().is_some());
     }
 
@@ -382,5 +370,61 @@ mod tests {
         assert_eq!(format_elapsed_compact(Duration::from_secs(3600)), "(1:00:00)");
         assert_eq!(format_elapsed_compact(Duration::from_secs(3661)), "(1:01:01)");
         assert_eq!(format_elapsed_compact(Duration::from_secs(3735)), "(1:02:15)");
+    }
+
+    #[test]
+    fn set_activity_sets_start_on_non_idle() {
+        let mut state = StatusLineState::default();
+        assert!(state.activity_start.is_none());
+        state.set_activity(Activity::Thinking);
+        assert!(state.activity_start.is_some());
+    }
+
+    #[test]
+    fn set_activity_clears_start_on_idle() {
+        let mut state = StatusLineState::default();
+        state.set_activity(Activity::Thinking);
+        assert!(state.activity_start.is_some());
+        state.set_activity(Activity::Idle);
+        assert!(state.activity_start.is_none());
+    }
+
+    #[test]
+    fn set_activity_resets_start_on_different_activity() {
+        let mut state = StatusLineState::default();
+        state.set_activity(Activity::Thinking);
+        let first_start = state.activity_start.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        state.set_activity(Activity::WaitingForPermission);
+        let second_start = state.activity_start.unwrap();
+        assert!(second_start > first_start, "activity_start should reset on change");
+    }
+
+    #[test]
+    fn set_activity_preserves_start_on_same_activity() {
+        let mut state = StatusLineState::default();
+        state.set_activity(Activity::Thinking);
+        let first_start = state.activity_start.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        state.set_activity(Activity::Thinking);
+        assert_eq!(state.activity_start.unwrap(), first_start, "same activity should preserve start");
+    }
+
+    #[test]
+    fn set_activity_resets_on_different_running_tool() {
+        use crate::tool::ToolName;
+        let mut state = StatusLineState::default();
+        state.set_activity(Activity::RunningTool {
+            tool_name: ToolName::Read,
+            args_summary: "src/main.rs".to_string(),
+        });
+        let first_start = state.activity_start.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        state.set_activity(Activity::RunningTool {
+            tool_name: ToolName::Read,
+            args_summary: "src/lib.rs".to_string(),
+        });
+        let second_start = state.activity_start.unwrap();
+        assert!(second_start > first_start, "different tool args should reset timer");
     }
 }
