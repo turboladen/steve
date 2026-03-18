@@ -996,10 +996,10 @@ impl App {
                 if let Some(last) = self.last_assistant_mut() {
                     last.ensure_preparing_tool_group();
                 }
-                self.status_line_state.activity = Activity::RunningTool {
+                self.status_line_state.set_activity(Activity::RunningTool {
                     tool_name,
                     args_summary: String::new(),
-                };
+                });
                 self.message_area_state.scroll_to_bottom();
             }
             AppEvent::LlmToolCall {
@@ -1012,10 +1012,10 @@ impl App {
                 if let Some(last) = self.last_assistant_mut() {
                     last.add_tool_call(tool_name, args_summary.clone(), diff_content);
                 }
-                self.status_line_state.activity = Activity::RunningTool {
+                self.status_line_state.set_activity(Activity::RunningTool {
                     tool_name,
                     args_summary,
-                };
+                });
                 self.message_area_state.scroll_to_bottom();
             }
             AppEvent::ToolResult {
@@ -1090,7 +1090,7 @@ impl App {
                 self.streaming_active = false;
                 self.stream_cancel = None;
                 self.interjection_tx = None;
-                self.status_line_state.activity = Activity::Idle;
+                self.status_line_state.set_activity(Activity::Idle);
 
                 // Remove trailing empty assistant message if present
                 if let Some(last) = self.messages.last()
@@ -1170,7 +1170,7 @@ impl App {
                 self.interjection_tx = None;
                 self.streaming_message = None;
                 self.messages.push(MessageBlock::Error { text: error });
-                self.status_line_state.activity = Activity::Idle;
+                self.status_line_state.set_activity(Activity::Idle);
                 self.message_area_state.scroll_to_bottom();
             }
             AppEvent::StreamNotice { text } => {
@@ -1204,7 +1204,7 @@ impl App {
                     args_summary: req.arguments_summary.clone(),
                     diff_content,
                 });
-                self.status_line_state.activity = Activity::WaitingForPermission;
+                self.status_line_state.set_activity(Activity::WaitingForPermission);
                 self.message_area_state.scroll_to_bottom();
                 self.pending_permission = Some(PendingPermission {
                     tool_name: req.tool_name,
@@ -1221,7 +1221,7 @@ impl App {
                     free_text: String::new(),
                     answered: None,
                 });
-                self.status_line_state.activity = Activity::WaitingForQuestion;
+                self.status_line_state.set_activity(Activity::WaitingForQuestion);
                 self.message_area_state.scroll_to_bottom();
                 self.pending_question = Some(PendingQuestion {
                     call_id: req.call_id,
@@ -1284,7 +1284,7 @@ impl App {
                 self.is_loading = false;
                 self.auto_compact_failed = true;
                 self.messages.push(MessageBlock::Error { text: error });
-                self.status_line_state.activity = Activity::Idle;
+                self.status_line_state.set_activity(Activity::Idle);
                 self.message_area_state.scroll_to_bottom();
                 tracing::error!("compaction failed, auto-compact disabled for this session");
             }
@@ -1294,7 +1294,7 @@ impl App {
                     tracing::info!("AGENTS.md update result arrived after cancellation, discarding");
                 } else {
                     self.is_loading = false;
-                    self.status_line_state.activity = Activity::Idle;
+                    self.status_line_state.set_activity(Activity::Idle);
                     self.pending_agents_update = Some(proposed_content.clone());
                     self.messages.push(MessageBlock::System {
                         text: "Proposed AGENTS.md update \u{2014} press **y** to apply, **n** to discard:".to_string(),
@@ -1312,7 +1312,7 @@ impl App {
                     tracing::info!("AGENTS.md update error arrived after cancellation, discarding");
                 } else {
                     self.is_loading = false;
-                    self.status_line_state.activity = Activity::Idle;
+                    self.status_line_state.set_activity(Activity::Idle);
                     self.messages.push(MessageBlock::Error { text: error });
                     self.message_area_state.scroll_to_bottom();
                     tracing::error!("AGENTS.md update failed");
@@ -1406,7 +1406,7 @@ impl App {
                     if let Some(perm) = self.pending_permission.take() {
                         let _ = perm.response_tx.send(PermissionReply::AllowOnce);
                         self.remove_last_permission_block();
-                        self.status_line_state.activity = Activity::Thinking;
+                        self.status_line_state.set_activity(Activity::Thinking);
                         self.message_area_state.scroll_to_bottom();
                     }
                     return Ok(());
@@ -1418,7 +1418,7 @@ impl App {
                         self.messages.push(MessageBlock::System {
                             text: format!("\u{2717} denied: {}", perm.tool_name),
                         });
-                        self.status_line_state.activity = Activity::Thinking;
+                        self.status_line_state.set_activity(Activity::Thinking);
                         self.message_area_state.scroll_to_bottom();
                     }
                     return Ok(());
@@ -1428,7 +1428,7 @@ impl App {
                         let tool_str = perm.tool_name.as_str().to_string();
                         let _ = perm.response_tx.send(PermissionReply::AllowAlways);
                         self.remove_last_permission_block();
-                        self.status_line_state.activity = Activity::Thinking;
+                        self.status_line_state.set_activity(Activity::Thinking);
                         self.message_area_state.scroll_to_bottom();
 
                         // Persist the grant to project config so it survives restarts
@@ -1472,7 +1472,7 @@ impl App {
                         let _ = q.response_tx.send(answer);
                         // Mark the question block as answered
                         self.mark_question_answered(&display_answer);
-                        self.status_line_state.activity = Activity::Thinking;
+                        self.status_line_state.set_activity(Activity::Thinking);
                         self.message_area_state.scroll_to_bottom();
                     }
                     return Ok(());
@@ -1481,7 +1481,7 @@ impl App {
                     if let Some(q) = self.pending_question.take() {
                         let _ = q.response_tx.send("User declined to answer.".to_string());
                         self.mark_question_answered("(skipped)");
-                        self.status_line_state.activity = Activity::Thinking;
+                        self.status_line_state.set_activity(Activity::Thinking);
                         self.message_area_state.scroll_to_bottom();
                     }
                     return Ok(());
@@ -1930,7 +1930,7 @@ impl App {
         self.messages.push(MessageBlock::System {
             text: "cancelled".to_string(),
         });
-        self.status_line_state.activity = Activity::Idle;
+        self.status_line_state.set_activity(Activity::Idle);
         self.message_area_state.scroll_to_bottom();
     }
 
@@ -2092,7 +2092,7 @@ impl App {
         let system_prompt = self.build_system_prompt();
         self.is_loading = true;
         self.streaming_active = true;
-        self.status_line_state.activity = Activity::Thinking;
+        self.status_line_state.set_activity(Activity::Thinking);
         self.status_line_state.context_window = resolved.config.context_window as u64;
 
         // Create a cancellation token for this stream
@@ -3121,7 +3121,7 @@ impl App {
                 });
                 self.message_area_state.scroll_to_bottom();
                 self.is_loading = true;
-                self.status_line_state.activity = Activity::UpdatingAgents;
+                self.status_line_state.set_activity(Activity::UpdatingAgents);
 
                 let api_model_id = resolved.api_model_id().to_string();
                 let event_tx = self.event_tx.clone();
@@ -3239,7 +3239,7 @@ impl App {
                 });
                 self.message_area_state.scroll_to_bottom();
                 self.is_loading = true;
-                self.status_line_state.activity = Activity::Compacting;
+                self.status_line_state.set_activity(Activity::Compacting);
 
                 // Build the transcript to summarize
                 let transcript = self.build_compact_prompt();

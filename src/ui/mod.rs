@@ -126,7 +126,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let has_pending_input = app.is_loading && !app.input.textarea.lines().join("").is_empty();
     let activity = if app.is_loading {
         let state = &app.status_line_state;
-        if state.activity != Activity::Idle {
+        if *state.activity() != Activity::Idle {
             state.spinner_char().map(|ch| (ch, state.activity_text(), has_pending_input))
         } else {
             None
