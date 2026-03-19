@@ -336,13 +336,21 @@ logging to file.
 - Scroll: Map `ScrollDown`→`scroll_down()` directly — do NOT invert (macOS already applies natural
   scrolling)
 - `/new` resets ALL session state: messages, tool cache, changeset, todos, tokens, context warning,
-  auto-compact flag, `pending_agents_update`. When adding session-scoped state, add its reset here
+  auto-compact flag, `pending_agents_update`, `stream_start_time`, `frozen_elapsed`. When adding
+  session-scoped state, add its reset here
 
 **Sidebar**: Changes (file diffs), Session (model/tokens/cost), Todos. Changeset recorded at
 `ToolResult` time, gated on `!output.is_error`. `strip_project_root()` takes `&str` not `&Path`.
 
 **Input area**: `INPUT_HEIGHT = 5` (1 border + 1 context + 3 textarea). Context line shows
-`[Mode] ~/path prompt_tokens/ctx (%)`.
+`[Mode] ~/path prompt_tokens/ctx (%)`. During/after streaming, elapsed timer prepends:
+`[Mode] ~/path elapsed · prompt_tokens/ctx (%)`.
+
+**Elapsed timers**: `stream_start_time: Option<Instant>` + `frozen_elapsed: Option<Duration>` on
+`App`. Rendering computes elapsed at render time:
+`frozen_elapsed.or_else(|| stream_start_time.map(|t| t.elapsed()))`. Per-activity timer:
+`activity_start: Option<Instant>` on `StatusLineState`, managed by `set_activity()` — the
+`activity` field is private, all changes must go through `set_activity()`.
 
 **Ambient context pressure**: `Theme::border_color(context_pct)` shifts borders through
 gray→amber→yellow→red at 40/60/80% thresholds.
