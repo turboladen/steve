@@ -6,6 +6,7 @@
 # Dolt database files (added by bd init)
 .dolt/
 *.db
+.beads/metadata.json
 
 # Claude
 .claude/settings.local.json
