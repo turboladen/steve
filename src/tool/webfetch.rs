@@ -44,9 +44,24 @@ fn execute(args: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         .and_then(|v| v.as_str())
         .context("missing 'url' parameter")?;
 
-    // Use a blocking HTTP request since our tool handlers are synchronous
+    // Reject non-HTTP(S) schemes to prevent SSRF via file://, data:, etc.
+    let parsed = reqwest::Url::parse(url)
+        .with_context(|| format!("invalid URL: {url}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        scheme => anyhow::bail!("disallowed URL scheme '{scheme}': only http and https are permitted"),
+    }
+
+    // Use a blocking HTTP request since our tool handlers are synchronous.
+    // Custom redirect policy rejects scheme changes (e.g., http→file:// SSRF).
     let response = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            match attempt.url().scheme() {
+                "http" | "https" => attempt.follow(),
+                _ => attempt.error(anyhow::anyhow!("redirect to non-http scheme blocked")),
+            }
+        }))
         .user_agent("steve/0.1")
         .build()?
         .get(url)
@@ -103,4 +118,100 @@ fn floor_char_boundary(s: &str, index: usize) -> usize {
         i -= 1;
     }
     i
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn floor_char_boundary_ascii_exact() {
+        let s = "hello world";
+        assert_eq!(floor_char_boundary(s, 5), 5);
+    }
+
+    #[test]
+    fn floor_char_boundary_multibyte_snaps_back() {
+        // '日' is 3 bytes in UTF-8
+        let s = "a日b";
+        // s = [0x61, 0xE6, 0x97, 0xA5, 0x62]
+        // index 2 is mid-character (inside '日'), should snap back to 1
+        assert_eq!(floor_char_boundary(s, 2), 1);
+        assert_eq!(floor_char_boundary(s, 3), 1);
+        // index 4 is exactly at 'b'
+        assert_eq!(floor_char_boundary(s, 4), 4);
+    }
+
+    #[test]
+    fn floor_char_boundary_beyond_length() {
+        let s = "abc";
+        assert_eq!(floor_char_boundary(s, 100), 3);
+    }
+
+    #[test]
+    fn floor_char_boundary_empty_string() {
+        assert_eq!(floor_char_boundary("", 0), 0);
+    }
+
+    #[test]
+    fn floor_char_boundary_four_byte_emoji() {
+        // '🦀' is 4 bytes: F0 9F A6 80
+        let s = "a🦀b";
+        // s = [0x61, 0xF0, 0x9F, 0xA6, 0x80, 0x62]
+        // Indices 2, 3, 4 are mid-emoji, should snap back to 1
+        assert_eq!(floor_char_boundary(s, 2), 1);
+        assert_eq!(floor_char_boundary(s, 3), 1);
+        assert_eq!(floor_char_boundary(s, 4), 1);
+        // index 5 is exactly 'b'
+        assert_eq!(floor_char_boundary(s, 5), 5);
+    }
+
+    #[test]
+    fn execute_missing_url_returns_error() {
+        let ctx = ToolContext {
+            project_root: std::path::PathBuf::from("/tmp"),
+            storage_dir: None,
+            task_store: None,
+            lsp_manager: None,
+        };
+        let result = execute(serde_json::json!({}), ctx);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("url"), "error should mention missing url param: {err}");
+    }
+
+    #[test]
+    fn tool_definition_parses() {
+        let entry = tool();
+        assert_eq!(entry.def.name, ToolName::Webfetch);
+        assert!(!entry.def.description.is_empty());
+    }
+
+    #[test]
+    fn rejects_file_scheme() {
+        let ctx = ToolContext {
+            project_root: std::path::PathBuf::from("/tmp"),
+            storage_dir: None,
+            task_store: None,
+            lsp_manager: None,
+        };
+        let result = execute(serde_json::json!({"url": "file:///etc/passwd"}), ctx);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("disallowed"), "should reject file:// scheme: {err}");
+    }
+
+    #[test]
+    fn rejects_data_scheme() {
+        let ctx = ToolContext {
+            project_root: std::path::PathBuf::from("/tmp"),
+            storage_dir: None,
+            task_store: None,
+            lsp_manager: None,
+        };
+        let result = execute(serde_json::json!({"url": "data:text/plain,hello"}), ctx);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("disallowed"), "should reject data: scheme: {err}");
+    }
 }

@@ -67,3 +67,59 @@ fn execute(args: Value, _ctx: ToolContext) -> anyhow::Result<ToolOutput> {
         is_error: false,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_ctx() -> ToolContext {
+        ToolContext {
+            project_root: std::path::PathBuf::from("/tmp"),
+            storage_dir: None,
+            task_store: None,
+            lsp_manager: None,
+        }
+    }
+
+    #[test]
+    fn stub_handler_returns_not_error() {
+        let result = execute(
+            serde_json::json!({"question": "Pick a color?"}),
+            make_ctx(),
+        )
+        .unwrap();
+        assert!(!result.is_error, "question stub should not be an error");
+    }
+
+    #[test]
+    fn stub_handler_output_contains_question_text() {
+        let result = execute(
+            serde_json::json!({"question": "What is your name?"}),
+            make_ctx(),
+        )
+        .unwrap();
+        assert!(
+            result.output.contains("What is your name?"),
+            "output should contain the question: {}",
+            result.output
+        );
+    }
+
+    #[test]
+    fn stub_handler_missing_question_uses_fallback() {
+        let result = execute(serde_json::json!({}), make_ctx()).unwrap();
+        assert!(
+            result.output.contains("(no question provided)"),
+            "output should contain fallback text: {}",
+            result.output
+        );
+        assert!(!result.is_error);
+    }
+
+    #[test]
+    fn tool_definition_parses() {
+        let entry = tool();
+        assert_eq!(entry.def.name, ToolName::Question);
+        assert!(!entry.def.description.is_empty());
+    }
+}
