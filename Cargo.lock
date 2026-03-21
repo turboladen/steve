@@ -3025,6 +3025,7 @@ dependencies = [
  "html2text",
  "ignore",
  "jsonc-parser",
+ "libc",
  "lsp-types",
  "mpatch",
  "ratatui",
