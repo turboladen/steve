@@ -256,7 +256,13 @@ accepts `"paths"` (array, multi-file), `"tail"` (last N lines), `"count"` (line 
 `len_chars() == 0` first and subtracts 1 for trailing `\n`.
 
 **Bash interception**: `check_native_tool_redirect()` rejects `cat`→read, `ls`→list, `find`→glob,
-`grep`→grep, `sed`→edit, `wc -l`→read(count). Compound commands pass through.
+`grep`→grep, `sed`→edit, `wc -l`→read(count). Compound commands (including newlines) pass through.
+
+**Webfetch security**: `execute()` rejects non-HTTP(S) URL schemes before issuing requests.
+Custom redirect policy blocks scheme-changing redirects (e.g., http→file:// SSRF).
+
+**Bash process cleanup**: `run_command()` spawns bash in its own process group
+(`process_group(0)`) and uses `libc::killpg` on timeout to kill the entire tree.
 
 **Exhaustive `ToolName` match locations** (all must update when adding variants):
 `extract_args_summary()` and `extract_diff_content()` in `app.rs`, `extract_tool_summary()` in
@@ -265,6 +271,9 @@ accepts `"paths"` (array, multi-file), `"tail"` (last N lines), `"count"` (line 
 `is_write_tool()`/`intent_category()`/`tool_marker()`/`visual_category()`/`gutter_char()` in
 `tool/mod.rs`, `build_mode_rules()` and `plan_mode_rules()` in `permission/mod.rs`. Inner operation
 dispatches (e.g., edit `operation`) must also list all values explicitly.
+
+`invalidate_write_tool_cache()` in `stream.rs` maps write `ToolName` variants to their
+path arg keys for cache invalidation — must stay in sync with tool argument names.
 
 When adding edit operations: update `extract_diff_content()` in `app.rs` and
 `build_permission_summary()` in `stream.rs`.

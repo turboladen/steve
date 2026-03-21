@@ -147,8 +147,13 @@ pub fn persist_allow_tool(project_root: &Path, tool_name: &str) -> Result<()> {
     let json_str = serde_json::to_string_pretty(&value)
         .context("failed to serialize config")?;
 
-    // Atomic write: write to tmp file then rename to avoid partial writes on crash
-    let tmp_path = config_path.with_extension("jsonc.tmp");
+    // Atomic write: write to uniquely-named tmp file then rename to avoid
+    // partial writes on crash and races between concurrent persist calls.
+    let tmp_path = config_path.with_extension(format!(
+        "jsonc.{}-{:?}.tmp",
+        std::process::id(),
+        std::thread::current().id()
+    ));
     std::fs::write(&tmp_path, json_str.as_bytes())
         .with_context(|| format!("failed to write {}", tmp_path.display()))?;
     std::fs::rename(&tmp_path, &config_path)

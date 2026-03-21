@@ -257,11 +257,18 @@ pub fn profile_plan_rules(
 
     // Path-based rules, but strip write-tool allow rules in Plan mode
     for rule in path_rules {
-        let is_write = match &rule.tool {
-            ToolMatcher::Specific(tool) => tool.is_write_tool(),
-            ToolMatcher::All => false, // wildcard rules pass through (deny still works)
+        let strip = match &rule.tool {
+            ToolMatcher::Specific(tool) => {
+                // Strip Allow rules for write tools in Plan mode
+                tool.is_write_tool() && matches!(rule.action, types::PermissionActionSerde::Allow)
+            }
+            ToolMatcher::All => {
+                // A wildcard Allow rule could unlock write tools in Plan mode — strip it.
+                // Wildcard Deny rules pass through safely (they restrict, not grant).
+                matches!(rule.action, types::PermissionActionSerde::Allow)
+            }
         };
-        if is_write && matches!(rule.action, types::PermissionActionSerde::Allow) {
+        if strip {
             continue; // Don't allow writes in Plan mode
         }
         rules.push(rule.clone());
@@ -657,6 +664,41 @@ mod tests {
         );
         // Path rule for edit is stripped in Plan mode — edit is denied
         assert_eq!(engine.check(ToolName::Edit, Some("src/main.rs"), None), PermissionAction::Deny);
+    }
+
+    #[test]
+    fn plan_mode_strips_wildcard_allow_path_rules() {
+        let path_rules = vec![
+            PermissionRule {
+                tool: ToolMatcher::All,
+                pattern: "**".into(),
+                action: types::PermissionActionSerde::Allow,
+            },
+        ];
+        let engine = PermissionEngine::new(
+            profile_plan_rules(PermissionProfile::Standard, &[], &path_rules),
+        );
+        // Wildcard Allow path rule is stripped in Plan mode — write tools are still denied
+        assert_eq!(engine.check(ToolName::Edit, Some("src/main.rs"), None), PermissionAction::Deny);
+        assert_eq!(engine.check(ToolName::Write, Some("foo.txt"), None), PermissionAction::Deny);
+        // Read tools should still be allowed (from plan_mode_rules defaults)
+        assert_eq!(engine.check(ToolName::Read, Some("src/main.rs"), None), PermissionAction::Allow);
+    }
+
+    #[test]
+    fn plan_mode_keeps_wildcard_deny_path_rules() {
+        let path_rules = vec![
+            PermissionRule {
+                tool: ToolMatcher::All,
+                pattern: "secret/**".into(),
+                action: types::PermissionActionSerde::Deny,
+            },
+        ];
+        let engine = PermissionEngine::new(
+            profile_plan_rules(PermissionProfile::Standard, &[], &path_rules),
+        );
+        // Wildcard Deny is preserved — blocks reads too
+        assert_eq!(engine.check(ToolName::Read, Some("secret/key.txt"), None), PermissionAction::Deny);
     }
 
     #[test]

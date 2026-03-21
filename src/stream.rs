@@ -238,8 +238,8 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
     let mut final_chance_taken = false;
 
     // Track previous iteration's tool count for keeping 2 iterations uncompressed.
-    // Initialized at top of loop from current_iteration_tool_count before each iteration.
-    let mut prev_iteration_tool_count: usize;
+    // Updated at bottom of loop before current_iteration_tool_count is reset to 0.
+    let mut prev_iteration_tool_count: usize = 0;
 
     // Track consecutive iterations where ALL tool calls were cache-repeat hits.
     // When this reaches the threshold, inject a strong "stop looping" message.
@@ -282,9 +282,9 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
         total_iteration_count += 1;
         iteration_count += 1;
-        // Update prev_iteration_tool_count before any early `continue` paths
-        // (final-chance) can skip the normal reset at the bottom of the loop.
-        prev_iteration_tool_count = current_iteration_tool_count;
+        // NOTE: prev_iteration_tool_count is updated at the bottom of the loop,
+        // right before current_iteration_tool_count is reset to 0, so it captures
+        // the actual tool count from the previous iteration.
         let mut user_interacted_this_iteration = false;
         let call_start = std::time::Instant::now();
         if iteration_count > effective_max {
@@ -371,8 +371,9 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             }
         }
 
-        // Reset counters for the next iteration
-        // (prev_iteration_tool_count already updated at top of loop)
+        // Capture this iteration's tool count before resetting, so keep_recent
+        // at the top of the next iteration correctly reflects "last 2 iterations".
+        prev_iteration_tool_count = current_iteration_tool_count;
         current_iteration_tool_count = 0;
         current_iteration_cache_repeats = 0;
 
@@ -1459,11 +1460,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                         cache.put(tc.tool_name, &tc.args, &result);
 
                         // Invalidate cache entries when write operations modify files
-                        if tc.tool_name.is_write_tool() {
-                            if let Some(path) = tc.args.get("file_path").and_then(|v| v.as_str()) {
-                                cache.invalidate_path(path);
-                            }
-                        }
+                        invalidate_write_tool_cache(tc.tool_name, &tc.args, &mut cache);
 
                         result
                     };
@@ -1515,11 +1512,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                         cache.put(tc.tool_name, &tc.args, &result);
 
                         // Invalidate cache entries when write operations modify files
-                        if tc.tool_name.is_write_tool() {
-                            if let Some(path) = tc.args.get("file_path").and_then(|v| v.as_str()) {
-                                cache.invalidate_path(path);
-                            }
-                        }
+                        invalidate_write_tool_cache(tc.tool_name, &tc.args, &mut cache);
 
                         result
                     };
@@ -2160,6 +2153,33 @@ fn is_valid_tool_call(tc: &PendingToolCall) -> bool {
         && !tc.id.is_empty()
         && !tc.function_name.is_empty()
         && serde_json::from_str::<Value>(&tc.arguments).is_ok()
+}
+
+/// Invalidate cache entries for paths affected by a write tool.
+///
+/// Different write tools use different argument keys for their paths:
+/// - `edit`/`write`/`patch` use `"file_path"`
+/// - `move`/`copy` use `"from_path"` and `"to_path"`
+/// - `delete`/`mkdir` use `"path"`
+fn invalidate_write_tool_cache(
+    tool_name: ToolName,
+    args: &Value,
+    cache: &mut ToolResultCache,
+) {
+    if !tool_name.is_write_tool() {
+        return;
+    }
+    let path_keys: &[&str] = match tool_name {
+        ToolName::Edit | ToolName::Write | ToolName::Patch => &["file_path"],
+        ToolName::Move | ToolName::Copy => &["from_path", "to_path"],
+        ToolName::Delete | ToolName::Mkdir => &["path"],
+        _ => return,
+    };
+    for key in path_keys {
+        if let Some(path) = args.get(*key).and_then(|v| v.as_str()) {
+            cache.invalidate_path(path);
+        }
+    }
 }
 
 /// Estimate the character count of a message for token approximation.

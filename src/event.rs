@@ -129,3 +129,68 @@ impl std::ops::AddAssign for StreamUsage {
         self.total_tokens += rhs.total_tokens;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_usage_default_all_zeros() {
+        let usage = StreamUsage::default();
+        assert_eq!(usage.prompt_tokens, 0);
+        assert_eq!(usage.completion_tokens, 0);
+        assert_eq!(usage.total_tokens, 0);
+    }
+
+    #[test]
+    fn stream_usage_add_assign_sums_fields() {
+        let mut a = StreamUsage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+        };
+        let b = StreamUsage {
+            prompt_tokens: 200,
+            completion_tokens: 75,
+            total_tokens: 275,
+        };
+        a += b;
+        assert_eq!(a.prompt_tokens, 300);
+        assert_eq!(a.completion_tokens, 125);
+        assert_eq!(a.total_tokens, 425);
+    }
+
+    #[test]
+    fn stream_usage_add_assign_identity() {
+        let mut usage = StreamUsage {
+            prompt_tokens: 42,
+            completion_tokens: 13,
+            total_tokens: 55,
+        };
+        usage += StreamUsage::default();
+        assert_eq!(usage.prompt_tokens, 42);
+        assert_eq!(usage.completion_tokens, 13);
+        assert_eq!(usage.total_tokens, 55);
+    }
+
+    #[test]
+    fn question_request_debug_contains_fields_and_redacts_sender() {
+        let (tx, _rx) = tokio::sync::oneshot::channel::<String>();
+        let req = QuestionRequest {
+            call_id: "call-123".to_string(),
+            question: "What color?".to_string(),
+            options: vec!["red".to_string(), "blue".to_string()],
+            response_tx: tx,
+        };
+        let debug = format!("{req:?}");
+        assert!(debug.contains("call_id"));
+        assert!(debug.contains("call-123"));
+        assert!(debug.contains("question"));
+        assert!(debug.contains("What color?"));
+        assert!(debug.contains("options"));
+        assert!(debug.contains("red"));
+        assert!(debug.contains("<oneshot::Sender>"));
+        // Must NOT contain the actual Sender debug repr
+        assert!(!debug.contains("Sender {"));
+    }
+}

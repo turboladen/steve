@@ -88,6 +88,19 @@ impl ToolResultCache {
                     );
                     self.entries.remove(&key);
                     self.hit_counts.remove(&key);
+                    // Also clean path_index to prevent duplicate keys on re-put
+                    if let Some(path) = self.extract_path(tool_name, args) {
+                        let mut remove_entry = false;
+                        if let Some(keys) = self.path_index.get_mut(&path) {
+                            keys.retain(|k| k != &key);
+                            if keys.is_empty() {
+                                remove_entry = true;
+                            }
+                        }
+                        if remove_entry {
+                            self.path_index.remove(&path);
+                        }
+                    }
                     self.misses += 1;
                     return None;
                 }

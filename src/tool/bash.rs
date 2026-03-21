@@ -1,7 +1,9 @@
 //! Bash tool — executes shell commands.
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -59,6 +61,7 @@ fn check_native_tool_redirect(command: &str) -> Option<String> {
         || trimmed.contains("&&")
         || trimmed.contains("||")
         || trimmed.contains(';')
+        || trimmed.contains('\n')
         || trimmed.contains('`')
         || trimmed.contains("$(")
     {
@@ -150,21 +153,39 @@ struct CommandResult {
 }
 
 fn run_command(command: &str, cwd: &Path, timeout_secs: u64) -> Result<CommandResult> {
-    let mut child = Command::new("bash")
-        .arg("-c")
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c")
         .arg(command)
         .current_dir(cwd)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("failed to spawn bash command")?;
+        .stderr(Stdio::piped());
+    // Spawn in its own process group so we can kill the whole tree on timeout
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let mut child = cmd.spawn().context("failed to spawn bash command")?;
 
     let timeout = Duration::from_secs(timeout_secs);
-    let status = match child.wait_timeout(timeout)? {
+    let status: ExitStatus = match child.wait_timeout(timeout)? {
         Some(status) => status,
         None => {
-            // Timed out — kill the child and reap it
-            let _ = child.kill();
+            // Timed out — kill the entire process group, then reap the child
+            #[cfg(unix)]
+            {
+                // SAFETY: child.id() is a valid PID, and the child was spawned in its own
+                // process group via CommandExt::process_group(0); killpg targets that group.
+                let pgid = child.id() as libc::pid_t;
+                let res = unsafe { libc::killpg(pgid, libc::SIGKILL) };
+                if res != 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.raw_os_error() != Some(libc::ESRCH) {
+                        tracing::warn!(pgid, %err, "failed to kill process group");
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = child.kill();
+            }
             let _ = child.wait();
             bail!("command timed out after {timeout_secs}s");
         }
@@ -425,5 +446,12 @@ mod tests {
         let output = execute(args, ctx).unwrap();
         assert!(output.is_error);
         assert!(output.output.contains("`read`"));
+    }
+
+    #[test]
+    fn newline_treated_as_compound_command() {
+        // A newline-separated command should be treated as compound (not redirected)
+        assert!(check_native_tool_redirect("cat foo.rs\necho done").is_none());
+        assert!(check_native_tool_redirect("grep pattern\nls").is_none());
     }
 }
