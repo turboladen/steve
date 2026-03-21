@@ -171,8 +171,16 @@ fn run_command(command: &str, cwd: &Path, timeout_secs: u64) -> Result<CommandRe
             // Timed out — kill the entire process group, then reap the child
             #[cfg(unix)]
             {
-                // SAFETY: child.id() is a valid PID; negating it targets the process group
-                unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL); }
+                // SAFETY: child.id() is a valid PID, and the child was spawned in its own
+                // process group via CommandExt::process_group(0); killpg targets that group.
+                let pgid = child.id() as libc::pid_t;
+                let res = unsafe { libc::killpg(pgid, libc::SIGKILL) };
+                if res != 0 {
+                    let err = std::io::Error::last_os_error();
+                    if err.raw_os_error() != Some(libc::ESRCH) {
+                        tracing::warn!(pgid, %err, "failed to kill process group");
+                    }
+                }
             }
             #[cfg(not(unix))]
             {

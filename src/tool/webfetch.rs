@@ -53,7 +53,7 @@ fn execute(args: Value, _ctx: ToolContext) -> Result<ToolOutput> {
     }
 
     // Use a blocking HTTP request since our tool handlers are synchronous.
-    // Custom redirect policy rejects scheme changes (e.g., http→file:// SSRF).
+    // Custom redirect policy rejects redirects to non-HTTP(S) schemes (e.g., http→file:// SSRF).
     let response = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
