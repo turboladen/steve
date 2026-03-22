@@ -11,6 +11,7 @@ pub mod event;
 pub mod export;
 pub mod file_ref;
 pub mod lsp;
+pub mod mcp;
 pub mod permission;
 pub mod project;
 pub mod provider;

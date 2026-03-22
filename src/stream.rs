@@ -88,6 +88,8 @@ pub struct AgentSpawner {
     pub usage_project_id: String,
     pub usage_session_id: String,
     pub cancel_token: CancellationToken,
+    /// MCP manager for General agents (None for Explore/Plan).
+    pub mcp_manager: Option<Arc<tokio::sync::Mutex<crate::mcp::McpManager>>>,
 }
 
 /// Parameters for launching a streaming LLM request.
@@ -121,6 +123,9 @@ pub struct StreamRequest {
     pub is_plan_mode: bool,
     /// Resources for spawning sub-agents. `None` in sub-agent streams to prevent recursion.
     pub agent_spawner: Option<AgentSpawner>,
+    /// MCP manager for dynamic tool execution. May have no servers (empty snapshot).
+    /// `None` for sub-agent streams where MCP should be unavailable.
+    pub mcp_manager: Option<Arc<tokio::sync::Mutex<crate::mcp::McpManager>>>,
 }
 
 /// Spawn a tokio task that streams the LLM response and sends events.
@@ -162,6 +167,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         usage_model_cost,
         is_plan_mode,
         agent_spawner,
+        mcp_manager,
     } = req;
 
     tracing::info!(model = %model, "starting LLM stream");
@@ -189,25 +195,46 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
     ));
 
     // Build tool definitions for the API (mutable — stripped at CRITICAL threshold).
-    // Helper closure rebuilds tools from the registry (used for initial build + restoration).
-    let build_tools = |registry: &ToolRegistry| -> Vec<ChatCompletionTools> {
-        registry
+    // Helper: convert a JSON tool def to ChatCompletionTools.
+    fn json_to_tool(def: &Value) -> Option<ChatCompletionTools> {
+        let func = def.get("function")?;
+        Some(ChatCompletionTools::Function(ChatCompletionTool {
+            function: FunctionObject {
+                name: func.get("name")?.as_str()?.to_string(),
+                description: func.get("description").and_then(|d| d.as_str()).map(String::from),
+                parameters: func.get("parameters").cloned(),
+                strict: None,
+            },
+        }))
+    }
+
+    // Get a lock-free snapshot of MCP tool metadata. We briefly await the lock
+    // only to clone the Arc, then drop it so streams always get a consistent
+    // view of available MCP tools.
+    let mcp_snapshot: Option<std::sync::Arc<crate::mcp::McpToolSnapshot>> = if let Some(ref mgr) = mcp_manager {
+        let mgr = mgr.lock().await;
+        let snap = mgr.tool_snapshot();
+        if !snap.is_empty() { Some(snap) } else { None }
+    } else {
+        None
+    };
+
+    // Helper closure rebuilds tools from the registry + MCP snapshot (no mutex needed).
+    let build_tools = |registry: &ToolRegistry, snap: &Option<std::sync::Arc<crate::mcp::McpToolSnapshot>>| -> Vec<ChatCompletionTools> {
+        let mut tools: Vec<ChatCompletionTools> = registry
             .tool_definitions()
             .into_iter()
-            .filter_map(|def| {
-                let func = def.get("function")?;
-                Some(ChatCompletionTools::Function(ChatCompletionTool {
-                    function: FunctionObject {
-                        name: func.get("name")?.as_str()?.to_string(),
-                        description: func.get("description").and_then(|d| d.as_str()).map(String::from),
-                        parameters: func.get("parameters").cloned(),
-                        strict: None,
-                    },
-                }))
-            })
-            .collect()
+            .filter_map(|def| json_to_tool(&def))
+            .collect();
+
+        // Append MCP tool definitions from the lock-free snapshot
+        if let Some(snap) = snap {
+            tools.extend(snap.tool_definitions().iter().filter_map(|def| json_to_tool(def)));
+        }
+
+        tools
     };
-    let mut tools: Option<Vec<ChatCompletionTools>> = tool_registry.as_ref().map(|r| build_tools(r));
+    let mut tools: Option<Vec<ChatCompletionTools>> = tool_registry.as_ref().map(|r| build_tools(r, &mcp_snapshot));
 
     let mut total_usage = StreamUsage::default();
     let mut current_iteration_tool_count: usize = 0;
@@ -276,7 +303,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             if tools_stripped {
                 tools_stripped = false;
                 final_chance_taken = false;
-                tools = tool_registry.as_ref().map(|r| build_tools(r));
+                tools = tool_registry.as_ref().map(|r| build_tools(r, &mcp_snapshot));
             }
         }
 
@@ -924,7 +951,15 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             action: PermissionAction,
         }
 
+        struct McpPreparedToolCall {
+            id: String,
+            prefixed_name: String,
+            args: Value,
+            action: PermissionAction,
+        }
+
         let mut prepared: Vec<PreparedToolCall> = Vec::new();
+        let mut mcp_pending: Vec<McpPreparedToolCall> = Vec::new();
 
         for idx in &sorted_indices {
             let tc = &pending_tool_calls[idx];
@@ -933,6 +968,28 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             let tool_name: ToolName = match tc.function_name.parse() {
                 Ok(name) => name,
                 Err(_) => {
+                    // Check MCP snapshot (lock-free) before returning error
+                    let is_mcp = mcp_snapshot
+                        .as_ref()
+                        .is_some_and(|snap| snap.has_tool(&tc.function_name));
+
+                    if is_mcp {
+                        // Route to MCP execution
+                        let action = if let Some(ref engine) = permission_engine {
+                            let engine = engine.lock().await;
+                            engine.check_mcp(&tc.function_name)
+                        } else {
+                            PermissionAction::Allow
+                        };
+                        mcp_pending.push(McpPreparedToolCall {
+                            id: tc.id.clone(),
+                            prefixed_name: tc.function_name.clone(),
+                            args: args.clone(),
+                            action,
+                        });
+                        continue;
+                    }
+
                     tracing::warn!(tool = %tc.function_name, "unknown tool name from LLM, returning error");
                     // Must provide a tool result for every tool_call_id in the assistant message
                     messages.push(ChatCompletionRequestMessage::Tool(
@@ -1534,6 +1591,110 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             }
         }
 
+        // ── Phase 4: Execute MCP tool calls sequentially ──
+        // MCP tools are always sequential (external IPC).
+        for mcp_tc in &mcp_pending {
+            if cancel_token.is_cancelled() {
+                tracing::info!("stream cancelled during MCP tool execution");
+                let _ = event_tx.send(AppEvent::LlmFinish {
+                    usage: Some(total_usage),
+                });
+                return Ok(());
+            }
+
+            // Handle permission
+            if matches!(mcp_tc.action, PermissionAction::Deny) {
+                messages.push(ChatCompletionRequestMessage::Tool(
+                    ChatCompletionRequestToolMessage {
+                        content: ChatCompletionRequestToolMessageContent::Text(
+                            "Error: MCP tool call denied by permission policy.".into(),
+                        ),
+                        tool_call_id: mcp_tc.id.clone(),
+                    },
+                ));
+                current_iteration_tool_count += 1;
+                continue;
+            }
+
+            if matches!(mcp_tc.action, PermissionAction::Ask) {
+                // Send permission request to UI
+                let summary = crate::mcp::mcp_permission_summary(&mcp_tc.prefixed_name, &mcp_tc.args);
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                // Use the first native tool name just for the PermissionRequest type
+                // (the UI will show the MCP summary string, not the tool name)
+                let _ = event_tx.send(AppEvent::PermissionRequest(PermissionRequest {
+                    call_id: mcp_tc.id.clone(),
+                    tool_name: ToolName::Bash, // placeholder — UI shows summary, not this
+                    arguments_summary: summary,
+                    tool_args: mcp_tc.args.clone(),
+                    response_tx: reply_tx,
+                }));
+
+                match reply_rx.await {
+                    Ok(PermissionReply::AllowOnce) => {
+                        user_interacted_this_iteration = true;
+                    }
+                    Ok(PermissionReply::AllowAlways) => {
+                        user_interacted_this_iteration = true;
+                        if let Some(ref engine) = permission_engine {
+                            let mut engine = engine.lock().await;
+                            engine.grant_mcp_session(mcp_tc.prefixed_name.clone());
+                        }
+                    }
+                    Ok(PermissionReply::Deny) | Err(_) => {
+                        messages.push(ChatCompletionRequestMessage::Tool(
+                            ChatCompletionRequestToolMessage {
+                                content: ChatCompletionRequestToolMessageContent::Text(
+                                    "Error: MCP tool call denied by user.".into(),
+                                ),
+                                tool_call_id: mcp_tc.id.clone(),
+                            },
+                        ));
+                        current_iteration_tool_count += 1;
+                        continue;
+                    }
+                }
+            }
+
+            // Execute the MCP tool call.
+            // The tokio::sync::Mutex is held across the await — this is safe (it's
+            // designed for this), and the lock is sequential with other MCP calls in
+            // this iteration. The snapshot handles all read-only access without locking.
+            let (result_text, is_error) = if let Some(ref mgr) = mcp_manager {
+                let mgr = mgr.lock().await;
+                match mgr.call_tool(&mcp_tc.prefixed_name, mcp_tc.args.clone()).await {
+                    Ok((text, is_err)) => (text, is_err),
+                    Err(e) => (format!("MCP tool error: {e}"), true),
+                }
+            } else {
+                ("Error: MCP manager not available".into(), true)
+            };
+
+            // Emit a notice for UI feedback. We intentionally do NOT emit
+            // AppEvent::LlmToolCall/ToolResult with a placeholder ToolName (e.g., Bash)
+            // because that would misclassify MCP calls in the UI: wrong tool grouping,
+            // wrong gutter markers, and app-level side effects (e.g., git refresh on
+            // bash success) would trigger incorrectly.
+            let mcp_summary = crate::mcp::mcp_permission_summary(&mcp_tc.prefixed_name, &mcp_tc.args);
+            if is_error {
+                let _ = event_tx.send(AppEvent::StreamNotice {
+                    text: format!("⚠ {mcp_summary} → error"),
+                });
+            } else {
+                let _ = event_tx.send(AppEvent::StreamNotice {
+                    text: format!("⚙ {mcp_summary} → ok"),
+                });
+            }
+
+            messages.push(ChatCompletionRequestMessage::Tool(
+                ChatCompletionRequestToolMessage {
+                    content: ChatCompletionRequestToolMessageContent::Text(result_text),
+                    tool_call_id: mcp_tc.id.clone(),
+                },
+            ));
+            current_iteration_tool_count += 1;
+        }
+
         // Reset iteration counter if user granted permission this iteration
         if user_interacted_this_iteration {
             tracing::debug!(
@@ -1548,7 +1709,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             if tools_stripped {
                 tools_stripped = false;
                 final_chance_taken = false;
-                tools = tool_registry.as_ref().map(|r| build_tools(r));
+                tools = tool_registry.as_ref().map(|r| build_tools(r, &mcp_snapshot));
             }
         }
 
@@ -1741,6 +1902,12 @@ async fn run_sub_agent(
         usage_model_cost: None,
         is_plan_mode: matches!(agent_type, AgentType::Plan),
         agent_spawner: None, // No recursion
+        // General agents inherit MCP tools; Explore/Plan do not
+        mcp_manager: if agent_type == AgentType::General {
+            spawner.mcp_manager.clone()
+        } else {
+            None
+        },
     };
 
     // Run the sub-agent stream concurrently with event processing.
@@ -2549,6 +2716,7 @@ mod tests {
             usage_model_cost: None,
             is_plan_mode: false,
             agent_spawner: None,
+            mcp_manager: None,
         }
     }
 
@@ -2826,6 +2994,7 @@ mod tests {
             usage_model_cost: None,
             is_plan_mode: false,
             agent_spawner: None,
+            mcp_manager: None,
         };
 
         run_stream(req).await.expect("cache hit stream should succeed");
@@ -3593,6 +3762,7 @@ mod tests {
             usage_model_cost: None,
             is_plan_mode: true,
             agent_spawner: None,
+            mcp_manager: None,
         };
 
         run_stream(req).await.expect("plan mode stream should succeed");
@@ -3698,6 +3868,7 @@ mod tests {
             usage_model_cost: None,
             is_plan_mode: false,
             agent_spawner: None,
+            mcp_manager: None,
         };
 
         run_stream(req).await.expect("trust-mode edit stream should succeed");

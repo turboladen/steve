@@ -544,6 +544,9 @@ pub struct App {
     /// LSP manager (shared with tool handlers via ToolContext).
     lsp_manager: Arc<std::sync::Mutex<crate::lsp::LspManager>>,
 
+    /// MCP manager for dynamic tool/resource servers.
+    mcp_manager: Arc<tokio::sync::Mutex<crate::mcp::McpManager>>,
+
     /// Usage analytics writer (SQLite background thread).
     usage_writer: UsageWriter,
 
@@ -596,6 +599,27 @@ impl App {
         let lsp_manager = Arc::new(std::sync::Mutex::new(
             crate::lsp::LspManager::new(project.root.clone()),
         ));
+
+        // Build MCP manager (servers started in background after app init)
+        let mcp_manager = Arc::new(tokio::sync::Mutex::new(
+            crate::mcp::McpManager::new(),
+        ));
+
+        // Configure MCP-related permission state on the engine
+        {
+            // Safe: engine was just created, no contention possible
+            if let Ok(mut engine) = permission_engine.try_lock() {
+                engine.set_profile(profile);
+
+                let mcp_overrides: std::collections::HashSet<String> = config.allow_tools.iter()
+                    .filter(|s| crate::mcp::types::parse_prefixed_tool_name(s).is_some())
+                    .cloned()
+                    .collect();
+                if !mcp_overrides.is_empty() {
+                    engine.set_mcp_overrides(mcp_overrides);
+                }
+            }
+        }
 
         // Build startup messages
         let mut messages = Vec::new();
@@ -662,6 +686,7 @@ impl App {
             selection_state: SelectionState::default(),
             last_message_area: ratatui::layout::Rect::default(),
             lsp_manager,
+            mcp_manager,
             usage_writer,
             event_tx,
             event_rx,
@@ -704,6 +729,23 @@ impl App {
                         }
                         let _ = tx.send(AppEvent::LspStatus { servers: status });
                     }
+                }
+            });
+        }
+
+        // Start MCP servers in background (non-blocking)
+        if !self.config.mcp_servers.is_empty() {
+            let mcp = self.mcp_manager.clone();
+            let tx = self.event_tx.clone();
+            let configs = self.config.mcp_servers.clone();
+            tokio::spawn(async move {
+                let mut mgr = mcp.lock().await;
+                mgr.start_servers(&configs).await;
+                let summary = mgr.server_summary();
+                if !summary.is_empty() {
+                    let _ = tx.send(AppEvent::StreamNotice {
+                        text: format!("MCP servers started: {}", summary.join(", ")),
+                    });
                 }
             });
         }
@@ -1444,13 +1486,19 @@ impl App {
                 (KeyCode::Char('a'), _) | (KeyCode::Char('A'), _) => {
                     if let Some(perm) = self.pending_permission.take() {
                         let tool_str = perm.tool_name.as_str().to_string();
+                        // Check if this is an MCP tool (placeholder ToolName::Bash
+                        // with MCP summary). MCP grants are session-only — don't
+                        // persist to config since MCP tool names are runtime-dynamic.
+                        let is_mcp = perm.summary.starts_with("MCP: ");
                         let _ = perm.response_tx.send(PermissionReply::AllowAlways);
                         self.remove_last_permission_block();
                         self.status_line_state.set_activity(Activity::Thinking);
                         self.message_area_state.scroll_to_bottom();
 
-                        // Persist the grant to project config so it survives restarts
-                        self.persist_tool_grant(&tool_str);
+                        if !is_mcp {
+                            // Persist the grant to project config so it survives restarts
+                            self.persist_tool_grant(&tool_str);
+                        }
                     }
                     return Ok(());
                 }
@@ -2193,7 +2241,9 @@ impl App {
                 usage_project_id: self.project.id.clone(),
                 usage_session_id: session_id.clone(),
                 cancel_token: cancel_token.clone(),
+                mcp_manager: Some(self.mcp_manager.clone()),
             }),
+            mcp_manager: Some(self.mcp_manager.clone()),
         });
 
         Ok(())
@@ -2605,9 +2655,11 @@ impl App {
 
         // Spawn a task to update the engine since it requires async lock
         let engine = self.permission_engine.clone();
+        let is_plan = self.input.mode == AgentMode::Plan;
         tokio::spawn(async move {
             let mut engine = engine.lock().await;
             engine.set_rules(rules);
+            engine.set_plan_mode(is_plan);
         });
     }
 
@@ -2715,6 +2767,45 @@ impl App {
                 section.push_str(&format!("\n### {label}\n\n{}\n", file.content));
             }
             parts.push(section);
+        }
+
+        // Inject MCP resource context (if any servers provide resources)
+        // Note: This is a sync context, so we use try_lock + cached resources only
+        if let Ok(mgr) = self.mcp_manager.try_lock() {
+            if mgr.has_servers() {
+                let resources = mgr.all_resources();
+                if !resources.is_empty() {
+                    let mut section = String::from("\n## MCP Context\n");
+                    let mut total_len = 0;
+                    for (server_id, resource) in &resources {
+                        let name = &resource.name;
+                        let desc = resource.description.as_deref().unwrap_or("");
+                        let entry = format!("\n- **{server_id}/{name}**: {desc}\n");
+                        total_len += entry.len();
+                        if total_len > 2000 {
+                            section.push_str("\n(additional resources omitted)\n");
+                            break;
+                        }
+                        section.push_str(&entry);
+                    }
+                    parts.push(section);
+                }
+
+                // Add MCP tool guidance
+                let tool_defs = mgr.all_tool_defs();
+                if !tool_defs.is_empty() {
+                    let mut guidance = String::from("\n## MCP Tools\n\nExternal tools provided by MCP servers. \
+                        These tools use prefixed names (`mcp__{server}__{tool}`). Use them when native tools \
+                        don't cover the task.\n");
+                    for (server_id, tool) in &tool_defs {
+                        let desc = tool.description.as_deref().unwrap_or("(no description)");
+                        let prefixed = crate::mcp::types::prefixed_tool_name(server_id, &tool.name);
+                        guidance.push_str(&format!("\n- `{prefixed}`: {desc}"));
+                    }
+                    guidance.push('\n');
+                    parts.push(guidance);
+                }
+            }
         }
 
         if self.input.mode == AgentMode::Plan {
