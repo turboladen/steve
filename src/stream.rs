@@ -207,25 +207,34 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         }))
     }
 
-    // Helper closure rebuilds tools from the registry + MCP (used for initial build + restoration).
-    let build_tools = |registry: &ToolRegistry, mcp: &Option<Arc<tokio::sync::Mutex<crate::mcp::McpManager>>>| -> Vec<ChatCompletionTools> {
+    // Get a lock-free snapshot of MCP tool metadata (survives mutex contention).
+    let mcp_snapshot: Option<std::sync::Arc<crate::mcp::McpToolSnapshot>> = if let Some(ref mgr) = mcp_manager {
+        if let Ok(mgr) = mgr.try_lock() {
+            let snap = mgr.tool_snapshot();
+            if !snap.is_empty() { Some(snap) } else { None }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Helper closure rebuilds tools from the registry + MCP snapshot (no mutex needed).
+    let build_tools = |registry: &ToolRegistry, snap: &Option<std::sync::Arc<crate::mcp::McpToolSnapshot>>| -> Vec<ChatCompletionTools> {
         let mut tools: Vec<ChatCompletionTools> = registry
             .tool_definitions()
             .into_iter()
             .filter_map(|def| json_to_tool(&def))
             .collect();
 
-        // Append MCP tool definitions (if any servers connected)
-        if let Some(mgr) = mcp {
-            if let Ok(mgr) = mgr.try_lock() {
-                let mcp_defs = mgr.tool_definitions();
-                tools.extend(mcp_defs.iter().filter_map(|def| json_to_tool(def)));
-            }
+        // Append MCP tool definitions from the lock-free snapshot
+        if let Some(snap) = snap {
+            tools.extend(snap.tool_definitions().iter().filter_map(|def| json_to_tool(def)));
         }
 
         tools
     };
-    let mut tools: Option<Vec<ChatCompletionTools>> = tool_registry.as_ref().map(|r| build_tools(r, &mcp_manager));
+    let mut tools: Option<Vec<ChatCompletionTools>> = tool_registry.as_ref().map(|r| build_tools(r, &mcp_snapshot));
 
     let mut total_usage = StreamUsage::default();
     let mut current_iteration_tool_count: usize = 0;
@@ -294,7 +303,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             if tools_stripped {
                 tools_stripped = false;
                 final_chance_taken = false;
-                tools = tool_registry.as_ref().map(|r| build_tools(r, &mcp_manager));
+                tools = tool_registry.as_ref().map(|r| build_tools(r, &mcp_snapshot));
             }
         }
 
@@ -959,16 +968,10 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             let tool_name: ToolName = match tc.function_name.parse() {
                 Ok(name) => name,
                 Err(_) => {
-                    // Check MCP manager before returning error
-                    let is_mcp = if let Some(ref mgr) = mcp_manager {
-                        if let Ok(mgr) = mgr.try_lock() {
-                            mgr.has_tool(&tc.function_name)
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
+                    // Check MCP snapshot (lock-free) before returning error
+                    let is_mcp = mcp_snapshot
+                        .as_ref()
+                        .is_some_and(|snap| snap.has_tool(&tc.function_name));
 
                     if is_mcp {
                         // Route to MCP execution
@@ -1653,10 +1656,13 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 }
             }
 
-            // Execute the MCP tool call
+            // Execute the MCP tool call.
+            // The tokio::sync::Mutex is held across the await — this is safe (it's
+            // designed for this), and the lock is sequential with other MCP calls in
+            // this iteration. The snapshot handles all read-only access without locking.
             let (result_text, is_error) = if let Some(ref mgr) = mcp_manager {
                 let mgr = mgr.lock().await;
-                match mgr.call_tool_raw(&mcp_tc.prefixed_name, mcp_tc.args.clone()).await {
+                match mgr.call_tool(&mcp_tc.prefixed_name, mcp_tc.args.clone()).await {
                     Ok((text, is_err)) => (text, is_err),
                     Err(e) => (format!("MCP tool error: {e}"), true),
                 }
@@ -1704,7 +1710,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             if tools_stripped {
                 tools_stripped = false;
                 final_chance_taken = false;
-                tools = tool_registry.as_ref().map(|r| build_tools(r, &mcp_manager));
+                tools = tool_registry.as_ref().map(|r| build_tools(r, &mcp_snapshot));
             }
         }
 

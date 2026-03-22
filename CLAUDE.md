@@ -290,9 +290,10 @@ sync: TUI tool handler (`tool/task.rs`), CLI (`cli/mod.rs`), and `app.rs` (`Comm
 at app startup via `tokio::spawn`. Uses the `rmcp` crate (v1.2) for transport, handshake, and RPC.
 
 **Architecture**: MCP tools bypass `ToolName` entirely — they have their own registry and execution
-path. Three surgical integration points in `stream.rs`:
-1. `build_tools()` appends MCP tool defs alongside native ones
-2. When `ToolName::from_str()` fails, falls back to `McpManager::has_tool()`
+path. `McpToolSnapshot` (lock-free, `Arc`-shared) provides tool name lookups and definitions
+without mutex contention. Three surgical integration points in `stream.rs`:
+1. `build_tools()` appends MCP tool defs from the snapshot alongside native ones
+2. When `ToolName::from_str()` fails, falls back to `McpToolSnapshot::has_tool()`
 3. MCP calls execute sequentially after native Phase 3 (external IPC)
 
 **Tool naming**: `mcp__{server_id}__{tool_name}` prefix prevents collisions.
@@ -306,6 +307,8 @@ path. Three surgical integration points in `stream.rs`:
 
 **Permissions**: `check_mcp()` on `PermissionEngine` — Trust=Allow, Standard/Cautious=Ask,
 Plan=Ask. Session grants via `grant_mcp_session()`. `allow_tools` supports MCP prefixed names.
+`AllowAlways` for MCP tools is session-only (not persisted to `.steve.jsonc`) because MCP tool
+names are runtime-dynamic and may change across server restarts.
 
 **Resources**: Cached at server init. Listed in system prompt under `## MCP Context`.
 

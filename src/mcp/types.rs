@@ -18,18 +18,21 @@ pub struct McpServerConfig {
     pub env: HashMap<String, String>,
 }
 
-/// Prefix separator used in MCP tool names: `mcp__{server_id}__{tool_name}`.
+/// Prefix for MCP tool names.
+pub const MCP_NAME_PREFIX: &str = "mcp";
+
+/// Separator between prefix, server ID, and tool name.
 pub const MCP_PREFIX_SEP: &str = "__";
 
 /// Build a prefixed MCP tool name: `mcp__{server_id}__{tool_name}`.
 pub fn prefixed_tool_name(server_id: &str, tool_name: &str) -> String {
-    format!("mcp{MCP_PREFIX_SEP}{server_id}{MCP_PREFIX_SEP}{tool_name}")
+    format!("{MCP_NAME_PREFIX}{MCP_PREFIX_SEP}{server_id}{MCP_PREFIX_SEP}{tool_name}")
 }
 
 /// Parse a prefixed MCP tool name back into `(server_id, tool_name)`.
 /// Returns `None` if the name doesn't match the expected format.
 pub fn parse_prefixed_tool_name(prefixed: &str) -> Option<(&str, &str)> {
-    let rest = prefixed.strip_prefix("mcp")?;
+    let rest = prefixed.strip_prefix(MCP_NAME_PREFIX)?;
     let rest = rest.strip_prefix(MCP_PREFIX_SEP)?;
     let sep_pos = rest.find(MCP_PREFIX_SEP)?;
     let server_id = &rest[..sep_pos];
@@ -38,6 +41,20 @@ pub fn parse_prefixed_tool_name(prefixed: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((server_id, tool_name))
+}
+
+/// Validate that a server ID is safe for use in prefixed tool names.
+/// Rejects IDs containing the separator (`__`) to avoid ambiguous parsing.
+pub fn validate_server_id(server_id: &str) -> Result<(), String> {
+    if server_id.is_empty() {
+        return Err("MCP server ID cannot be empty".into());
+    }
+    if server_id.contains(MCP_PREFIX_SEP) {
+        return Err(format!(
+            "MCP server ID '{server_id}' must not contain '{MCP_PREFIX_SEP}' (double underscore)"
+        ));
+    }
+    Ok(())
 }
 
 /// Expand `${VAR}` patterns in environment variable values from the process environment.
@@ -125,12 +142,31 @@ mod tests {
     }
 
     #[test]
+    fn validate_server_id_rejects_double_underscore() {
+        assert!(validate_server_id("my__server").is_err());
+        assert!(validate_server_id("a__b__c").is_err());
+    }
+
+    #[test]
+    fn validate_server_id_rejects_empty() {
+        assert!(validate_server_id("").is_err());
+    }
+
+    #[test]
+    fn validate_server_id_accepts_valid() {
+        assert!(validate_server_id("github").is_ok());
+        assert!(validate_server_id("my_server").is_ok());
+        assert!(validate_server_id("server-1").is_ok());
+    }
+
+    #[test]
     fn expand_env_value_no_vars() {
         assert_eq!(expand_env_value("hello world"), "hello world");
     }
 
     #[test]
     fn expand_env_value_with_known_var() {
+        // SAFETY: test-only env vars with unique names, unlikely to race with other tests.
         unsafe { std::env::set_var("STEVE_TEST_VAR", "expanded") };
         assert_eq!(expand_env_value("${STEVE_TEST_VAR}"), "expanded");
         assert_eq!(
@@ -148,6 +184,7 @@ mod tests {
 
     #[test]
     fn expand_env_map() {
+        // SAFETY: test-only env var with unique name, unlikely to race with other tests.
         unsafe { std::env::set_var("STEVE_TEST_KEY", "val") };
         let mut env = HashMap::new();
         env.insert("TOKEN".into(), "${STEVE_TEST_KEY}".into());

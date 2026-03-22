@@ -6,7 +6,8 @@
 
 pub mod types;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use rmcp::ServiceExt;
@@ -125,22 +126,60 @@ impl McpServer {
     }
 }
 
+/// Lock-free snapshot of MCP tool metadata.
+///
+/// Populated after `start_servers()` completes and shared via `Arc` so that
+/// `stream.rs` can check tool existence and build tool definitions without
+/// locking the `McpManager` mutex. This avoids holding the mutex across
+/// the LLM API call or during server initialization.
+#[derive(Clone, Default)]
+pub struct McpToolSnapshot {
+    /// Set of all prefixed MCP tool names for O(1) lookup.
+    known_tools: HashSet<String>,
+    /// Pre-built OpenAI-compatible tool definitions.
+    tool_defs: Vec<Value>,
+}
+
+impl McpToolSnapshot {
+    /// Check whether a prefixed tool name is a known MCP tool.
+    pub fn has_tool(&self, prefixed_name: &str) -> bool {
+        self.known_tools.contains(prefixed_name)
+    }
+
+    /// Get pre-built OpenAI function tool definitions for all MCP tools.
+    pub fn tool_definitions(&self) -> &[Value] {
+        &self.tool_defs
+    }
+
+    /// Whether any MCP tools are available.
+    pub fn is_empty(&self) -> bool {
+        self.known_tools.is_empty()
+    }
+}
+
 /// Singleton coordinator for all MCP server connections.
 pub struct McpManager {
     servers: HashMap<String, McpServer>,
+    /// Lock-free snapshot rebuilt after server initialization.
+    snapshot: Arc<McpToolSnapshot>,
 }
 
 impl McpManager {
     pub fn new() -> Self {
         Self {
             servers: HashMap::new(),
+            snapshot: Arc::new(McpToolSnapshot::default()),
         }
     }
 
     /// Spawn all configured MCP servers. Failures are logged per-server; healthy
-    /// servers continue. This should be called from a background task.
+    /// servers continue. Rebuilds the lock-free tool snapshot when done.
     pub async fn start_servers(&mut self, configs: &HashMap<String, McpServerConfig>) {
         for (server_id, config) in configs {
+            if let Err(e) = types::validate_server_id(server_id) {
+                tracing::error!(server = %server_id, error = %e, "invalid MCP server ID, skipping");
+                continue;
+            }
             match McpServer::spawn(server_id.clone(), config).await {
                 Ok(server) => {
                     self.servers.insert(server_id.clone(), server);
@@ -150,6 +189,44 @@ impl McpManager {
                 }
             }
         }
+        self.rebuild_snapshot();
+    }
+
+    /// Rebuild the lock-free tool snapshot from current server state.
+    fn rebuild_snapshot(&mut self) {
+        let mut known_tools = HashSet::new();
+        let mut tool_defs = Vec::new();
+
+        for (server_id, server) in &self.servers {
+            for tool in &server.cached_tools {
+                let prefixed = prefixed_tool_name(server_id, &tool.name);
+                known_tools.insert(prefixed.clone());
+
+                let description = tool
+                    .description
+                    .as_deref()
+                    .unwrap_or("MCP tool");
+                let parameters = tool.schema_as_json_value();
+                tool_defs.push(serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": prefixed,
+                        "description": description,
+                        "parameters": parameters,
+                    }
+                }));
+            }
+        }
+
+        self.snapshot = Arc::new(McpToolSnapshot {
+            known_tools,
+            tool_defs,
+        });
+    }
+
+    /// Get a lock-free snapshot of tool metadata for use outside the mutex.
+    pub fn tool_snapshot(&self) -> Arc<McpToolSnapshot> {
+        Arc::clone(&self.snapshot)
     }
 
     /// Whether any MCP servers are connected.
@@ -167,43 +244,11 @@ impl McpManager {
             .collect()
     }
 
-    /// Build OpenAI-compatible function tool definitions for all MCP tools.
-    /// Tool names are prefixed as `mcp__{server_id}__{tool_name}`.
-    pub fn tool_definitions(&self) -> Vec<Value> {
-        self.all_tool_defs()
-            .into_iter()
-            .map(|(server_id, tool)| {
-                let prefixed = prefixed_tool_name(server_id, &tool.name);
-                let description = tool
-                    .description
-                    .as_deref()
-                    .unwrap_or("MCP tool");
-                let parameters = tool.schema_as_json_value();
-                serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": prefixed,
-                        "description": description,
-                        "parameters": parameters,
-                    }
-                })
-            })
-            .collect()
-    }
-
-    /// Check whether a prefixed tool name belongs to an MCP server.
-    pub fn has_tool(&self, prefixed_name: &str) -> bool {
-        if let Some((server_id, tool_name)) = parse_prefixed_tool_name(prefixed_name) {
-            self.servers.get(server_id).is_some_and(|s| {
-                s.cached_tools.iter().any(|t| t.name.as_ref() == tool_name)
-            })
-        } else {
-            false
-        }
-    }
-
-    /// Call an MCP tool by its prefixed name. Returns the text result.
-    pub async fn call_tool(&self, prefixed_name: &str, args: Value) -> Result<String> {
+    /// Call an MCP tool by its prefixed name. Returns `(text_result, is_error)`.
+    ///
+    /// This acquires no additional locks — callers should drop the McpManager
+    /// lock before calling if possible, but the method itself only does IPC.
+    pub async fn call_tool(&self, prefixed_name: &str, args: Value) -> Result<(String, bool)> {
         let (server_id, tool_name) = parse_prefixed_tool_name(prefixed_name)
             .ok_or_else(|| anyhow::anyhow!("invalid MCP tool name: {prefixed_name}"))?;
 
@@ -215,30 +260,16 @@ impl McpManager {
         let args_map = match args {
             Value::Object(map) => Some(map),
             Value::Null => None,
-            _ => Some(serde_json::Map::from_iter([(
-                "input".to_string(),
-                args,
-            )])),
-        };
-
-        let result = server.call_tool(tool_name, args_map).await?;
-        Ok(format_call_result(&result))
-    }
-
-    /// Whether a tool call result was an error.
-    pub async fn call_tool_raw(&self, prefixed_name: &str, args: Value) -> Result<(String, bool)> {
-        let (server_id, tool_name) = parse_prefixed_tool_name(prefixed_name)
-            .ok_or_else(|| anyhow::anyhow!("invalid MCP tool name: {prefixed_name}"))?;
-
-        let server = self
-            .servers
-            .get(server_id)
-            .ok_or_else(|| anyhow::anyhow!("MCP server '{server_id}' not found"))?;
-
-        let args_map = match args {
-            Value::Object(map) => Some(map),
-            Value::Null => None,
-            _ => None,
+            other => {
+                tracing::warn!(
+                    tool = %prefixed_name,
+                    "MCP tool args is not an object or null, wrapping in {{\"input\": ...}}"
+                );
+                Some(serde_json::Map::from_iter([(
+                    "input".to_string(),
+                    other,
+                )]))
+            }
         };
 
         let result = server.call_tool(tool_name, args_map).await?;
@@ -281,7 +312,6 @@ impl McpManager {
     pub async fn shutdown(&mut self) {
         for (server_id, server) in self.servers.drain() {
             tracing::info!(server = %server_id, "shutting down MCP server");
-            // cancel() consumes self and returns the quit reason
             let _ = server.service.cancel().await;
         }
     }
@@ -323,7 +353,12 @@ pub fn mcp_permission_summary(prefixed_name: &str, args: &Value) -> String {
         let args_preview = serde_json::to_string(args)
             .unwrap_or_default();
         let truncated = if args_preview.len() > 80 {
-            format!("{}...", &args_preview[..80])
+            // Truncate at a char boundary to avoid panicking on multi-byte UTF-8
+            let mut end = 80;
+            while end > 0 && !args_preview.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}...", &args_preview[..end])
         } else {
             args_preview
         };
@@ -423,25 +458,43 @@ mod tests {
     }
 
     #[test]
+    fn mcp_permission_summary_truncates_safely() {
+        // Create a JSON string with a multi-byte char near the 80-byte boundary
+        let long_val = "a".repeat(75) + "🦀🦀🦀"; // 75 + 12 bytes = 87
+        let args = serde_json::json!({"key": long_val});
+        // Should not panic on multi-byte truncation
+        let summary = mcp_permission_summary("mcp__s__t", &args);
+        assert!(summary.contains("..."));
+    }
+
+    #[test]
     fn mcp_manager_new_has_no_servers() {
         let mgr = McpManager::new();
         assert!(!mgr.has_servers());
         assert!(mgr.all_tool_defs().is_empty());
-        assert!(mgr.tool_definitions().is_empty());
         assert!(mgr.all_resources().is_empty());
+        assert!(mgr.tool_snapshot().is_empty());
+    }
+
+    #[test]
+    fn tool_snapshot_empty_by_default() {
+        let snap = McpToolSnapshot::default();
+        assert!(snap.is_empty());
+        assert!(!snap.has_tool("mcp__x__y"));
+        assert!(snap.tool_definitions().is_empty());
     }
 
     #[test]
     fn has_tool_returns_false_for_native_tools() {
-        let mgr = McpManager::new();
-        assert!(!mgr.has_tool("read"));
-        assert!(!mgr.has_tool("edit"));
-        assert!(!mgr.has_tool("bash"));
+        let snap = McpToolSnapshot::default();
+        assert!(!snap.has_tool("read"));
+        assert!(!snap.has_tool("edit"));
+        assert!(!snap.has_tool("bash"));
     }
 
     #[test]
     fn has_tool_returns_false_for_missing_server() {
-        let mgr = McpManager::new();
-        assert!(!mgr.has_tool("mcp__ghost__some_tool"));
+        let snap = McpToolSnapshot::default();
+        assert!(!snap.has_tool("mcp__ghost__some_tool"));
     }
 }
