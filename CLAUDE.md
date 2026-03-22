@@ -268,12 +268,12 @@ Custom redirect policy blocks scheme-changing redirects (e.g., http→file:// SS
 `extract_args_summary()` and `extract_diff_content()` in `app.rs`, `extract_tool_summary()` in
 `export.rs`, `cache_key()` and `extract_path()` in `context/cache.rs`, `compress_tool_output()` in
 `context/compressor.rs`, `build_permission_summary()` and `extract_tool_path()` in `stream.rs`,
-`is_write_tool()`/`intent_category()`/`tool_marker()`/`visual_category()`/`gutter_char()` in
+`is_write_tool()`/`intent_category()`/`tool_marker()`/`visual_category()`/`gutter_char()`/`path_arg_keys()` in
 `tool/mod.rs`, `build_mode_rules()` and `plan_mode_rules()` in `permission/mod.rs`. Inner operation
 dispatches (e.g., edit `operation`) must also list all values explicitly.
 
-`invalidate_write_tool_cache()` in `stream.rs` maps write `ToolName` variants to their
-path arg keys for cache invalidation — must stay in sync with tool argument names.
+`path_arg_keys()` in `tool/mod.rs` is the single source of truth for tool→path-arg-key mapping.
+`invalidate_write_tool_cache()` and `extract_tool_path()` in `stream.rs` delegate to it.
 
 When adding edit operations: update `extract_diff_content()` in `app.rs` and
 `build_permission_summary()` in `stream.rs`.

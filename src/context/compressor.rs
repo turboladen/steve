@@ -166,7 +166,12 @@ fn compress_read(content: &str, tool_args: Option<&serde_json::Value>) -> String
 
     // Extract file path and line range from tool args if available
     let file_path = tool_args
-        .and_then(|a| a.get("file_path").or_else(|| a.get("path")))
+        .and_then(|a| {
+            crate::tool::ToolName::Read
+                .path_arg_keys()
+                .iter()
+                .find_map(|k| a.get(*k))
+        })
         .and_then(|v| v.as_str())
         .unwrap_or("(unknown)");
     let offset = tool_args.and_then(|a| a.get("offset")).and_then(|v| v.as_u64());
@@ -562,7 +567,7 @@ mod tests {
             lines.push(format!("{:>4} | // line {i}", i));
         }
         let content = lines.join("\n");
-        let args = serde_json::json!({"file_path": "src/main.rs", "offset": 1, "limit": 100});
+        let args = serde_json::json!({"path": "src/main.rs", "offset": 1, "limit": 100});
         let result = compress_read(&content, Some(&args));
         assert!(result.starts_with("[Previously read:"));
         assert!(result.contains("100 lines"));
@@ -741,7 +746,7 @@ mod tests {
             lines.push(format!("{:>4} | // padding line {i}", i));
         }
         let content = lines.join("\n");
-        let args = serde_json::json!({"file_path": "src/stream.rs", "offset": 10, "limit": 91});
+        let args = serde_json::json!({"path": "src/stream.rs", "offset": 10, "limit": 91});
         let result = compress_read(&content, Some(&args));
         assert!(result.contains("src/stream.rs"), "should include file path");
         assert!(result.contains("lines 10-101"), "should include line range");

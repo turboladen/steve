@@ -134,6 +134,22 @@ impl ToolName {
         matches!(self, ToolName::Task)
     }
 
+    /// The JSON argument key(s) that carry file paths for this tool.
+    ///
+    /// Returns all path-bearing keys. For move/copy the convention is
+    /// `[source, destination]` — callers needing only the write target
+    /// can use `.last()`.
+    pub fn path_arg_keys(self) -> &'static [&'static str] {
+        match self {
+            ToolName::Read | ToolName::Grep | ToolName::Glob | ToolName::List
+            | ToolName::Symbols | ToolName::Lsp | ToolName::Delete | ToolName::Mkdir => &["path"],
+            ToolName::Edit | ToolName::Write | ToolName::Patch => &["file_path"],
+            ToolName::Move | ToolName::Copy => &["from_path", "to_path"],
+            ToolName::Bash | ToolName::Question | ToolName::Task
+            | ToolName::Webfetch | ToolName::Memory | ToolName::Agent => &[],
+        }
+    }
+
     /// High-level intent category for UI intent indicators.
     ///
     /// Exhaustive match — adding a new variant forces updating this.
@@ -642,6 +658,43 @@ mod tests {
             assert_eq!(registry.tool_names().len(), allowed.len(),
                 "{at} registry has wrong number of tools");
         }
+    }
+
+    /// Every variant returns correct path_arg_keys — exhaustive via iter().
+    #[test]
+    fn path_arg_keys_exhaustive() {
+        for t in ToolName::iter() {
+            let keys = t.path_arg_keys();
+            if t.is_read_only() || t == ToolName::Lsp || t == ToolName::Delete || t == ToolName::Mkdir {
+                assert_eq!(keys, &["path"], "{t} should have [\"path\"]");
+            } else if matches!(t, ToolName::Edit | ToolName::Write | ToolName::Patch) {
+                assert_eq!(keys, &["file_path"], "{t} should have [\"file_path\"]");
+            } else if matches!(t, ToolName::Move | ToolName::Copy) {
+                assert_eq!(keys, &["from_path", "to_path"], "{t} should have [\"from_path\", \"to_path\"]");
+            } else {
+                assert!(keys.is_empty(), "{t} should have no path keys, got {keys:?}");
+            }
+        }
+    }
+
+    /// path_arg_keys: write tools always have non-empty keys (cache invalidation depends on this).
+    #[test]
+    fn path_arg_keys_write_tools_non_empty() {
+        for t in ToolName::iter() {
+            if t.is_write_tool() {
+                assert!(
+                    !t.path_arg_keys().is_empty(),
+                    "{t} is a write tool but has no path_arg_keys"
+                );
+            }
+        }
+    }
+
+    /// path_arg_keys: move/copy last key is the destination (write target).
+    #[test]
+    fn path_arg_keys_move_copy_last_is_destination() {
+        assert_eq!(ToolName::Move.path_arg_keys().last(), Some(&"to_path"));
+        assert_eq!(ToolName::Copy.path_arg_keys().last(), Some(&"to_path"));
     }
 
     /// visual_category is consistent with tool_marker groupings.

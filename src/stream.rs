@@ -1971,33 +1971,12 @@ fn check_iteration_warning(
 ///
 /// Returns `None` for tools that don't operate on file paths (bash, question, task).
 fn extract_tool_path(tool_name: ToolName, args: &Value) -> Option<String> {
-    match tool_name {
-        ToolName::Read | ToolName::Edit | ToolName::Write | ToolName::Patch | ToolName::List
-        | ToolName::Symbols | ToolName::Lsp => {
-            args.get("file_path").or_else(|| args.get("path"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        }
-        ToolName::Grep | ToolName::Glob => {
-            args.get("path")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        }
-        ToolName::Move | ToolName::Copy => {
-            // Use the destination path for permission checking (the write target)
-            args.get("to_path")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        }
-        ToolName::Delete | ToolName::Mkdir => {
-            args.get("path")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        }
-        // Tools without file paths
-        ToolName::Bash | ToolName::Question | ToolName::Task
-        | ToolName::Webfetch | ToolName::Memory | ToolName::Agent => None,
-    }
+    // For permission checks, prefer the write destination (last key).
+    // move/copy: last = "to_path"; single-key tools: last = only key.
+    tool_name
+        .path_arg_keys()
+        .last()
+        .and_then(|k| args.get(*k).and_then(|v| v.as_str()).map(|s| s.to_string()))
 }
 
 /// Build a human-readable summary of what a tool call wants to do.
@@ -2166,16 +2145,12 @@ fn invalidate_write_tool_cache(
     args: &Value,
     cache: &mut ToolResultCache,
 ) {
+    // Guard: only write tools should invalidate cache entries. Read tools also
+    // have non-empty path_arg_keys() but must not trigger invalidation.
     if !tool_name.is_write_tool() {
         return;
     }
-    let path_keys: &[&str] = match tool_name {
-        ToolName::Edit | ToolName::Write | ToolName::Patch => &["file_path"],
-        ToolName::Move | ToolName::Copy => &["from_path", "to_path"],
-        ToolName::Delete | ToolName::Mkdir => &["path"],
-        _ => return,
-    };
-    for key in path_keys {
+    for key in tool_name.path_arg_keys() {
         if let Some(path) = args.get(*key).and_then(|v| v.as_str()) {
             cache.invalidate_path(path);
         }
