@@ -1486,13 +1486,19 @@ impl App {
                 (KeyCode::Char('a'), _) | (KeyCode::Char('A'), _) => {
                     if let Some(perm) = self.pending_permission.take() {
                         let tool_str = perm.tool_name.as_str().to_string();
+                        // Check if this is an MCP tool (placeholder ToolName::Bash
+                        // with MCP summary). MCP grants are session-only — don't
+                        // persist to config since MCP tool names are runtime-dynamic.
+                        let is_mcp = perm.summary.starts_with("MCP: ");
                         let _ = perm.response_tx.send(PermissionReply::AllowAlways);
                         self.remove_last_permission_block();
                         self.status_line_state.set_activity(Activity::Thinking);
                         self.message_area_state.scroll_to_bottom();
 
-                        // Persist the grant to project config so it survives restarts
-                        self.persist_tool_grant(&tool_str);
+                        if !is_mcp {
+                            // Persist the grant to project config so it survives restarts
+                            self.persist_tool_grant(&tool_str);
+                        }
                     }
                     return Ok(());
                 }

@@ -123,7 +123,8 @@ pub struct StreamRequest {
     pub is_plan_mode: bool,
     /// Resources for spawning sub-agents. `None` in sub-agent streams to prevent recursion.
     pub agent_spawner: Option<AgentSpawner>,
-    /// MCP manager for dynamic tool execution. `None` when no MCP servers configured.
+    /// MCP manager for dynamic tool execution. May have no servers (empty snapshot).
+    /// `None` for sub-agent streams where MCP should be unavailable.
     pub mcp_manager: Option<Arc<tokio::sync::Mutex<crate::mcp::McpManager>>>,
 }
 
@@ -207,14 +208,13 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         }))
     }
 
-    // Get a lock-free snapshot of MCP tool metadata (survives mutex contention).
+    // Get a lock-free snapshot of MCP tool metadata. We briefly await the lock
+    // only to clone the Arc, then drop it so streams always get a consistent
+    // view of available MCP tools.
     let mcp_snapshot: Option<std::sync::Arc<crate::mcp::McpToolSnapshot>> = if let Some(ref mgr) = mcp_manager {
-        if let Ok(mgr) = mgr.try_lock() {
-            let snap = mgr.tool_snapshot();
-            if !snap.is_empty() { Some(snap) } else { None }
-        } else {
-            None
-        }
+        let mgr = mgr.lock().await;
+        let snap = mgr.tool_snapshot();
+        if !snap.is_empty() { Some(snap) } else { None }
     } else {
         None
     };
@@ -1670,22 +1670,21 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 ("Error: MCP manager not available".into(), true)
             };
 
-            // Emit tool call + result events for UI display
-            // Use Bash as visual placeholder — the UI will show the prefixed name from the summary
-            let _ = event_tx.send(AppEvent::LlmToolCall {
-                call_id: mcp_tc.id.clone(),
-                tool_name: ToolName::Bash, // placeholder for UI gutter
-                arguments: mcp_tc.args.clone(),
-            });
-            let _ = event_tx.send(AppEvent::ToolResult {
-                call_id: mcp_tc.id.clone(),
-                tool_name: ToolName::Bash, // placeholder
-                output: crate::tool::ToolOutput {
-                    title: crate::mcp::mcp_permission_summary(&mcp_tc.prefixed_name, &mcp_tc.args),
-                    output: result_text.clone(),
-                    is_error,
-                },
-            });
+            // Emit a notice for UI feedback. We intentionally do NOT emit
+            // AppEvent::LlmToolCall/ToolResult with a placeholder ToolName (e.g., Bash)
+            // because that would misclassify MCP calls in the UI: wrong tool grouping,
+            // wrong gutter markers, and app-level side effects (e.g., git refresh on
+            // bash success) would trigger incorrectly.
+            let mcp_summary = crate::mcp::mcp_permission_summary(&mcp_tc.prefixed_name, &mcp_tc.args);
+            if is_error {
+                let _ = event_tx.send(AppEvent::StreamNotice {
+                    text: format!("⚠ {mcp_summary} → error"),
+                });
+            } else {
+                let _ = event_tx.send(AppEvent::StreamNotice {
+                    text: format!("⚙ {mcp_summary} → ok"),
+                });
+            }
 
             messages.push(ChatCompletionRequestMessage::Tool(
                 ChatCompletionRequestToolMessage {

@@ -77,18 +77,26 @@ fn expand_env_value(value: &str) -> String {
         if ch == '$' && chars.peek() == Some(&'{') {
             chars.next(); // consume '{'
             let mut var_name = String::new();
+            let mut found_closing_brace = false;
             for c in chars.by_ref() {
                 if c == '}' {
+                    found_closing_brace = true;
                     break;
                 }
                 var_name.push(c);
             }
-            match std::env::var(&var_name) {
-                Ok(val) => result.push_str(&val),
-                Err(_) => {
-                    tracing::warn!(var = %var_name, "MCP env var not found, leaving unexpanded");
-                    result.push_str(&format!("${{{var_name}}}"));
+            if found_closing_brace {
+                match std::env::var(&var_name) {
+                    Ok(val) => result.push_str(&val),
+                    Err(_) => {
+                        tracing::warn!(var = %var_name, "MCP env var not found, leaving unexpanded");
+                        result.push_str(&format!("${{{var_name}}}"));
+                    }
                 }
+            } else {
+                // No closing brace found — treat the sequence as literal text
+                result.push_str("${");
+                result.push_str(&var_name);
             }
         } else {
             result.push(ch);
@@ -172,6 +180,20 @@ mod tests {
         assert_eq!(
             expand_env_value("prefix-${STEVE_TEST_VAR}-suffix"),
             "prefix-expanded-suffix"
+        );
+        unsafe { std::env::remove_var("STEVE_TEST_VAR") };
+    }
+
+    #[test]
+    fn expand_env_value_unclosed_brace_treated_as_literal() {
+        assert_eq!(expand_env_value("${UNCLOSED"), "${UNCLOSED");
+        assert_eq!(expand_env_value("prefix-${NO_CLOSE"), "prefix-${NO_CLOSE");
+        // Normal expansion still works alongside
+        // SAFETY: test-only env var with unique name, unlikely to race with other tests.
+        unsafe { std::env::set_var("STEVE_TEST_VAR", "ok") };
+        assert_eq!(
+            expand_env_value("${STEVE_TEST_VAR}-${UNCLOSED"),
+            "ok-${UNCLOSED"
         );
         unsafe { std::env::remove_var("STEVE_TEST_VAR") };
     }
