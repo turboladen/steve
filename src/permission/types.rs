@@ -29,6 +29,16 @@ impl ToolMatcher {
             ToolMatcher::All => true,
         }
     }
+
+    /// Whether this matcher could match a write tool.
+    /// `All` returns true (wildcards match everything).
+    /// `Specific` delegates to `ToolName::is_write_tool()`.
+    pub fn could_match_write(&self) -> bool {
+        match self {
+            ToolMatcher::All => true,
+            ToolMatcher::Specific(t) => t.is_write_tool(),
+        }
+    }
 }
 
 impl Serialize for ToolMatcher {
@@ -145,6 +155,30 @@ mod tests {
 
         let parsed: ToolMatcher = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, ToolMatcher::All);
+    }
+
+    #[test]
+    fn could_match_write_all_returns_true() {
+        assert!(ToolMatcher::All.could_match_write());
+    }
+
+    #[test]
+    fn could_match_write_specific_matches_is_write_tool() {
+        use strum::IntoEnumIterator;
+        for tool in ToolName::iter() {
+            let matcher = ToolMatcher::Specific(tool);
+            if tool.is_write_tool() {
+                assert!(
+                    matcher.could_match_write(),
+                    "{tool} is a write tool but could_match_write() returned false"
+                );
+            } else {
+                assert!(
+                    !matcher.could_match_write(),
+                    "{tool} is not a write tool but could_match_write() returned true"
+                );
+            }
+        }
     }
 
     #[test]
