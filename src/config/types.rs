@@ -41,6 +41,10 @@ pub struct Config {
     /// Provider definitions keyed by provider ID.
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
+
+    /// MCP server definitions keyed by server ID.
+    #[serde(default)]
+    pub mcp_servers: HashMap<String, crate::mcp::types::McpServerConfig>,
 }
 
 /// Configuration for a single LLM provider.
@@ -112,6 +116,7 @@ impl Config {
         // Detect whether the project config had meaningful content before moving fields.
         // This prevents a default project Config from clobbering global auto_compact.
         let project_has_content = !project.providers.is_empty()
+            || !project.mcp_servers.is_empty()
             || project.model.is_some()
             || project.small_model.is_some();
 
@@ -136,6 +141,11 @@ impl Config {
         }
         if project.theme != ThemePreference::Auto {
             self.theme = project.theme;
+        }
+
+        // MCP servers: project overrides global by server ID
+        for (server_id, project_server) in project.mcp_servers {
+            self.mcp_servers.insert(server_id, project_server);
         }
 
         // Providers: deep merge by provider ID, then by model ID

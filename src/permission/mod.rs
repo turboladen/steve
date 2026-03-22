@@ -58,6 +58,14 @@ pub struct PermissionEngine {
     rules: Vec<PermissionRule>,
     /// Tools that have been granted "always allow" for this session.
     session_grants: HashSet<ToolName>,
+    /// MCP tools granted "always allow" for this session (keyed by prefixed name).
+    mcp_session_grants: HashSet<String>,
+    /// MCP tool names that are always allowed (from config allow_tools).
+    mcp_allow_overrides: HashSet<String>,
+    /// Current permission profile (needed for MCP permission checks).
+    profile: PermissionProfile,
+    /// Whether currently in Plan mode.
+    is_plan_mode: bool,
 }
 
 impl PermissionEngine {
@@ -65,6 +73,10 @@ impl PermissionEngine {
         Self {
             rules,
             session_grants: HashSet::new(),
+            mcp_session_grants: HashSet::new(),
+            mcp_allow_overrides: HashSet::new(),
+            profile: PermissionProfile::Standard,
+            is_plan_mode: false,
         }
     }
 
@@ -138,6 +150,46 @@ impl PermissionEngine {
     /// Grant "always allow" for a specific tool for the rest of this session.
     pub fn grant_session(&mut self, tool_name: ToolName) {
         self.session_grants.insert(tool_name);
+    }
+
+    /// Check whether an MCP tool call should be allowed, denied, or needs user approval.
+    ///
+    /// MCP tools bypass `ToolName` entirely — permission is based on:
+    /// - Session grants (MCP-specific, keyed by prefixed name)
+    /// - Config `allow_tools` overrides (supports prefixed MCP names)
+    /// - Profile-based defaults: Trust=Allow, Standard/Cautious=Ask
+    /// - Plan mode: always Ask (MCP tools may have side effects)
+    pub fn check_mcp(&self, prefixed_name: &str) -> PermissionAction {
+        if self.mcp_session_grants.contains(prefixed_name) {
+            return PermissionAction::Allow;
+        }
+        if self.mcp_allow_overrides.contains(prefixed_name) && !self.is_plan_mode {
+            return PermissionAction::Allow;
+        }
+        match self.profile {
+            PermissionProfile::Trust if !self.is_plan_mode => PermissionAction::Allow,
+            _ => PermissionAction::Ask,
+        }
+    }
+
+    /// Grant "always allow" for an MCP tool for the rest of this session.
+    pub fn grant_mcp_session(&mut self, prefixed_name: String) {
+        self.mcp_session_grants.insert(prefixed_name);
+    }
+
+    /// Set MCP allow overrides from config `allow_tools` list.
+    pub fn set_mcp_overrides(&mut self, overrides: HashSet<String>) {
+        self.mcp_allow_overrides = overrides;
+    }
+
+    /// Update the permission profile (used when switching modes).
+    pub fn set_profile(&mut self, profile: PermissionProfile) {
+        self.profile = profile;
+    }
+
+    /// Update the plan mode flag.
+    pub fn set_plan_mode(&mut self, is_plan: bool) {
+        self.is_plan_mode = is_plan;
     }
 
     /// Check if a tool should be completely excluded from the LLM's available tools.
@@ -898,5 +950,54 @@ mod tests {
             engine.check(ToolName::Bash, None, None),
             PermissionAction::Ask,
         );
+    }
+
+    // -- MCP permission tests --
+
+    #[test]
+    fn check_mcp_standard_profile_asks() {
+        let engine = PermissionEngine::new(build_mode_rules());
+        assert_eq!(engine.check_mcp("mcp__github__search"), PermissionAction::Ask);
+    }
+
+    #[test]
+    fn check_mcp_trust_profile_allows() {
+        let mut engine = PermissionEngine::new(build_mode_rules());
+        engine.set_profile(PermissionProfile::Trust);
+        assert_eq!(engine.check_mcp("mcp__github__search"), PermissionAction::Allow);
+    }
+
+    #[test]
+    fn check_mcp_trust_plan_mode_asks() {
+        let mut engine = PermissionEngine::new(build_mode_rules());
+        engine.set_profile(PermissionProfile::Trust);
+        engine.set_plan_mode(true);
+        assert_eq!(engine.check_mcp("mcp__github__search"), PermissionAction::Ask);
+    }
+
+    #[test]
+    fn check_mcp_session_grant_overrides() {
+        let mut engine = PermissionEngine::new(build_mode_rules());
+        assert_eq!(engine.check_mcp("mcp__github__search"), PermissionAction::Ask);
+        engine.grant_mcp_session("mcp__github__search".into());
+        assert_eq!(engine.check_mcp("mcp__github__search"), PermissionAction::Allow);
+    }
+
+    #[test]
+    fn check_mcp_allow_override() {
+        let mut engine = PermissionEngine::new(build_mode_rules());
+        engine.set_mcp_overrides(["mcp__github__search".to_string()].into());
+        assert_eq!(engine.check_mcp("mcp__github__search"), PermissionAction::Allow);
+        // Other MCP tools still ask
+        assert_eq!(engine.check_mcp("mcp__github__push"), PermissionAction::Ask);
+    }
+
+    #[test]
+    fn check_mcp_allow_override_stripped_in_plan_mode() {
+        let mut engine = PermissionEngine::new(build_mode_rules());
+        engine.set_mcp_overrides(["mcp__github__search".to_string()].into());
+        engine.set_plan_mode(true);
+        // Override is stripped in Plan mode
+        assert_eq!(engine.check_mcp("mcp__github__search"), PermissionAction::Ask);
     }
 }

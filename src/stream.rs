@@ -88,6 +88,8 @@ pub struct AgentSpawner {
     pub usage_project_id: String,
     pub usage_session_id: String,
     pub cancel_token: CancellationToken,
+    /// MCP manager for General agents (None for Explore/Plan).
+    pub mcp_manager: Option<Arc<tokio::sync::Mutex<crate::mcp::McpManager>>>,
 }
 
 /// Parameters for launching a streaming LLM request.
@@ -121,6 +123,8 @@ pub struct StreamRequest {
     pub is_plan_mode: bool,
     /// Resources for spawning sub-agents. `None` in sub-agent streams to prevent recursion.
     pub agent_spawner: Option<AgentSpawner>,
+    /// MCP manager for dynamic tool execution. `None` when no MCP servers configured.
+    pub mcp_manager: Option<Arc<tokio::sync::Mutex<crate::mcp::McpManager>>>,
 }
 
 /// Spawn a tokio task that streams the LLM response and sends events.
@@ -162,6 +166,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         usage_model_cost,
         is_plan_mode,
         agent_spawner,
+        mcp_manager,
     } = req;
 
     tracing::info!(model = %model, "starting LLM stream");
@@ -189,25 +194,38 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
     ));
 
     // Build tool definitions for the API (mutable — stripped at CRITICAL threshold).
-    // Helper closure rebuilds tools from the registry (used for initial build + restoration).
-    let build_tools = |registry: &ToolRegistry| -> Vec<ChatCompletionTools> {
-        registry
+    // Helper: convert a JSON tool def to ChatCompletionTools.
+    fn json_to_tool(def: &Value) -> Option<ChatCompletionTools> {
+        let func = def.get("function")?;
+        Some(ChatCompletionTools::Function(ChatCompletionTool {
+            function: FunctionObject {
+                name: func.get("name")?.as_str()?.to_string(),
+                description: func.get("description").and_then(|d| d.as_str()).map(String::from),
+                parameters: func.get("parameters").cloned(),
+                strict: None,
+            },
+        }))
+    }
+
+    // Helper closure rebuilds tools from the registry + MCP (used for initial build + restoration).
+    let build_tools = |registry: &ToolRegistry, mcp: &Option<Arc<tokio::sync::Mutex<crate::mcp::McpManager>>>| -> Vec<ChatCompletionTools> {
+        let mut tools: Vec<ChatCompletionTools> = registry
             .tool_definitions()
             .into_iter()
-            .filter_map(|def| {
-                let func = def.get("function")?;
-                Some(ChatCompletionTools::Function(ChatCompletionTool {
-                    function: FunctionObject {
-                        name: func.get("name")?.as_str()?.to_string(),
-                        description: func.get("description").and_then(|d| d.as_str()).map(String::from),
-                        parameters: func.get("parameters").cloned(),
-                        strict: None,
-                    },
-                }))
-            })
-            .collect()
+            .filter_map(|def| json_to_tool(&def))
+            .collect();
+
+        // Append MCP tool definitions (if any servers connected)
+        if let Some(mgr) = mcp {
+            if let Ok(mgr) = mgr.try_lock() {
+                let mcp_defs = mgr.tool_definitions();
+                tools.extend(mcp_defs.iter().filter_map(|def| json_to_tool(def)));
+            }
+        }
+
+        tools
     };
-    let mut tools: Option<Vec<ChatCompletionTools>> = tool_registry.as_ref().map(|r| build_tools(r));
+    let mut tools: Option<Vec<ChatCompletionTools>> = tool_registry.as_ref().map(|r| build_tools(r, &mcp_manager));
 
     let mut total_usage = StreamUsage::default();
     let mut current_iteration_tool_count: usize = 0;
@@ -276,7 +294,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             if tools_stripped {
                 tools_stripped = false;
                 final_chance_taken = false;
-                tools = tool_registry.as_ref().map(|r| build_tools(r));
+                tools = tool_registry.as_ref().map(|r| build_tools(r, &mcp_manager));
             }
         }
 
@@ -924,7 +942,15 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             action: PermissionAction,
         }
 
+        struct McpPreparedToolCall {
+            id: String,
+            prefixed_name: String,
+            args: Value,
+            action: PermissionAction,
+        }
+
         let mut prepared: Vec<PreparedToolCall> = Vec::new();
+        let mut mcp_pending: Vec<McpPreparedToolCall> = Vec::new();
 
         for idx in &sorted_indices {
             let tc = &pending_tool_calls[idx];
@@ -933,6 +959,34 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             let tool_name: ToolName = match tc.function_name.parse() {
                 Ok(name) => name,
                 Err(_) => {
+                    // Check MCP manager before returning error
+                    let is_mcp = if let Some(ref mgr) = mcp_manager {
+                        if let Ok(mgr) = mgr.try_lock() {
+                            mgr.has_tool(&tc.function_name)
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if is_mcp {
+                        // Route to MCP execution
+                        let action = if let Some(ref engine) = permission_engine {
+                            let engine = engine.lock().await;
+                            engine.check_mcp(&tc.function_name)
+                        } else {
+                            PermissionAction::Allow
+                        };
+                        mcp_pending.push(McpPreparedToolCall {
+                            id: tc.id.clone(),
+                            prefixed_name: tc.function_name.clone(),
+                            args: args.clone(),
+                            action,
+                        });
+                        continue;
+                    }
+
                     tracing::warn!(tool = %tc.function_name, "unknown tool name from LLM, returning error");
                     // Must provide a tool result for every tool_call_id in the assistant message
                     messages.push(ChatCompletionRequestMessage::Tool(
@@ -1534,6 +1588,108 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             }
         }
 
+        // ── Phase 4: Execute MCP tool calls sequentially ──
+        // MCP tools are always sequential (external IPC).
+        for mcp_tc in &mcp_pending {
+            if cancel_token.is_cancelled() {
+                tracing::info!("stream cancelled during MCP tool execution");
+                let _ = event_tx.send(AppEvent::LlmFinish {
+                    usage: Some(total_usage),
+                });
+                return Ok(());
+            }
+
+            // Handle permission
+            if matches!(mcp_tc.action, PermissionAction::Deny) {
+                messages.push(ChatCompletionRequestMessage::Tool(
+                    ChatCompletionRequestToolMessage {
+                        content: ChatCompletionRequestToolMessageContent::Text(
+                            "Error: MCP tool call denied by permission policy.".into(),
+                        ),
+                        tool_call_id: mcp_tc.id.clone(),
+                    },
+                ));
+                current_iteration_tool_count += 1;
+                continue;
+            }
+
+            if matches!(mcp_tc.action, PermissionAction::Ask) {
+                // Send permission request to UI
+                let summary = crate::mcp::mcp_permission_summary(&mcp_tc.prefixed_name, &mcp_tc.args);
+                let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                // Use the first native tool name just for the PermissionRequest type
+                // (the UI will show the MCP summary string, not the tool name)
+                let _ = event_tx.send(AppEvent::PermissionRequest(PermissionRequest {
+                    call_id: mcp_tc.id.clone(),
+                    tool_name: ToolName::Bash, // placeholder — UI shows summary, not this
+                    arguments_summary: summary,
+                    tool_args: mcp_tc.args.clone(),
+                    response_tx: reply_tx,
+                }));
+
+                match reply_rx.await {
+                    Ok(PermissionReply::AllowOnce) => {
+                        user_interacted_this_iteration = true;
+                    }
+                    Ok(PermissionReply::AllowAlways) => {
+                        user_interacted_this_iteration = true;
+                        if let Some(ref engine) = permission_engine {
+                            let mut engine = engine.lock().await;
+                            engine.grant_mcp_session(mcp_tc.prefixed_name.clone());
+                        }
+                    }
+                    Ok(PermissionReply::Deny) | Err(_) => {
+                        messages.push(ChatCompletionRequestMessage::Tool(
+                            ChatCompletionRequestToolMessage {
+                                content: ChatCompletionRequestToolMessageContent::Text(
+                                    "Error: MCP tool call denied by user.".into(),
+                                ),
+                                tool_call_id: mcp_tc.id.clone(),
+                            },
+                        ));
+                        current_iteration_tool_count += 1;
+                        continue;
+                    }
+                }
+            }
+
+            // Execute the MCP tool call
+            let (result_text, is_error) = if let Some(ref mgr) = mcp_manager {
+                let mgr = mgr.lock().await;
+                match mgr.call_tool_raw(&mcp_tc.prefixed_name, mcp_tc.args.clone()).await {
+                    Ok((text, is_err)) => (text, is_err),
+                    Err(e) => (format!("MCP tool error: {e}"), true),
+                }
+            } else {
+                ("Error: MCP manager not available".into(), true)
+            };
+
+            // Emit tool call + result events for UI display
+            // Use Bash as visual placeholder — the UI will show the prefixed name from the summary
+            let _ = event_tx.send(AppEvent::LlmToolCall {
+                call_id: mcp_tc.id.clone(),
+                tool_name: ToolName::Bash, // placeholder for UI gutter
+                arguments: mcp_tc.args.clone(),
+            });
+            let _ = event_tx.send(AppEvent::ToolResult {
+                call_id: mcp_tc.id.clone(),
+                tool_name: ToolName::Bash, // placeholder
+                output: crate::tool::ToolOutput {
+                    title: crate::mcp::mcp_permission_summary(&mcp_tc.prefixed_name, &mcp_tc.args),
+                    output: result_text.clone(),
+                    is_error,
+                },
+            });
+
+            messages.push(ChatCompletionRequestMessage::Tool(
+                ChatCompletionRequestToolMessage {
+                    content: ChatCompletionRequestToolMessageContent::Text(result_text),
+                    tool_call_id: mcp_tc.id.clone(),
+                },
+            ));
+            current_iteration_tool_count += 1;
+        }
+
         // Reset iteration counter if user granted permission this iteration
         if user_interacted_this_iteration {
             tracing::debug!(
@@ -1548,7 +1704,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             if tools_stripped {
                 tools_stripped = false;
                 final_chance_taken = false;
-                tools = tool_registry.as_ref().map(|r| build_tools(r));
+                tools = tool_registry.as_ref().map(|r| build_tools(r, &mcp_manager));
             }
         }
 
@@ -1741,6 +1897,12 @@ async fn run_sub_agent(
         usage_model_cost: None,
         is_plan_mode: matches!(agent_type, AgentType::Plan),
         agent_spawner: None, // No recursion
+        // General agents inherit MCP tools; Explore/Plan do not
+        mcp_manager: if agent_type == AgentType::General {
+            spawner.mcp_manager.clone()
+        } else {
+            None
+        },
     };
 
     // Run the sub-agent stream concurrently with event processing.
@@ -2549,6 +2711,7 @@ mod tests {
             usage_model_cost: None,
             is_plan_mode: false,
             agent_spawner: None,
+            mcp_manager: None,
         }
     }
 
@@ -2826,6 +2989,7 @@ mod tests {
             usage_model_cost: None,
             is_plan_mode: false,
             agent_spawner: None,
+            mcp_manager: None,
         };
 
         run_stream(req).await.expect("cache hit stream should succeed");
@@ -3593,6 +3757,7 @@ mod tests {
             usage_model_cost: None,
             is_plan_mode: true,
             agent_spawner: None,
+            mcp_manager: None,
         };
 
         run_stream(req).await.expect("plan mode stream should succeed");
@@ -3698,6 +3863,7 @@ mod tests {
             usage_model_cost: None,
             is_plan_mode: false,
             agent_spawner: None,
+            mcp_manager: None,
         };
 
         run_stream(req).await.expect("trust-mode edit stream should succeed");

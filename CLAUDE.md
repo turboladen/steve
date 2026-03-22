@@ -284,6 +284,35 @@ IDs: `{project_name}-{kind_char}{4_hex}` (e.g., `steve-ta3f0`). Kind chars: `t` 
 `e` (epic). Legacy IDs (`task-*`/`bug-*`/`epic-*`) still recognized. Three interfaces must stay in
 sync: TUI tool handler (`tool/task.rs`), CLI (`cli/mod.rs`), and `app.rs` (`Command::TaskNew`).
 
+### MCP Client Integration (`mcp/`)
+
+`McpManager` behind `Arc<tokio::sync::Mutex>` manages connections to MCP servers. Background init
+at app startup via `tokio::spawn`. Uses the `rmcp` crate (v1.2) for transport, handshake, and RPC.
+
+**Architecture**: MCP tools bypass `ToolName` entirely — they have their own registry and execution
+path. Three surgical integration points in `stream.rs`:
+1. `build_tools()` appends MCP tool defs alongside native ones
+2. When `ToolName::from_str()` fails, falls back to `McpManager::has_tool()`
+3. MCP calls execute sequentially after native Phase 3 (external IPC)
+
+**Tool naming**: `mcp__{server_id}__{tool_name}` prefix prevents collisions.
+`parse_prefixed_tool_name()` / `prefixed_tool_name()` in `mcp/types.rs`.
+
+**Config**: `mcp_servers` HashMap in `Config`. Supports `${VAR}` env expansion.
+```jsonc
+{ "mcp_servers": { "github": { "command": "npx", "args": ["-y", "@mcp/server-github"],
+  "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" } } } }
+```
+
+**Permissions**: `check_mcp()` on `PermissionEngine` — Trust=Allow, Standard/Cautious=Ask,
+Plan=Ask. Session grants via `grant_mcp_session()`. `allow_tools` supports MCP prefixed names.
+
+**Resources**: Cached at server init. Listed in system prompt under `## MCP Context`.
+
+**Sub-agents**: General agents inherit MCP tools; Explore/Plan agents do not.
+
+**Tool stripping**: MCP tools stripped alongside native tools at critical iteration threshold.
+
 ### LSP Integration (`lsp/`)
 
 `LspManager` behind `Arc<std::sync::Mutex>` manages per-language `LspServer` instances. Background
