@@ -59,14 +59,30 @@ pub async fn authorize(
     }
 
     // Discover OAuth endpoints, then run the interactive browser flow.
-    discover_metadata(server_id, &mut auth_mgr, &status_tx).await?;
+    if let Err(e) = discover_metadata(server_id, &mut auth_mgr, &status_tx).await {
+        let log_hint = log_path_hint();
+        // Show the actual error in the TUI, not just "check logs"
+        send_status(&status_tx, format!(
+            "\u{26a0} MCP '{server_id}': OAuth discovery failed \u{2014} {e:#}"
+        ));
+        send_status(&status_tx, format!(
+            "\u{26a0} MCP '{server_id}': {log_hint}"
+        ));
+        return Err(e).context(format!(
+            "OAuth metadata discovery failed for MCP '{server_id}'"
+        ));
+    }
+
     if let Err(e) = browser_auth_flow(server_id, &mut auth_mgr, &status_tx).await {
         let log_hint = log_path_hint();
         send_status(&status_tx, format!(
-            "\u{26a0} MCP '{server_id}': authorization failed \u{2014} {log_hint}"
+            "\u{26a0} MCP '{server_id}': authorization failed \u{2014} {e:#}"
+        ));
+        send_status(&status_tx, format!(
+            "\u{26a0} MCP '{server_id}': {log_hint}"
         ));
         return Err(e).context(format!(
-            "OAuth authorization failed for MCP '{server_id}'. {log_hint}"
+            "OAuth authorization failed for MCP '{server_id}'"
         ));
     }
 
