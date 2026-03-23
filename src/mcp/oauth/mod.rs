@@ -46,6 +46,7 @@ pub async fn authorize(
     base_url: &str,
     credential_path: PathBuf,
     client_id: Option<&str>,
+    client_secret: Option<&str>,
     status_tx: Option<OAuthStatusTx>,
 ) -> Result<AuthClient<reqwest::Client>> {
     send_status(&status_tx, format!("MCP '{server_id}': starting OAuth authorization..."));
@@ -74,7 +75,7 @@ pub async fn authorize(
         ));
     }
 
-    if let Err(e) = browser_auth_flow(server_id, &mut auth_mgr, client_id, &status_tx).await {
+    if let Err(e) = browser_auth_flow(server_id, &mut auth_mgr, client_id, client_secret, &status_tx).await {
         let log_hint = log_path_hint();
         send_status(&status_tx, format!(
             "\u{26a0} MCP '{server_id}': authorization failed \u{2014} {e:#}"
@@ -135,6 +136,7 @@ async fn browser_auth_flow(
     server_id: &str,
     auth_mgr: &mut AuthorizationManager,
     client_id: Option<&str>,
+    client_secret: Option<&str>,
     status_tx: &Option<OAuthStatusTx>,
 ) -> Result<()> {
     let (callback_url, callback_rx, server_handle) = callback::start_callback_server()
@@ -143,7 +145,7 @@ async fn browser_auth_flow(
 
     // Ensure the callback server is always shut down.
     let result = async {
-        register_client(server_id, auth_mgr, &callback_url, client_id).await?;
+        register_client(server_id, auth_mgr, &callback_url, client_id, client_secret).await?;
         let callback_result = open_browser_and_wait(server_id, auth_mgr, callback_rx, status_tx).await?;
         exchange_token(server_id, auth_mgr, &callback_result, status_tx).await
     }
@@ -163,6 +165,7 @@ async fn register_client(
     auth_mgr: &mut AuthorizationManager,
     callback_url: &str,
     config_client_id: Option<&str>,
+    config_client_secret: Option<&str>,
 ) -> Result<()> {
     let scopes = auth_mgr.select_scopes(None, &[]);
     let scope_refs: Vec<&str> = scopes.iter().map(|s| s.as_str()).collect();
@@ -189,7 +192,7 @@ async fn register_client(
         tracing::info!(server = %server_id, "using config-provided client_id");
         let config = rmcp::transport::auth::OAuthClientConfig {
             client_id: client_id.to_string(),
-            client_secret: None,
+            client_secret: config_client_secret.map(|s| s.to_string()),
             scopes: scope_refs.iter().map(|s| s.to_string()).collect(),
             redirect_uri: callback_url.to_string(),
         };
@@ -328,7 +331,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cred_path = dir.path().join("creds.json");
         let result =
-            authorize("test", "https://127.0.0.1:1/nonexistent", cred_path, None, None).await;
+            authorize("test", "https://127.0.0.1:1/nonexistent", cred_path, None, None, None).await;
         assert!(result.is_err());
     }
 }

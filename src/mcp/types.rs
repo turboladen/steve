@@ -69,6 +69,11 @@ pub enum McpServerConfig {
         /// registration first, then fails if the server doesn't support it.
         #[serde(default)]
         client_id: Option<String>,
+        /// Optional OAuth client_secret. Required by some providers (e.g.,
+        /// GitHub OAuth Apps). Supports `${VAR}` expansion for secrets stored
+        /// in environment variables.
+        #[serde(default)]
+        client_secret: Option<String>,
     },
     /// Stdio child-process server (existing behavior).
     Stdio {
@@ -135,6 +140,11 @@ pub fn expand_env(env: &HashMap<String, String>) -> HashMap<String, String> {
             (key.clone(), expanded)
         })
         .collect()
+}
+
+/// Expand `${VAR}` patterns in a single string value (public API).
+pub fn expand_env_single(value: &str) -> String {
+    expand_env_value(value)
 }
 
 /// Expand `${VAR}` patterns in a single string value.
@@ -387,6 +397,7 @@ mod tests {
             url: "https://example.com".into(),
             headers: Some(HashMap::from([("X-Key".into(), "abc".into())])),
             client_id: None,
+            client_secret: None,
         };
         let json = serde_json::to_string(&config).unwrap();
         let back: McpServerConfig = serde_json::from_str(&json).unwrap();
