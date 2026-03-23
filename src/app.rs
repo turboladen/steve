@@ -41,7 +41,7 @@ use crate::ui::message_block::{
 };
 use crate::ui::selection::SelectionState;
 use crate::task::types::{Priority, TaskKind, TaskStatus};
-use crate::ui::sidebar::{SidebarLsp, SidebarMcp, SidebarState, SidebarTask, count_diff_lines, MAX_SIDEBAR_TASKS};
+use crate::ui::sidebar::{SidebarLsp, SidebarState, SidebarTask, count_diff_lines, MAX_SIDEBAR_TASKS};
 use crate::ui::status_line::{Activity, StatusLineState};
 use crate::ui::theme::Theme;
 
@@ -759,12 +759,8 @@ impl App {
                         text: format!("MCP servers started: {}", summary.join(", ")),
                     });
                 }
-                // Update sidebar with MCP server status
-                let status: Vec<(String, usize, usize, usize)> = mgr
-                    .server_status()
-                    .into_iter()
-                    .map(|(id, tools, resources, prompts)| (id.to_string(), tools, resources, prompts))
-                    .collect();
+                // Update sidebar with MCP server status (connected + failed)
+                let status = mgr.server_status();
                 if !status.is_empty() {
                     let _ = tx.send(AppEvent::McpStatus { servers: status });
                 }
@@ -1278,17 +1274,7 @@ impl App {
                     .collect();
             }
             AppEvent::McpStatus { servers } => {
-                self.sidebar_state.mcp_servers = servers
-                    .into_iter()
-                    .map(|(server_id, tool_count, resource_count, prompt_count)| SidebarMcp {
-                        server_id,
-                        tool_count,
-                        resource_count,
-                        prompt_count,
-                        connected: true,
-                        error: None,
-                    })
-                    .collect();
+                self.sidebar_state.mcp_servers = servers;
             }
             AppEvent::PermissionRequest(req) => {
                 // Show permission prompt to user, with diff preview if available
@@ -2604,21 +2590,15 @@ impl App {
             .unwrap_or(0);
         let combined_agents = self.combined_agents_content();
 
-        // Gather MCP server info (best-effort — skip if lock is held)
+        // Gather MCP server info from sidebar state (already populated via McpStatus event)
         let mcp_configured_ids: Vec<String> = self.config.mcp_servers.keys().cloned().collect();
         let mcp_configured: Vec<&str> = mcp_configured_ids.iter().map(|s| s.as_str()).collect();
-        let mcp_connected_owned: Vec<(String, usize, usize, usize)> =
-            if let Ok(mgr) = self.mcp_manager.try_lock() {
-                mgr.server_status()
-                    .into_iter()
-                    .map(|(id, tools, resources, prompts)| (id.to_owned(), tools, resources, prompts))
-                    .collect()
-            } else {
-                Vec::new()
-            };
-        let mcp_connected: Vec<(&str, usize, usize, usize)> = mcp_connected_owned
+        let mcp_connected: Vec<(&str, usize, usize, usize)> = self
+            .sidebar_state
+            .mcp_servers
             .iter()
-            .map(|(id, tools, resources, prompts)| (id.as_str(), *tools, *resources, *prompts))
+            .filter(|s| s.connected)
+            .map(|s| (s.server_id.as_str(), s.tool_count, s.resource_count, s.prompt_count))
             .collect();
 
         let input = crate::diagnostics::DiagnosticInput {

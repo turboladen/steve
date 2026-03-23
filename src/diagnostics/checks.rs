@@ -207,9 +207,9 @@ pub fn mcp_health_checks(
                     category: Category::McpHealth,
                     label: format!("{server_id} not connected"),
                     detail: format!("MCP server '{server_id}' is configured but not running"),
-                    recommendation: Some(
-                        "Check server command/URL, authentication, and logs".into(),
-                    ),
+                    recommendation: Some(log_path_recommendation(
+                        "Check server command/URL, authentication, and logs",
+                    )),
                 });
             }
             Some((_, tool_count, _, _)) if *tool_count == 0 => {
@@ -228,6 +228,14 @@ pub fn mcp_health_checks(
     }
 
     checks
+}
+
+/// Append the log directory path to a recommendation string for user guidance.
+fn log_path_recommendation(base_msg: &str) -> String {
+    match directories::ProjectDirs::from("", "", "steve") {
+        Some(dirs) => format!("{base_msg} ({})", dirs.data_dir().join("logs").display()),
+        None => base_msg.to_string(),
+    }
 }
 
 #[cfg(test)]

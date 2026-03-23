@@ -213,6 +213,9 @@ impl McpToolSnapshot {
 /// Singleton coordinator for all MCP server connections.
 pub struct McpManager {
     servers: HashMap<String, McpServer>,
+    /// Servers that were configured but failed to connect.
+    /// Maps server_id → error message for sidebar/diagnostics display.
+    failed_servers: HashMap<String, String>,
     /// Lock-free snapshot rebuilt after server initialization.
     snapshot: Arc<McpToolSnapshot>,
 }
@@ -221,6 +224,7 @@ impl McpManager {
     pub fn new() -> Self {
         Self {
             servers: HashMap::new(),
+            failed_servers: HashMap::new(),
             snapshot: Arc::new(McpToolSnapshot::default()),
         }
     }
@@ -268,6 +272,10 @@ impl McpManager {
                 }
                 Err(e) => {
                     tracing::error!(server = %server_id, error = %e, "failed to start MCP server");
+                    // Truncate error to first line for sidebar display.
+                    let msg = e.to_string();
+                    let short = msg.lines().next().unwrap_or("connection failed").to_string();
+                    self.failed_servers.insert(server_id.clone(), short);
                 }
             }
         }
@@ -398,15 +406,33 @@ impl McpManager {
         }
     }
 
-    /// Structured server status for sidebar display.
-    /// Returns `(server_id, tool_count, resource_count, prompt_count)` tuples.
-    pub fn server_status(&self) -> Vec<(&str, usize, usize, usize)> {
-        self.servers
+    /// Structured server status for sidebar display, including failed servers.
+    pub fn server_status(&self) -> Vec<crate::ui::sidebar::SidebarMcp> {
+        let mut result: Vec<crate::ui::sidebar::SidebarMcp> = self
+            .servers
             .iter()
-            .map(|(id, server)| {
-                (id.as_str(), server.cached_tools.len(), server.cached_resources.len(), server.cached_prompts.len())
+            .map(|(id, server)| crate::ui::sidebar::SidebarMcp {
+                server_id: id.clone(),
+                tool_count: server.cached_tools.len(),
+                resource_count: server.cached_resources.len(),
+                prompt_count: server.cached_prompts.len(),
+                connected: true,
+                error: None,
             })
-            .collect()
+            .collect();
+
+        for (id, error) in &self.failed_servers {
+            result.push(crate::ui::sidebar::SidebarMcp {
+                server_id: id.clone(),
+                tool_count: 0,
+                resource_count: 0,
+                prompt_count: 0,
+                connected: false,
+                error: Some(error.clone()),
+            });
+        }
+
+        result
     }
 
     /// Summary of connected servers for status display.
