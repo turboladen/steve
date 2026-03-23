@@ -30,6 +30,7 @@ pub async fn connect_http(
     server_id: &str,
     url: &str,
     headers: Option<&HashMap<String, String>>,
+    client_id: Option<&str>,
     credential_dir: Option<&Path>,
     status_tx: Option<OAuthStatusTx>,
 ) -> Result<RunningService<RoleClient, ()>> {
@@ -78,7 +79,7 @@ pub async fn connect_http(
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
         .collect();
     let credential_path = cred_dir.join(format!("{safe_id}.json"));
-    let auth_client = super::oauth::authorize(server_id, url, credential_path, status_tx).await?;
+    let auth_client = super::oauth::authorize(server_id, url, credential_path, client_id, status_tx).await?;
 
     // Build transport using the authenticated client
     let config = build_config(url, &expanded);

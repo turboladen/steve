@@ -20,6 +20,18 @@ use serde::{Deserialize, Serialize};
 /// assert!(config.is_http());
 /// ```
 ///
+/// Remote server with a pre-registered OAuth client_id (for servers that
+/// don't support dynamic client registration, like GitHub):
+///
+/// ```
+/// # use steve::mcp::types::McpServerConfig;
+/// let config: McpServerConfig = serde_json::from_str(r#"{
+///     "url": "https://api.githubcopilot.com/mcp/",
+///     "client_id": "Ov23liABCDEF123456"
+/// }"#).unwrap();
+/// assert!(config.is_http());
+/// ```
+///
 /// Remote server with a static bearer token:
 ///
 /// ```
@@ -48,8 +60,15 @@ pub enum McpServerConfig {
     /// HTTP/SSE remote server — just needs a URL.
     Http {
         url: String,
+        /// Optional static headers (e.g., for pre-configured bearer tokens).
+        /// Values support `${VAR}` expansion.
         #[serde(default)]
         headers: Option<HashMap<String, String>>,
+        /// Optional OAuth client_id for servers that don't support dynamic
+        /// client registration (RFC 7591). If omitted, Steve tries dynamic
+        /// registration first, then fails if the server doesn't support it.
+        #[serde(default)]
+        client_id: Option<String>,
     },
     /// Stdio child-process server (existing behavior).
     Stdio {
@@ -307,7 +326,7 @@ mod tests {
         let json = r#"{"url": "https://mcp.example.com/sse"}"#;
         let config: McpServerConfig = serde_json::from_str(json).unwrap();
         match &config {
-            McpServerConfig::Http { url, headers } => {
+            McpServerConfig::Http { url, headers, .. } => {
                 assert_eq!(url, "https://mcp.example.com/sse");
                 assert!(headers.is_none());
             }
@@ -324,7 +343,7 @@ mod tests {
         }"#;
         let config: McpServerConfig = serde_json::from_str(json).unwrap();
         match &config {
-            McpServerConfig::Http { url, headers } => {
+            McpServerConfig::Http { url, headers, .. } => {
                 assert_eq!(url, "https://mcp.example.com/sse");
                 let h = headers.as_ref().expect("headers should be Some");
                 assert_eq!(h["Authorization"], "Bearer tok_123");
@@ -367,11 +386,12 @@ mod tests {
         let config = McpServerConfig::Http {
             url: "https://example.com".into(),
             headers: Some(HashMap::from([("X-Key".into(), "abc".into())])),
+            client_id: None,
         };
         let json = serde_json::to_string(&config).unwrap();
         let back: McpServerConfig = serde_json::from_str(&json).unwrap();
         match back {
-            McpServerConfig::Http { url, headers } => {
+            McpServerConfig::Http { url, headers, .. } => {
                 assert_eq!(url, "https://example.com");
                 assert_eq!(headers.unwrap()["X-Key"], "abc");
             }

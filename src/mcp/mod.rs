@@ -86,8 +86,8 @@ impl McpServer {
                     .map_err(|e| anyhow::anyhow!("MCP handshake failed for '{server_id}': {e}"))?;
                 svc
             }
-            McpServerConfig::Http { url, headers } => {
-                transport::connect_http(&server_id, url, headers.as_ref(), credential_dir, status_tx).await?
+            McpServerConfig::Http { url, headers, client_id } => {
+                transport::connect_http(&server_id, url, headers.as_ref(), client_id.as_deref(), credential_dir, status_tx).await?
             }
         };
 

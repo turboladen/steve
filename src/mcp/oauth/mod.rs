@@ -45,6 +45,7 @@ pub async fn authorize(
     server_id: &str,
     base_url: &str,
     credential_path: PathBuf,
+    client_id: Option<&str>,
     status_tx: Option<OAuthStatusTx>,
 ) -> Result<AuthClient<reqwest::Client>> {
     send_status(&status_tx, format!("MCP '{server_id}': starting OAuth authorization..."));
@@ -73,7 +74,7 @@ pub async fn authorize(
         ));
     }
 
-    if let Err(e) = browser_auth_flow(server_id, &mut auth_mgr, &status_tx).await {
+    if let Err(e) = browser_auth_flow(server_id, &mut auth_mgr, client_id, &status_tx).await {
         let log_hint = log_path_hint();
         send_status(&status_tx, format!(
             "\u{26a0} MCP '{server_id}': authorization failed \u{2014} {e:#}"
@@ -133,6 +134,7 @@ async fn discover_metadata(
 async fn browser_auth_flow(
     server_id: &str,
     auth_mgr: &mut AuthorizationManager,
+    client_id: Option<&str>,
     status_tx: &Option<OAuthStatusTx>,
 ) -> Result<()> {
     let (callback_url, callback_rx, server_handle) = callback::start_callback_server()
@@ -141,7 +143,7 @@ async fn browser_auth_flow(
 
     // Ensure the callback server is always shut down.
     let result = async {
-        register_client(server_id, auth_mgr, &callback_url).await?;
+        register_client(server_id, auth_mgr, &callback_url, client_id).await?;
         let callback_result = open_browser_and_wait(server_id, auth_mgr, callback_rx, status_tx).await?;
         exchange_token(server_id, auth_mgr, &callback_result, status_tx).await
     }
@@ -151,25 +153,57 @@ async fn browser_auth_flow(
     result
 }
 
-/// Dynamically register an OAuth client (RFC 7591) and generate the
-/// authorization URL with PKCE.
+/// Register an OAuth client for authorization.
+///
+/// Tries dynamic client registration (RFC 7591) first. If the server doesn't
+/// support it, falls back to a config-provided `client_id`. If neither is
+/// available, returns an error.
 async fn register_client(
     server_id: &str,
     auth_mgr: &mut AuthorizationManager,
     callback_url: &str,
+    config_client_id: Option<&str>,
 ) -> Result<()> {
     let scopes = auth_mgr.select_scopes(None, &[]);
     let scope_refs: Vec<&str> = scopes.iter().map(|s| s.as_str()).collect();
 
-    tracing::info!(server = %server_id, "registering OAuth client");
-    // rmcp's register_client() internally calls configure_client(),
-    // so the returned config doesn't need separate handling.
-    let _client_config = auth_mgr
-        .register_client("steve", callback_url, &scope_refs)
-        .await
-        .context("OAuth dynamic client registration failed")?;
+    // Attempt 1: dynamic client registration (RFC 7591)
+    tracing::info!(server = %server_id, "attempting dynamic OAuth client registration");
+    match auth_mgr.register_client("steve", callback_url, &scope_refs).await {
+        Ok(_client_config) => {
+            // rmcp's register_client() internally calls configure_client()
+            tracing::info!(server = %server_id, "dynamic client registration succeeded");
+            return Ok(());
+        }
+        Err(e) => {
+            tracing::info!(
+                server = %server_id,
+                error = %e,
+                "dynamic client registration not supported, trying fallback"
+            );
+        }
+    }
 
-    Ok(())
+    // Attempt 2: use config-provided client_id
+    if let Some(client_id) = config_client_id {
+        tracing::info!(server = %server_id, "using config-provided client_id");
+        let config = rmcp::transport::auth::OAuthClientConfig {
+            client_id: client_id.to_string(),
+            client_secret: None,
+            scopes: scope_refs.iter().map(|s| s.to_string()).collect(),
+            redirect_uri: callback_url.to_string(),
+        };
+        auth_mgr
+            .configure_client(config)
+            .context("failed to configure OAuth client with provided client_id")?;
+        return Ok(());
+    }
+
+    Err(anyhow::anyhow!(
+        "MCP server '{server_id}' does not support dynamic client registration \
+         and no client_id was provided in config. Add a \"client_id\" field to \
+         the server config."
+    ))
 }
 
 /// Open the user's browser with the authorization URL and wait for the callback.
@@ -294,7 +328,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cred_path = dir.path().join("creds.json");
         let result =
-            authorize("test", "https://127.0.0.1:1/nonexistent", cred_path, None).await;
+            authorize("test", "https://127.0.0.1:1/nonexistent", cred_path, None, None).await;
         assert!(result.is_err());
     }
 }
