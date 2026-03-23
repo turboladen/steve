@@ -38,11 +38,20 @@ struct McpServer {
 impl McpServer {
     /// Spawn a child process, complete the MCP handshake, and cache tool definitions.
     async fn spawn(server_id: String, config: &McpServerConfig) -> Result<Self> {
-        let expanded_env = expand_env(&config.env);
+        let (command, args, env) = match config {
+            McpServerConfig::Stdio { command, args, env } => (command, args, env),
+            McpServerConfig::Http { url, .. } => {
+                anyhow::bail!(
+                    "HTTP MCP transport not yet implemented for '{server_id}' (url: {url})"
+                );
+            }
+        };
+
+        let expanded_env = expand_env(env);
 
         // Build the child process command
-        let mut cmd = tokio::process::Command::new(&config.command);
-        cmd.args(&config.args);
+        let mut cmd = tokio::process::Command::new(command);
+        cmd.args(args);
         for (key, value) in &expanded_env {
             cmd.env(key, value);
         }
