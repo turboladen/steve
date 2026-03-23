@@ -7,6 +7,41 @@ use serde::{Deserialize, Serialize};
 /// Uses `#[serde(untagged)]` so that a JSON object with `"url"` deserializes as
 /// `Http` and one with `"command"` deserializes as `Stdio`. **Http must come
 /// first** — serde tries variants in declaration order.
+///
+/// # Examples
+///
+/// Remote server with OAuth (just a URL — auth is discovered automatically):
+///
+/// ```
+/// # use steve::mcp::types::McpServerConfig;
+/// let config: McpServerConfig = serde_json::from_str(r#"{
+///     "url": "https://api.githubcopilot.com/mcp/"
+/// }"#).unwrap();
+/// assert!(config.is_http());
+/// ```
+///
+/// Remote server with a static bearer token:
+///
+/// ```
+/// # use steve::mcp::types::McpServerConfig;
+/// let config: McpServerConfig = serde_json::from_str(r#"{
+///     "url": "https://mcp.example.com",
+///     "headers": { "Authorization": "Bearer ${MCP_TOKEN}" }
+/// }"#).unwrap();
+/// assert!(config.is_http());
+/// ```
+///
+/// Local stdio server (child process):
+///
+/// ```
+/// # use steve::mcp::types::McpServerConfig;
+/// let config: McpServerConfig = serde_json::from_str(r#"{
+///     "command": "npx",
+///     "args": ["-y", "@modelcontextprotocol/server-github"],
+///     "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" }
+/// }"#).unwrap();
+/// assert!(!config.is_http());
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum McpServerConfig {
