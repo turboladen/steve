@@ -11,6 +11,7 @@ use rmcp::transport::streamable_http_client::{
 };
 use rmcp::transport::worker::WorkerTransport;
 
+use super::oauth::OAuthStatusTx;
 use super::types::expand_env;
 
 /// Connect to a remote MCP server over Streamable HTTP.
@@ -22,11 +23,15 @@ use super::types::expand_env;
 /// provided, the function first attempts an unauthenticated connection. If that
 /// fails with an auth-related error (HTTP 401 / MCP handshake auth rejection),
 /// it falls back to the full OAuth2 flow via [`super::oauth::authorize`].
+///
+/// `status_tx` is forwarded to the OAuth flow so progress messages can be
+/// displayed in the TUI.
 pub async fn connect_http(
     server_id: &str,
     url: &str,
     headers: Option<&HashMap<String, String>>,
     credential_dir: Option<&Path>,
+    status_tx: Option<OAuthStatusTx>,
 ) -> Result<RunningService<RoleClient, ()>> {
     let expanded = headers.map(|h| expand_env(h)).unwrap_or_default();
     let has_explicit_auth = expanded
@@ -67,7 +72,7 @@ pub async fn connect_http(
     };
 
     let credential_path = cred_dir.join(format!("{server_id}.json"));
-    let auth_client = super::oauth::authorize(server_id, url, credential_path).await?;
+    let auth_client = super::oauth::authorize(server_id, url, credential_path, status_tx).await?;
 
     // Build transport using the authenticated client
     let config = build_config(url, &expanded);

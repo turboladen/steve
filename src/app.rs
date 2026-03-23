@@ -741,8 +741,18 @@ impl App {
             tokio::spawn(async move {
                 let data_dir = directories::ProjectDirs::from("", "", "steve")
                     .map(|d| d.data_dir().to_path_buf());
+
+                // Create a channel for OAuth status messages → TUI StreamNotice events
+                let (oauth_tx, mut oauth_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+                let notice_tx = tx.clone();
+                tokio::spawn(async move {
+                    while let Some(msg) = oauth_rx.recv().await {
+                        let _ = notice_tx.send(AppEvent::StreamNotice { text: msg });
+                    }
+                });
+
                 let mut mgr = mcp.lock().await;
-                mgr.start_servers(&configs, data_dir.as_deref()).await;
+                mgr.start_servers(&configs, data_dir.as_deref(), Some(oauth_tx)).await;
                 let summary = mgr.server_summary();
                 if !summary.is_empty() {
                     let _ = tx.send(AppEvent::StreamNotice {

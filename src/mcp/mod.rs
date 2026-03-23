@@ -46,6 +46,7 @@ impl McpServer {
         server_id: String,
         config: &McpServerConfig,
         credential_dir: Option<&std::path::Path>,
+        status_tx: Option<oauth::OAuthStatusTx>,
     ) -> Result<Self> {
         let service = match config {
             McpServerConfig::Stdio { command, args, env } => {
@@ -84,7 +85,7 @@ impl McpServer {
                 svc
             }
             McpServerConfig::Http { url, headers } => {
-                transport::connect_http(&server_id, url, headers.as_ref(), credential_dir).await?
+                transport::connect_http(&server_id, url, headers.as_ref(), credential_dir, status_tx).await?
             }
         };
 
@@ -220,6 +221,7 @@ impl McpManager {
         &mut self,
         configs: &HashMap<String, McpServerConfig>,
         data_dir: Option<&std::path::Path>,
+        status_tx: Option<oauth::OAuthStatusTx>,
     ) {
         let credential_dir = data_dir.map(|d| d.join("oauth"));
         if let Some(ref dir) = credential_dir {
@@ -237,6 +239,7 @@ impl McpManager {
                 server_id.clone(),
                 config,
                 credential_dir.as_deref(),
+                status_tx.clone(),
             )
             .await
             {
