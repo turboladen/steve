@@ -159,10 +159,11 @@ fn is_auth_error(err: &anyhow::Error) -> bool {
         || lower.contains("403")
         || lower.contains("unauthorized")
         || lower.contains("forbidden")
+        || lower.contains("auth required")       // "Auth required" from rmcp
+        || lower.contains("authrequired")         // "AuthRequired" (no space)
         || lower.contains("authorization required")
         || lower.contains("www-authenticate")
         || lower.contains("insufficient_scope")
-        || lower.contains("authrequired")
 }
 
 #[cfg(test)]
@@ -214,6 +215,16 @@ mod tests {
     #[test]
     fn is_auth_error_detects_authrequired() {
         let err = anyhow::anyhow!("AuthRequired: please log in");
+        assert!(is_auth_error(&err));
+    }
+
+    #[test]
+    fn is_auth_error_detects_rmcp_auth_required() {
+        // Exact error string from rmcp when server returns 401
+        let err = anyhow::anyhow!(
+            "MCP HTTP handshake failed for 'github': Send message error \
+             Transport [...] error: Auth required, when send initialize request"
+        );
         assert!(is_auth_error(&err));
     }
 
