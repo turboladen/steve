@@ -60,7 +60,15 @@ pub async fn authorize(
 
     // Discover OAuth endpoints, then run the interactive browser flow.
     discover_metadata(server_id, &mut auth_mgr, &status_tx).await?;
-    browser_auth_flow(server_id, &mut auth_mgr, &status_tx).await?;
+    if let Err(e) = browser_auth_flow(server_id, &mut auth_mgr, &status_tx).await {
+        let log_hint = log_path_hint();
+        send_status(&status_tx, format!(
+            "\u{26a0} MCP '{server_id}': authorization failed \u{2014} {log_hint}"
+        ));
+        return Err(e).context(format!(
+            "OAuth authorization failed for MCP '{server_id}'. {log_hint}"
+        ));
+    }
 
     send_status(&status_tx, format!("MCP '{server_id}': authorized successfully"));
     Ok(wrap_client(auth_mgr))
@@ -164,7 +172,7 @@ async fn open_browser_and_wait(
         .context("failed to generate authorization URL")?;
 
     tracing::info!(server = %server_id, "opening browser for OAuth authorization");
-    send_status(status_tx, format!("MCP '{server_id}': opening browser for authorization..."));
+    send_status(status_tx, format!("\u{26a0} MCP '{server_id}': ACTION REQUIRED \u{2014} Authorize in your browser to continue"));
 
     if let Err(e) = webbrowser::open(&auth_url) {
         tracing::error!(error = %e, "failed to open browser — authorize manually");
@@ -203,6 +211,13 @@ async fn exchange_token(
     Ok(())
 }
 
+/// Best-effort hint about where logs are stored for error messages.
+fn log_path_hint() -> String {
+    directories::ProjectDirs::from("", "", "steve")
+        .map(|d| format!("Check logs at: {}", d.data_dir().join("logs").display()))
+        .unwrap_or_else(|| "Check steve log files for details".to_string())
+}
+
 /// Wrap an `AuthorizationManager` into a ready-to-use `AuthClient`.
 fn wrap_client(auth_mgr: AuthorizationManager) -> AuthClient<reqwest::Client> {
     AuthClient::new(reqwest::Client::new(), auth_mgr)
@@ -230,6 +245,17 @@ mod tests {
         drop(rx);
         // Sending to a closed channel should not panic (we ignore the error).
         send_status(&Some(tx), "dropped".into());
+    }
+
+    #[test]
+    fn log_path_hint_returns_non_empty_string() {
+        let hint = log_path_hint();
+        assert!(!hint.is_empty());
+        // Should contain either a path or a fallback message
+        assert!(
+            hint.contains("logs") || hint.contains("log"),
+            "hint should mention logs: {hint}"
+        );
     }
 
     #[tokio::test]

@@ -21,7 +21,7 @@ pub struct DiagnosticInput<'a> {
     pub compaction_count: u32,
     pub session_cost: Option<f64>,
     pub mcp_configured: &'a [&'a str],
-    pub mcp_connected: &'a [(&'a str, usize, usize)],
+    pub mcp_connected: &'a [(&'a str, usize, usize, usize)],
 }
 
 /// Run all diagnostic checks and return the combined results.

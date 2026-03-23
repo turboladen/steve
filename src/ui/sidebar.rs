@@ -82,6 +82,8 @@ pub struct SidebarMcp {
     pub tool_count: usize,
     /// Number of resources provided by this server.
     pub resource_count: usize,
+    /// Number of prompts provided by this server.
+    pub prompt_count: usize,
     /// Whether the server is currently connected.
     pub connected: bool,
     /// Error message if connection failed.
@@ -392,21 +394,23 @@ pub fn render_sidebar(
             let (icon, icon_color) = if server.connected {
                 ("\u{25cf}", theme.success) // ● green — connected
             } else {
-                ("\u{25cb}", theme.error) // ○ red — disconnected
+                ("\u{25cb}", theme.dim) // ○ dim — disconnected (matches LSP pattern)
             };
             let label = if server.connected {
-                let parts: Vec<String> = [
-                    (server.tool_count > 0).then(|| format!("{} tools", server.tool_count)),
-                    (server.resource_count > 0)
-                        .then(|| format!("{} resources", server.resource_count)),
-                ]
-                .into_iter()
-                .flatten()
-                .collect();
-                if parts.is_empty() {
+                let mut counts = Vec::new();
+                if server.tool_count > 0 {
+                    counts.push(format!("{}T", server.tool_count));
+                }
+                if server.resource_count > 0 {
+                    counts.push(format!("{}R", server.resource_count));
+                }
+                if server.prompt_count > 0 {
+                    counts.push(format!("{}P", server.prompt_count));
+                }
+                if counts.is_empty() {
                     server.server_id.clone()
                 } else {
-                    format!("{} ({})", server.server_id, parts.join(", "))
+                    format!("{} ({})", server.server_id, counts.join(" "))
                 }
             } else {
                 let suffix = server
@@ -1220,6 +1224,7 @@ mod tests {
                     server_id: "github".to_string(),
                     tool_count: 5,
                     resource_count: 0,
+                    prompt_count: 0,
                     connected: true,
                     error: None,
                 },
@@ -1227,6 +1232,7 @@ mod tests {
                     server_id: "atlassian".to_string(),
                     tool_count: 3,
                     resource_count: 2,
+                    prompt_count: 0,
                     connected: true,
                     error: None,
                 },
@@ -1236,10 +1242,10 @@ mod tests {
         let text = render_sidebar_to_string(50, 20, &state);
         assert!(text.contains("MCP"), "should show 'MCP' header");
         assert!(text.contains("github"), "should show github server");
-        assert!(text.contains("5 tools"), "should show tool count");
+        assert!(text.contains("5T"), "should show tool count");
         assert!(text.contains("atlassian"), "should show atlassian server");
-        assert!(text.contains("3 tools"), "should show tool count for atlassian");
-        assert!(text.contains("2 resources"), "should show resource count for atlassian");
+        assert!(text.contains("3T"), "should show tool count for atlassian");
+        assert!(text.contains("2R"), "should show resource count for atlassian");
         // Connected servers get filled circle
         assert!(text.contains("\u{25cf}"), "connected server should show \u{25cf} icon");
     }
@@ -1252,6 +1258,7 @@ mod tests {
                     server_id: "github".to_string(),
                     tool_count: 5,
                     resource_count: 0,
+                    prompt_count: 0,
                     connected: true,
                     error: None,
                 },
@@ -1259,6 +1266,7 @@ mod tests {
                     server_id: "broken".to_string(),
                     tool_count: 0,
                     resource_count: 0,
+                    prompt_count: 0,
                     connected: false,
                     error: Some("timeout".to_string()),
                 },
@@ -1279,6 +1287,7 @@ mod tests {
                 server_id: "broken".to_string(),
                 tool_count: 0,
                 resource_count: 0,
+                prompt_count: 0,
                 connected: false,
                 error: None,
             }],
@@ -1299,6 +1308,7 @@ mod tests {
                 server_id: "github".to_string(),
                 tool_count: 3,
                 resource_count: 0,
+                prompt_count: 0,
                 connected: true,
                 error: None,
             }],
@@ -1317,6 +1327,7 @@ mod tests {
                 server_id: "simple".to_string(),
                 tool_count: 0,
                 resource_count: 0,
+                prompt_count: 0,
                 connected: true,
                 error: None,
             }],
@@ -1325,7 +1336,7 @@ mod tests {
         let text = render_sidebar_to_string(50, 20, &state);
         // Connected with zero tools/resources should just show server_id
         assert!(text.contains("simple"), "should show server id");
-        assert!(!text.contains("tools"), "should not show tool count when zero");
+        assert!(!text.contains("0T"), "should not show tool count when zero");
     }
 
     #[test]

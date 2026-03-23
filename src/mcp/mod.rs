@@ -16,7 +16,7 @@ use std::process::Stdio;
 use anyhow::{Context, Result};
 use rmcp::ServiceExt;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, RawContent, ReadResourceRequestParams, Resource,
+    CallToolRequestParams, CallToolResult, Prompt, RawContent, ReadResourceRequestParams, Resource,
     ResourceContents, Tool,
 };
 use rmcp::service::{Peer, RoleClient, RunningService};
@@ -35,6 +35,8 @@ struct McpServer {
     cached_tools: Vec<Tool>,
     /// Cached resource list from the server.
     cached_resources: Vec<Resource>,
+    /// Cached prompt list from the server.
+    cached_prompts: Vec<Prompt>,
 }
 
 impl McpServer {
@@ -109,11 +111,22 @@ impl McpServer {
                 Vec::new()
             });
 
+        // Cache prompt list (best-effort)
+        let cached_prompts = service
+            .peer()
+            .list_all_prompts()
+            .await
+            .unwrap_or_else(|e| {
+                tracing::debug!(server = %server_id, error = %e, "failed to list MCP prompts (may not be supported)");
+                Vec::new()
+            });
+
         let transport_kind = if config.is_http() { "http" } else { "stdio" };
         tracing::info!(
             server = %server_id,
             tools = cached_tools.len(),
             resources = cached_resources.len(),
+            prompts = cached_prompts.len(),
             transport = transport_kind,
             "MCP server connected"
         );
@@ -123,6 +136,7 @@ impl McpServer {
             service,
             cached_tools,
             cached_resources,
+            cached_prompts,
         })
     }
 
@@ -385,12 +399,12 @@ impl McpManager {
     }
 
     /// Structured server status for sidebar display.
-    /// Returns `(server_id, tool_count, resource_count)` tuples.
-    pub fn server_status(&self) -> Vec<(&str, usize, usize)> {
+    /// Returns `(server_id, tool_count, resource_count, prompt_count)` tuples.
+    pub fn server_status(&self) -> Vec<(&str, usize, usize, usize)> {
         self.servers
             .iter()
             .map(|(id, server)| {
-                (id.as_str(), server.cached_tools.len(), server.cached_resources.len())
+                (id.as_str(), server.cached_tools.len(), server.cached_resources.len(), server.cached_prompts.len())
             })
             .collect()
     }
@@ -400,11 +414,21 @@ impl McpManager {
         self.servers
             .iter()
             .map(|(id, server)| {
-                format!(
-                    "{id} ({} tools, {} resources)",
-                    server.cached_tools.len(),
-                    server.cached_resources.len()
-                )
+                let mut parts = Vec::new();
+                if server.cached_tools.len() > 0 {
+                    parts.push(format!("{} tools", server.cached_tools.len()));
+                }
+                if server.cached_resources.len() > 0 {
+                    parts.push(format!("{} resources", server.cached_resources.len()));
+                }
+                if server.cached_prompts.len() > 0 {
+                    parts.push(format!("{} prompts", server.cached_prompts.len()));
+                }
+                if parts.is_empty() {
+                    id.clone()
+                } else {
+                    format!("{id} ({})", parts.join(", "))
+                }
             })
             .collect()
     }

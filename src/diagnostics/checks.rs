@@ -188,10 +188,10 @@ pub fn session_efficiency_checks(
 
 /// MCP server health checks.
 /// `configured` = server IDs from config.
-/// `connected` = (server_id, tool_count, resource_count) for running servers.
+/// `connected` = (server_id, tool_count, resource_count, prompt_count) for running servers.
 pub fn mcp_health_checks(
     configured: &[&str],
-    connected: &[(&str, usize, usize)],
+    connected: &[(&str, usize, usize, usize)],
 ) -> Vec<DiagnosticCheck> {
     let mut checks = Vec::new();
 
@@ -200,7 +200,7 @@ pub fn mcp_health_checks(
     }
 
     for &server_id in configured {
-        match connected.iter().find(|(id, _, _)| *id == server_id) {
+        match connected.iter().find(|(id, _, _, _)| *id == server_id) {
             None => {
                 checks.push(DiagnosticCheck {
                     severity: Severity::Error,
@@ -210,7 +210,7 @@ pub fn mcp_health_checks(
                     recommendation: Some("Check server command/path and logs".into()),
                 });
             }
-            Some((_, tool_count, _)) if *tool_count == 0 => {
+            Some((_, tool_count, _, _)) if *tool_count == 0 => {
                 checks.push(DiagnosticCheck {
                     severity: Severity::Warning,
                     category: Category::McpHealth,
@@ -441,7 +441,7 @@ mod tests {
     #[test]
     fn mcp_all_connected_no_errors() {
         let configured = &["github", "slack"];
-        let connected = &[("github", 5_usize, 2_usize), ("slack", 3, 0)];
+        let connected = &[("github", 5_usize, 2_usize, 0_usize), ("slack", 3, 0, 0)];
         let checks = mcp_health_checks(configured, connected);
         assert!(checks.is_empty());
     }
@@ -449,7 +449,7 @@ mod tests {
     #[test]
     fn mcp_connected_but_no_tools_warns() {
         let configured = &["github"];
-        let connected = &[("github", 0_usize, 1_usize)];
+        let connected = &[("github", 0_usize, 1_usize, 0_usize)];
         let checks = mcp_health_checks(configured, connected);
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].severity, Severity::Warning);

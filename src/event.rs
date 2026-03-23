@@ -77,8 +77,8 @@ pub enum AppEvent {
     },
     /// LSP servers have been initialized; carries detected server binaries with running status.
     LspStatus { servers: Vec<(String, bool)> },
-    /// MCP servers have been initialized; carries (server_id, tool_count, resource_count).
-    McpStatus { servers: Vec<(String, usize, usize)> },
+    /// MCP servers have been initialized; carries (server_id, tool_count, resource_count, prompt_count).
+    McpStatus { servers: Vec<(String, usize, usize, usize)> },
 
     // -- Permission events --
 

@@ -760,10 +760,10 @@ impl App {
                     });
                 }
                 // Update sidebar with MCP server status
-                let status: Vec<(String, usize, usize)> = mgr
+                let status: Vec<(String, usize, usize, usize)> = mgr
                     .server_status()
                     .into_iter()
-                    .map(|(id, tools, resources)| (id.to_string(), tools, resources))
+                    .map(|(id, tools, resources, prompts)| (id.to_string(), tools, resources, prompts))
                     .collect();
                 if !status.is_empty() {
                     let _ = tx.send(AppEvent::McpStatus { servers: status });
@@ -1280,10 +1280,11 @@ impl App {
             AppEvent::McpStatus { servers } => {
                 self.sidebar_state.mcp_servers = servers
                     .into_iter()
-                    .map(|(server_id, tool_count, resource_count)| SidebarMcp {
+                    .map(|(server_id, tool_count, resource_count, prompt_count)| SidebarMcp {
                         server_id,
                         tool_count,
                         resource_count,
+                        prompt_count,
                         connected: true,
                         error: None,
                     })
@@ -2606,18 +2607,18 @@ impl App {
         // Gather MCP server info (best-effort — skip if lock is held)
         let mcp_configured_ids: Vec<String> = self.config.mcp_servers.keys().cloned().collect();
         let mcp_configured: Vec<&str> = mcp_configured_ids.iter().map(|s| s.as_str()).collect();
-        let mcp_connected_owned: Vec<(String, usize, usize)> =
+        let mcp_connected_owned: Vec<(String, usize, usize, usize)> =
             if let Ok(mgr) = self.mcp_manager.try_lock() {
                 mgr.server_status()
                     .into_iter()
-                    .map(|(id, tools, resources)| (id.to_owned(), tools, resources))
+                    .map(|(id, tools, resources, prompts)| (id.to_owned(), tools, resources, prompts))
                     .collect()
             } else {
                 Vec::new()
             };
-        let mcp_connected: Vec<(&str, usize, usize)> = mcp_connected_owned
+        let mcp_connected: Vec<(&str, usize, usize, usize)> = mcp_connected_owned
             .iter()
-            .map(|(id, tools, resources)| (id.as_str(), *tools, *resources))
+            .map(|(id, tools, resources, prompts)| (id.as_str(), *tools, *resources, *prompts))
             .collect();
 
         let input = crate::diagnostics::DiagnosticInput {
