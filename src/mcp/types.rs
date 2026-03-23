@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// # Examples
 ///
-/// Remote server with OAuth (just a URL — auth is discovered automatically):
+/// GitHub MCP server (just a URL — Steve has a built-in GitHub App client_id):
 ///
 /// ```
 /// # use steve::mcp::types::McpServerConfig;
@@ -20,14 +20,14 @@ use serde::{Deserialize, Serialize};
 /// assert!(config.is_http());
 /// ```
 ///
-/// Remote server with a pre-registered OAuth client_id (for servers that
-/// don't support dynamic client registration, like GitHub):
+/// Remote server with a custom OAuth client_id (for servers that don't
+/// support dynamic client registration and aren't in Steve's built-in list):
 ///
 /// ```
 /// # use steve::mcp::types::McpServerConfig;
 /// let config: McpServerConfig = serde_json::from_str(r#"{
-///     "url": "https://api.githubcopilot.com/mcp/",
-///     "client_id": "Ov23liABCDEF123456"
+///     "url": "https://mcp.example.com",
+///     "client_id": "my-app-client-id"
 /// }"#).unwrap();
 /// assert!(config.is_http());
 /// ```

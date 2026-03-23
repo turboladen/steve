@@ -75,7 +75,7 @@ pub async fn authorize(
         ));
     }
 
-    if let Err(e) = browser_auth_flow(server_id, &mut auth_mgr, client_id, client_secret, &status_tx).await {
+    if let Err(e) = browser_auth_flow(server_id, base_url, &mut auth_mgr, client_id, client_secret, &status_tx).await {
         let log_hint = log_path_hint();
         send_status(&status_tx, format!(
             "\u{26a0} MCP '{server_id}': authorization failed \u{2014} {e:#}"
@@ -134,6 +134,7 @@ async fn discover_metadata(
 /// of success or failure.
 async fn browser_auth_flow(
     server_id: &str,
+    base_url: &str,
     auth_mgr: &mut AuthorizationManager,
     client_id: Option<&str>,
     client_secret: Option<&str>,
@@ -145,7 +146,7 @@ async fn browser_auth_flow(
 
     // Ensure the callback server is always shut down.
     let result = async {
-        register_client(server_id, auth_mgr, &callback_url, client_id, client_secret).await?;
+        register_client(server_id, base_url, auth_mgr, &callback_url, client_id, client_secret).await?;
         let callback_result = open_browser_and_wait(server_id, auth_mgr, callback_rx, status_tx).await?;
         exchange_token(server_id, auth_mgr, &callback_result, status_tx).await
     }
@@ -162,6 +163,7 @@ async fn browser_auth_flow(
 /// available, returns an error.
 async fn register_client(
     server_id: &str,
+    base_url: &str,
     auth_mgr: &mut AuthorizationManager,
     callback_url: &str,
     config_client_id: Option<&str>,
@@ -187,26 +189,37 @@ async fn register_client(
         }
     }
 
-    // Attempt 2: use config-provided client_id
-    if let Some(client_id) = config_client_id {
-        tracing::info!(server = %server_id, "using config-provided client_id");
-        let config = rmcp::transport::auth::OAuthClientConfig {
-            client_id: client_id.to_string(),
-            client_secret: config_client_secret.map(|s| s.to_string()),
-            scopes: scope_refs.iter().map(|s| s.to_string()).collect(),
-            redirect_uri: callback_url.to_string(),
-        };
-        auth_mgr
-            .configure_client(config)
-            .context("failed to configure OAuth client with provided client_id")?;
-        return Ok(());
-    }
+    // Attempt 2: use config-provided client_id (or well-known default)
+    let (client_id, client_secret) = match config_client_id {
+        Some(id) => {
+            tracing::info!(server = %server_id, "using config-provided client_id");
+            (id.to_string(), config_client_secret.map(|s| s.to_string()))
+        }
+        None => match well_known_client_id(base_url) {
+            Some(id) => {
+                tracing::info!(server = %server_id, client_id = %id, "using built-in client_id");
+                (id.to_string(), None)
+            }
+            None => {
+                return Err(anyhow::anyhow!(
+                    "MCP server '{server_id}' does not support dynamic client registration \
+                     and no client_id was provided in config. Add a \"client_id\" field to \
+                     the server config."
+                ));
+            }
+        },
+    };
 
-    Err(anyhow::anyhow!(
-        "MCP server '{server_id}' does not support dynamic client registration \
-         and no client_id was provided in config. Add a \"client_id\" field to \
-         the server config."
-    ))
+    let config = rmcp::transport::auth::OAuthClientConfig {
+        client_id,
+        client_secret,
+        scopes: scope_refs.iter().map(|s| s.to_string()).collect(),
+        redirect_uri: callback_url.to_string(),
+    };
+    auth_mgr
+        .configure_client(config)
+        .context("failed to configure OAuth client")?;
+    Ok(())
 }
 
 /// Open the user's browser with the authorization URL and wait for the callback.
@@ -271,6 +284,21 @@ fn log_path_hint() -> String {
         .unwrap_or_else(|| "Check steve log files for details".to_string())
 }
 
+/// Look up a built-in client_id for well-known MCP server URLs.
+///
+/// This allows users to configure popular servers with just a URL — no manual
+/// OAuth app registration needed. The client_ids here are for Steve's registered
+/// apps with each provider.
+fn well_known_client_id(base_url: &str) -> Option<&'static str> {
+    let lower = base_url.to_lowercase();
+    if lower.contains("githubcopilot.com") || lower.contains("github.com") {
+        // Steve's GitHub App (public client, PKCE, no secret needed)
+        Some("Iv23liXXwVqGAPlUVvVv")
+    } else {
+        None
+    }
+}
+
 /// Wrap an `AuthorizationManager` into a ready-to-use `AuthClient`.
 fn wrap_client(auth_mgr: AuthorizationManager) -> AuthClient<reqwest::Client> {
     AuthClient::new(reqwest::Client::new(), auth_mgr)
@@ -309,6 +337,27 @@ mod tests {
             hint.contains("logs") || hint.contains("log"),
             "hint should mention logs: {hint}"
         );
+    }
+
+    #[test]
+    fn well_known_client_id_github_copilot() {
+        assert_eq!(
+            well_known_client_id("https://api.githubcopilot.com/mcp/"),
+            Some("Iv23liXXwVqGAPlUVvVv"),
+        );
+    }
+
+    #[test]
+    fn well_known_client_id_github_domain() {
+        assert_eq!(
+            well_known_client_id("https://mcp.github.com/something"),
+            Some("Iv23liXXwVqGAPlUVvVv"),
+        );
+    }
+
+    #[test]
+    fn well_known_client_id_unknown_returns_none() {
+        assert_eq!(well_known_client_id("https://mcp.example.com"), None);
     }
 
     #[tokio::test]
