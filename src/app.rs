@@ -739,8 +739,10 @@ impl App {
             let tx = self.event_tx.clone();
             let configs = self.config.mcp_servers.clone();
             tokio::spawn(async move {
+                let data_dir = directories::ProjectDirs::from("", "", "steve")
+                    .map(|d| d.data_dir().to_path_buf());
                 let mut mgr = mcp.lock().await;
-                mgr.start_servers(&configs).await;
+                mgr.start_servers(&configs, data_dir.as_deref()).await;
                 let summary = mgr.server_summary();
                 if !summary.is_empty() {
                     let _ = tx.send(AppEvent::StreamNotice {

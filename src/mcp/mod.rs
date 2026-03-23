@@ -41,7 +41,12 @@ impl McpServer {
     /// Connect to an MCP server, complete the handshake, and cache tool definitions.
     ///
     /// Supports both stdio (child process) and HTTP (streamable HTTP) transports.
-    async fn spawn(server_id: String, config: &McpServerConfig) -> Result<Self> {
+    /// `credential_dir` is the directory for storing OAuth credentials (HTTP only).
+    async fn spawn(
+        server_id: String,
+        config: &McpServerConfig,
+        credential_dir: Option<&std::path::Path>,
+    ) -> Result<Self> {
         let service = match config {
             McpServerConfig::Stdio { command, args, env } => {
                 let expanded_env = expand_env(env);
@@ -79,7 +84,7 @@ impl McpServer {
                 svc
             }
             McpServerConfig::Http { url, headers } => {
-                transport::connect_http(&server_id, url, headers.as_ref()).await?
+                transport::connect_http(&server_id, url, headers.as_ref(), credential_dir).await?
             }
         };
 
@@ -207,13 +212,34 @@ impl McpManager {
 
     /// Spawn all configured MCP servers. Failures are logged per-server; healthy
     /// servers continue. Rebuilds the lock-free tool snapshot when done.
-    pub async fn start_servers(&mut self, configs: &HashMap<String, McpServerConfig>) {
+    ///
+    /// `data_dir` is the application data directory; OAuth credentials are stored
+    /// under `{data_dir}/oauth/`. Pass `None` if no data directory is available
+    /// (OAuth-requiring servers will fail gracefully).
+    pub async fn start_servers(
+        &mut self,
+        configs: &HashMap<String, McpServerConfig>,
+        data_dir: Option<&std::path::Path>,
+    ) {
+        let credential_dir = data_dir.map(|d| d.join("oauth"));
+        if let Some(ref dir) = credential_dir {
+            if let Err(e) = tokio::fs::create_dir_all(dir).await {
+                tracing::warn!(error = %e, "failed to create OAuth credential directory");
+            }
+        }
+
         for (server_id, config) in configs {
             if let Err(e) = types::validate_server_id(server_id) {
                 tracing::error!(server = %server_id, error = %e, "invalid MCP server ID, skipping");
                 continue;
             }
-            match McpServer::spawn(server_id.clone(), config).await {
+            match McpServer::spawn(
+                server_id.clone(),
+                config,
+                credential_dir.as_deref(),
+            )
+            .await
+            {
                 Ok(server) => {
                     self.servers.insert(server_id.clone(), server);
                 }
