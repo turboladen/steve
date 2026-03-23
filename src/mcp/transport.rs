@@ -71,7 +71,13 @@ pub async fn connect_http(
         ));
     };
 
-    let credential_path = cred_dir.join(format!("{server_id}.json"));
+    // Sanitize server_id before using as filename to prevent path traversal
+    // (server_id comes from user config keys which may contain `/`, `..`, etc.).
+    let safe_id: String = server_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let credential_path = cred_dir.join(format!("{safe_id}.json"));
     let auth_client = super::oauth::authorize(server_id, url, credential_path, status_tx).await?;
 
     // Build transport using the authenticated client
@@ -113,8 +119,12 @@ fn build_config(
 ) -> StreamableHttpClientTransportConfig {
     let mut config = StreamableHttpClientTransportConfig::with_uri(url);
 
-    // Extract Authorization header specially — rmcp sends it via a dedicated field
-    if let Some(auth) = expanded.get("Authorization") {
+    // Extract Authorization header specially — rmcp sends it via a dedicated field.
+    // Case-insensitive lookup to match the has_explicit_auth check in connect_http().
+    if let Some((_, auth)) = expanded
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("Authorization"))
+    {
         config = config.auth_header(auth.clone());
     }
 

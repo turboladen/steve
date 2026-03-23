@@ -207,7 +207,9 @@ pub fn mcp_health_checks(
                     category: Category::McpHealth,
                     label: format!("{server_id} not connected"),
                     detail: format!("MCP server '{server_id}' is configured but not running"),
-                    recommendation: Some("Check server command/path and logs".into()),
+                    recommendation: Some(
+                        "Check server command/URL, authentication, and logs".into(),
+                    ),
                 });
             }
             Some((_, tool_count, _, _)) if *tool_count == 0 => {

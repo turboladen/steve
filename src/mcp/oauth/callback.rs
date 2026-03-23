@@ -48,12 +48,17 @@ pub async fn start_callback_server()
                             description = %desc,
                             "OAuth callback received error"
                         );
-                        return Html(format!(
+                        // Drop the sender so the oneshot resolves immediately
+                        // (RecvError) instead of waiting for the 5-minute timeout.
+                        drop(tx.lock().await.take());
+                        // Static HTML — never interpolate untrusted query params.
+                        return Html(
                             "<html><body>\
-                             <h2>Authorization failed: {error}</h2>\
-                             <p>{desc}</p>\
+                             <h2>Authorization failed.</h2>\
+                             <p>Please return to the application for details.</p>\
                              </body></html>"
-                        ));
+                                .to_string(),
+                        );
                     }
 
                     let code = params.get("code").cloned().unwrap_or_default();
@@ -135,7 +140,7 @@ mod tests {
             .unwrap();
         assert!(resp.status().is_success());
         let body = resp.text().await.unwrap();
-        assert!(body.contains("access_denied"));
+        assert!(body.contains("Authorization failed"));
         handle.abort();
     }
 
