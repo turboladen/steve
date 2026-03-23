@@ -251,11 +251,20 @@ impl McpManager {
         for (server_id, config) in configs {
             if let Err(e) = types::validate_server_id(server_id) {
                 tracing::error!(server = %server_id, error = %e, "invalid MCP server ID, skipping");
+                if let Some(ref tx) = status_tx {
+                    let _ = tx.send(format!("\u{26a0} MCP '{server_id}': {e}"));
+                }
+                self.failed_servers.insert(server_id.clone(), e.to_string());
                 continue;
             }
             if let McpServerConfig::Http { url, .. } = config {
                 if url::Url::parse(url).is_err() {
                     tracing::error!(server = %server_id, url = %url, "invalid MCP server URL, skipping");
+                    let msg = format!("invalid URL: {url}");
+                    if let Some(ref tx) = status_tx {
+                        let _ = tx.send(format!("\u{26a0} MCP '{server_id}': {msg}"));
+                    }
+                    self.failed_servers.insert(server_id.clone(), msg);
                     continue;
                 }
             }
@@ -275,7 +284,13 @@ impl McpManager {
                     // Truncate error to first line for sidebar display.
                     let msg = e.to_string();
                     let short = msg.lines().next().unwrap_or("connection failed").to_string();
-                    self.failed_servers.insert(server_id.clone(), short);
+                    self.failed_servers.insert(server_id.clone(), short.clone());
+                    // Also send to TUI so user sees the failure even if logs aren't working.
+                    if let Some(ref tx) = status_tx {
+                        let _ = tx.send(format!(
+                            "\u{26a0} MCP '{server_id}': failed to start \u{2014} {short}"
+                        ));
+                    }
                 }
             }
         }
