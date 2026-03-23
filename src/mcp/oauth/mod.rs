@@ -49,97 +49,210 @@ pub async fn authorize(
 ) -> Result<AuthClient<reqwest::Client>> {
     send_status(&status_tx, format!("MCP '{server_id}': starting OAuth authorization..."));
 
-    let mut auth_mgr = AuthorizationManager::new(base_url)
-        .await
-        .context("failed to create AuthorizationManager")?;
-
-    // Persistent credential storage
-    let store = FileCredentialStore::new(credential_path);
-    auth_mgr.set_credential_store(store);
+    let mut auth_mgr = init_auth_manager(server_id, base_url, credential_path, &status_tx).await?;
 
     // Try stored credentials first — avoids browser flow if a valid token exists.
     if auth_mgr.initialize_from_store().await.unwrap_or(false) {
         tracing::info!(server = %server_id, "reusing stored OAuth credentials");
         send_status(&status_tx, format!("MCP '{server_id}': reusing stored OAuth credentials"));
-        let client = reqwest::Client::new();
-        return Ok(AuthClient::new(client, auth_mgr));
+        return Ok(wrap_client(auth_mgr));
     }
 
-    // Discover OAuth metadata (RFC 9728 Protected Resource Metadata → RFC 8414)
+    // Discover OAuth endpoints, then run the interactive browser flow.
+    discover_metadata(server_id, &mut auth_mgr, &status_tx).await?;
+    browser_auth_flow(server_id, &mut auth_mgr, &status_tx).await?;
+
+    send_status(&status_tx, format!("MCP '{server_id}': authorized successfully"));
+    Ok(wrap_client(auth_mgr))
+}
+
+/// Create and configure an `AuthorizationManager` with persistent credential storage.
+async fn init_auth_manager(
+    server_id: &str,
+    base_url: &str,
+    credential_path: PathBuf,
+    _status_tx: &Option<OAuthStatusTx>,
+) -> Result<AuthorizationManager> {
+    let mut auth_mgr = AuthorizationManager::new(base_url)
+        .await
+        .with_context(|| format!("failed to create AuthorizationManager for '{server_id}'"))?;
+
+    let store = FileCredentialStore::new(credential_path);
+    auth_mgr.set_credential_store(store);
+
+    Ok(auth_mgr)
+}
+
+/// Discover OAuth metadata via RFC 9728 Protected Resource Metadata → RFC 8414.
+async fn discover_metadata(
+    server_id: &str,
+    auth_mgr: &mut AuthorizationManager,
+    status_tx: &Option<OAuthStatusTx>,
+) -> Result<()> {
     tracing::info!(server = %server_id, "discovering OAuth metadata");
-    send_status(&status_tx, format!("MCP '{server_id}': discovering OAuth metadata..."));
+    send_status(status_tx, format!("MCP '{server_id}': discovering OAuth metadata..."));
+
     let metadata = auth_mgr
         .discover_metadata()
         .await
         .context("OAuth metadata discovery failed")?;
     auth_mgr.set_metadata(metadata);
 
-    // Start ephemeral callback server for the redirect URI
+    Ok(())
+}
+
+/// Run the interactive browser-based OAuth flow: register client, open browser,
+/// wait for callback, exchange code for token.
+///
+/// Starts an ephemeral callback server and ensures it is shut down regardless
+/// of success or failure.
+async fn browser_auth_flow(
+    server_id: &str,
+    auth_mgr: &mut AuthorizationManager,
+    status_tx: &Option<OAuthStatusTx>,
+) -> Result<()> {
     let (callback_url, callback_rx, server_handle) = callback::start_callback_server()
         .await
         .context("failed to start OAuth callback server")?;
 
-    // Run the browser-based OAuth flow, ensuring the callback server is
-    // always shut down regardless of success or failure.
+    // Ensure the callback server is always shut down.
     let result = async {
-        // Dynamic client registration (RFC 7591)
-        // `select_scopes()` picks the best scope set from metadata/headers/defaults.
-        let scopes = auth_mgr.select_scopes(None, &[]);
-        let scope_refs: Vec<&str> = scopes.iter().map(|s| s.as_str()).collect();
-
-        tracing::info!(server = %server_id, "registering OAuth client");
-        // rmcp's register_client() internally calls configure_client(),
-        // so the returned config doesn't need separate handling.
-        let _client_config = auth_mgr
-            .register_client("steve", &callback_url, &scope_refs)
-            .await
-            .context("OAuth dynamic client registration failed")?;
-
-        // Generate authorization URL with PKCE
-        let auth_url = auth_mgr
-            .get_authorization_url(&scope_refs)
-            .await
-            .context("failed to generate authorization URL")?;
-
-        // Open the user's browser
-        tracing::info!(server = %server_id, "opening browser for OAuth authorization");
-        send_status(&status_tx, format!("MCP '{server_id}': opening browser for authorization..."));
-        if let Err(e) = webbrowser::open(&auth_url) {
-            tracing::error!(error = %e, "failed to open browser — authorize manually");
-            tracing::info!(url = %auth_url, "open this URL manually to authorize");
-            send_status(&status_tx, format!("MCP '{server_id}': failed to open browser — check logs for URL"));
-        }
-
-        // Wait for the callback (5 minute timeout)
-        send_status(&status_tx, format!("MCP '{server_id}': waiting for browser authorization..."));
-        let callback_result = tokio::time::timeout(
-            std::time::Duration::from_secs(300),
-            callback_rx,
-        )
-        .await
-        .context("OAuth authorization timed out (5 minutes)")?
-        .context("OAuth callback channel closed")?;
-
-        // Exchange authorization code for token.
-        // CSRF state validation happens inside rmcp's exchange_code_for_token():
-        // it looks up the CSRF token in the state store (saved during
-        // get_authorization_url), verifies it matches, and deletes it after use.
-        tracing::info!(server = %server_id, "exchanging authorization code for token");
-        send_status(&status_tx, format!("MCP '{server_id}': exchanging authorization code..."));
-        auth_mgr
-            .exchange_code_for_token(&callback_result.code, &callback_result.state)
-            .await
-            .context("failed to exchange authorization code for token")?;
-
-        tracing::info!(server = %server_id, "OAuth authorization successful");
-        send_status(&status_tx, format!("MCP '{server_id}': authorized successfully"));
-        let client = reqwest::Client::new();
-        Ok(AuthClient::new(client, auth_mgr))
+        register_client(server_id, auth_mgr, &callback_url).await?;
+        let callback_result = open_browser_and_wait(server_id, auth_mgr, callback_rx, status_tx).await?;
+        exchange_token(server_id, auth_mgr, &callback_result, status_tx).await
     }
     .await;
 
-    // Always shut down the callback server, whether we succeeded or failed.
     server_handle.abort();
-
     result
+}
+
+/// Dynamically register an OAuth client (RFC 7591) and generate the
+/// authorization URL with PKCE.
+async fn register_client(
+    server_id: &str,
+    auth_mgr: &mut AuthorizationManager,
+    callback_url: &str,
+) -> Result<()> {
+    let scopes = auth_mgr.select_scopes(None, &[]);
+    let scope_refs: Vec<&str> = scopes.iter().map(|s| s.as_str()).collect();
+
+    tracing::info!(server = %server_id, "registering OAuth client");
+    // rmcp's register_client() internally calls configure_client(),
+    // so the returned config doesn't need separate handling.
+    let _client_config = auth_mgr
+        .register_client("steve", callback_url, &scope_refs)
+        .await
+        .context("OAuth dynamic client registration failed")?;
+
+    Ok(())
+}
+
+/// Open the user's browser with the authorization URL and wait for the callback.
+async fn open_browser_and_wait(
+    server_id: &str,
+    auth_mgr: &mut AuthorizationManager,
+    callback_rx: tokio::sync::oneshot::Receiver<CallbackResult>,
+    status_tx: &Option<OAuthStatusTx>,
+) -> Result<CallbackResult> {
+    let scopes = auth_mgr.select_scopes(None, &[]);
+    let scope_refs: Vec<&str> = scopes.iter().map(|s| s.as_str()).collect();
+
+    let auth_url = auth_mgr
+        .get_authorization_url(&scope_refs)
+        .await
+        .context("failed to generate authorization URL")?;
+
+    tracing::info!(server = %server_id, "opening browser for OAuth authorization");
+    send_status(status_tx, format!("MCP '{server_id}': opening browser for authorization..."));
+
+    if let Err(e) = webbrowser::open(&auth_url) {
+        tracing::error!(error = %e, "failed to open browser — authorize manually");
+        tracing::info!(url = %auth_url, "open this URL manually to authorize");
+        send_status(status_tx, format!("MCP '{server_id}': failed to open browser — check logs for URL"));
+    }
+
+    send_status(status_tx, format!("MCP '{server_id}': waiting for browser authorization..."));
+
+    tokio::time::timeout(std::time::Duration::from_secs(300), callback_rx)
+        .await
+        .context("OAuth authorization timed out (5 minutes)")?
+        .context("OAuth callback channel closed")
+}
+
+/// Exchange the authorization code for an access token.
+///
+/// CSRF state validation happens inside rmcp's `exchange_code_for_token()`:
+/// it looks up the CSRF token in the state store (saved during
+/// `get_authorization_url`), verifies it matches, and deletes it after use.
+async fn exchange_token(
+    server_id: &str,
+    auth_mgr: &mut AuthorizationManager,
+    callback_result: &CallbackResult,
+    status_tx: &Option<OAuthStatusTx>,
+) -> Result<()> {
+    tracing::info!(server = %server_id, "exchanging authorization code for token");
+    send_status(status_tx, format!("MCP '{server_id}': exchanging authorization code..."));
+
+    auth_mgr
+        .exchange_code_for_token(&callback_result.code, &callback_result.state)
+        .await
+        .context("failed to exchange authorization code for token")?;
+
+    tracing::info!(server = %server_id, "OAuth authorization successful");
+    Ok(())
+}
+
+/// Wrap an `AuthorizationManager` into a ready-to-use `AuthClient`.
+fn wrap_client(auth_mgr: AuthorizationManager) -> AuthClient<reqwest::Client> {
+    AuthClient::new(reqwest::Client::new(), auth_mgr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn send_status_with_sender_delivers() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        send_status(&Some(tx), "hello".into());
+        assert_eq!(rx.try_recv().unwrap(), "hello");
+    }
+
+    #[test]
+    fn send_status_with_none_does_not_panic() {
+        send_status(&None, "should be silently dropped".into());
+    }
+
+    #[test]
+    fn send_status_with_closed_sender_does_not_panic() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        drop(rx);
+        // Sending to a closed channel should not panic (we ignore the error).
+        send_status(&Some(tx), "dropped".into());
+    }
+
+    #[tokio::test]
+    async fn init_auth_manager_rejects_invalid_url() {
+        let result = init_auth_manager("test", "not a url", "/tmp/fake.json".into(), &None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn init_auth_manager_accepts_valid_url() {
+        let result =
+            init_auth_manager("test", "https://example.com", "/tmp/fake.json".into(), &None).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn authorize_fails_for_unreachable_server() {
+        // A server that doesn't exist should fail during metadata discovery,
+        // not hang or panic.
+        let dir = tempfile::tempdir().unwrap();
+        let cred_path = dir.path().join("creds.json");
+        let result =
+            authorize("test", "https://127.0.0.1:1/nonexistent", cred_path, None).await;
+        assert!(result.is_err());
+    }
 }
