@@ -9,6 +9,8 @@ pub mod types;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use std::process::Stdio;
+
 use anyhow::{Context, Result};
 use rmcp::ServiceExt;
 use rmcp::model::{
@@ -18,6 +20,7 @@ use rmcp::model::{
 use rmcp::service::{Peer, RoleClient, RunningService};
 use rmcp::transport::TokioChildProcess;
 use serde_json::Value;
+use tokio::io::AsyncBufReadExt;
 
 use types::{McpServerConfig, expand_env, parse_prefixed_tool_name, prefixed_tool_name};
 
@@ -44,9 +47,25 @@ impl McpServer {
             cmd.env(key, value);
         }
 
-        // Spawn via rmcp's TokioChildProcess transport
-        let transport = TokioChildProcess::new(cmd)
+        // Spawn via rmcp's TokioChildProcess transport.
+        // Use the builder API to capture stderr (default is inherit, which corrupts the TUI).
+        let (transport, stderr) = TokioChildProcess::builder(cmd)
+            .stderr(Stdio::piped())
+            .spawn()
             .context("failed to spawn MCP server process")?;
+
+        // Drain stderr in the background, routing lines to tracing so they
+        // appear in the log file instead of corrupting the terminal.
+        if let Some(stderr) = stderr {
+            let sid = server_id.clone();
+            tokio::spawn(async move {
+                let reader = tokio::io::BufReader::new(stderr);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::debug!(server = %sid, "mcp stderr: {line}");
+                }
+            });
+        }
 
         // Perform the MCP handshake — `()` implements the default ClientHandler
         let service: RunningService<RoleClient, ()> = ().serve(transport).await
