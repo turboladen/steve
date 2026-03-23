@@ -80,6 +80,7 @@ fn build_content_lines<'a>(checks: &'a [DiagnosticCheck], theme: &'a Theme) -> V
     let categories = [
         Category::AiEnvironment,
         Category::LspHealth,
+        Category::McpHealth,
         Category::SessionEfficiency,
     ];
 

@@ -186,6 +186,48 @@ pub fn session_efficiency_checks(
     checks
 }
 
+/// MCP server health checks.
+/// `configured` = server IDs from config.
+/// `connected` = (server_id, tool_count, resource_count) for running servers.
+pub fn mcp_health_checks(
+    configured: &[&str],
+    connected: &[(&str, usize, usize)],
+) -> Vec<DiagnosticCheck> {
+    let mut checks = Vec::new();
+
+    if configured.is_empty() {
+        return checks;
+    }
+
+    for &server_id in configured {
+        match connected.iter().find(|(id, _, _)| *id == server_id) {
+            None => {
+                checks.push(DiagnosticCheck {
+                    severity: Severity::Error,
+                    category: Category::McpHealth,
+                    label: format!("{server_id} not connected"),
+                    detail: format!("MCP server '{server_id}' is configured but not running"),
+                    recommendation: Some("Check server command/path and logs".into()),
+                });
+            }
+            Some((_, tool_count, _)) if *tool_count == 0 => {
+                checks.push(DiagnosticCheck {
+                    severity: Severity::Warning,
+                    category: Category::McpHealth,
+                    label: format!("{server_id} has no tools"),
+                    detail: format!("MCP server '{server_id}' is connected but exposes 0 tools"),
+                    recommendation: Some("Verify server configuration and capabilities".into()),
+                });
+            }
+            Some(_) => {
+                // Connected with tools — healthy, nothing to report
+            }
+        }
+    }
+
+    checks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,5 +418,42 @@ mod tests {
     fn zero_cost_no_check() {
         let checks = session_efficiency_checks(10_000, 4, 0, 0, 0, Some(0.0));
         assert!(!checks.iter().any(|c| c.label.contains("exchange")));
+    }
+
+    // -- mcp_health_checks tests --
+
+    #[test]
+    fn mcp_no_servers_configured_no_checks() {
+        let checks = mcp_health_checks(&[], &[]);
+        assert!(checks.is_empty());
+    }
+
+    #[test]
+    fn mcp_configured_but_not_connected() {
+        let checks = mcp_health_checks(&["github"], &[]);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].severity, Severity::Error);
+        assert!(checks[0].label.contains("github"));
+        assert!(checks[0].label.contains("not connected"));
+        assert_eq!(checks[0].category, Category::McpHealth);
+    }
+
+    #[test]
+    fn mcp_all_connected_no_errors() {
+        let configured = &["github", "slack"];
+        let connected = &[("github", 5_usize, 2_usize), ("slack", 3, 0)];
+        let checks = mcp_health_checks(configured, connected);
+        assert!(checks.is_empty());
+    }
+
+    #[test]
+    fn mcp_connected_but_no_tools_warns() {
+        let configured = &["github"];
+        let connected = &[("github", 0_usize, 1_usize)];
+        let checks = mcp_health_checks(configured, connected);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].severity, Severity::Warning);
+        assert!(checks[0].label.contains("no tools"));
+        assert_eq!(checks[0].category, Category::McpHealth);
     }
 }

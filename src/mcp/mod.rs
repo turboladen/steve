@@ -335,6 +335,17 @@ impl McpManager {
         }
     }
 
+    /// Structured server status for sidebar display.
+    /// Returns `(server_id, tool_count, resource_count)` tuples.
+    pub fn server_status(&self) -> Vec<(&str, usize, usize)> {
+        self.servers
+            .iter()
+            .map(|(id, server)| {
+                (id.as_str(), server.cached_tools.len(), server.cached_resources.len())
+            })
+            .collect()
+    }
+
     /// Summary of connected servers for status display.
     pub fn server_summary(&self) -> Vec<String> {
         self.servers

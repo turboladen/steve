@@ -73,6 +73,21 @@ pub struct SidebarLsp {
     pub running: bool,
 }
 
+/// MCP server status for sidebar display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidebarMcp {
+    /// Server ID from config (e.g., "github", "atlassian").
+    pub server_id: String,
+    /// Number of tools provided by this server.
+    pub tool_count: usize,
+    /// Number of resources provided by this server.
+    pub resource_count: usize,
+    /// Whether the server is currently connected.
+    pub connected: bool,
+    /// Error message if connection failed.
+    pub error: Option<String>,
+}
+
 /// Lightweight task summary for sidebar display.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SidebarTask {
@@ -164,6 +179,8 @@ pub struct SidebarState {
     pub changes: Vec<FileChange>,
     /// LSP servers detected in the project.
     pub lsp_servers: Vec<SidebarLsp>,
+    /// MCP servers configured for the project.
+    pub mcp_servers: Vec<SidebarMcp>,
     /// Current git branch name (None if not in a git repo).
     pub git_branch: Option<String>,
     /// Whether the repo has uncommitted changes (None if not in a git repo).
@@ -187,6 +204,7 @@ impl Default for SidebarState {
             session_closed_task_ids: Vec::new(),
             changes: Vec::new(),
             lsp_servers: Vec::new(),
+            mcp_servers: Vec::new(),
             git_branch: None,
             git_dirty: None,
             git_repo_name: None,
@@ -362,6 +380,44 @@ pub fn render_sidebar(
             lines.push(Line::from(vec![
                 Span::styled(format!(" {icon} "), Style::default().fg(icon_color)),
                 Span::styled(server.binary.clone(), Style::default().fg(theme.fg)),
+            ]));
+        }
+        lines.push(primitives::section_separator(sidebar_width, theme));
+    }
+
+    // -- MCP section (if any servers configured) --
+    if !state.mcp_servers.is_empty() {
+        lines.push(primitives::section_header("MCP", header_color));
+        for server in &state.mcp_servers {
+            let (icon, icon_color) = if server.connected {
+                ("\u{25cf}", theme.success) // ● green — connected
+            } else {
+                ("\u{25cb}", theme.error) // ○ red — disconnected
+            };
+            let label = if server.connected {
+                let parts: Vec<String> = [
+                    (server.tool_count > 0).then(|| format!("{} tools", server.tool_count)),
+                    (server.resource_count > 0)
+                        .then(|| format!("{} resources", server.resource_count)),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                if parts.is_empty() {
+                    server.server_id.clone()
+                } else {
+                    format!("{} ({})", server.server_id, parts.join(", "))
+                }
+            } else {
+                let suffix = server
+                    .error
+                    .as_deref()
+                    .unwrap_or("disconnected");
+                format!("{} ({})", server.server_id, suffix)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {icon} "), Style::default().fg(icon_color)),
+                Span::styled(label, Style::default().fg(theme.fg)),
             ]));
         }
         lines.push(primitives::section_separator(sidebar_width, theme));
@@ -1139,6 +1195,137 @@ mod tests {
         let git_pos = text.find("Git").expect("Git header not found");
         let lsp_pos = text.find("LSP").expect("LSP header not found");
         assert!(git_pos < lsp_pos, "Git should render above LSP");
+    }
+
+    // -- MCP section tests --
+
+    #[test]
+    fn default_sidebar_state_has_no_mcp_servers() {
+        let state = SidebarState::default();
+        assert!(state.mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn buffer_sidebar_no_mcp_no_section() {
+        let state = SidebarState::default();
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(!text.contains("MCP"), "no MCP servers = no 'MCP' header");
+    }
+
+    #[test]
+    fn buffer_sidebar_mcp_section_shows_connected_servers() {
+        let state = SidebarState {
+            mcp_servers: vec![
+                SidebarMcp {
+                    server_id: "github".to_string(),
+                    tool_count: 5,
+                    resource_count: 0,
+                    connected: true,
+                    error: None,
+                },
+                SidebarMcp {
+                    server_id: "atlassian".to_string(),
+                    tool_count: 3,
+                    resource_count: 2,
+                    connected: true,
+                    error: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(50, 20, &state);
+        assert!(text.contains("MCP"), "should show 'MCP' header");
+        assert!(text.contains("github"), "should show github server");
+        assert!(text.contains("5 tools"), "should show tool count");
+        assert!(text.contains("atlassian"), "should show atlassian server");
+        assert!(text.contains("3 tools"), "should show tool count for atlassian");
+        assert!(text.contains("2 resources"), "should show resource count for atlassian");
+        // Connected servers get filled circle
+        assert!(text.contains("\u{25cf}"), "connected server should show \u{25cf} icon");
+    }
+
+    #[test]
+    fn buffer_sidebar_mcp_section_shows_disconnected() {
+        let state = SidebarState {
+            mcp_servers: vec![
+                SidebarMcp {
+                    server_id: "github".to_string(),
+                    tool_count: 5,
+                    resource_count: 0,
+                    connected: true,
+                    error: None,
+                },
+                SidebarMcp {
+                    server_id: "broken".to_string(),
+                    tool_count: 0,
+                    resource_count: 0,
+                    connected: false,
+                    error: Some("timeout".to_string()),
+                },
+            ],
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(50, 20, &state);
+        assert!(text.contains("\u{25cf}"), "connected server should show \u{25cf} icon");
+        assert!(text.contains("\u{25cb}"), "disconnected server should show \u{25cb} icon");
+        assert!(text.contains("broken"), "should show broken server");
+        assert!(text.contains("timeout"), "should show error message");
+    }
+
+    #[test]
+    fn buffer_sidebar_mcp_disconnected_default_message() {
+        let state = SidebarState {
+            mcp_servers: vec![SidebarMcp {
+                server_id: "broken".to_string(),
+                tool_count: 0,
+                resource_count: 0,
+                connected: false,
+                error: None,
+            }],
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(50, 20, &state);
+        assert!(text.contains("disconnected"), "should show default 'disconnected' label");
+    }
+
+    #[test]
+    fn buffer_sidebar_mcp_renders_below_lsp() {
+        let state = SidebarState {
+            lsp_servers: vec![SidebarLsp {
+                binary: "rust-analyzer".to_string(),
+                running: true,
+            }],
+            mcp_servers: vec![SidebarMcp {
+                server_id: "github".to_string(),
+                tool_count: 3,
+                resource_count: 0,
+                connected: true,
+                error: None,
+            }],
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(50, 25, &state);
+        let lsp_pos = text.find("LSP").expect("LSP header not found");
+        let mcp_pos = text.find("MCP").expect("MCP header not found");
+        assert!(lsp_pos < mcp_pos, "LSP should render above MCP");
+    }
+
+    #[test]
+    fn buffer_sidebar_mcp_connected_tools_only() {
+        let state = SidebarState {
+            mcp_servers: vec![SidebarMcp {
+                server_id: "simple".to_string(),
+                tool_count: 0,
+                resource_count: 0,
+                connected: true,
+                error: None,
+            }],
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(50, 20, &state);
+        // Connected with zero tools/resources should just show server_id
+        assert!(text.contains("simple"), "should show server id");
+        assert!(!text.contains("tools"), "should not show tool count when zero");
     }
 
     #[test]

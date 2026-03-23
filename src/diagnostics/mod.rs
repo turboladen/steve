@@ -20,6 +20,8 @@ pub struct DiagnosticInput<'a> {
     pub cache_misses: u32,
     pub compaction_count: u32,
     pub session_cost: Option<f64>,
+    pub mcp_configured: &'a [&'a str],
+    pub mcp_connected: &'a [(&'a str, usize, usize)],
 }
 
 /// Run all diagnostic checks and return the combined results.
@@ -33,6 +35,8 @@ pub fn run_diagnostics(input: &DiagnosticInput) -> Vec<DiagnosticCheck> {
     ));
 
     results.extend(checks::lsp_health_checks(input.lsp_servers));
+
+    results.extend(checks::mcp_health_checks(input.mcp_configured, input.mcp_connected));
 
     results.extend(checks::session_efficiency_checks(
         input.total_tokens,
@@ -80,12 +84,15 @@ mod tests {
             cache_misses: 0,
             compaction_count: 0,
             session_cost: None,
+            mcp_configured: &["github"],
+            mcp_connected: &[],
         };
 
         let checks = run_diagnostics(&input);
         let categories: Vec<Category> = checks.iter().map(|c| c.category).collect();
         assert!(categories.contains(&Category::AiEnvironment));
         assert!(categories.contains(&Category::LspHealth));
+        assert!(categories.contains(&Category::McpHealth));
         assert!(categories.contains(&Category::SessionEfficiency));
     }
 
@@ -151,6 +158,8 @@ mod tests {
             cache_misses: 5,
             compaction_count: 0,
             session_cost: None,
+            mcp_configured: &[],
+            mcp_connected: &[],
         };
         let checks = run_diagnostics(&input);
         assert!(!checks.is_empty());
