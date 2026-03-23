@@ -151,7 +151,8 @@ fn is_auth_error(err: &anyhow::Error) -> bool {
         || lower.contains("forbidden")
         || lower.contains("authorization required")
         || lower.contains("www-authenticate")
-        || lower.contains("auth")
+        || lower.contains("insufficient_scope")
+        || lower.contains("authrequired")
 }
 
 #[cfg(test)]
@@ -191,6 +192,30 @@ mod tests {
     #[test]
     fn is_auth_error_ignores_timeout() {
         let err = anyhow::anyhow!("request timed out");
+        assert!(!is_auth_error(&err));
+    }
+
+    #[test]
+    fn is_auth_error_detects_insufficient_scope() {
+        let err = anyhow::anyhow!("insufficient_scope: need read access");
+        assert!(is_auth_error(&err));
+    }
+
+    #[test]
+    fn is_auth_error_detects_authrequired() {
+        let err = anyhow::anyhow!("AuthRequired: please log in");
+        assert!(is_auth_error(&err));
+    }
+
+    #[test]
+    fn is_auth_error_ignores_author() {
+        let err = anyhow::anyhow!("commit author not found");
+        assert!(!is_auth_error(&err));
+    }
+
+    #[test]
+    fn is_auth_error_ignores_authentication_not_required() {
+        let err = anyhow::anyhow!("authentication not required for this endpoint");
         assert!(!is_auth_error(&err));
     }
 

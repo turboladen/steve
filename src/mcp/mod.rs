@@ -235,6 +235,12 @@ impl McpManager {
                 tracing::error!(server = %server_id, error = %e, "invalid MCP server ID, skipping");
                 continue;
             }
+            if let McpServerConfig::Http { url, .. } = config {
+                if url::Url::parse(url).is_err() {
+                    tracing::error!(server = %server_id, url = %url, "invalid MCP server URL, skipping");
+                    continue;
+                }
+            }
             match McpServer::spawn(
                 server_id.clone(),
                 config,

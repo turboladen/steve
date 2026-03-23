@@ -22,7 +22,7 @@ pub struct CallbackResult {
 /// the OAuth `redirect_uri`, and `receiver` yields the authorization code + state once
 /// the user completes the browser flow.
 pub async fn start_callback_server()
-    -> anyhow::Result<(String, oneshot::Receiver<CallbackResult>)>
+    -> anyhow::Result<(String, oneshot::Receiver<CallbackResult>, tokio::task::JoinHandle<()>)>
 {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
@@ -72,7 +72,7 @@ pub async fn start_callback_server()
                     } else {
                         Html(
                             "<html><body>\
-                             <h2>Missing code or state parameter.</h2>\
+                             <h2>Missing or empty code/state parameter.</h2>\
                              </body></html>"
                                 .into(),
                         )
@@ -82,13 +82,13 @@ pub async fn start_callback_server()
         }),
     );
 
-    tokio::spawn(async move {
+    let server_handle = tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             tracing::error!(error = %e, "OAuth callback server error");
         }
     });
 
-    Ok((callback_url, rx))
+    Ok((callback_url, rx, server_handle))
 }
 
 #[cfg(test)]
@@ -97,14 +97,15 @@ mod tests {
 
     #[tokio::test]
     async fn callback_server_binds_and_returns_url() {
-        let (url, _rx) = start_callback_server().await.unwrap();
+        let (url, _rx, handle) = start_callback_server().await.unwrap();
         assert!(url.starts_with("http://127.0.0.1:"));
         assert!(url.contains("/callback"));
+        handle.abort();
     }
 
     #[tokio::test]
     async fn callback_server_handles_valid_callback() {
-        let (url, rx) = start_callback_server().await.unwrap();
+        let (url, rx, handle) = start_callback_server().await.unwrap();
         let client = reqwest::Client::new();
         let resp = client
             .get(format!("{url}?code=test_code&state=test_state"))
@@ -118,11 +119,12 @@ mod tests {
         let result = rx.await.unwrap();
         assert_eq!(result.code, "test_code");
         assert_eq!(result.state, "test_state");
+        handle.abort();
     }
 
     #[tokio::test]
     async fn callback_server_handles_error_response() {
-        let (url, _rx) = start_callback_server().await.unwrap();
+        let (url, _rx, handle) = start_callback_server().await.unwrap();
         let client = reqwest::Client::new();
         let resp = client
             .get(format!(
@@ -134,11 +136,12 @@ mod tests {
         assert!(resp.status().is_success());
         let body = resp.text().await.unwrap();
         assert!(body.contains("access_denied"));
+        handle.abort();
     }
 
     #[tokio::test]
     async fn callback_server_handles_missing_params() {
-        let (url, _rx) = start_callback_server().await.unwrap();
+        let (url, _rx, handle) = start_callback_server().await.unwrap();
         let client = reqwest::Client::new();
         let resp = client
             .get(format!("{url}?code=only_code"))
@@ -147,6 +150,7 @@ mod tests {
             .unwrap();
         assert!(resp.status().is_success());
         let body = resp.text().await.unwrap();
-        assert!(body.contains("Missing code or state"));
+        assert!(body.contains("Missing or empty code/state"));
+        handle.abort();
     }
 }

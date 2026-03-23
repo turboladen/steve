@@ -65,6 +65,18 @@ impl CredentialStore for FileCredentialStore {
             ))
         })?;
 
+        // Restrict file permissions to owner-only on Unix (credentials are sensitive).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            tokio::fs::set_permissions(&self.path, perms).await.map_err(|e| {
+                AuthError::InternalError(format!(
+                    "failed to set credential file permissions: {e}"
+                ))
+            })?;
+        }
+
         Ok(())
     }
 
@@ -144,6 +156,21 @@ mod tests {
         store.save(test_credentials()).await.unwrap();
         let loaded = store.load().await.unwrap().expect("should load from nested path");
         assert_eq!(loaded.client_id, "test-client-id");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn save_sets_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileCredentialStore::new(dir.path().join("creds.json"));
+
+        store.save(test_credentials()).await.unwrap();
+
+        let metadata = std::fs::metadata(dir.path().join("creds.json")).unwrap();
+        let mode = metadata.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "credential file should be owner-read/write only");
     }
 
     #[tokio::test]

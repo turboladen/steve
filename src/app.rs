@@ -3110,6 +3110,8 @@ impl App {
                 *self.tool_cache.lock().unwrap() = ToolResultCache::new(self.project.root.clone());
                 // Clear changeset tracking, session-closed tasks, selection, and reset token counters
                 // Note: tasks persist across sessions (not cleared on /new)
+                // Note: mcp_servers and lsp_servers intentionally persist — they represent
+                // running server processes, not per-session state.
                 self.sidebar_state.changes.clear();
                 self.sidebar_state.session_closed_task_ids.clear();
                 self.selection_state.clear();

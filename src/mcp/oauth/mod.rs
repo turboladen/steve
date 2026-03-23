@@ -75,56 +75,71 @@ pub async fn authorize(
     auth_mgr.set_metadata(metadata);
 
     // Start ephemeral callback server for the redirect URI
-    let (callback_url, callback_rx) = callback::start_callback_server()
+    let (callback_url, callback_rx, server_handle) = callback::start_callback_server()
         .await
         .context("failed to start OAuth callback server")?;
 
-    // Dynamic client registration (RFC 7591)
-    // `select_scopes()` picks the best scope set from metadata/headers/defaults.
-    let scopes = auth_mgr.select_scopes(None, &[]);
-    let scope_refs: Vec<&str> = scopes.iter().map(|s| s.as_str()).collect();
+    // Run the browser-based OAuth flow, ensuring the callback server is
+    // always shut down regardless of success or failure.
+    let result = async {
+        // Dynamic client registration (RFC 7591)
+        // `select_scopes()` picks the best scope set from metadata/headers/defaults.
+        let scopes = auth_mgr.select_scopes(None, &[]);
+        let scope_refs: Vec<&str> = scopes.iter().map(|s| s.as_str()).collect();
 
-    tracing::info!(server = %server_id, "registering OAuth client");
-    let _client_config = auth_mgr
-        .register_client("steve", &callback_url, &scope_refs)
+        tracing::info!(server = %server_id, "registering OAuth client");
+        // rmcp's register_client() internally calls configure_client(),
+        // so the returned config doesn't need separate handling.
+        let _client_config = auth_mgr
+            .register_client("steve", &callback_url, &scope_refs)
+            .await
+            .context("OAuth dynamic client registration failed")?;
+
+        // Generate authorization URL with PKCE
+        let auth_url = auth_mgr
+            .get_authorization_url(&scope_refs)
+            .await
+            .context("failed to generate authorization URL")?;
+
+        // Open the user's browser
+        tracing::info!(server = %server_id, "opening browser for OAuth authorization");
+        send_status(&status_tx, format!("MCP '{server_id}': opening browser for authorization..."));
+        if let Err(e) = webbrowser::open(&auth_url) {
+            tracing::error!(error = %e, "failed to open browser — authorize manually");
+            tracing::info!(url = %auth_url, "open this URL manually to authorize");
+            send_status(&status_tx, format!("MCP '{server_id}': failed to open browser — check logs for URL"));
+        }
+
+        // Wait for the callback (5 minute timeout)
+        send_status(&status_tx, format!("MCP '{server_id}': waiting for browser authorization..."));
+        let callback_result = tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            callback_rx,
+        )
         .await
-        .context("OAuth dynamic client registration failed")?;
+        .context("OAuth authorization timed out (5 minutes)")?
+        .context("OAuth callback channel closed")?;
 
-    // Generate authorization URL with PKCE
-    let auth_url = auth_mgr
-        .get_authorization_url(&scope_refs)
-        .await
-        .context("failed to generate authorization URL")?;
+        // Exchange authorization code for token.
+        // CSRF state validation happens inside rmcp's exchange_code_for_token():
+        // it looks up the CSRF token in the state store (saved during
+        // get_authorization_url), verifies it matches, and deletes it after use.
+        tracing::info!(server = %server_id, "exchanging authorization code for token");
+        send_status(&status_tx, format!("MCP '{server_id}': exchanging authorization code..."));
+        auth_mgr
+            .exchange_code_for_token(&callback_result.code, &callback_result.state)
+            .await
+            .context("failed to exchange authorization code for token")?;
 
-    // Open the user's browser
-    tracing::info!(server = %server_id, "opening browser for OAuth authorization");
-    send_status(&status_tx, format!("MCP '{server_id}': opening browser for authorization..."));
-    if let Err(e) = webbrowser::open(&auth_url) {
-        tracing::error!(error = %e, "failed to open browser — authorize manually");
-        tracing::info!(url = %auth_url, "open this URL manually to authorize");
-        send_status(&status_tx, format!("MCP '{server_id}': failed to open browser — check logs for URL"));
+        tracing::info!(server = %server_id, "OAuth authorization successful");
+        send_status(&status_tx, format!("MCP '{server_id}': authorized successfully"));
+        let client = reqwest::Client::new();
+        Ok(AuthClient::new(client, auth_mgr))
     }
+    .await;
 
-    // Wait for the callback (5 minute timeout)
-    send_status(&status_tx, format!("MCP '{server_id}': waiting for browser authorization..."));
-    let callback_result = tokio::time::timeout(
-        std::time::Duration::from_secs(300),
-        callback_rx,
-    )
-    .await
-    .context("OAuth authorization timed out (5 minutes)")?
-    .context("OAuth callback channel closed")?;
+    // Always shut down the callback server, whether we succeeded or failed.
+    server_handle.abort();
 
-    // Exchange authorization code for token
-    tracing::info!(server = %server_id, "exchanging authorization code for token");
-    send_status(&status_tx, format!("MCP '{server_id}': exchanging authorization code..."));
-    auth_mgr
-        .exchange_code_for_token(&callback_result.code, &callback_result.state)
-        .await
-        .context("failed to exchange authorization code for token")?;
-
-    tracing::info!(server = %server_id, "OAuth authorization successful");
-    send_status(&status_tx, format!("MCP '{server_id}': authorized successfully"));
-    let client = reqwest::Client::new();
-    Ok(AuthClient::new(client, auth_mgr))
+    result
 }

@@ -319,6 +319,15 @@ mod tests {
     }
 
     #[test]
+    fn mcp_server_config_ambiguous_picks_http() {
+        // With serde(untagged), Http is tried first. A config with both
+        // "url" and "command" silently matches Http, ignoring "command".
+        let json = r#"{"url": "https://example.com", "command": "npx"}"#;
+        let config: McpServerConfig = serde_json::from_str(json).unwrap();
+        assert!(matches!(config, McpServerConfig::Http { .. }));
+    }
+
+    #[test]
     fn mcp_server_config_roundtrip_http() {
         let config = McpServerConfig::Http {
             url: "https://example.com".into(),
