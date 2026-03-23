@@ -4,6 +4,8 @@
 //! MCP tools bypass the `ToolName` enum entirely — they have their own registry
 //! and execution path, integrated surgically into `stream.rs`.
 
+pub mod oauth;
+mod transport;
 pub mod types;
 
 use std::collections::{HashMap, HashSet};
@@ -36,49 +38,50 @@ struct McpServer {
 }
 
 impl McpServer {
-    /// Spawn a child process, complete the MCP handshake, and cache tool definitions.
+    /// Connect to an MCP server, complete the handshake, and cache tool definitions.
+    ///
+    /// Supports both stdio (child process) and HTTP (streamable HTTP) transports.
     async fn spawn(server_id: String, config: &McpServerConfig) -> Result<Self> {
-        let (command, args, env) = match config {
-            McpServerConfig::Stdio { command, args, env } => (command, args, env),
-            McpServerConfig::Http { url, .. } => {
-                anyhow::bail!(
-                    "HTTP MCP transport not yet implemented for '{server_id}' (url: {url})"
-                );
+        let service = match config {
+            McpServerConfig::Stdio { command, args, env } => {
+                let expanded_env = expand_env(env);
+
+                // Build the child process command
+                let mut cmd = tokio::process::Command::new(command);
+                cmd.args(args);
+                for (key, value) in &expanded_env {
+                    cmd.env(key, value);
+                }
+
+                // Spawn via rmcp's TokioChildProcess transport.
+                // Use the builder API to capture stderr (default is inherit, which corrupts the TUI).
+                let (transport, stderr) = TokioChildProcess::builder(cmd)
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .context("failed to spawn MCP server process")?;
+
+                // Drain stderr in the background, routing lines to tracing so they
+                // appear in the log file instead of corrupting the terminal.
+                if let Some(stderr) = stderr {
+                    let sid = server_id.clone();
+                    tokio::spawn(async move {
+                        let reader = tokio::io::BufReader::new(stderr);
+                        let mut lines = reader.lines();
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            tracing::debug!(server = %sid, "mcp stderr: {line}");
+                        }
+                    });
+                }
+
+                // Perform the MCP handshake — `()` implements the default ClientHandler
+                let svc: RunningService<RoleClient, ()> = ().serve(transport).await
+                    .map_err(|e| anyhow::anyhow!("MCP handshake failed for '{server_id}': {e}"))?;
+                svc
+            }
+            McpServerConfig::Http { url, headers } => {
+                transport::connect_http(&server_id, url, headers.as_ref()).await?
             }
         };
-
-        let expanded_env = expand_env(env);
-
-        // Build the child process command
-        let mut cmd = tokio::process::Command::new(command);
-        cmd.args(args);
-        for (key, value) in &expanded_env {
-            cmd.env(key, value);
-        }
-
-        // Spawn via rmcp's TokioChildProcess transport.
-        // Use the builder API to capture stderr (default is inherit, which corrupts the TUI).
-        let (transport, stderr) = TokioChildProcess::builder(cmd)
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("failed to spawn MCP server process")?;
-
-        // Drain stderr in the background, routing lines to tracing so they
-        // appear in the log file instead of corrupting the terminal.
-        if let Some(stderr) = stderr {
-            let sid = server_id.clone();
-            tokio::spawn(async move {
-                let reader = tokio::io::BufReader::new(stderr);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(server = %sid, "mcp stderr: {line}");
-                }
-            });
-        }
-
-        // Perform the MCP handshake — `()` implements the default ClientHandler
-        let service: RunningService<RoleClient, ()> = ().serve(transport).await
-            .map_err(|e| anyhow::anyhow!("MCP handshake failed for '{server_id}': {e}"))?;
 
         // Cache tool definitions
         let cached_tools = service
@@ -100,10 +103,12 @@ impl McpServer {
                 Vec::new()
             });
 
+        let transport_kind = if config.is_http() { "http" } else { "stdio" };
         tracing::info!(
             server = %server_id,
             tools = cached_tools.len(),
             resources = cached_resources.len(),
+            transport = transport_kind,
             "MCP server connected"
         );
 
