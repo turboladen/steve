@@ -124,6 +124,9 @@ impl ToolResultCache {
                 );
                 self.entries.remove(&key);
                 self.hit_counts.remove(&key);
+                // No path_index cleanup needed: tools that reach this branch
+                // (grep, glob, multi-file read) have extract_path() -> None,
+                // so they were never added to path_index in put().
                 self.misses += 1;
                 return None;
             }
@@ -789,6 +792,28 @@ mod tests {
         assert!(
             cache.get(ToolName::Read, &args).is_none(),
             "multi-file read (no mtime) should be invalidated on generation bump"
+        );
+    }
+
+    #[test]
+    fn test_generation_preserves_list_with_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("src");
+        std::fs::create_dir(&sub).unwrap();
+
+        let mut cache = ToolResultCache::new(dir.path().to_path_buf());
+        let path_str = sub.to_string_lossy().to_string();
+        let args = json!({"path": path_str, "depth": 1});
+
+        cache.put(ToolName::List, &args, &test_output("src/main.rs"));
+
+        cache.bump_generation();
+
+        // List has mtime — should survive generation bump when dir unchanged
+        let r = cache.get(ToolName::List, &args);
+        assert!(
+            r.is_some(),
+            "List entries with mtime should survive generation bump if dir unchanged"
         );
     }
 
