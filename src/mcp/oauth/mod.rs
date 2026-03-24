@@ -264,11 +264,12 @@ async fn resolve_client_id(
     }
 
     // Attempt 3: well-known default for popular services
+    // Still respect a config-provided client_secret (e.g., GitHub requires one)
     if let Some(id) = well_known_client_id(base_url) {
         tracing::info!(server = %server_id, client_id = %id, "using built-in client_id");
         return Ok(ResolvedClient {
             client_id: id.to_string(),
-            client_secret: None,
+            client_secret: config_client_secret.map(|s| s.to_string()),
         });
     }
 
