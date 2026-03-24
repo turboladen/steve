@@ -514,7 +514,8 @@ pub fn render_mcp_overlay(
     }
 
     // Render content with scroll
-    let scroll_offset = state.scroll_offsets[state.active_tab.index()];
+    let scroll_offset = state.scroll_offsets[state.active_tab.index()]
+        .min(u16::MAX as usize);
     let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .scroll((scroll_offset as u16, 0));
