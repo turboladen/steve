@@ -18,6 +18,8 @@ struct CachedResult {
     output: ToolOutput,
     /// mtime of the file when cached (None for non-file tools like grep/glob).
     mtime: Option<SystemTime>,
+    /// Cache generation when this entry was created.
+    generation: u64,
 }
 
 /// Cache for tool results within a session.
@@ -38,6 +40,10 @@ pub struct ToolResultCache {
     hit_counts: HashMap<String, u32>,
     /// Project root for normalizing paths.
     project_root: PathBuf,
+    /// Monotonically increasing generation counter. Bumped before each
+    /// `spawn_stream` (i.e., each user message). Entries without mtime from
+    /// a previous generation are treated as stale in `get()`.
+    generation: u64,
     /// Stats
     hits: u32,
     misses: u32,
@@ -58,6 +64,7 @@ impl ToolResultCache {
             path_index: HashMap::new(),
             hit_counts: HashMap::new(),
             project_root,
+            generation: 0,
             hits: 0,
             misses: 0,
         }
@@ -104,6 +111,21 @@ impl ToolResultCache {
                     self.misses += 1;
                     return None;
                 }
+            } else if cached.generation != self.generation {
+                // No mtime to check (grep, glob, multi-file read) and entry is
+                // from a previous generation — files may have changed externally
+                // between user turns.
+                tracing::info!(
+                    tool = %tool_name,
+                    key = %key,
+                    entry_gen = cached.generation,
+                    current_gen = self.generation,
+                    "cache miss — stale generation (no mtime)"
+                );
+                self.entries.remove(&key);
+                self.hit_counts.remove(&key);
+                self.misses += 1;
+                return None;
             }
         }
 
@@ -180,6 +202,7 @@ impl ToolResultCache {
             CachedResult {
                 output: output.clone(),
                 mtime,
+                generation: self.generation,
             },
         );
     }
@@ -367,6 +390,14 @@ impl ToolResultCache {
         } else {
             self.project_root.join(p)
         }
+    }
+
+    /// Advance the cache generation. Call before each `spawn_stream` so that
+    /// mtime-less entries (grep, glob, multi-file reads) from a previous user
+    /// turn are treated as stale.
+    pub fn bump_generation(&mut self) {
+        self.generation += 1;
+        tracing::debug!(generation = self.generation, "cache generation bumped");
     }
 
     /// Return `(hits, misses)` counters for diagnostics.
@@ -686,6 +717,103 @@ mod tests {
         assert!(
             cache.extract_path(ToolName::Read, &args).is_some(),
             "extract_path should return Some for single-file reads"
+        );
+    }
+
+    // -- Generation-based invalidation tests --
+
+    #[test]
+    fn test_generation_invalidates_no_mtime_entries() {
+        let mut cache = test_cache();
+        let grep_args = json!({"pattern": "fn main", "path": "src/"});
+
+        // Cache a grep result (has no mtime)
+        cache.put(ToolName::Grep, &grep_args, &test_output("grep results"));
+        assert!(cache.get(ToolName::Grep, &grep_args).is_some());
+
+        // Bump generation (simulates new user message)
+        cache.bump_generation();
+
+        // Should now be a cache miss — stale generation
+        assert!(
+            cache.get(ToolName::Grep, &grep_args).is_none(),
+            "grep entry should be invalidated after generation bump"
+        );
+    }
+
+    #[test]
+    fn test_generation_preserves_mtime_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test.rs");
+        std::fs::write(&file_path, "content").unwrap();
+
+        let mut cache = ToolResultCache::new(dir.path().to_path_buf());
+        let path_str = file_path.to_string_lossy().to_string();
+        let args = json!({"path": path_str});
+
+        cache.put(ToolName::Read, &args, &test_output("content"));
+
+        // Bump generation
+        cache.bump_generation();
+
+        // Single-file read has mtime — should still hit (file unchanged)
+        let r = cache.get(ToolName::Read, &args);
+        assert!(
+            r.is_some(),
+            "mtime entries should survive generation bump if file unchanged"
+        );
+    }
+
+    #[test]
+    fn test_generation_same_turn_cache_hit() {
+        let mut cache = test_cache();
+        let glob_args = json!({"pattern": "**/*.rs"});
+
+        cache.put(ToolName::Glob, &glob_args, &test_output("file list"));
+
+        // No generation bump — same turn
+        let r = cache.get(ToolName::Glob, &glob_args);
+        assert!(r.is_some(), "no-mtime entries should hit within same generation");
+        assert_eq!(r.unwrap().output, "file list");
+    }
+
+    #[test]
+    fn test_generation_multi_file_read_invalidated() {
+        let mut cache = test_cache();
+        let args = json!({"paths": ["a.rs", "b.rs"]});
+
+        cache.put(ToolName::Read, &args, &test_output("multi content"));
+        assert!(cache.get(ToolName::Read, &args).is_some());
+
+        cache.bump_generation();
+        assert!(
+            cache.get(ToolName::Read, &args).is_none(),
+            "multi-file read (no mtime) should be invalidated on generation bump"
+        );
+    }
+
+    #[test]
+    fn test_generation_bump_resets_repeat_counter() {
+        let mut cache = test_cache();
+        let grep_args = json!({"pattern": "TODO", "path": "src/"});
+
+        cache.put(ToolName::Grep, &grep_args, &test_output("TODO items"));
+
+        // Hit once (builds toward repeat threshold)
+        let r = cache.get(ToolName::Grep, &grep_args).unwrap();
+        assert_eq!(r.output, "TODO items");
+
+        // Bump generation — entry evicted, counter cleared
+        cache.bump_generation();
+
+        // Re-cache with same content
+        cache.put(ToolName::Grep, &grep_args, &test_output("TODO items"));
+
+        // Should get full content again (counter was reset)
+        let r = cache.get(ToolName::Grep, &grep_args).unwrap();
+        assert_eq!(
+            r.output, "TODO items",
+            "repeat counter should reset after generation bump + re-cache"
         );
     }
 }

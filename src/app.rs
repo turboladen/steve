@@ -2202,6 +2202,10 @@ impl App {
         // which will be passed as user_message separately)
         let history = self.build_api_history();
 
+        // Bump cache generation so mtime-less entries (grep, glob, multi-file
+        // reads) from the previous turn are invalidated on next access.
+        self.tool_cache.lock().unwrap().bump_generation();
+
         // Launch the streaming task with tool support
         stream::spawn_stream(StreamRequest {
             stream_provider: std::sync::Arc::new(stream::OpenAIChatStream::new(
