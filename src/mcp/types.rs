@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// # Examples
 ///
-/// GitHub MCP server (just a URL — Steve has a built-in GitHub App client_id):
+/// GitHub MCP server (just a URL — Steve has built-in OAuth credentials):
 ///
 /// ```
 /// # use steve::mcp::types::McpServerConfig;

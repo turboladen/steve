@@ -263,13 +263,15 @@ async fn resolve_client_id(
         });
     }
 
-    // Attempt 3: well-known default for popular services
-    // Still respect a config-provided client_secret (e.g., GitHub requires one)
-    if let Some(id) = well_known_client_id(base_url) {
-        tracing::info!(server = %server_id, client_id = %id, "using built-in client_id");
+    // Attempt 3: well-known built-in credentials for popular services
+    if let Some(creds) = well_known_credentials(base_url) {
+        tracing::info!(server = %server_id, client_id = %creds.client_id, "using built-in credentials");
         return Ok(ResolvedClient {
-            client_id: id.to_string(),
-            client_secret: config_client_secret.map(|s| s.to_string()),
+            client_id: creds.client_id.to_string(),
+            // Config-provided secret overrides built-in (allows user customization)
+            client_secret: config_client_secret
+                .map(|s| s.to_string())
+                .or_else(|| creds.client_secret.map(|s| s.to_string())),
         });
     }
 
@@ -406,12 +408,25 @@ fn base64_url_encode(bytes: &[u8]) -> String {
 
 // -- Well-known client IDs --
 
-/// Look up a built-in client_id for well-known MCP server URLs.
-fn well_known_client_id(base_url: &str) -> Option<&'static str> {
+/// Built-in OAuth credentials for well-known MCP servers.
+///
+/// Shipping client secrets in native app binaries is standard practice
+/// (VS Code, Claude Code, etc. do the same). GitHub considers this acceptable
+/// for native/desktop OAuth apps — the secret prevents casual impersonation
+/// but is not a security boundary for distributed binaries.
+struct WellKnownCredentials {
+    client_id: &'static str,
+    client_secret: Option<&'static str>,
+}
+
+/// Look up built-in OAuth credentials for well-known MCP server URLs.
+fn well_known_credentials(base_url: &str) -> Option<WellKnownCredentials> {
     let lower = base_url.to_lowercase();
     if lower.contains("githubcopilot.com") || lower.contains("github.com") {
-        // Steve's GitHub App (public client, PKCE, no secret needed)
-        Some("Iv23liXXwVqGAPlUVvVv")
+        Some(WellKnownCredentials {
+            client_id: "Iv23liXXwVqGAPlUVvVv",
+            client_secret: Some("cb594175ff0564a05f7dbc13d3ceee3e411a074b"),
+        })
     } else {
         None
     }
@@ -462,24 +477,21 @@ mod tests {
     }
 
     #[test]
-    fn well_known_client_id_github_copilot() {
-        assert_eq!(
-            well_known_client_id("https://api.githubcopilot.com/mcp/"),
-            Some("Iv23liXXwVqGAPlUVvVv"),
-        );
+    fn well_known_credentials_github_copilot() {
+        let creds = well_known_credentials("https://api.githubcopilot.com/mcp/").unwrap();
+        assert_eq!(creds.client_id, "Iv23liXXwVqGAPlUVvVv");
+        assert!(creds.client_secret.is_some());
     }
 
     #[test]
-    fn well_known_client_id_github_domain() {
-        assert_eq!(
-            well_known_client_id("https://mcp.github.com/something"),
-            Some("Iv23liXXwVqGAPlUVvVv"),
-        );
+    fn well_known_credentials_github_domain() {
+        let creds = well_known_credentials("https://mcp.github.com/something").unwrap();
+        assert_eq!(creds.client_id, "Iv23liXXwVqGAPlUVvVv");
     }
 
     #[test]
-    fn well_known_client_id_unknown_returns_none() {
-        assert_eq!(well_known_client_id("https://mcp.example.com"), None);
+    fn well_known_credentials_unknown_returns_none() {
+        assert!(well_known_credentials("https://mcp.example.com").is_none());
     }
 
     #[test]
