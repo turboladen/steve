@@ -3,19 +3,93 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for a single MCP server.
+///
+/// Uses `#[serde(untagged)]` so that a JSON object with `"url"` deserializes as
+/// `Http` and one with `"command"` deserializes as `Stdio`. **Http must come
+/// first** — serde tries variants in declaration order.
+///
+/// # Examples
+///
+/// GitHub MCP server (just a URL — Steve has built-in OAuth credentials):
+///
+/// ```
+/// # use steve::mcp::types::McpServerConfig;
+/// let config: McpServerConfig = serde_json::from_str(r#"{
+///     "url": "https://api.githubcopilot.com/mcp/"
+/// }"#).unwrap();
+/// assert!(config.is_http());
+/// ```
+///
+/// Remote server with a custom OAuth client_id (for servers that don't
+/// support dynamic client registration and aren't in Steve's built-in list):
+///
+/// ```
+/// # use steve::mcp::types::McpServerConfig;
+/// let config: McpServerConfig = serde_json::from_str(r#"{
+///     "url": "https://mcp.example.com",
+///     "client_id": "my-app-client-id"
+/// }"#).unwrap();
+/// assert!(config.is_http());
+/// ```
+///
+/// Remote server with a static bearer token:
+///
+/// ```
+/// # use steve::mcp::types::McpServerConfig;
+/// let config: McpServerConfig = serde_json::from_str(r#"{
+///     "url": "https://mcp.example.com",
+///     "headers": { "Authorization": "Bearer ${MCP_TOKEN}" }
+/// }"#).unwrap();
+/// assert!(config.is_http());
+/// ```
+///
+/// Local stdio server (child process):
+///
+/// ```
+/// # use steve::mcp::types::McpServerConfig;
+/// let config: McpServerConfig = serde_json::from_str(r#"{
+///     "command": "npx",
+///     "args": ["-y", "@modelcontextprotocol/server-github"],
+///     "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" }
+/// }"#).unwrap();
+/// assert!(!config.is_http());
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpServerConfig {
-    /// Command to spawn (e.g., "npx", "uvx", "node").
-    pub command: String,
+#[serde(untagged)]
+pub enum McpServerConfig {
+    /// HTTP/SSE remote server — just needs a URL.
+    Http {
+        url: String,
+        /// Optional static headers (e.g., for pre-configured bearer tokens).
+        /// Values support `${VAR}` expansion.
+        #[serde(default)]
+        headers: Option<HashMap<String, String>>,
+        /// Optional OAuth client_id for servers that don't support dynamic
+        /// client registration (RFC 7591). If omitted, Steve tries dynamic
+        /// registration first, then fails if the server doesn't support it.
+        #[serde(default)]
+        client_id: Option<String>,
+        /// Optional OAuth client_secret. Required by some providers (e.g.,
+        /// GitHub OAuth Apps). Supports `${VAR}` expansion for secrets stored
+        /// in environment variables.
+        #[serde(default)]
+        client_secret: Option<String>,
+    },
+    /// Stdio child-process server (existing behavior).
+    Stdio {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: HashMap<String, String>,
+    },
+}
 
-    /// Arguments to the command.
-    #[serde(default)]
-    pub args: Vec<String>,
-
-    /// Environment variables to set for the server process.
-    /// Supports `${VAR}` expansion from the process environment.
-    #[serde(default)]
-    pub env: HashMap<String, String>,
+impl McpServerConfig {
+    /// Whether this is an HTTP remote server.
+    pub fn is_http(&self) -> bool {
+        matches!(self, Self::Http { .. })
+    }
 }
 
 /// Prefix for MCP tool names.
@@ -66,6 +140,11 @@ pub fn expand_env(env: &HashMap<String, String>) -> HashMap<String, String> {
             (key.clone(), expanded)
         })
         .collect()
+}
+
+/// Expand `${VAR}` patterns in a single string value (public API).
+pub fn expand_env_single(value: &str) -> String {
+    expand_env_value(value)
 }
 
 /// Expand `${VAR}` patterns in a single string value.
@@ -219,24 +298,115 @@ mod tests {
     }
 
     #[test]
-    fn mcp_server_config_deserialize() {
+    fn mcp_server_config_stdio_deserialize() {
         let json = r#"{
             "command": "npx",
             "args": ["-y", "@modelcontextprotocol/server-github"],
             "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" }
         }"#;
         let config: McpServerConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.command, "npx");
-        assert_eq!(config.args, vec!["-y", "@modelcontextprotocol/server-github"]);
-        assert_eq!(config.env["GITHUB_TOKEN"], "${GITHUB_TOKEN}");
+        match &config {
+            McpServerConfig::Stdio { command, args, env } => {
+                assert_eq!(command, "npx");
+                assert_eq!(args, &vec!["-y".to_string(), "@modelcontextprotocol/server-github".to_string()]);
+                assert_eq!(env["GITHUB_TOKEN"], "${GITHUB_TOKEN}");
+            }
+            McpServerConfig::Http { .. } => panic!("expected Stdio variant"),
+        }
+        assert!(!config.is_http());
     }
 
     #[test]
-    fn mcp_server_config_minimal() {
+    fn mcp_server_config_minimal_stdio() {
         let json = r#"{"command": "my-server"}"#;
         let config: McpServerConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.command, "my-server");
-        assert!(config.args.is_empty());
-        assert!(config.env.is_empty());
+        match &config {
+            McpServerConfig::Stdio { command, args, env } => {
+                assert_eq!(command, "my-server");
+                assert!(args.is_empty());
+                assert!(env.is_empty());
+            }
+            McpServerConfig::Http { .. } => panic!("expected Stdio variant"),
+        }
+        assert!(!config.is_http());
+    }
+
+    #[test]
+    fn mcp_server_config_http_deserialize() {
+        let json = r#"{"url": "https://mcp.example.com/sse"}"#;
+        let config: McpServerConfig = serde_json::from_str(json).unwrap();
+        match &config {
+            McpServerConfig::Http { url, headers, .. } => {
+                assert_eq!(url, "https://mcp.example.com/sse");
+                assert!(headers.is_none());
+            }
+            McpServerConfig::Stdio { .. } => panic!("expected Http variant"),
+        }
+        assert!(config.is_http());
+    }
+
+    #[test]
+    fn mcp_server_config_http_with_headers() {
+        let json = r#"{
+            "url": "https://mcp.example.com/sse",
+            "headers": { "Authorization": "Bearer tok_123" }
+        }"#;
+        let config: McpServerConfig = serde_json::from_str(json).unwrap();
+        match &config {
+            McpServerConfig::Http { url, headers, .. } => {
+                assert_eq!(url, "https://mcp.example.com/sse");
+                let h = headers.as_ref().expect("headers should be Some");
+                assert_eq!(h["Authorization"], "Bearer tok_123");
+            }
+            McpServerConfig::Stdio { .. } => panic!("expected Http variant"),
+        }
+        assert!(config.is_http());
+    }
+
+    #[test]
+    fn mcp_server_config_roundtrip_stdio() {
+        let config = McpServerConfig::Stdio {
+            command: "npx".into(),
+            args: vec!["-y".into(), "server".into()],
+            env: HashMap::from([("KEY".into(), "val".into())]),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: McpServerConfig = serde_json::from_str(&json).unwrap();
+        match back {
+            McpServerConfig::Stdio { command, args, env } => {
+                assert_eq!(command, "npx");
+                assert_eq!(args, vec!["-y", "server"]);
+                assert_eq!(env["KEY"], "val");
+            }
+            McpServerConfig::Http { .. } => panic!("expected Stdio variant"),
+        }
+    }
+
+    #[test]
+    fn mcp_server_config_ambiguous_picks_http() {
+        // With serde(untagged), Http is tried first. A config with both
+        // "url" and "command" silently matches Http, ignoring "command".
+        let json = r#"{"url": "https://example.com", "command": "npx"}"#;
+        let config: McpServerConfig = serde_json::from_str(json).unwrap();
+        assert!(matches!(config, McpServerConfig::Http { .. }));
+    }
+
+    #[test]
+    fn mcp_server_config_roundtrip_http() {
+        let config = McpServerConfig::Http {
+            url: "https://example.com".into(),
+            headers: Some(HashMap::from([("X-Key".into(), "abc".into())])),
+            client_id: None,
+            client_secret: None,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: McpServerConfig = serde_json::from_str(&json).unwrap();
+        match back {
+            McpServerConfig::Http { url, headers, .. } => {
+                assert_eq!(url, "https://example.com");
+                assert_eq!(headers.unwrap()["X-Key"], "abc");
+            }
+            McpServerConfig::Stdio { .. } => panic!("expected Http variant"),
+        }
     }
 }

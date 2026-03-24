@@ -739,13 +739,30 @@ impl App {
             let tx = self.event_tx.clone();
             let configs = self.config.mcp_servers.clone();
             tokio::spawn(async move {
+                let data_dir = directories::ProjectDirs::from("", "", "steve")
+                    .map(|d| d.data_dir().to_path_buf());
+
+                // Create a channel for OAuth status messages → TUI StreamNotice events
+                let (oauth_tx, mut oauth_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+                let notice_tx = tx.clone();
+                tokio::spawn(async move {
+                    while let Some(msg) = oauth_rx.recv().await {
+                        let _ = notice_tx.send(AppEvent::StreamNotice { text: msg });
+                    }
+                });
+
                 let mut mgr = mcp.lock().await;
-                mgr.start_servers(&configs).await;
+                mgr.start_servers(&configs, data_dir.as_deref(), Some(oauth_tx)).await;
                 let summary = mgr.server_summary();
                 if !summary.is_empty() {
                     let _ = tx.send(AppEvent::StreamNotice {
                         text: format!("MCP servers started: {}", summary.join(", ")),
                     });
+                }
+                // Update sidebar with MCP server status (connected + failed)
+                let status = mgr.server_status();
+                if !status.is_empty() {
+                    let _ = tx.send(AppEvent::McpStatus { servers: status });
                 }
             });
         }
@@ -1255,6 +1272,9 @@ impl App {
                     .into_iter()
                     .map(|(binary, running)| SidebarLsp { binary, running })
                     .collect();
+            }
+            AppEvent::McpStatus { servers } => {
+                self.sidebar_state.mcp_servers = servers;
             }
             AppEvent::PermissionRequest(req) => {
                 // Show permission prompt to user, with diff preview if available
@@ -2569,6 +2589,18 @@ impl App {
             .map(|s| s.token_usage.total_tokens)
             .unwrap_or(0);
         let combined_agents = self.combined_agents_content();
+
+        // Gather MCP server info from sidebar state (already populated via McpStatus event)
+        let mcp_configured_ids: Vec<String> = self.config.mcp_servers.keys().cloned().collect();
+        let mcp_configured: Vec<&str> = mcp_configured_ids.iter().map(|s| s.as_str()).collect();
+        let mcp_connected: Vec<(&str, usize, usize, usize)> = self
+            .sidebar_state
+            .mcp_servers
+            .iter()
+            .filter(|s| s.connected)
+            .map(|s| (s.server_id.as_str(), s.tool_count, s.resource_count, s.prompt_count))
+            .collect();
+
         let input = crate::diagnostics::DiagnosticInput {
             agents_md: combined_agents.as_deref(),
             system_prompt_len,
@@ -2580,6 +2612,8 @@ impl App {
             cache_misses,
             compaction_count: self.compaction_count,
             session_cost: self.sidebar_state.session_cost,
+            mcp_configured: &mcp_configured,
+            mcp_connected: &mcp_connected,
         };
         crate::diagnostics::run_diagnostics(&input)
     }
@@ -3057,6 +3091,8 @@ impl App {
                 *self.tool_cache.lock().unwrap() = ToolResultCache::new(self.project.root.clone());
                 // Clear changeset tracking, session-closed tasks, selection, and reset token counters
                 // Note: tasks persist across sessions (not cleared on /new)
+                // Note: mcp_servers and lsp_servers intentionally persist — they represent
+                // running server processes, not per-session state.
                 self.sidebar_state.changes.clear();
                 self.sidebar_state.session_closed_task_ids.clear();
                 self.selection_state.clear();

@@ -13,6 +13,7 @@ pub enum Severity {
 pub enum Category {
     AiEnvironment,
     LspHealth,
+    McpHealth,
     SessionEfficiency,
 }
 
@@ -22,6 +23,7 @@ impl Category {
         match self {
             Category::AiEnvironment => "AI Environment",
             Category::LspHealth => "LSP Health",
+            Category::McpHealth => "MCP Health",
             Category::SessionEfficiency => "Session Efficiency",
         }
     }
@@ -72,6 +74,7 @@ mod tests {
     fn category_labels() {
         assert_eq!(Category::AiEnvironment.label(), "AI Environment");
         assert_eq!(Category::LspHealth.label(), "LSP Health");
+        assert_eq!(Category::McpHealth.label(), "MCP Health");
         assert_eq!(Category::SessionEfficiency.label(), "Session Efficiency");
     }
 

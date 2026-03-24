@@ -27,9 +27,10 @@ glob = "0.3"
 grep = "0.4"
 ignore = "0.4"
 
-# HTTP (webfetch tool)
+# HTTP (webfetch tool + MCP HTTP transport)
 html2text = "0.16"
-reqwest = { version = "0.12", features = ["json", "blocking"] }
+http = "1"
+reqwest = { version = "0.13", features = ["json", "blocking"] }
 
 # Error handling
 anyhow = "1"
@@ -94,7 +95,22 @@ tree-sitter-typescript = "0.23"
 libc = "0.2.183"
 
 # MCP client (Model Context Protocol)
-rmcp = { version = "1.2", features = ["client", "transport-child-process"] }
+rmcp = { version = "1.2", features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+    "auth",
+] }
+
+# OAuth / HTTP transport support
+async-trait = "0.1"
+webbrowser = "1"
+axum = "0.8"
+url = "2"
+sha2 = "0.10"
+rand = "0.9"
+urlencoding = "2"
+oauth2 = "5"
 
 [dev-dependencies]
 tempfile = "3"

@@ -77,6 +77,11 @@ pub enum AppEvent {
     },
     /// LSP servers have been initialized; carries detected server binaries with running status.
     LspStatus { servers: Vec<(String, bool)> },
+    /// MCP servers have been initialized; carries status for all configured servers
+    /// (both connected and failed).
+    McpStatus {
+        servers: Vec<crate::ui::sidebar::SidebarMcp>,
+    },
 
     // -- Permission events --
 

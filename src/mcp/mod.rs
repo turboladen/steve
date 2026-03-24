@@ -4,20 +4,25 @@
 //! MCP tools bypass the `ToolName` enum entirely — they have their own registry
 //! and execution path, integrated surgically into `stream.rs`.
 
+pub mod oauth;
+mod transport;
 pub mod types;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use std::process::Stdio;
+
 use anyhow::{Context, Result};
 use rmcp::ServiceExt;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, RawContent, ReadResourceRequestParams, Resource,
+    CallToolRequestParams, CallToolResult, Prompt, RawContent, ReadResourceRequestParams, Resource,
     ResourceContents, Tool,
 };
 use rmcp::service::{Peer, RoleClient, RunningService};
 use rmcp::transport::TokioChildProcess;
 use serde_json::Value;
+use tokio::io::AsyncBufReadExt;
 
 use types::{McpServerConfig, expand_env, parse_prefixed_tool_name, prefixed_tool_name};
 
@@ -30,27 +35,62 @@ struct McpServer {
     cached_tools: Vec<Tool>,
     /// Cached resource list from the server.
     cached_resources: Vec<Resource>,
+    /// Cached prompt list from the server.
+    cached_prompts: Vec<Prompt>,
 }
 
 impl McpServer {
-    /// Spawn a child process, complete the MCP handshake, and cache tool definitions.
-    async fn spawn(server_id: String, config: &McpServerConfig) -> Result<Self> {
-        let expanded_env = expand_env(&config.env);
+    /// Connect to an MCP server, complete the handshake, and cache tool definitions.
+    ///
+    /// Supports both stdio (child process) and HTTP (streamable HTTP) transports.
+    /// `credential_dir` is the directory for storing OAuth credentials (HTTP only).
+    async fn spawn(
+        server_id: String,
+        config: &McpServerConfig,
+        credential_dir: Option<&std::path::Path>,
+        status_tx: Option<oauth::OAuthStatusTx>,
+    ) -> Result<Self> {
+        let service = match config {
+            McpServerConfig::Stdio { command, args, env } => {
+                let expanded_env = expand_env(env);
 
-        // Build the child process command
-        let mut cmd = tokio::process::Command::new(&config.command);
-        cmd.args(&config.args);
-        for (key, value) in &expanded_env {
-            cmd.env(key, value);
-        }
+                // Build the child process command
+                let mut cmd = tokio::process::Command::new(command);
+                cmd.args(args);
+                for (key, value) in &expanded_env {
+                    cmd.env(key, value);
+                }
 
-        // Spawn via rmcp's TokioChildProcess transport
-        let transport = TokioChildProcess::new(cmd)
-            .context("failed to spawn MCP server process")?;
+                // Spawn via rmcp's TokioChildProcess transport.
+                // Use the builder API to capture stderr (default is inherit, which corrupts the TUI).
+                let (transport, stderr) = TokioChildProcess::builder(cmd)
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .context("failed to spawn MCP server process")?;
 
-        // Perform the MCP handshake — `()` implements the default ClientHandler
-        let service: RunningService<RoleClient, ()> = ().serve(transport).await
-            .map_err(|e| anyhow::anyhow!("MCP handshake failed for '{server_id}': {e}"))?;
+                // Drain stderr in the background, routing lines to tracing so they
+                // appear in the log file instead of corrupting the terminal.
+                if let Some(stderr) = stderr {
+                    let sid = server_id.clone();
+                    tokio::spawn(async move {
+                        let reader = tokio::io::BufReader::new(stderr);
+                        let mut lines = reader.lines();
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            tracing::debug!(server = %sid, "mcp stderr: {line}");
+                        }
+                    });
+                }
+
+                // Perform the MCP handshake — `()` implements the default ClientHandler
+                let svc: RunningService<RoleClient, ()> = ().serve(transport).await
+                    .map_err(|e| anyhow::anyhow!("MCP handshake failed for '{server_id}': {e}"))?;
+                svc
+            }
+            McpServerConfig::Http { url, headers, client_id, client_secret } => {
+                let expanded_secret = client_secret.as_ref().map(|s| types::expand_env_single(s));
+                transport::connect_http(&server_id, url, headers.as_ref(), client_id.as_deref(), expanded_secret.as_deref(), credential_dir, status_tx).await?
+            }
+        };
 
         // Cache tool definitions
         let cached_tools = service
@@ -72,10 +112,23 @@ impl McpServer {
                 Vec::new()
             });
 
+        // Cache prompt list (best-effort)
+        let cached_prompts = service
+            .peer()
+            .list_all_prompts()
+            .await
+            .unwrap_or_else(|e| {
+                tracing::debug!(server = %server_id, error = %e, "failed to list MCP prompts (may not be supported)");
+                Vec::new()
+            });
+
+        let transport_kind = if config.is_http() { "http" } else { "stdio" };
         tracing::info!(
             server = %server_id,
             tools = cached_tools.len(),
             resources = cached_resources.len(),
+            prompts = cached_prompts.len(),
+            transport = transport_kind,
             "MCP server connected"
         );
 
@@ -84,6 +137,7 @@ impl McpServer {
             service,
             cached_tools,
             cached_resources,
+            cached_prompts,
         })
     }
 
@@ -160,6 +214,9 @@ impl McpToolSnapshot {
 /// Singleton coordinator for all MCP server connections.
 pub struct McpManager {
     servers: HashMap<String, McpServer>,
+    /// Servers that were configured but failed to connect.
+    /// Maps server_id → error message for sidebar/diagnostics display.
+    failed_servers: HashMap<String, String>,
     /// Lock-free snapshot rebuilt after server initialization.
     snapshot: Arc<McpToolSnapshot>,
 }
@@ -168,24 +225,73 @@ impl McpManager {
     pub fn new() -> Self {
         Self {
             servers: HashMap::new(),
+            failed_servers: HashMap::new(),
             snapshot: Arc::new(McpToolSnapshot::default()),
         }
     }
 
     /// Spawn all configured MCP servers. Failures are logged per-server; healthy
     /// servers continue. Rebuilds the lock-free tool snapshot when done.
-    pub async fn start_servers(&mut self, configs: &HashMap<String, McpServerConfig>) {
+    ///
+    /// `data_dir` is the application data directory; OAuth credentials are stored
+    /// under `{data_dir}/oauth/`. Pass `None` if no data directory is available
+    /// (OAuth-requiring servers will fail gracefully).
+    pub async fn start_servers(
+        &mut self,
+        configs: &HashMap<String, McpServerConfig>,
+        data_dir: Option<&std::path::Path>,
+        status_tx: Option<oauth::OAuthStatusTx>,
+    ) {
+        let credential_dir = data_dir.map(|d| d.join("oauth"));
+        if let Some(ref dir) = credential_dir {
+            if let Err(e) = tokio::fs::create_dir_all(dir).await {
+                tracing::warn!(error = %e, "failed to create OAuth credential directory");
+            }
+        }
+
         for (server_id, config) in configs {
             if let Err(e) = types::validate_server_id(server_id) {
                 tracing::error!(server = %server_id, error = %e, "invalid MCP server ID, skipping");
+                if let Some(ref tx) = status_tx {
+                    let _ = tx.send(format!("\u{26a0} MCP '{server_id}': {e}"));
+                }
+                self.failed_servers.insert(server_id.clone(), e.to_string());
                 continue;
             }
-            match McpServer::spawn(server_id.clone(), config).await {
+            if let McpServerConfig::Http { url, .. } = config {
+                if url::Url::parse(url).is_err() {
+                    tracing::error!(server = %server_id, url = %url, "invalid MCP server URL, skipping");
+                    let msg = format!("invalid URL: {url}");
+                    if let Some(ref tx) = status_tx {
+                        let _ = tx.send(format!("\u{26a0} MCP '{server_id}': {msg}"));
+                    }
+                    self.failed_servers.insert(server_id.clone(), msg);
+                    continue;
+                }
+            }
+            match McpServer::spawn(
+                server_id.clone(),
+                config,
+                credential_dir.as_deref(),
+                status_tx.clone(),
+            )
+            .await
+            {
                 Ok(server) => {
                     self.servers.insert(server_id.clone(), server);
                 }
                 Err(e) => {
                     tracing::error!(server = %server_id, error = %e, "failed to start MCP server");
+                    // Truncate error to first line for sidebar display.
+                    let msg = e.to_string();
+                    let short = msg.lines().next().unwrap_or("connection failed").to_string();
+                    self.failed_servers.insert(server_id.clone(), short.clone());
+                    // Also send to TUI so user sees the failure even if logs aren't working.
+                    if let Some(ref tx) = status_tx {
+                        let _ = tx.send(format!(
+                            "\u{26a0} MCP '{server_id}': failed to start \u{2014} {short}"
+                        ));
+                    }
                 }
             }
         }
@@ -316,16 +422,55 @@ impl McpManager {
         }
     }
 
+    /// Structured server status for sidebar display, including failed servers.
+    pub fn server_status(&self) -> Vec<crate::ui::sidebar::SidebarMcp> {
+        let mut result: Vec<crate::ui::sidebar::SidebarMcp> = self
+            .servers
+            .iter()
+            .map(|(id, server)| crate::ui::sidebar::SidebarMcp {
+                server_id: id.clone(),
+                tool_count: server.cached_tools.len(),
+                resource_count: server.cached_resources.len(),
+                prompt_count: server.cached_prompts.len(),
+                connected: true,
+                error: None,
+            })
+            .collect();
+
+        for (id, error) in &self.failed_servers {
+            result.push(crate::ui::sidebar::SidebarMcp {
+                server_id: id.clone(),
+                tool_count: 0,
+                resource_count: 0,
+                prompt_count: 0,
+                connected: false,
+                error: Some(error.clone()),
+            });
+        }
+
+        result
+    }
+
     /// Summary of connected servers for status display.
     pub fn server_summary(&self) -> Vec<String> {
         self.servers
             .iter()
             .map(|(id, server)| {
-                format!(
-                    "{id} ({} tools, {} resources)",
-                    server.cached_tools.len(),
-                    server.cached_resources.len()
-                )
+                let mut parts = Vec::new();
+                if server.cached_tools.len() > 0 {
+                    parts.push(format!("{} tools", server.cached_tools.len()));
+                }
+                if server.cached_resources.len() > 0 {
+                    parts.push(format!("{} resources", server.cached_resources.len()));
+                }
+                if server.cached_prompts.len() > 0 {
+                    parts.push(format!("{} prompts", server.cached_prompts.len()));
+                }
+                if parts.is_empty() {
+                    id.clone()
+                } else {
+                    format!("{id} ({})", parts.join(", "))
+                }
             })
             .collect()
     }
