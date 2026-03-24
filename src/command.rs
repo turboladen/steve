@@ -23,6 +23,11 @@ pub enum Command {
     EpicNew(String),
     Diagnostics,
     AgentsUpdate,
+    // MCP commands
+    Mcp,
+    McpTools(Option<String>),
+    McpResources(Option<String>),
+    McpPrompts(Option<String>),
 }
 
 /// Metadata for a known slash command, used for autocomplete.
@@ -86,6 +91,21 @@ impl Command {
             },
             "/diagnostics" => Ok(Command::Diagnostics),
             "/agents-update" => Ok(Command::AgentsUpdate),
+            "/mcp" => match arg {
+                None => Ok(Command::Mcp),
+                Some(rest) => {
+                    let sub_parts: Vec<&str> = rest.splitn(2, ' ').collect();
+                    let sub_arg = sub_parts.get(1).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+                    match sub_parts[0] {
+                        "tools" => Ok(Command::McpTools(sub_arg)),
+                        "resources" => Ok(Command::McpResources(sub_arg)),
+                        "prompts" => Ok(Command::McpPrompts(sub_arg)),
+                        other => Err(format!(
+                            "Unknown /mcp subcommand: {other}. Available: tools, resources, prompts"
+                        )),
+                    }
+                }
+            },
             "/epics" => Ok(Command::Epics),
             "/epic-new" => match arg {
                 Some(title) if !title.is_empty() => Ok(Command::EpicNew(title)),
@@ -111,6 +131,10 @@ impl Command {
             CommandInfo { name: "/task-edit", description: "Edit a task" },
             CommandInfo { name: "/epics", description: "List epics" },
             CommandInfo { name: "/epic-new", description: "Create an epic" },
+            CommandInfo { name: "/mcp", description: "MCP server overview" },
+            CommandInfo { name: "/mcp tools", description: "Browse MCP tools" },
+            CommandInfo { name: "/mcp resources", description: "Browse MCP resources" },
+            CommandInfo { name: "/mcp prompts", description: "Browse MCP prompts" },
             CommandInfo { name: "/diagnostics", description: "Show health dashboard" },
             CommandInfo { name: "/agents-update", description: "Update AGENTS.md" },
             CommandInfo { name: "/init", description: "Create AGENTS.md" },
@@ -208,7 +232,11 @@ mod tests {
         assert!(names.contains(&"/epic-new"));
         assert!(names.contains(&"/diagnostics"));
         assert!(names.contains(&"/agents-update"));
-        assert_eq!(cmds.len(), 20);
+        assert!(names.contains(&"/mcp"));
+        assert!(names.contains(&"/mcp tools"));
+        assert!(names.contains(&"/mcp resources"));
+        assert!(names.contains(&"/mcp prompts"));
+        assert_eq!(cmds.len(), 24);
     }
 
     #[test]
@@ -231,7 +259,7 @@ mod tests {
     #[test]
     fn filter_commands_slash_only() {
         let matches = Command::matching_commands("/");
-        assert_eq!(matches.len(), 20);
+        assert_eq!(matches.len(), 24);
     }
 
     #[test]
@@ -320,6 +348,68 @@ mod tests {
     #[test]
     fn parse_agents_update_command() {
         assert_eq!(Command::parse("/agents-update").unwrap(), Command::AgentsUpdate);
+    }
+
+    // -- MCP command tests --
+
+    #[test]
+    fn parse_mcp_overview() {
+        assert_eq!(Command::parse("/mcp").unwrap(), Command::Mcp);
+    }
+
+    #[test]
+    fn parse_mcp_tools() {
+        assert_eq!(Command::parse("/mcp tools").unwrap(), Command::McpTools(None));
+    }
+
+    #[test]
+    fn parse_mcp_tools_with_server() {
+        assert_eq!(
+            Command::parse("/mcp tools github").unwrap(),
+            Command::McpTools(Some("github".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_mcp_resources() {
+        assert_eq!(Command::parse("/mcp resources").unwrap(), Command::McpResources(None));
+    }
+
+    #[test]
+    fn parse_mcp_resources_with_server() {
+        assert_eq!(
+            Command::parse("/mcp resources github").unwrap(),
+            Command::McpResources(Some("github".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_mcp_prompts() {
+        assert_eq!(Command::parse("/mcp prompts").unwrap(), Command::McpPrompts(None));
+    }
+
+    #[test]
+    fn parse_mcp_prompts_with_server() {
+        assert_eq!(
+            Command::parse("/mcp prompts github").unwrap(),
+            Command::McpPrompts(Some("github".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_mcp_unknown_subcommand() {
+        assert!(Command::parse("/mcp foobar").is_err());
+    }
+
+    #[test]
+    fn filter_commands_mcp_prefix() {
+        let matches = Command::matching_commands("/mcp");
+        let names: Vec<&str> = matches.iter().map(|c| c.name).collect();
+        assert!(names.contains(&"/mcp"));
+        assert!(names.contains(&"/mcp tools"));
+        assert!(names.contains(&"/mcp resources"));
+        assert!(names.contains(&"/mcp prompts"));
+        assert_eq!(names.len(), 4);
     }
 
     #[test]
