@@ -342,9 +342,21 @@ async fn save_credentials(
         .map(|s| s.split(&[',', ' '][..]).filter(|s| !s.is_empty()).map(|s| s.to_string()).collect())
         .unwrap_or_default();
 
-    // Deserialize into rmcp's OAuthTokenResponse type for credential store compatibility
+    // Deserialize into rmcp's OAuthTokenResponse type for credential store compatibility.
+    // GitHub's token response may not include all fields rmcp expects (e.g., token_type
+    // might be missing). Add defaults if needed.
+    let mut token_with_defaults = token.clone();
+    if token_with_defaults.get("token_type").is_none() {
+        token_with_defaults["token_type"] = serde_json::json!("bearer");
+    }
     let token_response: Option<rmcp::transport::auth::OAuthTokenResponse> =
-        serde_json::from_value(token.clone()).ok();
+        match serde_json::from_value(token_with_defaults) {
+            Ok(resp) => Some(resp),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not parse token into rmcp format — credentials may not persist across sessions");
+                None
+            }
+        };
 
     let stored = StoredCredentials {
         client_id: client_id.to_string(),
