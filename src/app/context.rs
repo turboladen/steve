@@ -259,3 +259,140 @@ impl App {
         self.last_prompt_tokens >= threshold
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::tests::{make_test_app, make_test_registry};
+
+    #[test]
+    fn check_context_warning_fires_at_60_pct() {
+        let mut app = make_test_app();
+        app.context_warned = false;
+        app.status_line_state.context_window = 128_000;
+        app.last_prompt_tokens = 80_000; // ~62%
+        app.status_line_state.last_prompt_tokens = 80_000;
+        app.check_context_warning();
+        assert!(app.context_warned);
+        assert!(app.messages.iter().any(|m| {
+            matches!(m, MessageBlock::System { text } if text.contains("Context window"))
+        }));
+    }
+
+    #[test]
+    fn check_context_warning_only_fires_once() {
+        let mut app = make_test_app();
+        app.context_warned = false;
+        app.status_line_state.context_window = 128_000;
+        app.last_prompt_tokens = 80_000;
+        app.status_line_state.last_prompt_tokens = 80_000;
+        app.check_context_warning();
+        let msg_count = app.messages.len();
+        app.check_context_warning(); // second call
+        assert_eq!(app.messages.len(), msg_count); // no new message
+    }
+
+    #[test]
+    fn check_context_warning_does_not_fire_below_threshold() {
+        let mut app = make_test_app();
+        app.status_line_state.context_window = 128_000;
+        app.last_prompt_tokens = 50_000; // ~39%
+        app.status_line_state.last_prompt_tokens = 50_000;
+        app.check_context_warning();
+        assert!(!app.context_warned);
+    }
+
+    #[test]
+    fn sync_context_window_sets_from_registry() {
+        let mut app = make_test_app();
+        assert_eq!(app.status_line_state.context_window, 0);
+
+        app.provider_registry = Some(make_test_registry(128_000));
+        app.current_model = Some("test/test-model".to_string());
+        app.sync_context_window();
+
+        assert_eq!(app.status_line_state.context_window, 128_000);
+    }
+
+    #[test]
+    fn sync_context_window_noop_without_registry() {
+        let mut app = make_test_app();
+        app.current_model = Some("test/test-model".to_string());
+        app.sync_context_window();
+        assert_eq!(app.status_line_state.context_window, 0);
+    }
+
+    #[test]
+    fn sync_context_window_noop_without_model() {
+        let mut app = make_test_app();
+        app.provider_registry = Some(make_test_registry(128_000));
+        app.current_model = None;
+        app.sync_context_window();
+        assert_eq!(app.status_line_state.context_window, 0);
+    }
+
+    #[test]
+    fn sync_context_window_invalid_model_preserves_previous() {
+        let mut app = make_test_app();
+        app.provider_registry = Some(make_test_registry(128_000));
+        app.current_model = Some("test/test-model".to_string());
+        app.sync_context_window();
+        assert_eq!(app.status_line_state.context_window, 128_000);
+
+        // Switch to an invalid model — previous value should be preserved
+        app.current_model = Some("nonexistent/model".to_string());
+        app.sync_context_window();
+        assert_eq!(app.status_line_state.context_window, 128_000);
+    }
+
+    #[test]
+    fn sync_context_window_updates_on_model_change() {
+        let mut app = make_test_app();
+        let mut models = std::collections::HashMap::new();
+        models.insert(
+            "small".to_string(),
+            crate::config::types::ModelConfig {
+                id: "small".to_string(),
+                name: "Small".to_string(),
+                context_window: 32_000,
+                max_output_tokens: None,
+                cost: None,
+                capabilities: crate::config::types::ModelCapabilities {
+                    tool_call: true,
+                    reasoning: false,
+                },
+            },
+        );
+        models.insert(
+            "large".to_string(),
+            crate::config::types::ModelConfig {
+                id: "large".to_string(),
+                name: "Large".to_string(),
+                context_window: 200_000,
+                max_output_tokens: None,
+                cost: None,
+                capabilities: crate::config::types::ModelCapabilities {
+                    tool_call: true,
+                    reasoning: false,
+                },
+            },
+        );
+        let provider_config = crate::config::types::ProviderConfig {
+            base_url: "https://api.test.com/v1".to_string(),
+            api_key_env: "TEST_KEY".to_string(),
+            models,
+        };
+        let client = crate::provider::client::LlmClient::new("https://api.test.com/v1", "fake");
+        app.provider_registry = Some(crate::provider::ProviderRegistry::from_entries(vec![
+            ("test".to_string(), provider_config, client),
+        ]));
+
+        app.current_model = Some("test/small".to_string());
+        app.sync_context_window();
+        assert_eq!(app.status_line_state.context_window, 32_000);
+
+        app.current_model = Some("test/large".to_string());
+        app.sync_context_window();
+        assert_eq!(app.status_line_state.context_window, 200_000);
+    }
+}

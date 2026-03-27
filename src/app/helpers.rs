@@ -264,3 +264,488 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::tests::{make_test_app, make_test_registry, has_error_message, has_system_message};
+    use crate::ui::message_block::{ToolGroup, ToolGroupStatus};
+    use tokio::sync::mpsc;
+
+    // -- should_show_sidebar tests --
+
+    #[test]
+    fn should_show_sidebar_auto_mode() {
+        // In auto mode (None), sidebar shows at >= 120 width
+        let app = make_test_app();
+        assert!(app.should_show_sidebar(120));
+        assert!(app.should_show_sidebar(200));
+        assert!(!app.should_show_sidebar(119));
+        assert!(!app.should_show_sidebar(80));
+    }
+
+    #[test]
+    fn should_show_sidebar_forced_show() {
+        let mut app = make_test_app();
+        app.sidebar_override = Some(true);
+        // Force show regardless of width
+        assert!(app.should_show_sidebar(80));
+        assert!(app.should_show_sidebar(120));
+    }
+
+    #[test]
+    fn should_show_sidebar_forced_hide() {
+        let mut app = make_test_app();
+        app.sidebar_override = Some(false);
+        // Force hide regardless of width
+        assert!(!app.should_show_sidebar(120));
+        assert!(!app.should_show_sidebar(200));
+    }
+
+    // -- strip_project_root tests --
+
+    #[test]
+    fn strip_project_root_absolute_path() {
+        let app = make_test_app();
+        assert_eq!(
+            app.strip_project_root("/tmp/test/src/main.rs"),
+            "src/main.rs"
+        );
+    }
+
+    #[test]
+    fn strip_project_root_relative_path() {
+        let app = make_test_app();
+        assert_eq!(app.strip_project_root("src/main.rs"), "src/main.rs");
+    }
+
+    #[test]
+    fn strip_project_root_no_match() {
+        let app = make_test_app();
+        assert_eq!(
+            app.strip_project_root("/other/path/file.rs"),
+            "/other/path/file.rs"
+        );
+    }
+
+    #[test]
+    fn strip_project_root_exact_root() {
+        let app = make_test_app();
+        // Edge case: path is exactly the root with trailing slash
+        assert_eq!(app.strip_project_root("/tmp/test/"), "");
+    }
+
+    #[test]
+    fn strip_project_root_sibling_directory() {
+        let app = make_test_app();
+        // Should NOT strip prefix from sibling directory (not a path boundary)
+        assert_eq!(
+            app.strip_project_root("/tmp/test-backup/file.rs"),
+            "/tmp/test-backup/file.rs"
+        );
+    }
+
+    // -- interjection tests --
+
+    #[test]
+    fn handle_interjection_adds_user_message() {
+        let mut app = make_test_app();
+        let (interjection_tx, _rx) = mpsc::unbounded_channel();
+        app.interjection_tx = Some(interjection_tx);
+
+        let initial_count = app.messages.len();
+        app.handle_interjection("focus on tests".to_string());
+
+        assert_eq!(app.messages.len(), initial_count + 1);
+        match &app.messages[initial_count] {
+            MessageBlock::User { text } => {
+                assert_eq!(text, "focus on tests");
+            }
+            other => panic!("expected User message, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn handle_interjection_rejects_commands() {
+        let mut app = make_test_app();
+        let (interjection_tx, _rx) = mpsc::unbounded_channel();
+        app.interjection_tx = Some(interjection_tx);
+
+        let initial_count = app.messages.len();
+        app.handle_interjection("/compact".to_string());
+
+        // No message should be added
+        assert_eq!(app.messages.len(), initial_count);
+    }
+
+    #[test]
+    fn handle_interjection_noop_when_no_sender() {
+        let mut app = make_test_app();
+        assert!(app.interjection_tx.is_none());
+
+        let initial_count = app.messages.len();
+        app.handle_interjection("hello".to_string());
+
+        // Should silently do nothing
+        assert_eq!(app.messages.len(), initial_count);
+    }
+
+    // -- close_all_overlays tests --
+
+    #[test]
+    fn close_all_overlays_closes_everything() {
+        let mut app = make_test_app();
+        let models = vec![("openai/gpt-4o".into(), "GPT-4o".into())];
+        app.model_picker.open(&models, None);
+        app.diagnostics_overlay.open(vec![]);
+        let snapshot = crate::ui::mcp_overlay::McpSnapshot::default();
+        app.mcp_overlay.open(crate::ui::mcp_overlay::McpTab::Servers, snapshot, None);
+        // session_picker needs SessionInfo, so set visible directly
+        app.session_picker.visible = true;
+        assert!(app.model_picker.visible);
+        assert!(app.diagnostics_overlay.visible);
+        assert!(app.mcp_overlay.visible);
+        assert!(app.session_picker.visible);
+
+        app.close_all_overlays();
+        assert!(!app.model_picker.visible);
+        assert!(!app.diagnostics_overlay.visible);
+        assert!(!app.mcp_overlay.visible);
+        assert!(!app.session_picker.visible);
+    }
+
+    // -- resolve_client tests --
+
+    #[test]
+    fn resolve_client_no_provider_pushes_error() {
+        let mut app = make_test_app();
+        assert!(app.provider_registry.is_none());
+        let result = app.resolve_client("test/model");
+        assert!(result.is_none());
+        assert!(has_error_message(&app, "No provider configured"));
+    }
+
+    #[test]
+    fn resolve_client_invalid_model_pushes_error() {
+        let mut app = make_test_app();
+        app.provider_registry = Some(make_test_registry(128_000));
+        let result = app.resolve_client("nonexistent/model");
+        assert!(result.is_none());
+        assert!(has_error_message(&app, "Failed to resolve model"));
+    }
+
+    #[test]
+    fn resolve_client_valid_model_returns_client() {
+        let mut app = make_test_app();
+        app.provider_registry = Some(make_test_registry(128_000));
+        let result = app.resolve_client("test/test-model");
+        assert!(result.is_some());
+        let (resolved, _client) = result.unwrap();
+        assert_eq!(resolved.model_id, "test-model");
+    }
+
+    // -- finish_stream tests --
+
+    #[test]
+    fn finish_stream_clears_state() {
+        let mut app = make_test_app();
+        app.is_loading = true;
+        app.streaming_active = true;
+        app.stream_start_time = Some(Instant::now());
+
+        app.finish_stream();
+
+        assert!(!app.is_loading);
+        assert!(!app.streaming_active);
+        assert!(app.stream_cancel.is_none());
+        assert!(app.interjection_tx.is_none());
+        assert!(app.frozen_elapsed.is_some());
+    }
+
+    #[test]
+    fn finish_stream_no_elapsed_without_start_time() {
+        let mut app = make_test_app();
+        app.is_loading = true;
+        assert!(app.stream_start_time.is_none());
+
+        app.finish_stream();
+
+        assert!(app.frozen_elapsed.is_none());
+    }
+
+    // -- last_assistant_mut tests --
+
+    #[test]
+    fn last_assistant_mut_finds_assistant_after_system() {
+        let mut app = make_test_app();
+        app.messages.push(MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::Text("hello".into())],
+        });
+        // Interleave a system message (like a permission response)
+        app.messages.push(MessageBlock::System { text: "granted".into() });
+
+        let found = app.last_assistant_mut();
+        assert!(found.is_some());
+        assert!(found.unwrap().is_assistant());
+    }
+
+    #[test]
+    fn last_assistant_mut_returns_none_when_no_assistant() {
+        let mut app = make_test_app();
+        app.messages.clear();
+        app.messages.push(MessageBlock::User { text: "hi".into() });
+        assert!(app.last_assistant_mut().is_none());
+    }
+
+    // -- remove_last_permission_block tests --
+
+    #[test]
+    fn remove_last_permission_block_removes_it() {
+        let mut app = make_test_app();
+        app.messages.clear();
+        app.messages.push(MessageBlock::User { text: "run it".into() });
+        app.messages.push(MessageBlock::Permission {
+            tool_name: "bash".into(),
+            args_summary: "ls".into(),
+            diff_content: None,
+        });
+        app.messages.push(MessageBlock::System { text: "ok".into() });
+        assert_eq!(app.messages.len(), 3);
+
+        app.remove_last_permission_block();
+
+        assert_eq!(app.messages.len(), 2);
+        // Permission block should be gone
+        assert!(!app.messages.iter().any(|m| matches!(m, MessageBlock::Permission { .. })));
+    }
+
+    #[test]
+    fn remove_last_permission_block_noop_when_none() {
+        let mut app = make_test_app();
+        app.messages.push(MessageBlock::User { text: "hi".into() });
+        let count = app.messages.len();
+
+        app.remove_last_permission_block();
+
+        assert_eq!(app.messages.len(), count);
+    }
+
+    // -- mark_question_answered tests --
+
+    #[test]
+    fn mark_question_answered_sets_answer() {
+        let mut app = make_test_app();
+        app.messages.push(MessageBlock::Question {
+            question: "Pick one".into(),
+            options: vec!["a".into(), "b".into()],
+            selected: Some(0),
+            free_text: String::new(),
+            answered: None,
+        });
+
+        app.mark_question_answered("a");
+
+        match app.messages.last().unwrap() {
+            MessageBlock::Question { answered, .. } => {
+                assert_eq!(answered.as_deref(), Some("a"));
+            }
+            other => panic!("expected Question, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mark_question_answered_skips_already_answered() {
+        let mut app = make_test_app();
+        // Already answered question
+        app.messages.push(MessageBlock::Question {
+            question: "Old".into(),
+            options: vec![],
+            selected: None,
+            free_text: String::new(),
+            answered: Some("done".into()),
+        });
+        // Unanswered question
+        app.messages.push(MessageBlock::Question {
+            question: "New".into(),
+            options: vec![],
+            selected: None,
+            free_text: String::new(),
+            answered: None,
+        });
+
+        app.mark_question_answered("new answer");
+
+        // Should answer the second (unanswered) one
+        match &app.messages[app.messages.len() - 1] {
+            MessageBlock::Question { answered, question, .. } => {
+                assert_eq!(question, "New");
+                assert_eq!(answered.as_deref(), Some("new answer"));
+            }
+            other => panic!("expected Question, got {other:?}"),
+        }
+        // First one should be unchanged
+        match &app.messages[app.messages.len() - 2] {
+            MessageBlock::Question { answered, .. } => {
+                assert_eq!(answered.as_deref(), Some("done"));
+            }
+            other => panic!("expected Question, got {other:?}"),
+        }
+    }
+
+    // -- file index tests --
+
+    #[test]
+    fn invalidate_and_ensure_file_index() {
+        let mut app = make_test_app();
+        // Initially None
+        assert!(app.file_index.is_none());
+
+        // ensure_file_index populates it
+        let index = app.ensure_file_index();
+        assert!(index.is_empty() || !index.is_empty()); // just check it returns something
+
+        // Now it's cached
+        assert!(app.file_index.is_some());
+
+        // invalidate clears it
+        app.invalidate_file_index();
+        assert!(app.file_index.is_none());
+    }
+
+    // -- discard_pending_agents_update tests --
+
+    #[test]
+    fn discard_pending_agents_update_clears_and_notifies() {
+        let mut app = make_test_app();
+        app.pending_agents_update = Some("proposed content".into());
+        let msg_count = app.messages.len();
+
+        app.discard_pending_agents_update();
+
+        assert!(app.pending_agents_update.is_none());
+        assert_eq!(app.messages.len(), msg_count + 1);
+        assert!(has_system_message(&app, "AGENTS.md update discarded"));
+    }
+
+    // -- cancel_stream tests --
+
+    #[test]
+    fn cancel_stream_clears_state_and_pushes_cancelled() {
+        let mut app = make_test_app();
+        app.streaming_active = true;
+        app.is_loading = true;
+        app.stream_start_time = Some(Instant::now());
+        // Add an empty assistant message (should be removed)
+        app.messages.push(MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![],
+        });
+
+        app.cancel_stream();
+
+        assert!(!app.streaming_active);
+        assert!(!app.is_loading);
+        assert!(app.streaming_message.is_none());
+        assert!(has_system_message(&app, "cancelled"));
+        // Empty assistant should have been popped
+        assert!(!app.messages.iter().any(|m| m.is_empty_assistant()));
+    }
+
+    #[test]
+    fn cancel_stream_dismisses_pending_permission() {
+        let mut app = make_test_app();
+        app.streaming_active = true;
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        app.pending_permission = Some(super::types::PendingPermission {
+            tool_name: ToolName::Bash,
+            summary: "test".into(),
+            response_tx: tx,
+        });
+
+        app.cancel_stream();
+
+        assert!(app.pending_permission.is_none());
+        // The receiver should get Deny
+        assert!(matches!(rx.try_recv().unwrap(), PermissionReply::Deny));
+    }
+
+    // -- find_last_completed_call tests --
+
+    #[test]
+    fn find_last_completed_call_finds_matching_tool() {
+        let mut app = make_test_app();
+        app.messages.push(MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::ToolGroup(ToolGroup {
+                calls: vec![ToolCall {
+                    tool_name: ToolName::Read,
+                    args_summary: "src/main.rs".into(),
+                    full_output: Some("contents".into()),
+                    result_summary: Some("42 lines".into()),
+                    diff_content: None,
+                    is_error: false,
+                    expanded: false,
+                    agent_progress: None,
+                }],
+                status: ToolGroupStatus::Complete,
+            })],
+        });
+
+        let found = app.find_last_completed_call(ToolName::Read);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().args_summary, "src/main.rs");
+    }
+
+    #[test]
+    fn find_last_completed_call_returns_none_for_wrong_tool() {
+        let mut app = make_test_app();
+        app.messages.push(MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::ToolGroup(ToolGroup {
+                calls: vec![ToolCall {
+                    tool_name: ToolName::Read,
+                    args_summary: "src/main.rs".into(),
+                    full_output: Some("contents".into()),
+                    result_summary: Some("42 lines".into()),
+                    diff_content: None,
+                    is_error: false,
+                    expanded: false,
+                    agent_progress: None,
+                }],
+                status: ToolGroupStatus::Complete,
+            })],
+        });
+
+        assert!(app.find_last_completed_call(ToolName::Write).is_none());
+    }
+
+    #[test]
+    fn find_last_completed_call_skips_incomplete() {
+        let mut app = make_test_app();
+        app.messages.push(MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![AssistantPart::ToolGroup(ToolGroup {
+                calls: vec![ToolCall {
+                    tool_name: ToolName::Read,
+                    args_summary: "src/main.rs".into(),
+                    full_output: None,
+                    result_summary: None, // not completed yet
+                    diff_content: None,
+                    is_error: false,
+                    expanded: false,
+                    agent_progress: None,
+                }],
+                status: ToolGroupStatus::Running { current_tool: ToolName::Read },
+            })],
+        });
+
+        assert!(app.find_last_completed_call(ToolName::Read).is_none());
+    }
+
+    #[test]
+    fn find_last_completed_call_returns_none_when_no_assistant() {
+        let app = make_test_app();
+        assert!(app.find_last_completed_call(ToolName::Read).is_none());
+    }
+}

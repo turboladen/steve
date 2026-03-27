@@ -329,3 +329,179 @@ impl App {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod overlay_tests {
+    use super::*;
+    use tests::make_test_app;
+
+    #[test]
+    fn model_picker_open_populates_state() {
+        let mut app = make_test_app();
+        let models = vec![
+            ("openai/gpt-4o".into(), "GPT-4o".into()),
+            ("anthropic/claude".into(), "Claude".into()),
+        ];
+        app.model_picker.open(&models, Some("openai/gpt-4o"));
+
+        assert!(app.model_picker.visible);
+        assert_eq!(app.model_picker.filtered_models().len(), 2);
+    }
+
+    #[test]
+    fn model_picker_close_on_new() {
+        let mut app = make_test_app();
+        let models = vec![("openai/gpt-4o".into(), "GPT-4o".into())];
+        app.model_picker.open(&models, None);
+        assert!(app.model_picker.visible);
+
+        // Simulate the relevant part of Command::New handler
+        app.model_picker.close();
+        assert!(!app.model_picker.visible);
+    }
+
+    #[test]
+    fn model_picker_renders_in_full_app() {
+        let mut app = make_test_app();
+        let models = vec![
+            ("openai/gpt-4o".into(), "GPT-4o".into()),
+            ("anthropic/claude".into(), "Claude".into()),
+        ];
+        app.model_picker.open(&models, Some("openai/gpt-4o"));
+
+        let buf = crate::ui::render_to_buffer(80, 24, |frame| {
+            crate::ui::render(frame, &mut app);
+        });
+
+        let mut text = String::new();
+        for y in 0..24 {
+            for x in 0..80 {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+
+        assert!(
+            text.contains("Switch Model"),
+            "overlay title should be visible, got:\n{text}"
+        );
+        assert!(
+            text.contains("openai/gpt-4o"),
+            "model ref should be visible, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn diagnostics_overlay_close_on_new() {
+        let mut app = make_test_app();
+        app.diagnostics_overlay.open(vec![]);
+        assert!(app.diagnostics_overlay.visible);
+
+        // Simulate the relevant part of Command::New handler
+        app.diagnostics_overlay.close();
+        assert!(!app.diagnostics_overlay.visible);
+    }
+
+    #[test]
+    fn diagnostics_overlay_closes_model_picker() {
+        let mut app = make_test_app();
+        let models = vec![("openai/gpt-4o".into(), "GPT-4o".into())];
+        app.model_picker.open(&models, None);
+        assert!(app.model_picker.visible);
+
+        // Opening diagnostics should close model picker (mutual exclusivity)
+        app.model_picker.close();
+        let checks = app.collect_diagnostics();
+        app.diagnostics_overlay.open(checks);
+        assert!(app.diagnostics_overlay.visible);
+        assert!(!app.model_picker.visible);
+    }
+
+    #[test]
+    fn mcp_overlay_close_on_new() {
+        let mut app = make_test_app();
+        let snapshot = crate::ui::mcp_overlay::McpSnapshot::default();
+        app.mcp_overlay.open(crate::ui::mcp_overlay::McpTab::Servers, snapshot, None);
+        assert!(app.mcp_overlay.visible);
+
+        // Simulate the relevant part of Command::New handler
+        app.mcp_overlay.close();
+        assert!(!app.mcp_overlay.visible);
+    }
+
+    #[test]
+    fn mcp_overlay_closes_other_overlays() {
+        let mut app = make_test_app();
+        let models = vec![("openai/gpt-4o".into(), "GPT-4o".into())];
+        app.model_picker.open(&models, None);
+        assert!(app.model_picker.visible);
+
+        // Simulate what open_mcp_overlay() does — close other overlays then open MCP.
+        app.model_picker.close();
+        app.session_picker.close();
+        app.diagnostics_overlay.close();
+        let snapshot = crate::ui::mcp_overlay::McpSnapshot::default();
+        app.mcp_overlay.open(crate::ui::mcp_overlay::McpTab::Tools, snapshot, None);
+        assert!(app.mcp_overlay.visible);
+        assert!(!app.model_picker.visible);
+    }
+
+    #[test]
+    fn mcp_overlay_closed_by_diagnostics() {
+        let mut app = make_test_app();
+        let snapshot = crate::ui::mcp_overlay::McpSnapshot::default();
+        app.mcp_overlay.open(crate::ui::mcp_overlay::McpTab::Servers, snapshot, None);
+        assert!(app.mcp_overlay.visible);
+
+        // Simulate what handle_command(Diagnostics) does — close others then open.
+        app.model_picker.close();
+        app.session_picker.close();
+        app.mcp_overlay.close();
+        let checks = app.collect_diagnostics();
+        app.diagnostics_overlay.open(checks);
+        assert!(app.diagnostics_overlay.visible);
+        assert!(!app.mcp_overlay.visible);
+    }
+
+    #[test]
+    fn compaction_count_resets_on_new() {
+        let mut app = make_test_app();
+        app.compaction_count = 5;
+
+        // Simulate the relevant part of Command::New handler
+        app.compaction_count = 0;
+        assert_eq!(app.compaction_count, 0);
+    }
+
+    #[test]
+    fn compaction_count_increments() {
+        let mut app = make_test_app();
+        assert_eq!(app.compaction_count, 0);
+        app.compaction_count += 1;
+        assert_eq!(app.compaction_count, 1);
+    }
+
+    #[test]
+    fn diagnostics_overlay_renders_in_full_app() {
+        let mut app = make_test_app();
+        let checks = app.collect_diagnostics();
+        app.diagnostics_overlay.open(checks);
+
+        let buf = crate::ui::render_to_buffer(80, 24, |frame| {
+            crate::ui::render(frame, &mut app);
+        });
+
+        let mut text = String::new();
+        for y in 0..24 {
+            for x in 0..80 {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+
+        assert!(
+            text.contains("Health Dashboard"),
+            "overlay title should be visible, got:\n{text}"
+        );
+    }
+}

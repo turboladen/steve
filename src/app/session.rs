@@ -312,3 +312,263 @@ pub(super) fn sanitize_title(raw: &str) -> String {
 
     truncate_title(cleaned)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::tests::{make_test_app_with_storage, create_test_session};
+
+    // -- title_fallback tests --
+
+    #[test]
+    fn title_fallback_short_text() {
+        assert_eq!(title_fallback("Fix the login bug"), "Fix the login bug");
+    }
+
+    #[test]
+    fn title_fallback_exactly_60_chars() {
+        let text = "a".repeat(60);
+        assert_eq!(title_fallback(&text), text);
+    }
+
+    #[test]
+    fn title_fallback_over_60_chars_truncates() {
+        let text = "a".repeat(80);
+        let result = title_fallback(&text);
+        assert_eq!(result.chars().count(), 60);
+        assert!(result.ends_with("..."));
+        assert_eq!(&result[..57], "a".repeat(57));
+    }
+
+    #[test]
+    fn title_fallback_unicode_truncation() {
+        // 70 emoji characters — should truncate to 57 + "..."
+        let text = "🦀".repeat(70);
+        let result = title_fallback(&text);
+        assert_eq!(result.chars().count(), 60);
+        assert!(result.ends_with("..."));
+    }
+
+    // -- sanitize_title tests --
+
+    #[test]
+    fn sanitize_title_clean_response() {
+        assert_eq!(sanitize_title("Fix login redirect"), "Fix login redirect");
+    }
+
+    #[test]
+    fn sanitize_title_strips_double_quotes() {
+        assert_eq!(sanitize_title("\"Fix login redirect\""), "Fix login redirect");
+    }
+
+    #[test]
+    fn sanitize_title_strips_single_quotes() {
+        assert_eq!(sanitize_title("'Fix login redirect'"), "Fix login redirect");
+    }
+
+    #[test]
+    fn sanitize_title_strips_title_prefix() {
+        assert_eq!(sanitize_title("Title: Fix login redirect"), "Fix login redirect");
+    }
+
+    #[test]
+    fn sanitize_title_strips_title_prefix_case_insensitive() {
+        assert_eq!(sanitize_title("TITLE: Fix login redirect"), "Fix login redirect");
+    }
+
+    #[test]
+    fn sanitize_title_takes_first_line() {
+        assert_eq!(
+            sanitize_title("Fix login redirect\nHere is some explanation"),
+            "Fix login redirect"
+        );
+    }
+
+    #[test]
+    fn sanitize_title_skips_empty_first_line() {
+        assert_eq!(
+            sanitize_title("\n  \nFix login redirect\n"),
+            "Fix login redirect"
+        );
+    }
+
+    #[test]
+    fn sanitize_title_enforces_60_char_cap() {
+        let long = "a".repeat(80);
+        let result = sanitize_title(&long);
+        assert_eq!(result.chars().count(), 60);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn sanitize_title_trims_whitespace() {
+        assert_eq!(sanitize_title("  Fix login redirect  \n"), "Fix login redirect");
+    }
+
+    #[test]
+    fn sanitize_title_empty_returns_empty() {
+        assert_eq!(sanitize_title(""), "");
+    }
+
+    #[test]
+    fn sanitize_title_combined_quote_and_prefix() {
+        // Quotes stripped first, then prefix stripped too
+        assert_eq!(sanitize_title("\"Title: Fix login\""), "Fix login");
+    }
+
+    #[test]
+    fn sanitize_title_single_quote_char_no_panic() {
+        assert_eq!(sanitize_title("\""), "\"");
+    }
+
+    #[test]
+    fn sanitize_title_single_apostrophe_no_panic() {
+        assert_eq!(sanitize_title("'"), "'");
+    }
+
+    #[test]
+    fn sanitize_title_non_ascii_prefix_no_panic() {
+        // "Título:" starts with a multibyte char — must not panic on byte-index
+        assert_eq!(sanitize_title("Título: Fix"), "Título: Fix");
+    }
+
+    // -- title_fallback edge cases --
+
+    #[test]
+    fn title_fallback_strips_newlines() {
+        assert_eq!(
+            title_fallback("Fix bug\nin login.rs"),
+            "Fix bug"
+        );
+    }
+
+    #[test]
+    fn title_fallback_empty_returns_empty() {
+        assert_eq!(title_fallback(""), "");
+    }
+
+    // -- apply_session_title edge cases --
+
+    #[test]
+    fn apply_session_title_rejects_empty_string() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        let session = create_test_session(&app);
+        app.current_session = Some(session);
+
+        app.apply_session_title("");
+
+        // Title should remain unchanged
+        assert_eq!(app.current_session.as_ref().unwrap().title, "New session");
+    }
+
+    // -- maybe_generate_title / apply_session_title tests --
+
+    #[test]
+    fn maybe_generate_title_skips_non_default_title() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        let session = create_test_session(&app);
+
+        // Rename via manager before handing to app
+        {
+            let mgr = SessionManager::new(&app.storage, &app.project.id);
+            let mut s = session;
+            mgr.rename_session(&mut s, "My Custom Title").unwrap();
+            app.current_session = Some(s);
+        }
+
+        app.messages.push(MessageBlock::User {
+            text: "Hello world".to_string(),
+        });
+
+        app.maybe_generate_title();
+
+        assert_eq!(app.current_session.as_ref().unwrap().title, "My Custom Title");
+    }
+
+    #[test]
+    fn maybe_generate_title_sync_fallback_without_small_model() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        let session = create_test_session(&app);
+        app.current_session = Some(session);
+        assert!(app.config.small_model.is_none());
+
+        app.messages.push(MessageBlock::User {
+            text: "Fix the authentication bug in login.rs".to_string(),
+        });
+
+        app.maybe_generate_title();
+
+        assert_eq!(
+            app.current_session.as_ref().unwrap().title,
+            "Fix the authentication bug in login.rs"
+        );
+    }
+
+    #[test]
+    fn maybe_generate_title_sync_fallback_truncates_long_message() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        let session = create_test_session(&app);
+        app.current_session = Some(session);
+
+        app.messages.push(MessageBlock::User {
+            text: "a".repeat(80),
+        });
+
+        app.maybe_generate_title();
+
+        let title = &app.current_session.as_ref().unwrap().title;
+        assert_eq!(title.chars().count(), 60);
+        assert!(title.ends_with("..."));
+    }
+
+    #[test]
+    fn apply_session_title_updates_sidebar_and_persists() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        let session = create_test_session(&app);
+        let session_id = session.id.clone();
+        app.current_session = Some(session);
+
+        app.apply_session_title("My New Title");
+
+        assert_eq!(app.current_session.as_ref().unwrap().title, "My New Title");
+        assert_eq!(app.sidebar_state.session_title, "My New Title");
+
+        // Verify persisted to storage
+        {
+            let mgr = SessionManager::new(&app.storage, &app.project.id);
+            let reloaded = mgr.load_session(&session_id).expect("load");
+            assert_eq!(reloaded.title, "My New Title");
+        }
+    }
+
+    #[test]
+    fn title_event_guards_stale_session_id() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        let session = create_test_session(&app);
+        app.current_session = Some(session);
+
+        // Stale session ID — apply_title_if_current should be a no-op
+        app.apply_title_if_current("stale-id-does-not-match", "LLM Generated Title");
+
+        assert_eq!(app.current_session.as_ref().unwrap().title, "New session");
+    }
+
+    #[test]
+    fn title_event_guards_renamed_session() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        let session = create_test_session(&app);
+        let session_id = session.id.clone();
+        app.current_session = Some(session);
+
+        // User renames the session before async title arrives
+        app.apply_session_title("User Chose This");
+
+        // apply_title_if_current with matching session_id should still not overwrite
+        app.apply_title_if_current(&session_id, "LLM Generated Title");
+
+        assert_eq!(
+            app.current_session.as_ref().unwrap().title,
+            "User Chose This"
+        );
+    }
+}

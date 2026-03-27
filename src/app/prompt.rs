@@ -322,3 +322,35 @@ impl App {
         result
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::app::tests::make_test_app;
+
+    #[test]
+    fn system_prompt_includes_tool_guidance() {
+        let app = make_test_app();
+        let prompt = app.build_system_prompt().unwrap();
+        assert!(
+            prompt.contains("Search before reading"),
+            "should contain search guidance"
+        );
+        assert!(prompt.contains("offset"), "should mention offset param");
+        assert!(
+            prompt.contains("context-efficient"),
+            "should mention context efficiency"
+        );
+        assert!(
+            prompt.contains("You are Steve"),
+            "should contain Steve identity"
+        );
+        assert!(
+            prompt.contains("Build mode"),
+            "should explain permission model"
+        );
+        assert!(
+            prompt.contains("Date"),
+            "should contain current date"
+        );
+    }
+}

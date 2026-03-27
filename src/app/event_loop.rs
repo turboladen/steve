@@ -559,3 +559,221 @@ impl App {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::tests::{make_test_app, has_error_message, has_system_message};
+    use crate::event::{AppEvent, StreamUsage};
+
+    /// Put app into streaming state with an empty assistant message block.
+    fn start_streaming(app: &mut App) {
+        app.streaming_active = true;
+        app.is_loading = true;
+        app.stream_start_time = Some(Instant::now());
+        app.messages.push(MessageBlock::Assistant {
+            thinking: None,
+            parts: vec![],
+        });
+    }
+
+    #[tokio::test]
+    async fn event_llm_delta_appends_text() {
+        let mut app = make_test_app();
+        start_streaming(&mut app);
+
+        app.handle_event(AppEvent::LlmDelta { text: "Hello".into() }).await.unwrap();
+        app.handle_event(AppEvent::LlmDelta { text: " world".into() }).await.unwrap();
+
+        match app.messages.last().unwrap() {
+            MessageBlock::Assistant { parts, .. } => {
+                let text: String = parts.iter().filter_map(|p| {
+                    if let AssistantPart::Text(t) = p { Some(t.as_str()) } else { None }
+                }).collect();
+                assert_eq!(text, "Hello world");
+            }
+            other => panic!("expected Assistant, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn event_llm_delta_ignored_when_not_streaming() {
+        let mut app = make_test_app();
+        let msg_count = app.messages.len();
+
+        app.handle_event(AppEvent::LlmDelta { text: "ignored".into() }).await.unwrap();
+
+        // No new messages, no panic
+        assert_eq!(app.messages.len(), msg_count);
+    }
+
+    #[tokio::test]
+    async fn event_llm_usage_update_sets_tokens() {
+        let mut app = make_test_app();
+        app.status_line_state.context_window = 128_000;
+
+        app.handle_event(AppEvent::LlmUsageUpdate {
+            usage: StreamUsage {
+                prompt_tokens: 50_000,
+                completion_tokens: 1_000,
+                total_tokens: 51_000,
+            },
+        }).await.unwrap();
+
+        assert_eq!(app.last_prompt_tokens, 50_000);
+        assert_eq!(app.status_line_state.last_prompt_tokens, 50_000);
+        assert_eq!(app.sidebar_state.prompt_tokens, 50_000);
+        assert_eq!(app.sidebar_state.completion_tokens, 1_000);
+    }
+
+    #[tokio::test]
+    async fn event_llm_error_clears_streaming_state() {
+        let mut app = make_test_app();
+        start_streaming(&mut app);
+        assert!(app.is_loading);
+        assert!(app.streaming_active);
+
+        app.handle_event(AppEvent::LlmError { error: "connection failed".into() }).await.unwrap();
+
+        assert!(!app.is_loading);
+        assert!(!app.streaming_active);
+        assert!(app.stream_cancel.is_none());
+        assert!(app.streaming_message.is_none());
+        assert!(has_error_message(&app, "connection failed"));
+    }
+
+    #[tokio::test]
+    async fn event_llm_finish_clears_streaming_state() {
+        let mut app = make_test_app();
+        start_streaming(&mut app);
+
+        app.handle_event(AppEvent::LlmFinish { usage: None }).await.unwrap();
+
+        assert!(!app.is_loading);
+        assert!(!app.streaming_active);
+        assert!(app.frozen_elapsed.is_some());
+    }
+
+    #[tokio::test]
+    async fn event_stream_notice_pushes_system_message() {
+        let mut app = make_test_app();
+
+        app.handle_event(AppEvent::StreamNotice { text: "LSP started".into() }).await.unwrap();
+
+        assert!(has_system_message(&app, "LSP started"));
+    }
+
+    #[tokio::test]
+    async fn event_compact_error_sets_auto_compact_failed() {
+        let mut app = make_test_app();
+        app.is_loading = true;
+        assert!(!app.auto_compact_failed);
+
+        app.handle_event(AppEvent::CompactError { error: "boom".into() }).await.unwrap();
+
+        assert!(app.auto_compact_failed);
+        assert!(!app.is_loading);
+        assert!(has_error_message(&app, "boom"));
+    }
+
+    #[tokio::test]
+    async fn event_llm_retry_shows_retry_message() {
+        let mut app = make_test_app();
+
+        app.handle_event(AppEvent::LlmRetry {
+            attempt: 2,
+            max_attempts: 3,
+            error: "timeout".into(),
+        }).await.unwrap();
+
+        assert!(has_system_message(&app, "timeout"));
+        assert!(has_system_message(&app, "2/3"));
+    }
+
+    #[tokio::test]
+    async fn event_tick_clears_expired_flash() {
+        let mut app = make_test_app();
+        // Set a flash that expired 2 seconds ago
+        app.selection_state.copied_flash = Some(Instant::now() - Duration::from_secs(2));
+
+        app.handle_event(AppEvent::Tick).await.unwrap();
+
+        assert!(app.selection_state.copied_flash.is_none());
+    }
+
+    #[tokio::test]
+    async fn event_tick_preserves_fresh_flash() {
+        let mut app = make_test_app();
+        app.selection_state.copied_flash = Some(Instant::now());
+
+        app.handle_event(AppEvent::Tick).await.unwrap();
+
+        assert!(app.selection_state.copied_flash.is_some());
+    }
+
+    #[test]
+    fn scroll_down_event_scrolls_down() {
+        let mut state = crate::ui::message_area::MessageAreaState::default();
+        state.update_dimensions(500, 100);
+        state.scroll_to_bottom();
+        state.scroll_up(10);
+        let after_up = state.scroll_offset;
+        state.scroll_down(3);
+        assert!(
+            state.scroll_offset > after_up,
+            "scroll_down should increase offset"
+        );
+    }
+
+    #[test]
+    fn keyboard_scroll_up_down() {
+        let mut state = crate::ui::message_area::MessageAreaState::default();
+        state.update_dimensions(500, 100);
+        state.scroll_to_bottom(); // offset = 400
+        assert!(state.auto_scroll);
+        state.scroll_up(1);
+        assert_eq!(state.scroll_offset, 399);
+        assert!(!state.auto_scroll, "scrolling up should disable auto_scroll");
+        state.scroll_down(1);
+        assert_eq!(state.scroll_offset, 400);
+        assert!(state.auto_scroll, "returning to bottom should re-enable auto_scroll");
+    }
+
+    #[test]
+    fn keyboard_page_scroll() {
+        let mut state = crate::ui::message_area::MessageAreaState::default();
+        state.update_dimensions(500, 100);
+        state.scroll_to_bottom(); // offset = 400
+        assert!(state.auto_scroll);
+        let page = state.visible_height(); // 100
+        state.scroll_up(page);
+        assert_eq!(state.scroll_offset, 300);
+        assert!(!state.auto_scroll, "page up should disable auto_scroll");
+        state.scroll_down(page);
+        assert_eq!(state.scroll_offset, 400);
+        assert!(state.auto_scroll, "page down to bottom should re-enable auto_scroll");
+    }
+
+    #[tokio::test]
+    async fn llm_usage_update_sets_prompt_tokens_without_session_storage() {
+        let mut app = make_test_app();
+        app.status_line_state.context_window = 128_000;
+        app.last_prompt_tokens = 0;
+        app.status_line_state.last_prompt_tokens = 0;
+
+        // Simulate the LlmUsageUpdate handler logic
+        let usage = crate::event::StreamUsage {
+            prompt_tokens: 60_000,
+            completion_tokens: 500,
+            total_tokens: 60_500,
+        };
+        app.last_prompt_tokens = usage.prompt_tokens as u64;
+        app.status_line_state.last_prompt_tokens = usage.prompt_tokens as u64;
+        app.check_context_warning();
+
+        assert_eq!(app.last_prompt_tokens, 60_000);
+        assert_eq!(app.status_line_state.last_prompt_tokens, 60_000);
+        // Session storage should remain untouched
+        assert!(app.current_session.is_none());
+    }
+}

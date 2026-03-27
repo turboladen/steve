@@ -581,3 +581,252 @@ impl App {
         self.mcp_overlay.open(tab, snapshot, filter);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::tests::{make_test_app, make_test_app_with_storage, make_test_registry, has_error_message, has_system_message};
+
+    fn last_message_text(app: &App) -> String {
+        match app.messages.last() {
+            Some(MessageBlock::System { text }) => text.clone(),
+            Some(MessageBlock::Error { text }) => text.clone(),
+            other => panic!("expected System or Error message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn command_unknown_pushes_error() {
+        let mut app = make_test_app();
+        app.handle_command("/foobar").await.unwrap();
+        assert!(has_error_message(&app, "Unknown command"));
+    }
+
+    #[tokio::test]
+    async fn command_exit_sets_should_quit() {
+        let mut app = make_test_app();
+        assert!(!app.should_quit);
+        app.handle_command("/exit").await.unwrap();
+        assert!(app.should_quit);
+    }
+
+    #[tokio::test]
+    async fn command_new_resets_state() {
+        let mut app = make_test_app();
+        app.compaction_count = 5;
+        app.context_warned = true;
+        app.last_prompt_tokens = 9999;
+        app.exchange_count = 10;
+        app.messages.push(MessageBlock::User { text: "hello".into() });
+
+        app.handle_command("/new").await.unwrap();
+
+        assert_eq!(app.compaction_count, 0);
+        assert!(!app.context_warned);
+        assert_eq!(app.last_prompt_tokens, 0);
+        assert_eq!(app.exchange_count, 0);
+        assert!(app.stored_messages.is_empty());
+        // Should have "New session started." as last message
+        assert!(has_system_message(&app, "New session started"));
+        // Should have created a new session
+        assert!(app.current_session.is_some());
+    }
+
+    #[tokio::test]
+    async fn command_help_shows_commands() {
+        let mut app = make_test_app();
+        app.handle_command("/help").await.unwrap();
+        let text = last_message_text(&app);
+        assert!(text.contains("/new"));
+        assert!(text.contains("/exit"));
+        assert!(text.contains("/compact"));
+    }
+
+    #[tokio::test]
+    async fn command_model_no_provider_errors() {
+        let mut app = make_test_app();
+        assert!(app.provider_registry.is_none());
+        app.handle_command("/model test/gpt").await.unwrap();
+        assert!(has_error_message(&app, "No providers configured"));
+    }
+
+    #[tokio::test]
+    async fn command_models_no_provider_errors() {
+        let mut app = make_test_app();
+        app.handle_command("/models").await.unwrap();
+        assert!(has_error_message(&app, "No providers configured"));
+    }
+
+    #[tokio::test]
+    async fn command_models_opens_picker() {
+        let mut app = make_test_app();
+        app.provider_registry = Some(make_test_registry(128_000));
+        assert!(!app.model_picker.visible);
+        app.handle_command("/models").await.unwrap();
+        assert!(app.model_picker.visible);
+    }
+
+    #[tokio::test]
+    async fn command_models_closes_other_overlays() {
+        let mut app = make_test_app();
+        app.provider_registry = Some(make_test_registry(128_000));
+        app.diagnostics_overlay.open(vec![]);
+        assert!(app.diagnostics_overlay.visible);
+
+        app.handle_command("/models").await.unwrap();
+        assert!(app.model_picker.visible);
+        assert!(!app.diagnostics_overlay.visible);
+    }
+
+    #[tokio::test]
+    async fn command_diagnostics_opens_overlay() {
+        let mut app = make_test_app();
+        assert!(!app.diagnostics_overlay.visible);
+        app.handle_command("/diagnostics").await.unwrap();
+        assert!(app.diagnostics_overlay.visible);
+    }
+
+    #[tokio::test]
+    async fn command_diagnostics_closes_other_overlays() {
+        let mut app = make_test_app();
+        let models = vec![("openai/gpt-4o".into(), "GPT-4o".into())];
+        app.model_picker.open(&models, None);
+        assert!(app.model_picker.visible);
+
+        app.handle_command("/diagnostics").await.unwrap();
+        assert!(app.diagnostics_overlay.visible);
+        assert!(!app.model_picker.visible);
+    }
+
+    #[tokio::test]
+    async fn command_compact_nothing_to_compact() {
+        let mut app = make_test_app();
+        app.handle_command("/compact").await.unwrap();
+        assert!(has_system_message(&app, "Nothing to compact"));
+    }
+
+    #[tokio::test]
+    async fn command_compact_rejects_while_loading() {
+        let mut app = make_test_app();
+        app.current_session = Some(crate::session::types::SessionInfo {
+            id: "test".into(),
+            project_id: "test".into(),
+            title: "Test".into(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            model_ref: "test/m".into(),
+            token_usage: Default::default(),
+        });
+        app.stored_messages.push(crate::session::message::Message::user("test", "hello"));
+        app.is_loading = true;
+        app.handle_command("/compact").await.unwrap();
+        assert!(has_error_message(&app, "Cannot compact while streaming"));
+    }
+
+    #[tokio::test]
+    async fn command_compact_rejects_while_streaming_active() {
+        let mut app = make_test_app();
+        app.current_session = Some(crate::session::types::SessionInfo {
+            id: "test".into(),
+            project_id: "test".into(),
+            title: "Test".into(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            model_ref: "test/m".into(),
+            token_usage: Default::default(),
+        });
+        app.stored_messages.push(crate::session::message::Message::user("test", "hello"));
+        app.streaming_active = true;
+        app.handle_command("/compact").await.unwrap();
+        assert!(has_error_message(&app, "Cannot compact while streaming"));
+    }
+
+    #[tokio::test]
+    async fn command_tasks_empty() {
+        let mut app = make_test_app();
+        app.handle_command("/tasks").await.unwrap();
+        assert!(has_system_message(&app, "No tasks"));
+    }
+
+    #[tokio::test]
+    async fn command_task_new_creates_task() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        app.handle_command("/task-new Fix the login bug").await.unwrap();
+        assert!(has_system_message(&app, "Created task"));
+        assert!(has_system_message(&app, "Fix the login bug"));
+    }
+
+    #[tokio::test]
+    async fn command_task_lifecycle() {
+        let (mut app, _dir) = make_test_app_with_storage();
+
+        // Create
+        app.handle_command("/task-new Test task").await.unwrap();
+        let task_id = {
+            let tasks = app.task_store.list_tasks().unwrap();
+            assert_eq!(tasks.len(), 1);
+            tasks[0].id.clone()
+        };
+
+        // Show
+        app.handle_command(&format!("/task-show {task_id}")).await.unwrap();
+        assert!(has_system_message(&app, "Test task"));
+
+        // Complete
+        app.handle_command(&format!("/task-done {task_id}")).await.unwrap();
+        assert!(has_system_message(&app, "Completed"));
+    }
+
+    #[tokio::test]
+    async fn command_task_done_nonexistent_errors() {
+        let mut app = make_test_app();
+        app.handle_command("/task-done nonexistent-id").await.unwrap();
+        assert!(has_error_message(&app, "Failed to complete task"));
+    }
+
+    #[tokio::test]
+    async fn command_epics_empty() {
+        let mut app = make_test_app();
+        app.handle_command("/epics").await.unwrap();
+        assert!(has_system_message(&app, "No epics"));
+    }
+
+    #[tokio::test]
+    async fn command_epic_new_creates_epic() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        app.handle_command("/epic-new Auth Overhaul").await.unwrap();
+        assert!(has_system_message(&app, "Created epic"));
+        assert!(has_system_message(&app, "Auth Overhaul"));
+    }
+
+    #[tokio::test]
+    async fn command_agents_update_rejects_during_streaming() {
+        let mut app = make_test_app();
+        app.is_loading = true;
+        app.handle_command("/agents-update").await.unwrap();
+        assert!(has_error_message(&app, "Cannot update AGENTS.md while streaming"));
+    }
+
+    #[tokio::test]
+    async fn command_agents_update_rejects_without_model() {
+        let mut app = make_test_app();
+        assert!(app.current_model.is_none());
+        app.handle_command("/agents-update").await.unwrap();
+        assert!(has_error_message(&app, "No model available"));
+    }
+
+    #[tokio::test]
+    async fn command_sessions_rejects_during_streaming() {
+        let mut app = make_test_app();
+        app.is_loading = true;
+        app.handle_command("/sessions").await.unwrap();
+        assert!(has_error_message(&app, "Cannot browse sessions while streaming"));
+    }
+
+    #[tokio::test]
+    async fn command_export_debug_no_session_errors() {
+        let mut app = make_test_app();
+        app.handle_command("/export-debug").await.unwrap();
+        assert!(has_error_message(&app, "No active session to export"));
+    }
+}
