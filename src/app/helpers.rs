@@ -4,14 +4,14 @@ impl App {
     /// Find the last Assistant block in messages.
     /// Permission/System blocks can be interleaved during streaming, so
     /// `messages.last_mut()` may not be the Assistant block we need.
-    pub(crate) fn last_assistant_mut(&mut self) -> Option<&mut MessageBlock> {
+    pub(super) fn last_assistant_mut(&mut self) -> Option<&mut MessageBlock> {
         self.messages.iter_mut().rev().find(|m| m.is_assistant())
     }
 
     /// Remove the last Permission block from messages.
     /// Called after the user responds to a permission prompt so the ephemeral
     /// prompt doesn't appear out-of-order with tool call results.
-    pub(crate) fn remove_last_permission_block(&mut self) {
+    pub(super) fn remove_last_permission_block(&mut self) {
         if let Some(pos) = self
             .messages
             .iter()
@@ -22,7 +22,7 @@ impl App {
     }
 
     /// Update the last Question block to reflect current PendingQuestion state.
-    pub(crate) fn sync_question_block(&mut self) {
+    pub(super) fn sync_question_block(&mut self) {
         if let Some(q) = &self.pending_question {
             if let Some(block) = self.messages.iter_mut().rev().find(|m| matches!(m, MessageBlock::Question { answered: None, .. })) {
                 if let MessageBlock::Question { selected, free_text, .. } = block {
@@ -34,7 +34,7 @@ impl App {
     }
 
     /// Mark the last unanswered Question block as answered.
-    pub(crate) fn mark_question_answered(&mut self, answer: &str) {
+    pub(super) fn mark_question_answered(&mut self, answer: &str) {
         if let Some(block) = self.messages.iter_mut().rev().find(|m| matches!(m, MessageBlock::Question { answered: None, .. })) {
             if let MessageBlock::Question { answered, .. } = block {
                 *answered = Some(answer.to_string());
@@ -43,7 +43,7 @@ impl App {
     }
 
     /// Lazily build the file index for `@` autocomplete.
-    pub(crate) fn ensure_file_index(&mut self) -> &[String] {
+    pub(super) fn ensure_file_index(&mut self) -> &[String] {
         if self.file_index.is_none() {
             self.file_index = Some(file_ref::build_file_index(&self.project.root));
         }
@@ -51,12 +51,12 @@ impl App {
     }
 
     /// Invalidate the file index (called after write tools complete).
-    pub(crate) fn invalidate_file_index(&mut self) {
+    pub(super) fn invalidate_file_index(&mut self) {
         self.file_index = None;
     }
 
     /// Discard a pending AGENTS.md update and notify the user.
-    pub(crate) fn discard_pending_agents_update(&mut self) {
+    pub(super) fn discard_pending_agents_update(&mut self) {
         self.pending_agents_update = None;
         self.messages.push(MessageBlock::System {
             text: "AGENTS.md update discarded.".to_string(),
@@ -65,7 +65,7 @@ impl App {
     }
 
     /// Cancel the current streaming task.
-    pub(crate) fn cancel_stream(&mut self) {
+    pub(super) fn cancel_stream(&mut self) {
         tracing::info!("cancelling stream");
 
         // Signal the stream task to stop
@@ -107,7 +107,7 @@ impl App {
     /// Inject a user message into the active tool loop without cancelling it.
     /// The message is sent via the interjection channel to the stream task,
     /// which drains it before the next LLM API call.
-    pub(crate) fn handle_interjection(&mut self, text: String) {
+    pub(super) fn handle_interjection(&mut self, text: String) {
         // Silently reject slash commands during interjection
         if text.starts_with('/') {
             return;
@@ -169,7 +169,7 @@ impl App {
 
     /// Find the most recently completed tool call with the given name in the last
     /// assistant message's tool groups. Returns a reference to the `ToolCall`.
-    pub(crate) fn find_last_completed_call(&self, tool_name: ToolName) -> Option<&ToolCall> {
+    pub(super) fn find_last_completed_call(&self, tool_name: ToolName) -> Option<&ToolCall> {
         let last = self.messages.iter().rev().find(|m| m.is_assistant())?;
         if let MessageBlock::Assistant { parts, .. } = last {
             for part in parts.iter().rev() {
@@ -189,7 +189,7 @@ impl App {
     /// Strip the project root prefix from an absolute path, returning a relative path.
     /// Returns the input unchanged if it doesn't start with the project root.
     /// Only strips at path boundaries (e.g., `/foo/bar` won't match `/foo/bar-baz`).
-    pub(crate) fn strip_project_root(&self, path: &str) -> String {
+    pub(super) fn strip_project_root(&self, path: &str) -> String {
         let root = self.project.root.to_string_lossy();
         let root_str = root.as_ref();
         if let Some(rest) = path.strip_prefix(root_str) {
