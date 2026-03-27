@@ -1262,14 +1262,18 @@ fn close_all_overlays_closes_everything() {
     app.diagnostics_overlay.open(vec![]);
     let snapshot = crate::ui::mcp_overlay::McpSnapshot::default();
     app.mcp_overlay.open(crate::ui::mcp_overlay::McpTab::Servers, snapshot, None);
+    // session_picker needs SessionInfo, so set visible directly
+    app.session_picker.visible = true;
     assert!(app.model_picker.visible);
     assert!(app.diagnostics_overlay.visible);
     assert!(app.mcp_overlay.visible);
+    assert!(app.session_picker.visible);
 
     app.close_all_overlays();
     assert!(!app.model_picker.visible);
     assert!(!app.diagnostics_overlay.visible);
     assert!(!app.mcp_overlay.visible);
+    assert!(!app.session_picker.visible);
 }
 
 // ─── handle_command tests ───
@@ -1320,6 +1324,7 @@ async fn command_new_resets_state() {
     assert!(!app.context_warned);
     assert_eq!(app.last_prompt_tokens, 0);
     assert_eq!(app.exchange_count, 0);
+    assert!(app.stored_messages.is_empty());
     // Should have "New session started." as last message
     assert!(has_system_message(&app, "New session started"));
     // Should have created a new session
@@ -1352,6 +1357,27 @@ async fn command_models_no_provider_errors() {
 }
 
 #[tokio::test]
+async fn command_models_opens_picker() {
+    let mut app = make_test_app();
+    app.provider_registry = Some(make_test_registry(128_000));
+    assert!(!app.model_picker.visible);
+    app.handle_command("/models").await.unwrap();
+    assert!(app.model_picker.visible);
+}
+
+#[tokio::test]
+async fn command_models_closes_other_overlays() {
+    let mut app = make_test_app();
+    app.provider_registry = Some(make_test_registry(128_000));
+    app.diagnostics_overlay.open(vec![]);
+    assert!(app.diagnostics_overlay.visible);
+
+    app.handle_command("/models").await.unwrap();
+    assert!(app.model_picker.visible);
+    assert!(!app.diagnostics_overlay.visible);
+}
+
+#[tokio::test]
 async fn command_diagnostics_opens_overlay() {
     let mut app = make_test_app();
     assert!(!app.diagnostics_overlay.visible);
@@ -1379,7 +1405,7 @@ async fn command_compact_nothing_to_compact() {
 }
 
 #[tokio::test]
-async fn command_compact_rejects_during_streaming() {
+async fn command_compact_rejects_while_loading() {
     let mut app = make_test_app();
     app.current_session = Some(crate::session::types::SessionInfo {
         id: "test".into(),
@@ -1392,6 +1418,24 @@ async fn command_compact_rejects_during_streaming() {
     });
     app.stored_messages.push(crate::session::message::Message::user("test", "hello"));
     app.is_loading = true;
+    app.handle_command("/compact").await.unwrap();
+    assert!(has_error_message(&app, "Cannot compact while streaming"));
+}
+
+#[tokio::test]
+async fn command_compact_rejects_while_streaming_active() {
+    let mut app = make_test_app();
+    app.current_session = Some(crate::session::types::SessionInfo {
+        id: "test".into(),
+        project_id: "test".into(),
+        title: "Test".into(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        model_ref: "test/m".into(),
+        token_usage: Default::default(),
+    });
+    app.stored_messages.push(crate::session::message::Message::user("test", "hello"));
+    app.streaming_active = true;
     app.handle_command("/compact").await.unwrap();
     assert!(has_error_message(&app, "Cannot compact while streaming"));
 }

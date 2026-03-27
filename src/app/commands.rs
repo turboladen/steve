@@ -34,7 +34,7 @@ impl App {
                 self.context_warned = false;
                 self.last_prompt_tokens = 0;
                 self.current_session = None;
-                self.session_picker.close();
+                self.close_all_overlays();
                 // Reset tool result cache for the new session
                 *self.tool_cache.lock().unwrap() = ToolResultCache::new(self.project.root.clone());
                 // Clear changeset tracking, session-closed tasks, selection, and reset token counters
@@ -46,9 +46,6 @@ impl App {
                 self.selection_state.clear();
                 self.pending_question = None;
                 self.pending_agents_update = None;
-                self.model_picker.close();
-                self.diagnostics_overlay.close();
-                self.mcp_overlay.close();
                 self.compaction_count = 0;
                 self.autocomplete_state.hide();
                 self.ensure_session();
