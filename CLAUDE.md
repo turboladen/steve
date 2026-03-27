@@ -82,7 +82,7 @@ use `"provider_id/model_id"` format throughout. MCP servers merge by server ID (
 
 All must update when adding a `ToolName` variant:
 
-`extract_args_summary()` and `extract_diff_content()` in `app.rs`, `extract_tool_summary()` in
+`extract_args_summary()` and `extract_diff_content()` in `app/tool_display.rs`, `extract_tool_summary()` in
 `export.rs`, `cache_key()` and `extract_path()` in `context/cache.rs`, `compress_tool_output()` in
 `context/compressor.rs`, `build_permission_summary()` and `extract_tool_path()` in `stream.rs`,
 `is_write_tool()`/`intent_category()`/`tool_marker()`/`visual_category()`/`gutter_char()`/`path_arg_keys()` in
@@ -90,7 +90,7 @@ All must update when adding a `ToolName` variant:
 
 `path_arg_keys()` in `tool/mod.rs` is the single source of truth for tool→path-arg-key mapping.
 
-When adding edit operations: update `extract_diff_content()` in `app.rs` and
+When adding edit operations: update `extract_diff_content()` in `app/tool_display.rs` and
 `build_permission_summary()` in `stream.rs`.
 
 ### MCP Client Integration (`mcp/`)
