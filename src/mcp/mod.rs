@@ -383,6 +383,16 @@ impl McpManager {
         Ok((format_call_result(&result), is_error))
     }
 
+    /// Aggregate prompts from all servers.
+    pub fn all_prompts(&self) -> Vec<(&str, &Prompt)> {
+        self.servers
+            .iter()
+            .flat_map(|(id, server)| {
+                server.cached_prompts.iter().map(move |p| (id.as_str(), p))
+            })
+            .collect()
+    }
+
     /// Aggregate resources from all servers.
     pub fn all_resources(&self) -> Vec<(&str, &Resource)> {
         self.servers
@@ -449,6 +459,91 @@ impl McpManager {
         }
 
         result
+    }
+
+    /// Build an owned snapshot of MCP data for the overlay UI.
+    pub fn overlay_snapshot(
+        &self,
+        configs: &HashMap<String, McpServerConfig>,
+    ) -> crate::ui::mcp_overlay::McpSnapshot {
+        use crate::ui::mcp_overlay::*;
+
+        let mut servers: Vec<McpServerInfo> = self
+            .servers
+            .iter()
+            .map(|(id, server)| {
+                let transport = configs
+                    .get(id)
+                    .map(|c| if c.is_http() { "http" } else { "stdio" })
+                    .unwrap_or("unknown");
+
+                McpServerInfo {
+                    server_id: id.clone(),
+                    connected: true,
+                    error: None,
+                    transport,
+                    tools: server
+                        .cached_tools
+                        .iter()
+                        .map(|t| McpToolInfo {
+                            name: t.name.to_string(),
+                            description: t.description.as_deref().unwrap_or("").to_string(),
+                        })
+                        .collect(),
+                    resources: server
+                        .cached_resources
+                        .iter()
+                        .map(|r| McpResourceInfo {
+                            name: r.name.clone(),
+                            uri: r.uri.as_str().to_string(),
+                            description: r.description.as_deref().unwrap_or("").to_string(),
+                        })
+                        .collect(),
+                    prompts: server
+                        .cached_prompts
+                        .iter()
+                        .map(|p| McpPromptInfo {
+                            name: p.name.clone(),
+                            description: p.description.as_deref().unwrap_or("").to_string(),
+                            arguments: p
+                                .arguments
+                                .as_deref()
+                                .unwrap_or(&[])
+                                .iter()
+                                .map(|a| McpPromptArg {
+                                    name: a.name.clone(),
+                                    description: a.description.as_deref().unwrap_or("").to_string(),
+                                    required: a.required.unwrap_or(false),
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+
+        // Add failed servers
+        for (id, error) in &self.failed_servers {
+            let transport = configs
+                .get(id)
+                .map(|c| if c.is_http() { "http" } else { "stdio" })
+                .unwrap_or("unknown");
+
+            servers.push(McpServerInfo {
+                server_id: id.clone(),
+                connected: false,
+                error: Some(error.clone()),
+                transport,
+                tools: vec![],
+                resources: vec![],
+                prompts: vec![],
+            });
+        }
+
+        // Sort by server_id for consistent ordering
+        servers.sort_by(|a, b| a.server_id.cmp(&b.server_id));
+
+        McpSnapshot { servers }
     }
 
     /// Summary of connected servers for status display.

@@ -1,6 +1,7 @@
 pub mod autocomplete;
 pub mod diagnostics_overlay;
 pub mod input;
+pub mod mcp_overlay;
 pub mod layout;
 pub mod markdown;
 pub mod message_area;
@@ -34,6 +35,7 @@ use message_area::render_message_blocks;
 use autocomplete::render_autocomplete;
 use input::{render_input, render_paste_preview, abbreviate_path, InputContext, MIN_INPUT_HEIGHT, MAX_INPUT_PCT, CHEVRON_WIDTH};
 use diagnostics_overlay::render_diagnostics_overlay;
+use mcp_overlay::render_mcp_overlay;
 use model_picker::render_model_picker;
 use session_picker::render_session_picker;
 use sidebar::render_sidebar;
@@ -211,6 +213,14 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         frame,
         layout.message_area,
         &app.diagnostics_overlay,
+        &app.theme,
+        pct,
+    );
+
+    render_mcp_overlay(
+        frame,
+        layout.message_area,
+        &app.mcp_overlay,
         &app.theme,
         pct,
     );

@@ -361,17 +361,17 @@ async fn save_credentials(
             }
         };
 
-    let stored = StoredCredentials {
-        client_id: client_id.to_string(),
-        token_response,
-        granted_scopes,
-        token_received_at: Some(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        ),
-    };
+    // StoredCredentials is #[non_exhaustive] in rmcp — construct via serde.
+    let stored: StoredCredentials = serde_json::from_value(serde_json::json!({
+        "client_id": client_id,
+        "token_response": token_response,
+        "granted_scopes": granted_scopes,
+        "token_received_at": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    }))
+    .context("failed to build StoredCredentials")?;
 
     let store = FileCredentialStore::new(credential_path.to_path_buf());
     store.save(stored).await.context("failed to save OAuth credentials")?;

@@ -532,6 +532,9 @@ pub struct App {
     /// Diagnostics overlay state.
     pub diagnostics_overlay: crate::ui::diagnostics_overlay::DiagnosticsOverlayState,
 
+    /// MCP overlay state.
+    pub mcp_overlay: crate::ui::mcp_overlay::McpOverlayState,
+
     /// Number of compactions in the current session (for diagnostics).
     pub compaction_count: u32,
 
@@ -682,6 +685,7 @@ impl App {
             file_index: None,
             model_picker: ModelPickerState::default(),
             diagnostics_overlay: crate::ui::diagnostics_overlay::DiagnosticsOverlayState::default(),
+            mcp_overlay: crate::ui::mcp_overlay::McpOverlayState::default(),
             compaction_count: 0,
             selection_state: SelectionState::default(),
             last_message_area: ratatui::layout::Rect::default(),
@@ -930,6 +934,7 @@ impl App {
         self.model_picker.close();
         self.session_picker.close();
         self.diagnostics_overlay.close();
+        self.mcp_overlay.close();
         self.compaction_count = 0;
         self.refresh_git_info();
         self.sync_sidebar_tokens();
@@ -948,7 +953,7 @@ impl App {
             AppEvent::Input(Event::Mouse(mouse)) => {
                 use crossterm::event::MouseButton;
                 // Block mouse events in the message area when an overlay is active
-                if self.model_picker.visible || self.session_picker.visible || self.diagnostics_overlay.visible || self.pending_question.is_some() {
+                if self.model_picker.visible || self.session_picker.visible || self.diagnostics_overlay.visible || self.mcp_overlay.visible || self.pending_question.is_some() {
                     return Ok(());
                 }
                 match mouse.kind {
@@ -1759,6 +1764,35 @@ impl App {
             return Ok(());
         }
 
+        // If the MCP overlay is open, intercept keystrokes
+        if self.mcp_overlay.visible {
+            match (key.code, key.modifiers) {
+                (KeyCode::Esc, _) => {
+                    self.mcp_overlay.close();
+                }
+                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
+                    self.mcp_overlay.close();
+                    if self.is_loading || self.streaming_active {
+                        self.cancel_stream();
+                    }
+                }
+                (KeyCode::Up, _) => {
+                    self.mcp_overlay.scroll_up(1);
+                }
+                (KeyCode::Down, _) => {
+                    self.mcp_overlay.scroll_down(1);
+                }
+                (KeyCode::Tab, _) | (KeyCode::Right, _) => {
+                    self.mcp_overlay.next_tab();
+                }
+                (KeyCode::BackTab, _) | (KeyCode::Left, _) => {
+                    self.mcp_overlay.prev_tab();
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         // If the diagnostics overlay is open, intercept keystrokes
         if self.diagnostics_overlay.visible {
             match (key.code, key.modifiers) {
@@ -1816,13 +1850,13 @@ impl App {
             (KeyCode::Tab, KeyModifiers::NONE) if self.autocomplete_state.visible => {
                 match self.autocomplete_state.mode {
                     AutocompleteMode::Command => {
+                        // Tab completes the command text without executing,
+                        // allowing the user to append arguments (e.g. `/mcp tools <server>`).
                         if let Some(cmd_name) = self.autocomplete_state.selected_command() {
                             let cmd_name = cmd_name.to_string();
-                            self.autocomplete_state.hide();
-                            self.input.take_text(); // clear input
-                            if !self.is_loading {
-                                self.handle_input(cmd_name).await?;
-                            }
+                            self.input.set_text(&cmd_name);
+                            // Re-filter so the menu stays visible with narrowed matches.
+                            self.autocomplete_state.update(&cmd_name);
                         }
                     }
                     AutocompleteMode::FileRef => {
@@ -3104,6 +3138,7 @@ impl App {
                 self.pending_agents_update = None;
                 self.model_picker.close();
                 self.diagnostics_overlay.close();
+                self.mcp_overlay.close();
                 self.compaction_count = 0;
                 self.autocomplete_state.hide();
                 self.ensure_session();
@@ -3156,6 +3191,7 @@ impl App {
             }
             Command::Models => {
                 self.diagnostics_overlay.close();
+                self.mcp_overlay.close();
                 self.session_picker.close();
                 if let Some(registry) = &self.provider_registry {
                     let models = registry.list_models();
@@ -3181,6 +3217,7 @@ impl App {
                 // Close other overlays (mutual exclusivity)
                 self.model_picker.close();
                 self.session_picker.close();
+                self.mcp_overlay.close();
                 // Run diagnostics and open the overlay
                 let checks = self.collect_diagnostics();
                 self.diagnostics_overlay.open(checks);
@@ -3319,6 +3356,7 @@ impl App {
                 // Close other overlays (mutual exclusivity)
                 self.model_picker.close();
                 self.diagnostics_overlay.close();
+                self.mcp_overlay.close();
                 let mgr = SessionManager::new(&self.storage, &self.project.id);
                 match mgr.list_sessions() {
                     Ok(sessions) if sessions.is_empty() => {
@@ -3658,9 +3696,39 @@ impl App {
                     }
                 }
             }
+            Command::Mcp => {
+                self.open_mcp_overlay(crate::ui::mcp_overlay::McpTab::Servers, None).await;
+            }
+            Command::McpTools(filter) => {
+                self.open_mcp_overlay(crate::ui::mcp_overlay::McpTab::Tools, filter).await;
+            }
+            Command::McpResources(filter) => {
+                self.open_mcp_overlay(crate::ui::mcp_overlay::McpTab::Resources, filter).await;
+            }
+            Command::McpPrompts(filter) => {
+                self.open_mcp_overlay(crate::ui::mcp_overlay::McpTab::Prompts, filter).await;
+            }
         }
 
         Ok(())
+    }
+
+    /// Open the MCP overlay on the given tab, snapshotting current MCP state.
+    async fn open_mcp_overlay(
+        &mut self,
+        tab: crate::ui::mcp_overlay::McpTab,
+        filter: Option<String>,
+    ) {
+        // Close other overlays
+        self.model_picker.close();
+        self.session_picker.close();
+        self.diagnostics_overlay.close();
+
+        let mgr = self.mcp_manager.lock().await;
+        let snapshot = mgr.overlay_snapshot(&self.config.mcp_servers);
+        drop(mgr);
+
+        self.mcp_overlay.open(tab, snapshot, filter);
     }
 }
 
@@ -4772,6 +4840,52 @@ pub(crate) mod tests {
         app.diagnostics_overlay.open(checks);
         assert!(app.diagnostics_overlay.visible);
         assert!(!app.model_picker.visible);
+    }
+
+    #[test]
+    fn mcp_overlay_close_on_new() {
+        let mut app = make_test_app();
+        let snapshot = crate::ui::mcp_overlay::McpSnapshot::default();
+        app.mcp_overlay.open(crate::ui::mcp_overlay::McpTab::Servers, snapshot, None);
+        assert!(app.mcp_overlay.visible);
+
+        // Simulate the relevant part of Command::New handler
+        app.mcp_overlay.close();
+        assert!(!app.mcp_overlay.visible);
+    }
+
+    #[test]
+    fn mcp_overlay_closes_other_overlays() {
+        let mut app = make_test_app();
+        let models = vec![("openai/gpt-4o".into(), "GPT-4o".into())];
+        app.model_picker.open(&models, None);
+        assert!(app.model_picker.visible);
+
+        // Simulate what open_mcp_overlay() does — close other overlays then open MCP.
+        app.model_picker.close();
+        app.session_picker.close();
+        app.diagnostics_overlay.close();
+        let snapshot = crate::ui::mcp_overlay::McpSnapshot::default();
+        app.mcp_overlay.open(crate::ui::mcp_overlay::McpTab::Tools, snapshot, None);
+        assert!(app.mcp_overlay.visible);
+        assert!(!app.model_picker.visible);
+    }
+
+    #[test]
+    fn mcp_overlay_closed_by_diagnostics() {
+        let mut app = make_test_app();
+        let snapshot = crate::ui::mcp_overlay::McpSnapshot::default();
+        app.mcp_overlay.open(crate::ui::mcp_overlay::McpTab::Servers, snapshot, None);
+        assert!(app.mcp_overlay.visible);
+
+        // Simulate what handle_command(Diagnostics) does — close others then open.
+        app.model_picker.close();
+        app.session_picker.close();
+        app.mcp_overlay.close();
+        let checks = app.collect_diagnostics();
+        app.diagnostics_overlay.open(checks);
+        assert!(app.diagnostics_overlay.visible);
+        assert!(!app.mcp_overlay.visible);
     }
 
     #[test]

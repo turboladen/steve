@@ -80,19 +80,31 @@ pub async fn connect_http(
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
         .collect();
     let credential_path = cred_dir.join(format!("{safe_id}.json"));
-    let auth_client = super::oauth::authorize(server_id, url, credential_path, client_id, client_secret, status_tx).await?;
 
-    // Build transport using the authenticated client
-    let config = build_config(url, &expanded);
-    let worker = StreamableHttpClientWorker::new(auth_client, config);
-    let transport = WorkerTransport::spawn(worker);
+    // First attempt — may use stored (cached) credentials.
+    let first_result = oauth_connect(
+        server_id, url, &expanded, credential_path.clone(),
+        client_id, client_secret, status_tx.clone(),
+    ).await;
 
-    let service: RunningService<RoleClient, ()> = ()
-        .serve(transport)
-        .await
-        .map_err(|e| anyhow::anyhow!("MCP HTTP handshake failed for '{server_id}' (OAuth): {e}"))?;
+    match first_result {
+        Ok(service) => return Ok(service),
+        Err(e) if is_auth_error(&e) && credential_path.exists() => {
+            // Stored credentials are stale (expired/revoked) — clear them and
+            // re-authorize, which will trigger the browser-based OAuth flow.
+            tracing::info!(
+                server = %server_id,
+                "stored OAuth credentials rejected, clearing and re-authorizing"
+            );
+            let _ = tokio::fs::remove_file(&credential_path).await;
 
-    Ok(service)
+            oauth_connect(
+                server_id, url, &expanded, credential_path,
+                client_id, client_secret, status_tx,
+            ).await
+        }
+        other => other,
+    }
 }
 
 /// Connect using a plain `reqwest::Client` (no OAuth).
@@ -110,6 +122,32 @@ async fn connect_direct(
         .serve(transport)
         .await
         .map_err(|e| anyhow::anyhow!("MCP HTTP handshake failed for '{server_id}': {e}"))?;
+
+    Ok(service)
+}
+
+/// Run the OAuth flow and perform the MCP handshake with the resulting `AuthClient`.
+async fn oauth_connect(
+    server_id: &str,
+    url: &str,
+    expanded: &HashMap<String, String>,
+    credential_path: std::path::PathBuf,
+    client_id: Option<&str>,
+    client_secret: Option<&str>,
+    status_tx: Option<OAuthStatusTx>,
+) -> Result<RunningService<RoleClient, ()>> {
+    let auth_client = super::oauth::authorize(
+        server_id, url, credential_path, client_id, client_secret, status_tx,
+    ).await?;
+
+    let config = build_config(url, expanded);
+    let worker = StreamableHttpClientWorker::new(auth_client, config);
+    let transport = WorkerTransport::spawn(worker);
+
+    let service: RunningService<RoleClient, ()> = ()
+        .serve(transport)
+        .await
+        .map_err(|e| anyhow::anyhow!("MCP HTTP handshake failed for '{server_id}' (OAuth): {e}"))?;
 
     Ok(service)
 }

@@ -46,8 +46,12 @@ impl Default for AutocompleteState {
 
 impl AutocompleteState {
     /// Update matches based on current input prefix (command mode only).
+    ///
+    /// Supports multi-word commands (e.g. `/mcp tools`) by matching the full
+    /// input prefix against command names.  The menu stays visible as long as
+    /// at least one command name starts with the typed text.
     pub fn update(&mut self, input: &str) {
-        if input.starts_with('/') && !input.contains(' ') {
+        if input.starts_with('/') {
             self.mode = AutocompleteMode::Command;
             self.matches = Command::matching_commands(input)
                 .into_iter()
@@ -361,9 +365,38 @@ mod tests {
     }
 
     #[test]
-    fn update_hides_on_space() {
+    fn update_hides_when_no_command_matches() {
         let mut state = AutocompleteState::default();
+        // No command starts with "/model something", so menu hides.
         state.update("/model something");
+        assert!(!state.visible);
+    }
+
+    #[test]
+    fn update_matches_multiword_commands() {
+        let mut state = AutocompleteState::default();
+        // "/mcp " should still show the multi-word subcommands.
+        state.update("/mcp ");
+        assert!(state.visible);
+        assert!(state.matches.iter().any(|(name, _)| *name == "/mcp tools"));
+        assert!(state.matches.iter().any(|(name, _)| *name == "/mcp resources"));
+        assert!(state.matches.iter().any(|(name, _)| *name == "/mcp prompts"));
+    }
+
+    #[test]
+    fn update_narrows_multiword_prefix() {
+        let mut state = AutocompleteState::default();
+        state.update("/mcp t");
+        assert!(state.visible);
+        assert_eq!(state.matches.len(), 1);
+        assert_eq!(state.matches[0].0, "/mcp tools");
+    }
+
+    #[test]
+    fn update_hides_after_full_multiword_plus_arg() {
+        let mut state = AutocompleteState::default();
+        // After completing "/mcp tools" and typing an arg, no command matches.
+        state.update("/mcp tools my-server");
         assert!(!state.visible);
     }
 
