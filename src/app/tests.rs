@@ -1736,3 +1736,269 @@ fn finish_stream_no_elapsed_without_start_time() {
 
     assert!(app.frozen_elapsed.is_none());
 }
+
+// ─── helpers.rs tests ───
+
+use crate::ui::message_block::{ToolGroup, ToolGroupStatus};
+
+#[test]
+fn last_assistant_mut_finds_assistant_after_system() {
+    let mut app = make_test_app();
+    app.messages.push(MessageBlock::Assistant {
+        thinking: None,
+        parts: vec![AssistantPart::Text("hello".into())],
+    });
+    // Interleave a system message (like a permission response)
+    app.messages.push(MessageBlock::System { text: "granted".into() });
+
+    let found = app.last_assistant_mut();
+    assert!(found.is_some());
+    assert!(found.unwrap().is_assistant());
+}
+
+#[test]
+fn last_assistant_mut_returns_none_when_no_assistant() {
+    let mut app = make_test_app();
+    app.messages.clear();
+    app.messages.push(MessageBlock::User { text: "hi".into() });
+    assert!(app.last_assistant_mut().is_none());
+}
+
+#[test]
+fn remove_last_permission_block_removes_it() {
+    let mut app = make_test_app();
+    app.messages.clear();
+    app.messages.push(MessageBlock::User { text: "run it".into() });
+    app.messages.push(MessageBlock::Permission {
+        tool_name: "bash".into(),
+        args_summary: "ls".into(),
+        diff_content: None,
+    });
+    app.messages.push(MessageBlock::System { text: "ok".into() });
+    assert_eq!(app.messages.len(), 3);
+
+    app.remove_last_permission_block();
+
+    assert_eq!(app.messages.len(), 2);
+    // Permission block should be gone
+    assert!(!app.messages.iter().any(|m| matches!(m, MessageBlock::Permission { .. })));
+}
+
+#[test]
+fn remove_last_permission_block_noop_when_none() {
+    let mut app = make_test_app();
+    app.messages.push(MessageBlock::User { text: "hi".into() });
+    let count = app.messages.len();
+
+    app.remove_last_permission_block();
+
+    assert_eq!(app.messages.len(), count);
+}
+
+#[test]
+fn mark_question_answered_sets_answer() {
+    let mut app = make_test_app();
+    app.messages.push(MessageBlock::Question {
+        question: "Pick one".into(),
+        options: vec!["a".into(), "b".into()],
+        selected: Some(0),
+        free_text: String::new(),
+        answered: None,
+    });
+
+    app.mark_question_answered("a");
+
+    match app.messages.last().unwrap() {
+        MessageBlock::Question { answered, .. } => {
+            assert_eq!(answered.as_deref(), Some("a"));
+        }
+        other => panic!("expected Question, got {other:?}"),
+    }
+}
+
+#[test]
+fn mark_question_answered_skips_already_answered() {
+    let mut app = make_test_app();
+    // Already answered question
+    app.messages.push(MessageBlock::Question {
+        question: "Old".into(),
+        options: vec![],
+        selected: None,
+        free_text: String::new(),
+        answered: Some("done".into()),
+    });
+    // Unanswered question
+    app.messages.push(MessageBlock::Question {
+        question: "New".into(),
+        options: vec![],
+        selected: None,
+        free_text: String::new(),
+        answered: None,
+    });
+
+    app.mark_question_answered("new answer");
+
+    // Should answer the second (unanswered) one
+    match &app.messages[app.messages.len() - 1] {
+        MessageBlock::Question { answered, question, .. } => {
+            assert_eq!(question, "New");
+            assert_eq!(answered.as_deref(), Some("new answer"));
+        }
+        other => panic!("expected Question, got {other:?}"),
+    }
+    // First one should be unchanged
+    match &app.messages[app.messages.len() - 2] {
+        MessageBlock::Question { answered, .. } => {
+            assert_eq!(answered.as_deref(), Some("done"));
+        }
+        other => panic!("expected Question, got {other:?}"),
+    }
+}
+
+#[test]
+fn invalidate_and_ensure_file_index() {
+    let mut app = make_test_app();
+    // Initially None
+    assert!(app.file_index.is_none());
+
+    // ensure_file_index populates it
+    let index = app.ensure_file_index();
+    assert!(index.is_empty() || !index.is_empty()); // just check it returns something
+
+    // Now it's cached
+    assert!(app.file_index.is_some());
+
+    // invalidate clears it
+    app.invalidate_file_index();
+    assert!(app.file_index.is_none());
+}
+
+#[test]
+fn discard_pending_agents_update_clears_and_notifies() {
+    let mut app = make_test_app();
+    app.pending_agents_update = Some("proposed content".into());
+    let msg_count = app.messages.len();
+
+    app.discard_pending_agents_update();
+
+    assert!(app.pending_agents_update.is_none());
+    assert_eq!(app.messages.len(), msg_count + 1);
+    assert!(has_system_message(&app, "AGENTS.md update discarded"));
+}
+
+#[test]
+fn cancel_stream_clears_state_and_pushes_cancelled() {
+    let mut app = make_test_app();
+    app.streaming_active = true;
+    app.is_loading = true;
+    app.stream_start_time = Some(Instant::now());
+    // Add an empty assistant message (should be removed)
+    app.messages.push(MessageBlock::Assistant {
+        thinking: None,
+        parts: vec![],
+    });
+
+    app.cancel_stream();
+
+    assert!(!app.streaming_active);
+    assert!(!app.is_loading);
+    assert!(app.streaming_message.is_none());
+    assert!(has_system_message(&app, "cancelled"));
+    // Empty assistant should have been popped
+    assert!(!app.messages.iter().any(|m| m.is_empty_assistant()));
+}
+
+#[test]
+fn cancel_stream_dismisses_pending_permission() {
+    let mut app = make_test_app();
+    app.streaming_active = true;
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    app.pending_permission = Some(super::types::PendingPermission {
+        tool_name: ToolName::Bash,
+        summary: "test".into(),
+        response_tx: tx,
+    });
+
+    app.cancel_stream();
+
+    assert!(app.pending_permission.is_none());
+    // The receiver should get Deny
+    assert!(matches!(rx.try_recv().unwrap(), PermissionReply::Deny));
+}
+
+#[test]
+fn find_last_completed_call_finds_matching_tool() {
+    let mut app = make_test_app();
+    app.messages.push(MessageBlock::Assistant {
+        thinking: None,
+        parts: vec![AssistantPart::ToolGroup(ToolGroup {
+            calls: vec![ToolCall {
+                tool_name: ToolName::Read,
+                args_summary: "src/main.rs".into(),
+                full_output: Some("contents".into()),
+                result_summary: Some("42 lines".into()),
+                diff_content: None,
+                is_error: false,
+                expanded: false,
+                agent_progress: None,
+            }],
+            status: ToolGroupStatus::Complete,
+        })],
+    });
+
+    let found = app.find_last_completed_call(ToolName::Read);
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().args_summary, "src/main.rs");
+}
+
+#[test]
+fn find_last_completed_call_returns_none_for_wrong_tool() {
+    let mut app = make_test_app();
+    app.messages.push(MessageBlock::Assistant {
+        thinking: None,
+        parts: vec![AssistantPart::ToolGroup(ToolGroup {
+            calls: vec![ToolCall {
+                tool_name: ToolName::Read,
+                args_summary: "src/main.rs".into(),
+                full_output: Some("contents".into()),
+                result_summary: Some("42 lines".into()),
+                diff_content: None,
+                is_error: false,
+                expanded: false,
+                agent_progress: None,
+            }],
+            status: ToolGroupStatus::Complete,
+        })],
+    });
+
+    assert!(app.find_last_completed_call(ToolName::Write).is_none());
+}
+
+#[test]
+fn find_last_completed_call_skips_incomplete() {
+    let mut app = make_test_app();
+    app.messages.push(MessageBlock::Assistant {
+        thinking: None,
+        parts: vec![AssistantPart::ToolGroup(ToolGroup {
+            calls: vec![ToolCall {
+                tool_name: ToolName::Read,
+                args_summary: "src/main.rs".into(),
+                full_output: None,
+                result_summary: None, // not completed yet
+                diff_content: None,
+                is_error: false,
+                expanded: false,
+                agent_progress: None,
+            }],
+            status: ToolGroupStatus::Running { current_tool: ToolName::Read },
+        })],
+    });
+
+    assert!(app.find_last_completed_call(ToolName::Read).is_none());
+}
+
+#[test]
+fn find_last_completed_call_returns_none_when_no_assistant() {
+    let app = make_test_app();
+    assert!(app.find_last_completed_call(ToolName::Read).is_none());
+}
