@@ -12,3 +12,6 @@
 # Claude
 .claude/settings.local.json
 .superpowers/
+
+# Beads / Dolt files (added by bd init)
+.beads-credential-key
