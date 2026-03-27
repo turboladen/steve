@@ -171,10 +171,18 @@ impl McpOverlayState {
         self.scroll_offsets[idx] = self.scroll_offsets[idx].saturating_sub(n);
     }
 
-    /// Scroll down by `n` lines within the current tab.
+    /// Scroll down by `n` lines within the current tab, clamped to content size.
     pub fn scroll_down(&mut self, n: usize) {
         let idx = self.active_tab.index();
-        self.scroll_offsets[idx] = self.scroll_offsets[idx].saturating_add(n);
+        let servers = &self.filtered_servers();
+        // Generous upper bound on rendered lines per tab (~4 lines per item).
+        let max = match self.active_tab {
+            McpTab::Servers => servers.len().saturating_mul(6),
+            McpTab::Tools => servers.iter().map(|s| s.tools.len()).sum::<usize>().saturating_mul(4),
+            McpTab::Resources => servers.iter().map(|s| s.resources.len()).sum::<usize>().saturating_mul(4),
+            McpTab::Prompts => servers.iter().map(|s| s.prompts.len()).sum::<usize>().saturating_mul(4),
+        };
+        self.scroll_offsets[idx] = self.scroll_offsets[idx].saturating_add(n).min(max);
     }
 
     /// Switch to the next tab.
@@ -462,12 +470,20 @@ pub fn render_mcp_overlay(
 
     // Calculate popup dimensions
     let content_height = lines.len() as u16;
+    let max_height = message_area.height.saturating_sub(2);
+    let min_height = 10u16;
+
+    // If we don't have enough vertical space for a minimally useful popup, skip rendering.
+    if max_height < min_height {
+        return;
+    }
+
     let popup_height = (content_height + 4) // +2 border +2 padding
-        .min(message_area.height.saturating_sub(2))
-        .max(10);
+        .max(min_height)
+        .min(max_height);
     let popup_width = 70u16.min(message_area.width.saturating_sub(4));
 
-    if popup_width < 20 || popup_height < 5 {
+    if popup_width < 20 {
         return;
     }
 
@@ -502,7 +518,7 @@ pub fn render_mcp_overlay(
                 .add_modifier(Modifier::BOLD),
         )]))
         .title_bottom(Line::from(vec![Span::styled(
-            " Tab switch  \u{2191}\u{2193} scroll  Esc close ",
+            " Tab/Shift-Tab/\u{2190}\u{2192} switch  \u{2191}\u{2193} scroll  Esc close ",
             Style::default().fg(theme.dim),
         )]));
 
@@ -513,8 +529,12 @@ pub fn render_mcp_overlay(
         return;
     }
 
-    // Render content with scroll
+    // Render content with scroll, clamped so users can't overscroll into blank space.
+    let visible_rows = inner.height as usize;
+    let total_lines = lines.len();
+    let max_scroll = total_lines.saturating_sub(visible_rows);
     let scroll_offset = state.scroll_offsets[state.active_tab.index()]
+        .min(max_scroll)
         .min(u16::MAX as usize);
     let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
@@ -640,6 +660,20 @@ mod tests {
         state.open(McpTab::Servers, sample_snapshot(), None);
         state.scroll_down(3);
         assert_eq!(state.scroll_offsets[McpTab::Servers.index()], 3);
+    }
+
+    #[test]
+    fn scroll_down_clamps_at_content_bound() {
+        let mut state = McpOverlayState::default();
+        state.open(McpTab::Servers, sample_snapshot(), None);
+        // Scrolling far beyond content should clamp, not grow unbounded.
+        state.scroll_down(10_000);
+        let offset = state.scroll_offsets[McpTab::Servers.index()];
+        assert!(offset < 10_000, "scroll should be clamped, got {offset}");
+        // Scrolling further should not increase beyond the clamp.
+        let before = offset;
+        state.scroll_down(100);
+        assert_eq!(state.scroll_offsets[McpTab::Servers.index()], before);
     }
 
     #[test]

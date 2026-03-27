@@ -4861,8 +4861,10 @@ pub(crate) mod tests {
         app.model_picker.open(&models, None);
         assert!(app.model_picker.visible);
 
-        // Opening MCP overlay should close model picker (mutual exclusivity)
+        // Simulate what open_mcp_overlay() does — close other overlays then open MCP.
         app.model_picker.close();
+        app.session_picker.close();
+        app.diagnostics_overlay.close();
         let snapshot = crate::ui::mcp_overlay::McpSnapshot::default();
         app.mcp_overlay.open(crate::ui::mcp_overlay::McpTab::Tools, snapshot, None);
         assert!(app.mcp_overlay.visible);
@@ -4876,7 +4878,9 @@ pub(crate) mod tests {
         app.mcp_overlay.open(crate::ui::mcp_overlay::McpTab::Servers, snapshot, None);
         assert!(app.mcp_overlay.visible);
 
-        // Opening diagnostics should close MCP overlay
+        // Simulate what handle_command(Diagnostics) does — close others then open.
+        app.model_picker.close();
+        app.session_picker.close();
         app.mcp_overlay.close();
         let checks = app.collect_diagnostics();
         app.diagnostics_overlay.open(checks);

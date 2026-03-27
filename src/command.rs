@@ -94,6 +94,10 @@ impl Command {
             "/mcp" => match arg {
                 None => Ok(Command::Mcp),
                 Some(rest) => {
+                    let rest = rest.trim();
+                    if rest.is_empty() {
+                        return Ok(Command::Mcp);
+                    }
                     let sub_parts: Vec<&str> = rest.splitn(2, ' ').collect();
                     let sub_arg = sub_parts.get(1).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
                     match sub_parts[0] {
@@ -394,6 +398,12 @@ mod tests {
             Command::parse("/mcp prompts github").unwrap(),
             Command::McpPrompts(Some("github".to_string()))
         );
+    }
+
+    #[test]
+    fn parse_mcp_trailing_spaces() {
+        // "/mcp   " should parse as Mcp, not as an unknown subcommand.
+        assert_eq!(Command::parse("/mcp   ").unwrap(), Command::Mcp);
     }
 
     #[test]
