@@ -97,13 +97,15 @@ mod tests {
     use super::*;
 
     /// Build a minimal `StoredCredentials` for testing.
+    /// Constructed via serde because the struct is `#[non_exhaustive]` in rmcp.
     fn test_credentials() -> StoredCredentials {
-        StoredCredentials {
-            client_id: "test-client-id".to_string(),
-            token_response: None,
-            granted_scopes: vec!["read".to_string(), "write".to_string()],
-            token_received_at: Some(1700000000),
-        }
+        serde_json::from_value(serde_json::json!({
+            "client_id": "test-client-id",
+            "token_response": null,
+            "granted_scopes": ["read", "write"],
+            "token_received_at": 1700000000_u64,
+        }))
+        .expect("test StoredCredentials should deserialize")
     }
 
     #[tokio::test]

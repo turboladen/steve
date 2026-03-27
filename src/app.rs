@@ -1850,13 +1850,13 @@ impl App {
             (KeyCode::Tab, KeyModifiers::NONE) if self.autocomplete_state.visible => {
                 match self.autocomplete_state.mode {
                     AutocompleteMode::Command => {
+                        // Tab completes the command text without executing,
+                        // allowing the user to append arguments (e.g. `/mcp tools <server>`).
                         if let Some(cmd_name) = self.autocomplete_state.selected_command() {
                             let cmd_name = cmd_name.to_string();
-                            self.autocomplete_state.hide();
-                            self.input.take_text(); // clear input
-                            if !self.is_loading {
-                                self.handle_input(cmd_name).await?;
-                            }
+                            self.input.set_text(&cmd_name);
+                            // Re-filter so the menu stays visible with narrowed matches.
+                            self.autocomplete_state.update(&cmd_name);
                         }
                     }
                     AutocompleteMode::FileRef => {
