@@ -107,7 +107,7 @@ impl App {
     }
 
 
-    async fn handle_event(&mut self, event: AppEvent) -> Result<()> {
+    pub(super) async fn handle_event(&mut self, event: AppEvent) -> Result<()> {
         match event {
             AppEvent::Input(Event::Key(key)) => self.handle_key(key).await?,
             AppEvent::Input(Event::Mouse(mouse)) => {
@@ -276,13 +276,9 @@ impl App {
                     );
                 }
 
-                // Invalidate file index on successful write tool completion
+                // On successful write tool completion: invalidate file index + record changeset
                 if tool_name.is_write_tool() && !output.is_error {
                     self.invalidate_file_index();
-                }
-
-                // Record changeset on successful write tool completion
-                if tool_name.is_write_tool() && !output.is_error {
                     if let Some(call) = self.find_last_completed_call(tool_name) {
                         if let Some(diff) = &call.diff_content {
                             let (additions, removals) = count_diff_lines(diff);
@@ -322,14 +318,7 @@ impl App {
             }
 
             AppEvent::LlmFinish { usage } => {
-                if let Some(start) = self.stream_start_time {
-                    self.frozen_elapsed = Some(start.elapsed());
-                }
-                self.is_loading = false;
-                self.streaming_active = false;
-                self.stream_cancel = None;
-                self.interjection_tx = None;
-                self.status_line_state.set_activity(Activity::Idle);
+                self.finish_stream();
 
                 // Remove trailing empty assistant message if present
                 if let Some(last) = self.messages.last()
@@ -403,16 +392,9 @@ impl App {
                 self.message_area_state.scroll_to_bottom();
             }
             AppEvent::LlmError { error } => {
-                if let Some(start) = self.stream_start_time {
-                    self.frozen_elapsed = Some(start.elapsed());
-                }
-                self.is_loading = false;
-                self.streaming_active = false;
-                self.stream_cancel = None;
-                self.interjection_tx = None;
+                self.finish_stream();
                 self.streaming_message = None;
                 self.messages.push(MessageBlock::Error { text: error });
-                self.status_line_state.set_activity(Activity::Idle);
                 self.message_area_state.scroll_to_bottom();
             }
             AppEvent::StreamNotice { text } => {

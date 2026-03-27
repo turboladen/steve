@@ -46,6 +46,19 @@ impl App {
         Some((resolved, client))
     }
 
+    /// Common cleanup when a stream ends (finish or error).
+    /// Freezes elapsed time, clears streaming state, and sets activity to idle.
+    pub(super) fn finish_stream(&mut self) {
+        if let Some(start) = self.stream_start_time {
+            self.frozen_elapsed = Some(start.elapsed());
+        }
+        self.is_loading = false;
+        self.streaming_active = false;
+        self.stream_cancel = None;
+        self.interjection_tx = None;
+        self.status_line_state.set_activity(Activity::Idle);
+    }
+
     /// Find the last Assistant block in messages.
     /// Permission/System blocks can be interleaved during streaming, so
     /// `messages.last_mut()` may not be the Assistant block we need.
