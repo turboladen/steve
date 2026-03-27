@@ -64,6 +64,18 @@ use `"provider_id/model_id"` format throughout. MCP servers merge by server ID (
 `lib.rs` (public modules) + `main.rs` (binary). Integration tests in `tests/` access modules via
 `use steve::*`. No workspace — single crate.
 
+### App Module (`app/`)
+
+The `App` struct (coordination point) lives in `app/mod.rs`. Submodules split by concern:
+`event_loop.rs` (run/handle_event), `key_handling.rs`, `input.rs`, `commands.rs`,
+`session.rs`, `prompt.rs`, `context.rs` (diagnostics/sidebar/tokens), `helpers.rs`,
+`tool_display.rs`, `constants.rs`, `types.rs`, `tests.rs`. Each submodule defines its own
+`impl App {}` block — Rust allows multiple impl blocks across child modules. Submodules use
+`use super::*;` to inherit mod.rs imports. Use `pub(super)` for cross-submodule methods,
+`pub` only for external API (`extract_args_summary`, `extract_result_summary`,
+`should_show_sidebar`). Use `close_all_overlays()` and `resolve_client()` helpers to avoid
+duplication. Use `r#""#` raw strings for multi-line system prompts in `constants.rs`.
+
 ### Critical Invariants
 
 - **Tool call detection**: Check for valid data (non-empty `id` + `function_name`), NOT
@@ -75,7 +87,8 @@ use `"provider_id/model_id"` format throughout. MCP servers merge by server ID (
   interleave
 - **Token metrics**: `last_prompt_tokens` (per-call, context pressure) vs `total_tokens`
   (cumulative, cost display) — do not confuse. `LlmFinish` must NOT overwrite `last_prompt_tokens`
-- **`/new` resets ALL session state** — when adding session-scoped state, add its reset there
+- **`/new` resets ALL session state** — when adding session-scoped state, add its reset in
+  `commands.rs` Command::New. When adding overlays, update `close_all_overlays()` in `helpers.rs`
 - **Scroll**: Map `ScrollDown`→`scroll_down()` directly — do NOT invert (macOS natural scrolling)
 
 ### Exhaustive `ToolName` Match Locations
