@@ -1,6 +1,51 @@
 use super::*;
 
 impl App {
+    /// Close all overlay panels (model picker, session picker, diagnostics, MCP).
+    /// Called before opening a new overlay to enforce mutual exclusivity.
+    pub(super) fn close_all_overlays(&mut self) {
+        self.model_picker.close();
+        self.session_picker.close();
+        self.diagnostics_overlay.close();
+        self.mcp_overlay.close();
+    }
+
+    /// Resolve a model ref to a client, pushing error messages on failure.
+    /// Returns `None` (with errors already displayed) if resolution fails.
+    pub(super) fn resolve_client(
+        &mut self,
+        model_ref: &str,
+    ) -> Option<(crate::provider::ResolvedModel, crate::provider::client::LlmClient)> {
+        let registry = match &self.provider_registry {
+            Some(r) => r,
+            None => {
+                self.messages.push(MessageBlock::Error {
+                    text: "No provider configured.".to_string(),
+                });
+                return None;
+            }
+        };
+        let resolved = match registry.resolve_model(model_ref) {
+            Ok(r) => r,
+            Err(e) => {
+                self.messages.push(MessageBlock::Error {
+                    text: format!("Failed to resolve model: {e}"),
+                });
+                return None;
+            }
+        };
+        let client = match registry.client(&resolved.provider_id) {
+            Ok(c) => c.clone(),
+            Err(e) => {
+                self.messages.push(MessageBlock::Error {
+                    text: format!("{e}"),
+                });
+                return None;
+            }
+        };
+        Some((resolved, client))
+    }
+
     /// Find the last Assistant block in messages.
     /// Permission/System blocks can be interleaved during streaming, so
     /// `messages.last_mut()` may not be the Assistant block we need.

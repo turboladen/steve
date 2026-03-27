@@ -127,10 +127,7 @@ impl App {
         self.current_session = Some(session.clone());
         self.sidebar_state.changes.clear();
         self.sidebar_state.session_closed_task_ids.clear();
-        self.model_picker.close();
-        self.session_picker.close();
-        self.diagnostics_overlay.close();
-        self.mcp_overlay.close();
+        self.close_all_overlays();
         self.compaction_count = 0;
         self.refresh_git_info();
         self.sync_sidebar_tokens();

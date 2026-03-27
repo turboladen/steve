@@ -100,9 +100,7 @@ impl App {
                 }
             }
             Command::Models => {
-                self.diagnostics_overlay.close();
-                self.mcp_overlay.close();
-                self.session_picker.close();
+                self.close_all_overlays();
                 if let Some(registry) = &self.provider_registry {
                     let models = registry.list_models();
                     if models.is_empty() {
@@ -124,10 +122,7 @@ impl App {
                 }
             }
             Command::Diagnostics => {
-                // Close other overlays (mutual exclusivity)
-                self.model_picker.close();
-                self.session_picker.close();
-                self.mcp_overlay.close();
+                self.close_all_overlays();
                 // Run diagnostics and open the overlay
                 let checks = self.collect_diagnostics();
                 self.diagnostics_overlay.open(checks);
@@ -192,31 +187,8 @@ impl App {
                     }
                 };
 
-                let Some(registry) = &self.provider_registry else {
-                    self.messages.push(MessageBlock::Error {
-                        text: "No provider configured.".to_string(),
-                    });
+                let Some((resolved, client)) = self.resolve_client(&model_ref) else {
                     return Ok(());
-                };
-
-                let resolved = match registry.resolve_model(&model_ref) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        self.messages.push(MessageBlock::Error {
-                            text: format!("Failed to resolve model: {e}"),
-                        });
-                        return Ok(());
-                    }
-                };
-
-                let client = match registry.client(&resolved.provider_id) {
-                    Ok(c) => c.clone(),
-                    Err(e) => {
-                        self.messages.push(MessageBlock::Error {
-                            text: format!("{e}"),
-                        });
-                        return Ok(());
-                    }
                 };
 
                 // Gather project context
@@ -263,10 +235,7 @@ impl App {
                     });
                     return Ok(());
                 }
-                // Close other overlays (mutual exclusivity)
-                self.model_picker.close();
-                self.diagnostics_overlay.close();
-                self.mcp_overlay.close();
+                self.close_all_overlays();
                 let mgr = SessionManager::new(&self.storage, &self.project.id);
                 match mgr.list_sessions() {
                     Ok(sessions) if sessions.is_empty() => {
@@ -313,31 +282,8 @@ impl App {
                     }
                 };
 
-                let Some(registry) = &self.provider_registry else {
-                    self.messages.push(MessageBlock::Error {
-                        text: "No provider configured.".to_string(),
-                    });
+                let Some((resolved, client)) = self.resolve_client(&model_ref) else {
                     return Ok(());
-                };
-
-                let resolved = match registry.resolve_model(&model_ref) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        self.messages.push(MessageBlock::Error {
-                            text: format!("Failed to resolve compact model: {e}"),
-                        });
-                        return Ok(());
-                    }
-                };
-
-                let client = match registry.client(&resolved.provider_id) {
-                    Ok(c) => c.clone(),
-                    Err(e) => {
-                        self.messages.push(MessageBlock::Error {
-                            text: format!("{e}"),
-                        });
-                        return Ok(());
-                    }
                 };
 
                 // Show feedback
@@ -629,10 +575,7 @@ impl App {
         tab: crate::ui::mcp_overlay::McpTab,
         filter: Option<String>,
     ) {
-        // Close other overlays
-        self.model_picker.close();
-        self.session_picker.close();
-        self.diagnostics_overlay.close();
+        self.close_all_overlays();
 
         let mgr = self.mcp_manager.lock().await;
         let snapshot = mgr.overlay_snapshot(&self.config.mcp_servers);
