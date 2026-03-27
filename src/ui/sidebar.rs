@@ -367,6 +367,60 @@ pub fn render_sidebar(
                 Style::default().fg(status_color),
             )));
         }
+        // Inline file-change stats (formerly the standalone "Changes" section)
+        if !state.changes.is_empty() {
+            lines.push(Line::from(""));
+            let mut sorted_changes = state.changes.clone();
+            sorted_changes.sort_by(|a, b| a.path.cmp(&b.path));
+            for change in &sorted_changes {
+                let mut stats_width = 0;
+                if change.additions > 0 {
+                    stats_width += 2 + format!("{}", change.additions).chars().count();
+                }
+                if change.removals > 0 {
+                    stats_width += 2 + format!("{}", change.removals).chars().count();
+                }
+                let path_width = sidebar_width.saturating_sub(1 + stats_width);
+                let display_path = shorten_path(&change.path, path_width);
+                let mut spans = vec![Span::styled(
+                    format!(" {display_path}"),
+                    Style::default().fg(theme.fg),
+                )];
+                if change.additions > 0 {
+                    spans.push(Span::styled(
+                        format!(" +{}", change.additions),
+                        Style::default().fg(theme.success),
+                    ));
+                }
+                if change.removals > 0 {
+                    spans.push(Span::styled(
+                        format!(" -{}", change.removals),
+                        Style::default().fg(theme.error),
+                    ));
+                }
+                lines.push(Line::from(spans));
+            }
+            let (total_add, total_rem) = state.total_changes();
+            let file_word = if state.changes.len() == 1 { "file" } else { "files" };
+            let mut summary_spans: Vec<Span> = vec![Span::styled(
+                format!(" {} {file_word}", state.changes.len()),
+                Style::default().fg(theme.dim),
+            )];
+            if total_add > 0 {
+                summary_spans.push(Span::styled(
+                    format!(" +{total_add}"),
+                    Style::default().fg(theme.success),
+                ));
+            }
+            if total_rem > 0 {
+                summary_spans.push(Span::styled(
+                    format!(" -{total_rem}"),
+                    Style::default().fg(theme.error),
+                ));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(summary_spans));
+        }
         lines.push(primitives::section_separator(sidebar_width, theme));
     }
 
@@ -454,68 +508,6 @@ pub fn render_sidebar(
             Span::styled(format!(" {icon} "), Style::default().fg(icon_color)),
             Span::styled(label, Style::default().fg(theme.dim)),
         ]));
-        lines.push(primitives::section_separator(sidebar_width, theme));
-    }
-
-    // -- Changes section (if any files were modified) --
-    if !state.changes.is_empty() {
-        lines.push(primitives::section_header("Changes", header_color));
-        // Sort changes alphabetically by path
-        let mut sorted_changes = state.changes.clone();
-        sorted_changes.sort_by(|a, b| a.path.cmp(&b.path));
-        for change in &sorted_changes {
-            // Calculate width consumed by stats suffix: " +N" and/or " -N"
-            let mut stats_width = 0;
-            if change.additions > 0 {
-                // " +N" = 2 chars + digit count
-                stats_width += 2 + format!("{}", change.additions).chars().count();
-            }
-            if change.removals > 0 {
-                // " -N" = 2 chars + digit count
-                stats_width += 2 + format!("{}", change.removals).chars().count();
-            }
-            // Available width for path: sidebar_width - 1 (leading space) - stats_width
-            let path_width = sidebar_width.saturating_sub(1 + stats_width);
-            let display_path = shorten_path(&change.path, path_width);
-            let mut spans = vec![Span::styled(
-                format!(" {display_path}"),
-                Style::default().fg(theme.fg),
-            )];
-            if change.additions > 0 {
-                spans.push(Span::styled(
-                    format!(" +{}", change.additions),
-                    Style::default().fg(theme.success),
-                ));
-            }
-            if change.removals > 0 {
-                spans.push(Span::styled(
-                    format!(" -{}", change.removals),
-                    Style::default().fg(theme.error),
-                ));
-            }
-            lines.push(Line::from(spans));
-        }
-        // Summary line
-        let (total_add, total_rem) = state.total_changes();
-        let file_word = if state.changes.len() == 1 { "file" } else { "files" };
-        let mut summary_spans: Vec<Span> = vec![Span::styled(
-            format!(" {} {file_word}", state.changes.len()),
-            Style::default().fg(theme.dim),
-        )];
-        if total_add > 0 {
-            summary_spans.push(Span::styled(
-                format!(" +{total_add}"),
-                Style::default().fg(theme.success),
-            ));
-        }
-        if total_rem > 0 {
-            summary_spans.push(Span::styled(
-                format!(" -{total_rem}"),
-                Style::default().fg(theme.error),
-            ));
-        }
-        lines.push(Line::from(""));
-        lines.push(Line::from(summary_spans));
         lines.push(primitives::section_separator(sidebar_width, theme));
     }
 
@@ -861,11 +853,16 @@ mod tests {
     }
 
     #[test]
-    fn buffer_sidebar_changes_section() {
-        let mut state = SidebarState::default();
+    fn buffer_sidebar_changes_inside_git_section() {
+        let mut state = SidebarState {
+            git_branch: Some("main".to_string()),
+            git_dirty: Some(true),
+            ..Default::default()
+        };
         state.record_file_change("src/main.rs".into(), 10, 3);
         let text = render_sidebar_to_string(40, 20, &state);
-        assert!(text.contains("Changes"), "should show 'Changes' header");
+        assert!(!text.contains("Changes"), "no standalone 'Changes' header — merged into Git");
+        assert!(text.contains("Git"), "should show 'Git' header");
         assert!(text.contains("src/main.rs"), "should show file path");
         assert!(text.contains("+10"), "should show additions in green");
         assert!(text.contains("-3"), "should show removals in red");
@@ -999,16 +996,12 @@ mod tests {
     }
 
     #[test]
-    fn buffer_sidebar_session_renders_above_changes() {
-        let mut state = SidebarState {
-            model_name: "gpt-4o".to_string(),
-            ..Default::default()
-        };
+    fn buffer_sidebar_changes_require_git_branch() {
+        // Changes only render inside the Git section, so no git_branch = no changes shown
+        let mut state = SidebarState::default();
         state.record_file_change("file.rs".into(), 1, 0);
         let text = render_sidebar_to_string(40, 20, &state);
-        let session_pos = text.find("Session").expect("Session header not found");
-        let changes_pos = text.find("Changes").expect("Changes header not found");
-        assert!(session_pos < changes_pos, "Session should render above Changes");
+        assert!(!text.contains("file.rs"), "no git branch = changes not shown");
     }
 
     #[test]
@@ -1101,7 +1094,7 @@ mod tests {
     }
 
     #[test]
-    fn buffer_sidebar_git_renders_above_changes() {
+    fn buffer_sidebar_git_section_includes_changes() {
         let mut state = SidebarState {
             git_branch: Some("main".to_string()),
             git_dirty: Some(false),
@@ -1109,9 +1102,9 @@ mod tests {
         };
         state.record_file_change("file.rs".into(), 1, 0);
         let text = render_sidebar_to_string(40, 25, &state);
-        let git_pos = text.find("Git").expect("Git header not found");
-        let changes_pos = text.find("Changes").expect("Changes header not found");
-        assert!(git_pos < changes_pos, "Git should render above Changes");
+        assert!(text.contains("Git"), "should show Git header");
+        assert!(text.contains("file.rs"), "changes should appear in Git section");
+        assert!(!text.contains("Changes"), "no standalone Changes header");
     }
 
     #[test]
@@ -1171,8 +1164,10 @@ mod tests {
     }
 
     #[test]
-    fn buffer_sidebar_lsp_renders_above_changes() {
+    fn buffer_sidebar_changes_inside_git_not_after_lsp() {
         let mut state = SidebarState {
+            git_branch: Some("main".to_string()),
+            git_dirty: Some(true),
             lsp_servers: vec![
                 SidebarLsp { binary: "rust-analyzer".to_string(), running: true },
             ],
@@ -1180,9 +1175,10 @@ mod tests {
         };
         state.record_file_change("file.rs".into(), 1, 0);
         let text = render_sidebar_to_string(40, 25, &state);
+        // Changes appear inside Git (before LSP), not after LSP
+        let file_pos = text.find("file.rs").expect("file.rs not found");
         let lsp_pos = text.find("LSP").expect("LSP header not found");
-        let changes_pos = text.find("Changes").expect("Changes header not found");
-        assert!(lsp_pos < changes_pos, "LSP should render above Changes");
+        assert!(file_pos < lsp_pos, "changes should appear inside Git section, before LSP");
     }
 
     #[test]
@@ -1548,7 +1544,10 @@ mod tests {
 
     #[test]
     fn buffer_sidebar_changes_sorted_alphabetically() {
-        let mut state = SidebarState::default();
+        let mut state = SidebarState {
+            git_branch: Some("main".to_string()),
+            ..Default::default()
+        };
         // Insert in non-alphabetical order
         state.record_file_change("src/zebra.rs".into(), 1, 0);
         state.record_file_change("src/alpha.rs".into(), 2, 0);
@@ -1567,7 +1566,10 @@ mod tests {
 
     #[test]
     fn buffer_sidebar_changes_shortens_long_paths() {
-        let mut state = SidebarState::default();
+        let mut state = SidebarState {
+            git_branch: Some("main".to_string()),
+            ..Default::default()
+        };
         state.record_file_change(
             "src/components/dialogs/widgets/very_long_filename.rs".into(),
             5,
