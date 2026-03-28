@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::{
-    tool::ToolName,
+    tool::{EditOperation, LspOperation, SymbolsOperation, ToolName},
     ui::message_block::{DiffContent, DiffLine},
 };
 
@@ -33,20 +33,22 @@ pub fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
             .to_string(),
         ToolName::Symbols => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let op = args
+            let op: SymbolsOperation = args
                 .get("operation")
                 .and_then(|v| v.as_str())
-                .unwrap_or("list_symbols");
+                .unwrap_or("list_symbols")
+                .parse()
+                .unwrap_or(SymbolsOperation::ListSymbols);
             match op {
-                "find_scope" => {
+                SymbolsOperation::FindScope => {
                     let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
                     format!("{path} scope@{line}")
                 }
-                "find_definition" => {
+                SymbolsOperation::FindDefinition => {
                     let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
                     format!("{path} def:{name}")
                 }
-                _ => path.to_string(),
+                SymbolsOperation::ListSymbols => path.to_string(),
             }
         }
         ToolName::Grep | ToolName::Glob => args
@@ -107,15 +109,17 @@ pub fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
             .to_string(),
         ToolName::Lsp => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let op = args
+            let op: LspOperation = args
                 .get("operation")
                 .and_then(|v| v.as_str())
-                .unwrap_or("diagnostics");
+                .unwrap_or("diagnostics")
+                .parse()
+                .unwrap_or(LspOperation::Diagnostics);
             match op {
-                "diagnostics" => format!("{path} diagnostics"),
-                _ => {
+                LspOperation::Diagnostics => format!("{path} diagnostics"),
+                other => {
                     let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
-                    format!("{path} {op}@{line}")
+                    format!("{path} {other}@{line}")
                 }
             }
         }
@@ -153,12 +157,16 @@ pub fn extract_result_summary(tool_name: ToolName, output: &crate::tool::ToolOut
 pub(super) fn extract_diff_content(tool_name: ToolName, args: &Value) -> Option<DiffContent> {
     match tool_name {
         ToolName::Edit => {
-            let operation = args
+            let raw_op = args
                 .get("operation")
                 .and_then(|v| v.as_str())
                 .unwrap_or("find_replace");
+            let Some(operation) = raw_op.parse::<EditOperation>().ok() else {
+                tracing::warn!("unhandled edit operation for diff extraction: {raw_op}");
+                return None;
+            };
             match operation {
-                "find_replace" => {
+                EditOperation::FindReplace => {
                     let old = args
                         .get("old_string")
                         .and_then(|v| v.as_str())
@@ -179,7 +187,7 @@ pub(super) fn extract_diff_content(tool_name: ToolName, args: &Value) -> Option<
                     }
                     Some(DiffContent::EditDiff { lines })
                 }
-                "insert_lines" => {
+                EditOperation::InsertLines => {
                     let line_num = args.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
                     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
                     if content.is_empty() {
@@ -191,7 +199,7 @@ pub(super) fn extract_diff_content(tool_name: ToolName, args: &Value) -> Option<
                     }
                     Some(DiffContent::EditDiff { lines })
                 }
-                "delete_lines" => {
+                EditOperation::DeleteLines => {
                     let start = args.get("start_line").and_then(|v| v.as_u64()).unwrap_or(0);
                     let end = args.get("end_line").and_then(|v| v.as_u64()).unwrap_or(0);
                     let count = end.saturating_sub(start) + 1;
@@ -201,7 +209,7 @@ pub(super) fn extract_diff_content(tool_name: ToolName, args: &Value) -> Option<
                     ];
                     Some(DiffContent::EditDiff { lines })
                 }
-                "replace_range" => {
+                EditOperation::ReplaceRange => {
                     let start = args.get("start_line").and_then(|v| v.as_u64()).unwrap_or(0);
                     let end = args.get("end_line").and_then(|v| v.as_u64()).unwrap_or(0);
                     let old_count = end.saturating_sub(start) + 1;
@@ -215,7 +223,7 @@ pub(super) fn extract_diff_content(tool_name: ToolName, args: &Value) -> Option<
                     }
                     Some(DiffContent::EditDiff { lines })
                 }
-                "multi_find_replace" => {
+                EditOperation::MultiFindReplace => {
                     let edits = args.get("edits").and_then(|v| v.as_array());
                     let mut lines = Vec::new();
                     if let Some(edits) = edits {
@@ -241,10 +249,6 @@ pub(super) fn extract_diff_content(tool_name: ToolName, args: &Value) -> Option<
                     } else {
                         Some(DiffContent::EditDiff { lines })
                     }
-                }
-                other => {
-                    tracing::warn!("unhandled edit operation for diff extraction: {other}");
-                    None
                 }
             }
         }

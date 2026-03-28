@@ -65,10 +65,17 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing 'path' argument"))?;
 
-    let operation = args
+    let operation: super::LspOperation = args
         .get("operation")
         .and_then(|v| v.as_str())
-        .unwrap_or("diagnostics");
+        .unwrap_or("diagnostics")
+        .parse()
+        .map_err(|_| {
+            let raw = args.get("operation").and_then(|v| v.as_str()).unwrap_or("?");
+            anyhow::anyhow!(
+                "unknown lsp operation: '{raw}'. Expected one of: diagnostics, definition, references, rename"
+            )
+        })?;
 
     // Resolve path relative to project root
     let path = if Path::new(path_str).is_absolute() {
@@ -91,16 +98,16 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
         .ok_or_else(|| anyhow::anyhow!("LSP not available"))?;
 
     match operation {
-        "diagnostics" => execute_diagnostics(lsp_manager, &path, path_str),
-        "definition" => {
+        super::LspOperation::Diagnostics => execute_diagnostics(lsp_manager, &path, path_str),
+        super::LspOperation::Definition => {
             let (line, character) = extract_position(&args)?;
             execute_definition(lsp_manager, &path, path_str, line, character)
         }
-        "references" => {
+        super::LspOperation::References => {
             let (line, character) = extract_position(&args)?;
             execute_references(lsp_manager, &path, path_str, line, character)
         }
-        "rename" => {
+        super::LspOperation::Rename => {
             let (line, character) = extract_position(&args)?;
             let new_name = args
                 .get("new_name")
@@ -108,13 +115,6 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
                 .ok_or_else(|| anyhow::anyhow!("rename requires 'new_name' argument"))?;
             execute_rename(lsp_manager, &path, path_str, line, character, new_name)
         }
-        other => Ok(ToolOutput {
-            title: format!("lsp {path_str}"),
-            output: format!(
-                "Unknown operation: '{other}'. Use 'diagnostics', 'definition', 'references', or 'rename'."
-            ),
-            is_error: true,
-        }),
     }
 }
 
@@ -480,9 +480,11 @@ mod tests {
             "path": file.to_str().unwrap(),
             "operation": "unknown_op"
         });
-        let result = execute(args, test_ctx_with_lsp(dir.path())).unwrap();
-        assert!(result.is_error);
-        assert!(result.output.contains("Unknown operation"));
+        let err = execute(args, test_ctx_with_lsp(dir.path())).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown lsp operation"),
+            "expected parse error, got: {err}"
+        );
     }
 
     #[test]

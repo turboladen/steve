@@ -286,6 +286,39 @@ impl AsRef<str> for ToolName {
     }
 }
 
+/// Operations supported by the `edit` tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum EditOperation {
+    FindReplace,
+    InsertLines,
+    DeleteLines,
+    ReplaceRange,
+    MultiFindReplace,
+}
+
+/// Operations supported by the `symbols` tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum SymbolsOperation {
+    ListSymbols,
+    FindScope,
+    FindDefinition,
+}
+
+/// Operations supported by the `lsp` tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum LspOperation {
+    Diagnostics,
+    Definition,
+    References,
+    Rename,
+}
+
 /// Output from a tool execution.
 #[derive(Debug, Clone)]
 pub struct ToolOutput {

@@ -550,10 +550,17 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing 'path' argument"))?;
 
-    let operation = args
+    let operation: super::SymbolsOperation = args
         .get("operation")
         .and_then(|v| v.as_str())
-        .unwrap_or("list_symbols");
+        .unwrap_or("list_symbols")
+        .parse()
+        .map_err(|_| {
+            let raw = args.get("operation").and_then(|v| v.as_str()).unwrap_or("?");
+            anyhow::anyhow!(
+                "unknown symbols operation: '{raw}'. Expected one of: list_symbols, find_scope, find_definition"
+            )
+        })?;
 
     // Resolve path relative to project root
     let path = if Path::new(path_str).is_absolute() {
@@ -623,7 +630,7 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
     let root = tree.root_node();
 
     match operation {
-        "list_symbols" => {
+        super::SymbolsOperation::ListSymbols => {
             let symbols = walk_symbols(root, &source, lang_info.name, 0);
             let total_lines = std::str::from_utf8(&source)
                 .map(|s| s.lines().count())
@@ -658,7 +665,7 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
             })
         }
 
-        "find_scope" => {
+        super::SymbolsOperation::FindScope => {
             let line = args
                 .get("line")
                 .and_then(|v| v.as_u64())
@@ -702,7 +709,7 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
             }
         }
 
-        "find_definition" => {
+        super::SymbolsOperation::FindDefinition => {
             let name = args
                 .get("name")
                 .and_then(|v| v.as_str())
@@ -730,14 +737,6 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
                 }),
             }
         }
-
-        other => Ok(ToolOutput {
-            title: format!("symbols {path_str}"),
-            output: format!(
-                "Unknown operation: '{other}'. Use 'list_symbols', 'find_scope', or 'find_definition'."
-            ),
-            is_error: true,
-        }),
     }
 }
 
@@ -1220,10 +1219,12 @@ fn bar() -> bool {
             "path": file.to_str().unwrap(),
             "operation": "unknown_op"
         });
-        let result = execute(args, test_ctx(dir.path())).unwrap();
+        let err = execute(args, test_ctx(dir.path())).unwrap_err();
 
-        assert!(result.is_error);
-        assert!(result.output.contains("Unknown operation"));
+        assert!(
+            err.to_string().contains("unknown symbols operation"),
+            "expected parse error, got: {err}"
+        );
     }
 
     #[test]

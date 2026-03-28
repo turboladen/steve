@@ -111,20 +111,26 @@ pub fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
         .and_then(|v| v.as_str())
         .context("missing 'file_path' parameter")?;
 
-    let operation = args
+    let operation: super::EditOperation = args
         .get("operation")
         .and_then(|v| v.as_str())
-        .unwrap_or("find_replace");
+        .unwrap_or("find_replace")
+        .parse()
+        .map_err(|_| {
+            let raw = args.get("operation").and_then(|v| v.as_str()).unwrap_or("?");
+            anyhow::anyhow!(
+                "unknown edit operation: '{raw}'. Expected one of: find_replace, insert_lines, delete_lines, replace_range, multi_find_replace"
+            )
+        })?;
 
     match operation {
-        "find_replace" => execute_find_replace(&args, file_path_str, &ctx),
-        "insert_lines" => execute_insert_lines(&args, file_path_str, &ctx),
-        "delete_lines" => execute_delete_lines(&args, file_path_str, &ctx),
-        "replace_range" => execute_replace_range(&args, file_path_str, &ctx),
-        "multi_find_replace" => execute_multi_find_replace(&args, file_path_str, &ctx),
-        other => bail!(
-            "unknown edit operation: '{other}'. Expected one of: find_replace, insert_lines, delete_lines, replace_range, multi_find_replace"
-        ),
+        super::EditOperation::FindReplace => execute_find_replace(&args, file_path_str, &ctx),
+        super::EditOperation::InsertLines => execute_insert_lines(&args, file_path_str, &ctx),
+        super::EditOperation::DeleteLines => execute_delete_lines(&args, file_path_str, &ctx),
+        super::EditOperation::ReplaceRange => execute_replace_range(&args, file_path_str, &ctx),
+        super::EditOperation::MultiFindReplace => {
+            execute_multi_find_replace(&args, file_path_str, &ctx)
+        }
     }
 }
 
