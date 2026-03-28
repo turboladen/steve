@@ -145,7 +145,7 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
         let paths: Vec<String> = args
             .get("paths")
             .and_then(|v| v.as_array())
-            .unwrap()
+            .ok_or_else(|| anyhow::anyhow!("missing 'paths' argument"))?
             .iter()
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect();
@@ -187,7 +187,10 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
         })
     } else {
         // Single file mode
-        let path_str = args.get("path").and_then(|v| v.as_str()).unwrap();
+        let path_str = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("missing 'path' argument"))?;
         let resolved = resolve_path(path_str, &ctx.project_root);
 
         match read_single_file(path_str, &resolved, &mode, max_lines) {

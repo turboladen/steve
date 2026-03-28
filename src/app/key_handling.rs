@@ -484,7 +484,9 @@ impl App {
     fn handle_agents_update_key(&mut self, key: KeyEvent) -> Result<()> {
         match (key.code, key.modifiers) {
             (KeyCode::Char('y'), _) | (KeyCode::Char('Y'), _) => {
-                let content = self.pending_agents_update.take().unwrap();
+                let Some(content) = self.pending_agents_update.take() else {
+                    return Ok(());
+                };
                 let agents_path = self.project.root.join("AGENTS.md");
                 match std::fs::write(&agents_path, &content) {
                     Ok(_) => {

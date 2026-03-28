@@ -126,7 +126,7 @@ impl LspManager {
             let server = self.start_server(lang)?;
             self.servers.insert(lang, server);
         }
-        Ok(self.servers.get_mut(&lang).unwrap())
+        Ok(self.servers.get_mut(&lang).expect("just inserted"))
     }
 
     pub fn shutdown(&mut self) {

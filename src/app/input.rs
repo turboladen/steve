@@ -77,7 +77,10 @@ impl App {
 
         // Bump cache generation so mtime-less entries (grep, glob, multi-file
         // reads) from the previous turn are invalidated on next access.
-        self.tool_cache.lock().unwrap().bump_generation();
+        self.tool_cache
+            .lock()
+            .expect("lock poisoned")
+            .bump_generation();
 
         // Launch the streaming task with tool support
         stream::spawn_stream(StreamRequest {

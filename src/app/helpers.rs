@@ -167,7 +167,7 @@ impl App {
         if self.file_index.is_none() {
             self.file_index = Some(file_ref::build_file_index(&self.project.root));
         }
-        self.file_index.as_ref().unwrap()
+        self.file_index.as_ref().expect("just populated above")
     }
 
     /// Invalidate the file index (called after write tools complete).

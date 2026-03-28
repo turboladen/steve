@@ -86,7 +86,8 @@ impl App {
         self.pending_question = None;
         self.pending_agents_update = None;
         self.model_picker.close();
-        *self.tool_cache.lock().unwrap() = ToolResultCache::new(self.project.root.clone());
+        *self.tool_cache.lock().expect("lock poisoned") =
+            ToolResultCache::new(self.project.root.clone());
 
         // Load messages
         if let Ok(loaded_messages) = mgr.load_messages(&session.id) {

@@ -95,7 +95,8 @@ impl App {
     /// Called at discrete sync points (LlmFinish, CompactFinish, /new, switch_to_session)
     /// and when the /diagnostics overlay is opened — not per-frame.
     pub(super) fn collect_diagnostics(&self) -> Vec<crate::diagnostics::DiagnosticCheck> {
-        let (cache_hits, cache_misses) = self.tool_cache.lock().unwrap().cache_stats();
+        let (cache_hits, cache_misses) =
+            self.tool_cache.lock().expect("lock poisoned").cache_stats();
         let lsp_servers: Vec<(&str, bool)> = self
             .sidebar_state
             .lsp_servers

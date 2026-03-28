@@ -375,7 +375,7 @@ fn is_horizontal_rule(line: &str) -> bool {
     if no_spaces.len() < 3 {
         return false;
     }
-    let first = no_spaces.chars().next().unwrap();
+    let first = no_spaces.chars().next().expect("checked len >= 3 above");
     matches!(first, '-' | '*' | '_') && no_spaces.chars().all(|c| c == first)
 }
 

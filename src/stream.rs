@@ -1102,7 +1102,11 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         let mut tasks_to_spawn: Vec<ParallelTask> = Vec::new();
 
         for tc in &auto_allowed {
-            if let Some(cached) = tool_cache.lock().unwrap().get(tc.tool_name, &tc.args) {
+            if let Some(cached) = tool_cache
+                .lock()
+                .expect("lock poisoned")
+                .get(tc.tool_name, &tc.args)
+            {
                 tracing::debug!(tool = %tc.tool_name, "using cached result (parallel)");
                 if cached.output.starts_with(CACHE_REPEAT_PREFIX) {
                     current_iteration_cache_repeats += 1;
@@ -1165,7 +1169,10 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 };
 
                 // Cache the result
-                tool_cache.lock().unwrap().put(tool_name, &args, &output);
+                tool_cache
+                    .lock()
+                    .expect("lock poisoned")
+                    .put(tool_name, &args, &output);
 
                 parallel_results.insert(call_id, output);
             }
@@ -1549,8 +1556,10 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
                     tracing::info!(tool = %tc.tool_name, "executing tool");
 
-                    let output = if let Some(cached) =
-                        tool_cache.lock().unwrap().get(tc.tool_name, &tc.args)
+                    let output = if let Some(cached) = tool_cache
+                        .lock()
+                        .expect("lock poisoned")
+                        .get(tc.tool_name, &tc.args)
                     {
                         if cached.output.starts_with(CACHE_REPEAT_PREFIX) {
                             current_iteration_cache_repeats += 1;
@@ -1573,7 +1582,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                             }
                         };
 
-                        let mut cache = tool_cache.lock().unwrap();
+                        let mut cache = tool_cache.lock().expect("lock poisoned");
                         cache.put(tc.tool_name, &tc.args, &result);
 
                         // Invalidate cache entries when write operations modify files
@@ -1607,8 +1616,10 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
                     tracing::info!(tool = %tc.tool_name, "executing allowed tool (sequential)");
 
-                    let output = if let Some(cached) =
-                        tool_cache.lock().unwrap().get(tc.tool_name, &tc.args)
+                    let output = if let Some(cached) = tool_cache
+                        .lock()
+                        .expect("lock poisoned")
+                        .get(tc.tool_name, &tc.args)
                     {
                         if cached.output.starts_with(CACHE_REPEAT_PREFIX) {
                             current_iteration_cache_repeats += 1;
@@ -1631,7 +1642,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                             }
                         };
 
-                        let mut cache = tool_cache.lock().unwrap();
+                        let mut cache = tool_cache.lock().expect("lock poisoned");
                         cache.put(tc.tool_name, &tc.args, &result);
 
                         // Invalidate cache entries when write operations modify files
@@ -2689,7 +2700,12 @@ mod tests {
             Box<dyn Future<Output = Result<ChatCompletionResponseStream, OpenAIError>> + Send + '_>,
         > {
             Box::pin(async move {
-                let chunks = self.streams.lock().unwrap().pop_front().unwrap_or_default();
+                let chunks = self
+                    .streams
+                    .lock()
+                    .expect("lock poisoned")
+                    .pop_front()
+                    .unwrap_or_default();
                 let stream = tokio_stream::iter(chunks);
                 Ok(Box::pin(stream) as ChatCompletionResponseStream)
             })

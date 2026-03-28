@@ -492,7 +492,7 @@ fn execute_multi_find_replace(
                 file_path.display()
             );
         }
-        let start = content.find(old).unwrap(); // safe: count == 1
+        let start = content.find(old).expect("verified count == 1 above");
         matches.push((start, old.len(), new));
     }
 

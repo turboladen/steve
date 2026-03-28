@@ -28,7 +28,7 @@ fn shorten_path(path: &str, max_width: usize) -> String {
     if parts.len() <= 1 {
         return path.to_string(); // No directories to shorten
     }
-    let filename = parts.last().unwrap();
+    let filename = parts.last().expect("checked len > 1 above");
     let shortened_dirs: Vec<String> = parts[..parts.len() - 1]
         .iter()
         .map(|d| d.chars().next().map(String::from).unwrap_or_default())
