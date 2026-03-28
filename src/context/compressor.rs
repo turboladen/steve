@@ -195,40 +195,12 @@ fn compress_read(content: &str, tool_args: Option<&serde_json::Value>) -> String
 
     let lang = detect_language_label(tool_args);
 
-    // Extract first few "important" lines (imports, module declarations)
-    let key_lines: Vec<String> = lines
-        .iter()
-        .filter_map(|line| {
-            let stripped = if let Some(pipe_pos) = line.find(" | ") {
-                &line[pipe_pos + 3..]
-            } else {
-                line
-            };
-            let trimmed = stripped.trim();
-            if trimmed.starts_with("use ")
-                || trimmed.starts_with("import ")
-                || trimmed.starts_with("from ")
-                || trimmed.starts_with("mod ")
-                || trimmed.starts_with("#include")
-                || trimmed.starts_with("package ")
-            {
-                let truncated: String = trimmed.chars().take(60).collect();
-                Some(truncated)
-            } else {
-                None
-            }
-        })
-        .take(3)
-        .collect();
-
-    // Extract key definitions (fn, struct, impl, class, def, etc.)
+    // Extract key symbols (imports, definitions) via tree-sitter
     let definitions = extract_definitions(tool_args, content);
 
-    let key_items = if !key_lines.is_empty() || !definitions.is_empty() {
-        let mut items: Vec<String> = key_lines;
-        items.extend(definitions.into_iter().take(5));
-        let total = items.len();
-        let combined: Vec<&str> = items.iter().take(5).map(|s| s.as_str()).collect();
+    let key_items = if !definitions.is_empty() {
+        let total = definitions.len();
+        let combined: Vec<&str> = definitions.iter().take(5).map(|s| s.as_str()).collect();
         let extra_count = total.saturating_sub(5);
         let extra_str = if extra_count > 0 {
             format!(", +{extra_count} more")
