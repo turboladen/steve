@@ -103,6 +103,7 @@ tree-sitter-rust = "0.24"
 tree-sitter-toml-ng = "0.7"
 tree-sitter-typescript = "0.23"
 tree-sitter-yaml = "0.7"
+which = "8.0"
 libc = "0.2.183"
 
 # MCP client (Model Context Protocol)

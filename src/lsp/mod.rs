@@ -173,7 +173,7 @@ impl Language {
     /// Find the first available server binary on PATH for this language.
     pub fn resolve_server(self) -> Option<(String, Vec<String>)> {
         for candidate in self.server_candidates() {
-            if which(candidate.binary) {
+            if which::which(candidate.binary).is_ok() {
                 return Some((
                     candidate.binary.to_string(),
                     candidate.args.iter().map(|s| s.to_string()).collect(),
@@ -182,16 +182,6 @@ impl Language {
         }
         None
     }
-}
-
-/// Check if a binary is available on PATH.
-fn which(binary: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(binary)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
 }
 
 #[cfg(test)]
