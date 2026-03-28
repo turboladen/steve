@@ -372,10 +372,11 @@ fn write_logs(out: &mut String, session_start: DateTime<Utc>) {
     if let Ok(entries) = std::fs::read_dir(&log_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if let Some(date) = date_from_log_filename(&path) {
-                if date >= session_date && date <= now_date {
-                    log_files.push(path);
-                }
+            if let Some(date) = date_from_log_filename(&path)
+                && date >= session_date
+                && date <= now_date
+            {
+                log_files.push(path);
             }
         }
     }

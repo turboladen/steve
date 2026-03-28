@@ -325,12 +325,11 @@ impl App {
             }
             Command::ExportDebug => {
                 let include_logs = true;
-                if self.current_session.is_none() || self.stored_messages.is_empty() {
+                if self.stored_messages.is_empty() {
                     self.messages.push(MessageBlock::Error {
                         text: "No active session to export.".to_string(),
                     });
-                } else {
-                    let session = self.current_session.as_ref().unwrap();
+                } else if let Some(session) = self.current_session.as_ref() {
                     let system_prompt = self.build_system_prompt();
                     let model_ref = self.current_model.as_deref();
                     let params = crate::export::ExportParams {

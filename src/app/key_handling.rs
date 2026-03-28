@@ -429,23 +429,21 @@ impl App {
                 }
             }
             (KeyCode::Up, _) => {
-                if let Some(q) = self.pending_question.as_mut() {
-                    if let Some(sel) = q.selected {
-                        if sel > 0 {
-                            q.selected = Some(sel - 1);
-                            self.sync_question_block();
-                        }
-                    }
+                if let Some(q) = self.pending_question.as_mut()
+                    && let Some(sel) = q.selected
+                    && sel > 0
+                {
+                    q.selected = Some(sel - 1);
+                    self.sync_question_block();
                 }
             }
             (KeyCode::Down, _) => {
-                if let Some(q) = self.pending_question.as_mut() {
-                    if let Some(sel) = q.selected {
-                        if sel + 1 < q.options.len() {
-                            q.selected = Some(sel + 1);
-                            self.sync_question_block();
-                        }
-                    }
+                if let Some(q) = self.pending_question.as_mut()
+                    && let Some(sel) = q.selected
+                    && sel + 1 < q.options.len()
+                {
+                    q.selected = Some(sel + 1);
+                    self.sync_question_block();
                 }
             }
             (KeyCode::Tab, _) => {
@@ -462,19 +460,19 @@ impl App {
                 }
             }
             (KeyCode::Char(c), _) => {
-                if let Some(q) = self.pending_question.as_mut() {
-                    if q.selected.is_none() {
-                        q.free_text.push(c);
-                        self.sync_question_block();
-                    }
+                if let Some(q) = self.pending_question.as_mut()
+                    && q.selected.is_none()
+                {
+                    q.free_text.push(c);
+                    self.sync_question_block();
                 }
             }
             (KeyCode::Backspace, _) => {
-                if let Some(q) = self.pending_question.as_mut() {
-                    if q.selected.is_none() {
-                        q.free_text.pop();
-                        self.sync_question_block();
-                    }
+                if let Some(q) = self.pending_question.as_mut()
+                    && q.selected.is_none()
+                {
+                    q.free_text.pop();
+                    self.sync_question_block();
                 }
             }
             _ => {}

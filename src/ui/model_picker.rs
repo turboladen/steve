@@ -22,7 +22,7 @@ struct ModelEntry {
 }
 
 /// State for the model picker overlay.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ModelPickerState {
     /// Whether the overlay is currently visible.
     pub visible: bool,
@@ -36,19 +36,6 @@ pub struct ModelPickerState {
     selected: usize,
     /// The currently active model ref (shown with ● marker).
     current_ref: Option<String>,
-}
-
-impl Default for ModelPickerState {
-    fn default() -> Self {
-        Self {
-            visible: false,
-            filter: String::new(),
-            all_models: Vec::new(),
-            filtered: Vec::new(),
-            selected: 0,
-            current_ref: None,
-        }
-    }
 }
 
 impl ModelPickerState {

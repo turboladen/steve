@@ -9,67 +9,51 @@ use strum::{Display, EnumIter, EnumString};
 )]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
+#[derive(Default)]
 pub enum TaskKind {
+    #[default]
     Task,
     Bug,
-}
-
-impl Default for TaskKind {
-    fn default() -> Self {
-        Self::Task
-    }
 }
 
 /// Priority level for epics and tasks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display, EnumString)]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
+#[derive(Default)]
 pub enum Priority {
     High,
+    #[default]
     Medium,
     Low,
-}
-
-impl Default for Priority {
-    fn default() -> Self {
-        Self::Medium
-    }
 }
 
 /// Lifecycle status of an epic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display, EnumString)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum EpicStatus {
     #[strum(serialize = "open")]
+    #[default]
     Open,
     #[strum(serialize = "in_progress")]
     InProgress,
     #[strum(serialize = "done")]
     Done,
-}
-
-impl Default for EpicStatus {
-    fn default() -> Self {
-        Self::Open
-    }
 }
 
 /// Lifecycle status of a task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display, EnumString)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum TaskStatus {
     #[strum(serialize = "open")]
+    #[default]
     Open,
     #[strum(serialize = "in_progress")]
     InProgress,
     #[strum(serialize = "done")]
     Done,
-}
-
-impl Default for TaskStatus {
-    fn default() -> Self {
-        Self::Open
-    }
 }
 
 /// A high-level work item that groups related tasks.

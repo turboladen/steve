@@ -142,7 +142,7 @@ pub struct StreamRequest {
 /// Returns the JoinHandle so the caller can track task completion.
 pub fn spawn_stream(req: StreamRequest) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(_) = run_stream(req).await {
+        if run_stream(req).await.is_err() {
             // Error already sent via channel in run_stream
         }
     })
@@ -245,11 +245,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
         // Append MCP tool definitions from the lock-free snapshot
         if let Some(snap) = snap {
-            tools.extend(
-                snap.tool_definitions()
-                    .iter()
-                    .filter_map(|def| json_to_tool(def)),
-            );
+            tools.extend(snap.tool_definitions().iter().filter_map(json_to_tool));
         }
 
         tools
@@ -397,7 +393,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             .any(|m| matches!(m, ChatCompletionRequestMessage::Tool(_)));
         let keep_recent = current_iteration_tool_count + prev_iteration_tool_count;
         if has_tool_messages || current_iteration_tool_count > 0 {
-            let payload_estimate: usize = messages.iter().map(|m| estimate_message_chars(m)).sum();
+            let payload_estimate: usize = messages.iter().map(estimate_message_chars).sum();
             // Rough heuristic: ~4 chars/token. Underestimates for code-heavy content,
             // but the 60% aggressive pruning safety valve catches underestimates.
             let estimated_tokens = payload_estimate / 4;
@@ -414,7 +410,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         // compress ALL tool results (including current iteration) to stay under budget.
         // Uses keep_recent=0 so even the latest tool results get compressed.
         if let Some(ctx_window) = context_window {
-            let estimated_chars: usize = messages.iter().map(|m| estimate_message_chars(m)).sum();
+            let estimated_chars: usize = messages.iter().map(estimate_message_chars).sum();
             let estimated_tokens = estimated_chars / 4;
             if ctx_window > 0 && estimated_tokens as u64 > ctx_window * 60 / 100 {
                 tracing::info!(
@@ -473,10 +469,10 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             ..Default::default()
         };
 
-        if let Some(ref t) = tools {
-            if !t.is_empty() {
-                request.tools = Some(t.clone());
-            }
+        if let Some(ref t) = tools
+            && !t.is_empty()
+        {
+            request.tools = Some(t.clone());
         }
 
         // Open the stream with retry for transient errors
@@ -629,14 +625,13 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                                 //   }
 
                                 // Text content delta
-                                if let Some(content) = &choice.delta.content {
-                                    if !content.is_empty() {
+                                if let Some(content) = &choice.delta.content
+                                    && !content.is_empty() {
                                         assistant_content.push_str(content);
                                         let _ = event_tx.send(AppEvent::LlmDelta {
                                             text: content.clone(),
                                         });
                                     }
-                                }
 
                                 // Tool call fragments
                                 if let Some(tool_calls) = &choice.delta.tool_calls {
@@ -655,22 +650,20 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                                     // Notify UI when new tool calls appear
                                     // (done outside the entry borrow to satisfy the borrow checker)
                                     for tc in tool_calls {
-                                        if tc.function.as_ref().and_then(|f| f.name.as_ref()).is_some() {
-                                            if let Some(entry) = pending_tool_calls.get(&tc.index) {
-                                                if let Ok(name) = entry.function_name.parse::<ToolName>() {
+                                        if tc.function.as_ref().and_then(|f| f.name.as_ref()).is_some()
+                                            && let Some(entry) = pending_tool_calls.get(&tc.index)
+                                                && let Ok(name) = entry.function_name.parse::<ToolName>() {
                                                     let _ = event_tx.send(AppEvent::LlmToolCallStreaming {
                                                         count: pending_tool_calls.len(),
                                                         tool_name: name,
                                                     });
                                                 }
-                                            }
-                                        }
                                     }
                                 }
 
                                 // Track finish reason
                                 if let Some(reason) = &choice.finish_reason {
-                                    finish_reason = Some(reason.clone());
+                                    finish_reason = Some(*reason);
                                 }
                             }
                         }
@@ -1362,11 +1355,10 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                                 match reply {
                                     Ok(PermissionReply::AllowOnce) | Ok(PermissionReply::AllowAlways) => {
                                         user_interacted_this_iteration = true;
-                                        if let Ok(PermissionReply::AllowAlways) = reply.as_ref() {
-                                            if let Some(ref engine) = permission_engine {
+                                        if let Ok(PermissionReply::AllowAlways) = reply.as_ref()
+                                            && let Some(ref engine) = permission_engine {
                                                 engine.lock().await.grant_session(tc.tool_name);
                                             }
-                                        }
                                         true
                                     }
                                     _ => false,
@@ -2203,10 +2195,11 @@ fn check_iteration_warning(
         ))
     } else if iteration_count >= critical_at && (*warnings_sent & WARN_CRITICAL_BIT) == 0 {
         *warnings_sent |= WARN_CRITICAL_BIT;
-        Some(format!(
+        Some(
             "\n\n[CRITICAL: Tools REMOVED from next request. You cannot make more tool calls. \
              Respond with your findings immediately.]"
-        ))
+                .to_string(),
+        )
     } else if iteration_count >= warning_at && (*warnings_sent & WARN_WARNING_BIT) == 0 {
         *warnings_sent |= WARN_WARNING_BIT;
         Some(format!(

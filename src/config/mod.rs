@@ -306,7 +306,6 @@ pub fn global_config_dir() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-
     #[test]
     fn default_config_has_auto_compact_true() {
         let config: Config = serde_json::from_str("{}").unwrap();

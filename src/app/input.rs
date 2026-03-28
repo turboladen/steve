@@ -41,7 +41,7 @@ impl App {
             return Ok(());
         };
 
-        let Some((resolved, client)) = self.resolve_client(&model_ref) else {
+        let Some((resolved, client)) = self.resolve_client(model_ref) else {
             return Ok(());
         };
 
@@ -156,14 +156,15 @@ impl App {
     /// first (if any) and are responsible for clearing `self.current_session`
     /// afterward if continuing to a new session.
     pub(super) fn prune_empty_session(&self) {
-        if self.exchange_count == 0 && self.stored_messages.is_empty() {
-            if let Some(session) = &self.current_session {
-                let mgr = SessionManager::new(&self.storage, &self.project.id);
-                if let Err(e) = mgr.delete_session(&session.id) {
-                    tracing::warn!(error = %e, "failed to prune empty session");
-                } else {
-                    tracing::info!(session_id = %session.id, "pruned empty session");
-                }
+        if self.exchange_count == 0
+            && self.stored_messages.is_empty()
+            && let Some(session) = &self.current_session
+        {
+            let mgr = SessionManager::new(&self.storage, &self.project.id);
+            if let Err(e) = mgr.delete_session(&session.id) {
+                tracing::warn!(error = %e, "failed to prune empty session");
+            } else {
+                tracing::info!(session_id = %session.id, "pruned empty session");
             }
         }
     }

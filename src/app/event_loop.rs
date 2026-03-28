@@ -133,18 +133,18 @@ impl App {
                         {
                             // Clear any previous selection and start a new drag
                             self.selection_state.clear();
-                            if let Some(map) = &self.message_area_state.content_map {
-                                if let Some(pos) = map.screen_to_content(
+                            if let Some(map) = &self.message_area_state.content_map
+                                && let Some(pos) = map.screen_to_content(
                                     mouse.row,
                                     mouse.column,
                                     self.message_area_state.scroll_offset,
                                     area.y,
                                     area.x,
-                                ) {
-                                    self.selection_state.anchor = Some(pos);
-                                    self.selection_state.cursor = Some(pos);
-                                    self.selection_state.dragging = true;
-                                }
+                                )
+                            {
+                                self.selection_state.anchor = Some(pos);
+                                self.selection_state.cursor = Some(pos);
+                                self.selection_state.dragging = true;
                             }
                         }
                     }
@@ -157,16 +157,16 @@ impl App {
                             } else if mouse.row >= area.y + area.height {
                                 self.message_area_state.scroll_down(1);
                             }
-                            if let Some(map) = &self.message_area_state.content_map {
-                                if let Some(pos) = map.screen_to_content(
+                            if let Some(map) = &self.message_area_state.content_map
+                                && let Some(pos) = map.screen_to_content(
                                     mouse.row,
                                     mouse.column,
                                     self.message_area_state.scroll_offset,
                                     area.y,
                                     area.x,
-                                ) {
-                                    self.selection_state.cursor = Some(pos);
-                                }
+                                )
+                            {
+                                self.selection_state.cursor = Some(pos);
                             }
                         }
                     }
@@ -174,12 +174,12 @@ impl App {
                         if self.selection_state.dragging {
                             self.selection_state.dragging = false;
                             // If we have a valid selection range, copy to clipboard
-                            if let Some((start, end)) = self.selection_state.ordered_range() {
-                                if let Some(map) = &self.message_area_state.content_map {
-                                    let text = map.extract_text(&start, &end);
-                                    if !text.is_empty() {
-                                        self.copy_to_clipboard(&text);
-                                    }
+                            if let Some((start, end)) = self.selection_state.ordered_range()
+                                && let Some(map) = &self.message_area_state.content_map
+                            {
+                                let text = map.extract_text(&start, &end);
+                                if !text.is_empty() {
+                                    self.copy_to_clipboard(&text);
                                 }
                             }
                         }
@@ -198,10 +198,10 @@ impl App {
             AppEvent::Tick => {
                 self.status_line_state.tick();
                 // Clear expired "Copied!" flash
-                if let Some(t) = self.selection_state.copied_flash {
-                    if t.elapsed().as_secs() >= 1 {
-                        self.selection_state.copied_flash = None;
-                    }
+                if let Some(t) = self.selection_state.copied_flash
+                    && t.elapsed().as_secs() >= 1
+                {
+                    self.selection_state.copied_flash = None;
                 }
             }
 
@@ -284,31 +284,28 @@ impl App {
                 // On successful write tool completion: invalidate file index + record changeset
                 if tool_name.is_write_tool() && !output.is_error {
                     self.invalidate_file_index();
-                    if let Some(call) = self.find_last_completed_call(tool_name) {
-                        if let Some(diff) = &call.diff_content {
-                            let (additions, removals) = count_diff_lines(diff);
-                            let display_path = self.strip_project_root(&call.args_summary);
-                            self.sidebar_state.record_file_change(
-                                display_path,
-                                additions,
-                                removals,
-                            );
-                        }
+                    if let Some(call) = self.find_last_completed_call(tool_name)
+                        && let Some(diff) = &call.diff_content
+                    {
+                        let (additions, removals) = count_diff_lines(diff);
+                        let display_path = self.strip_project_root(&call.args_summary);
+                        self.sidebar_state
+                            .record_file_change(display_path, additions, removals);
                     }
                 }
 
                 // Track task completions for sidebar display
-                if tool_name == ToolName::Task && !output.is_error {
-                    if let Some(call) = self.find_last_completed_call(tool_name) {
-                        if call.args_summary == "complete" {
-                            // Parse task ID from output: "Completed task {id}: {title}"
-                            // Safe to split on ':' — task IDs are hex-only (task-XXXXXXXX)
-                            if let Some(rest) = output.output.strip_prefix("Completed task ") {
-                                if let Some(id) = rest.split(':').next() {
-                                    self.sidebar_state.record_task_closed(id.trim().to_string());
-                                }
-                            }
-                        }
+                if tool_name == ToolName::Task
+                    && !output.is_error
+                    && let Some(call) = self.find_last_completed_call(tool_name)
+                    && call.args_summary == "complete"
+                {
+                    // Parse task ID from output: "Completed task {id}: {title}"
+                    // Safe to split on ':' — task IDs are hex-only (task-XXXXXXXX)
+                    if let Some(rest) = output.output.strip_prefix("Completed task ")
+                        && let Some(id) = rest.split(':').next()
+                    {
+                        self.sidebar_state.record_task_closed(id.trim().to_string());
                     }
                 }
 

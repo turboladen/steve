@@ -171,17 +171,17 @@ pub fn session_efficiency_checks(
     }
 
     // Cost per exchange (informational)
-    if let Some(cost) = session_cost {
-        if cost > 0.0 {
-            let cost_per = cost / exchange_count as f64;
-            checks.push(DiagnosticCheck {
-                severity: Severity::Info,
-                category: Category::SessionEfficiency,
-                label: format!("${cost_per:.4}/exchange ({exchange_count} exchanges)"),
-                detail: format!("Session total: ${cost:.4}"),
-                recommendation: None,
-            });
-        }
+    if let Some(cost) = session_cost
+        && cost > 0.0
+    {
+        let cost_per = cost / exchange_count as f64;
+        checks.push(DiagnosticCheck {
+            severity: Severity::Info,
+            category: Category::SessionEfficiency,
+            label: format!("${cost_per:.4}/exchange ({exchange_count} exchanges)"),
+            detail: format!("Session total: ${cost:.4}"),
+            recommendation: None,
+        });
     }
 
     checks

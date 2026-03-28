@@ -143,7 +143,7 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
                 .truncate(true)
                 .open(&path)?;
             file.lock()?;
-            write!(&file, "{content}\n")?;
+            writeln!(&file, "{content}")?;
             let _ = file.unlock();
 
             Ok(ToolOutput {

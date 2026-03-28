@@ -215,15 +215,12 @@ impl LspServer {
     /// Process any notifications received alongside a response.
     fn process_notifications(&mut self, notifications: Vec<JsonRpcNotification>) {
         for notif in notifications {
-            if notif.method == "textDocument/publishDiagnostics" {
-                if let Some(params) = notif.params {
-                    if let Ok(diag_params) =
-                        serde_json::from_value::<PublishDiagnosticsParams>(params)
-                    {
-                        self.diagnostics
-                            .insert(diag_params.uri, diag_params.diagnostics);
-                    }
-                }
+            if notif.method == "textDocument/publishDiagnostics"
+                && let Some(params) = notif.params
+                && let Ok(diag_params) = serde_json::from_value::<PublishDiagnosticsParams>(params)
+            {
+                self.diagnostics
+                    .insert(diag_params.uri, diag_params.diagnostics);
             }
             // Ignore other notifications (window/logMessage, etc.)
         }
@@ -417,11 +414,11 @@ fn percent_decode(input: &str) -> String {
         if b == b'%' {
             let hi = chars.next();
             let lo = chars.next();
-            if let (Some(hi), Some(lo)) = (hi, lo) {
-                if let (Some(h), Some(l)) = (hex_val(hi), hex_val(lo)) {
-                    result.push((h << 4 | l) as char);
-                    continue;
-                }
+            if let (Some(hi), Some(lo)) = (hi, lo)
+                && let (Some(h), Some(l)) = (hex_val(hi), hex_val(lo))
+            {
+                result.push((h << 4 | l) as char);
+                continue;
             }
             // Malformed sequence — pass through
             result.push('%');

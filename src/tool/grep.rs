@@ -38,7 +38,7 @@ pub fn tool() -> ToolEntry {
                 "required": ["pattern"]
             }),
         },
-        handler: Box::new(|args, ctx| execute(args, ctx)),
+        handler: Box::new(execute),
     }
 }
 
@@ -144,7 +144,7 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
         );
 
         // Silently skip files that can't be searched (binary files, etc.)
-        if let Err(_) = result {
+        if result.is_err() {
             continue;
         }
     }

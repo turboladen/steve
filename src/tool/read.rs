@@ -73,7 +73,7 @@ pub fn tool() -> ToolEntry {
                 "required": []
             }),
         },
-        handler: Box::new(|args, ctx| execute(args, ctx)),
+        handler: Box::new(execute),
     }
 }
 
@@ -260,9 +260,7 @@ fn read_single_file(
     }
 
     match mode {
-        ReadMode::Count => {
-            return Err("internal error: count mode should be handled earlier".into());
-        }
+        ReadMode::Count => Err("internal error: count mode should be handled earlier".into()),
         ReadMode::Tail { n } => {
             let capped = (*n).min(max_lines);
             let start = lines.len().saturating_sub(capped);

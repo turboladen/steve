@@ -26,7 +26,7 @@ pub fn tool() -> ToolEntry {
                 "required": []
             }),
         },
-        handler: Box::new(|args, ctx| execute(args, ctx)),
+        handler: Box::new(execute),
     }
 }
 

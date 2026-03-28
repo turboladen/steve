@@ -80,6 +80,12 @@ pub struct DataState {
     pub detail_offset: usize,
 }
 
+impl Default for DataState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DataState {
     pub fn new() -> Self {
         Self {

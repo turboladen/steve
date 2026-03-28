@@ -132,23 +132,20 @@ impl App {
 
     /// Update the last Question block to reflect current PendingQuestion state.
     pub(super) fn sync_question_block(&mut self) {
-        if let Some(q) = &self.pending_question {
-            if let Some(block) = self
+        if let Some(q) = &self.pending_question
+            && let Some(block) = self
                 .messages
                 .iter_mut()
                 .rev()
                 .find(|m| matches!(m, MessageBlock::Question { answered: None, .. }))
-            {
-                if let MessageBlock::Question {
-                    selected,
-                    free_text,
-                    ..
-                } = block
-                {
-                    *selected = q.selected;
-                    *free_text = q.free_text.clone();
-                }
-            }
+            && let MessageBlock::Question {
+                selected,
+                free_text,
+                ..
+            } = block
+        {
+            *selected = q.selected;
+            *free_text = q.free_text.clone();
         }
     }
 
@@ -159,10 +156,9 @@ impl App {
             .iter_mut()
             .rev()
             .find(|m| matches!(m, MessageBlock::Question { answered: None, .. }))
+            && let MessageBlock::Question { answered, .. } = block
         {
-            if let MessageBlock::Question { answered, .. } = block {
-                *answered = Some(answer.to_string());
-            }
+            *answered = Some(answer.to_string());
         }
     }
 

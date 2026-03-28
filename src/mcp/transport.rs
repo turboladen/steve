@@ -35,7 +35,7 @@ pub async fn connect_http(
     credential_dir: Option<&Path>,
     status_tx: Option<OAuthStatusTx>,
 ) -> Result<RunningService<RoleClient, ()>> {
-    let expanded = headers.map(|h| expand_env(h)).unwrap_or_default();
+    let expanded = headers.map(expand_env).unwrap_or_default();
     let has_explicit_auth = expanded
         .keys()
         .any(|k| k.eq_ignore_ascii_case("Authorization"));
@@ -100,7 +100,7 @@ pub async fn connect_http(
     .await;
 
     match first_result {
-        Ok(service) => return Ok(service),
+        Ok(service) => Ok(service),
         Err(e) if is_auth_error(&e) && credential_path.exists() => {
             // Stored credentials are stale (expired/revoked) — clear them and
             // re-authorize, which will trigger the browser-based OAuth flow.

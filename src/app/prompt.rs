@@ -107,19 +107,19 @@ impl App {
 
         // Load project memory if it exists (with shared lock for safe concurrent access)
         let memory_path = self.storage.base_dir().join("memory.md");
-        if let Ok(memory) = Self::read_memory_file(&memory_path) {
-            if !memory.trim().is_empty() {
-                let truncated = if memory.len() > 2000 {
-                    let end = crate::floor_char_boundary(&memory, 2000);
-                    format!(
-                        "{}...\n(use memory tool to read full content)",
-                        &memory[..end]
-                    )
-                } else {
-                    memory
-                };
-                parts.push(format!("\n## Project Memory\n\n{truncated}"));
-            }
+        if let Ok(memory) = Self::read_memory_file(&memory_path)
+            && !memory.trim().is_empty()
+        {
+            let truncated = if memory.len() > 2000 {
+                let end = crate::floor_char_boundary(&memory, 2000);
+                format!(
+                    "{}...\n(use memory tool to read full content)",
+                    &memory[..end]
+                )
+            } else {
+                memory
+            };
+            parts.push(format!("\n## Project Memory\n\n{truncated}"));
         }
 
         // Inject open tasks summary
@@ -148,42 +148,42 @@ impl App {
 
         // Inject MCP resource context (if any servers provide resources)
         // Note: This is a sync context, so we use try_lock + cached resources only
-        if let Ok(mgr) = self.mcp_manager.try_lock() {
-            if mgr.has_servers() {
-                let resources = mgr.all_resources();
-                if !resources.is_empty() {
-                    let mut section = String::from("\n## MCP Context\n");
-                    let mut total_len = 0;
-                    for (server_id, resource) in &resources {
-                        let name = &resource.name;
-                        let desc = resource.description.as_deref().unwrap_or("");
-                        let entry = format!("\n- **{server_id}/{name}**: {desc}\n");
-                        total_len += entry.len();
-                        if total_len > 2000 {
-                            section.push_str("\n(additional resources omitted)\n");
-                            break;
-                        }
-                        section.push_str(&entry);
+        if let Ok(mgr) = self.mcp_manager.try_lock()
+            && mgr.has_servers()
+        {
+            let resources = mgr.all_resources();
+            if !resources.is_empty() {
+                let mut section = String::from("\n## MCP Context\n");
+                let mut total_len = 0;
+                for (server_id, resource) in &resources {
+                    let name = &resource.name;
+                    let desc = resource.description.as_deref().unwrap_or("");
+                    let entry = format!("\n- **{server_id}/{name}**: {desc}\n");
+                    total_len += entry.len();
+                    if total_len > 2000 {
+                        section.push_str("\n(additional resources omitted)\n");
+                        break;
                     }
-                    parts.push(section);
+                    section.push_str(&entry);
                 }
+                parts.push(section);
+            }
 
-                // Add MCP tool guidance
-                let tool_defs = mgr.all_tool_defs();
-                if !tool_defs.is_empty() {
-                    let mut guidance = String::from(
-                        "\n## MCP Tools\n\nExternal tools provided by MCP servers. \
+            // Add MCP tool guidance
+            let tool_defs = mgr.all_tool_defs();
+            if !tool_defs.is_empty() {
+                let mut guidance = String::from(
+                    "\n## MCP Tools\n\nExternal tools provided by MCP servers. \
                         These tools use prefixed names (`mcp__{server}__{tool}`). Use them when native tools \
                         don't cover the task.\n",
-                    );
-                    for (server_id, tool) in &tool_defs {
-                        let desc = tool.description.as_deref().unwrap_or("(no description)");
-                        let prefixed = crate::mcp::types::prefixed_tool_name(server_id, &tool.name);
-                        guidance.push_str(&format!("\n- `{prefixed}`: {desc}"));
-                    }
-                    guidance.push('\n');
-                    parts.push(guidance);
+                );
+                for (server_id, tool) in &tool_defs {
+                    let desc = tool.description.as_deref().unwrap_or("(no description)");
+                    let prefixed = crate::mcp::types::prefixed_tool_name(server_id, &tool.name);
+                    guidance.push_str(&format!("\n- `{prefixed}`: {desc}"));
                 }
+                guidance.push('\n');
+                parts.push(guidance);
             }
         }
 
@@ -275,7 +275,7 @@ impl App {
             .collect::<Result<Vec<_>, _>>()
         {
             for entry in walker {
-                if let Some(path) = entry.path().strip_prefix(&self.project.root).ok() {
+                if let Ok(path) = entry.path().strip_prefix(&self.project.root) {
                     entries.push(path.display().to_string());
                 }
             }

@@ -55,7 +55,7 @@ pub fn tool() -> ToolEntry {
                 "required": ["path"]
             }),
         },
-        handler: Box::new(|args, ctx| execute(args, ctx)),
+        handler: Box::new(execute),
     }
 }
 

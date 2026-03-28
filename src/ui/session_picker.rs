@@ -28,7 +28,7 @@ struct SessionEntry {
 }
 
 /// State for the session picker overlay.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct SessionPickerState {
     /// Whether the overlay is currently visible.
     pub visible: bool,
@@ -42,19 +42,6 @@ pub struct SessionPickerState {
     filtered: Vec<usize>,
     /// Index into `filtered` for the currently highlighted item.
     selected: usize,
-}
-
-impl Default for SessionPickerState {
-    fn default() -> Self {
-        Self {
-            visible: false,
-            filter: String::new(),
-            all_sessions: Vec::new(),
-            source_sessions: Vec::new(),
-            filtered: Vec::new(),
-            selected: 0,
-        }
-    }
 }
 
 impl SessionPickerState {

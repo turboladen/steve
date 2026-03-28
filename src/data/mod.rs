@@ -347,13 +347,13 @@ fn run_event_loop(terminal: &mut crate::ui::Tui, app: &mut DataApp) -> Result<()
         }
 
         // Poll for events
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                app.handle_key(key.code, key.modifiers)?;
+        if event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.kind != KeyEventKind::Press {
+                continue;
             }
+            app.handle_key(key.code, key.modifiers)?;
         }
     }
 

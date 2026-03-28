@@ -1,4 +1,6 @@
 #![allow(dead_code)]
+#![warn(clippy::cargo)]
+#![allow(clippy::multiple_crate_versions)]
 
 /// Find the largest valid UTF-8 char boundary at or before `byte_index`.
 /// Polyfill for the unstable `str::floor_char_boundary`.

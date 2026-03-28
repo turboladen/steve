@@ -169,6 +169,8 @@ async fn discover_metadata(
 ///
 /// Manages PKCE and token exchange directly (without rmcp's exchange_code_for_token)
 /// to avoid the unsupported RFC 8707 `resource` parameter.
+// Structural — these args are all needed
+#[allow(clippy::too_many_arguments)]
 async fn browser_auth_flow(
     server_id: &str,
     base_url: &str,

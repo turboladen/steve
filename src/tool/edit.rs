@@ -500,8 +500,7 @@ fn execute_multi_find_replace(
     for i in 0..matches.len() {
         let (start_a, len_a, _) = matches[i];
         let end_a = start_a + len_a;
-        for j in (i + 1)..matches.len() {
-            let (start_b, len_b, _) = matches[j];
+        for (j, &(start_b, len_b, _)) in matches.iter().enumerate().skip(i + 1) {
             let end_b = start_b + len_b;
             // Overlap: ranges [start_a, end_a) and [start_b, end_b) intersect
             if start_a < end_b && start_b < end_a {

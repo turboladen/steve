@@ -3,6 +3,11 @@ name = "steve"
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.89"
+description = "A TUI AI coding agent powered by any OpenAI-compatible LLM API"
+license = "MIT"
+repository = "https://github.com/turboladen/steve"
+keywords = ["ai", "coding-agent", "tui", "llm", "openai"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 # Async runtime

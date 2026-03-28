@@ -1,3 +1,6 @@
+#![warn(clippy::cargo)]
+#![allow(clippy::multiple_crate_versions)]
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};

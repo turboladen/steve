@@ -354,8 +354,8 @@ fn scan_emphasis(chars: &[char], start: usize) -> Option<(String, Modifier, usiz
                 return Some((content, modifier, i));
             }
             // Not enough closing stars — add them as content
-            for k in j..i {
-                content.push(chars[k]);
+            for ch in &chars[j..i] {
+                content.push(*ch);
             }
         } else {
             content.push(chars[i]);
@@ -577,9 +577,8 @@ pub fn render_table(
         let mut plain = String::new();
         spans.push(Span::styled("│", border_style));
         plain.push('│');
-        for col_idx in 0..col_count {
+        for (col_idx, &w) in col_widths.iter().enumerate().take(col_count) {
             let cell = row.get(col_idx).map(|s| s.as_str()).unwrap_or("");
-            let w = col_widths[col_idx];
             let cell_chars = cell.chars().count();
             let padded = if cell_chars > w {
                 // Truncate with ellipsis if needed

@@ -498,40 +498,39 @@ fn find_def_recursive(
 ) -> Option<DefinitionInfo> {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if symbol_types.contains(&child.kind()) {
-            if let Some(name) = extract_name(child, source) {
-                if name == target_name {
-                    let start_line = child.start_position().row + 1;
-                    let end_line = child.end_position().row + 1;
+        if symbol_types.contains(&child.kind())
+            && let Some(name) = extract_name(child, source)
+            && name == target_name
+        {
+            let start_line = child.start_position().row + 1;
+            let end_line = child.end_position().row + 1;
 
-                    // Extract source preview (first ~20 lines)
-                    let source_str = std::str::from_utf8(source).unwrap_or("");
-                    let lines: Vec<&str> = source_str.lines().collect();
-                    let preview_end = std::cmp::min(start_line - 1 + 20, end_line);
-                    let preview_end = std::cmp::min(preview_end, lines.len());
-                    let preview_start = start_line - 1;
+            // Extract source preview (first ~20 lines)
+            let source_str = std::str::from_utf8(source).unwrap_or("");
+            let lines: Vec<&str> = source_str.lines().collect();
+            let preview_end = std::cmp::min(start_line - 1 + 20, end_line);
+            let preview_end = std::cmp::min(preview_end, lines.len());
+            let preview_start = start_line - 1;
 
-                    let mut preview = String::new();
-                    for (i, line) in lines[preview_start..preview_end].iter().enumerate() {
-                        let line_num = preview_start + i + 1;
-                        preview.push_str(&format!("{line_num:>4} | {line}\n"));
-                    }
-                    if preview_end < end_line {
-                        preview.push_str(&format!(
-                            "     ... ({} more lines)\n",
-                            end_line - preview_end
-                        ));
-                    }
-
-                    return Some(DefinitionInfo {
-                        kind: kind_label(child.kind()).to_string(),
-                        name,
-                        start_line,
-                        end_line,
-                        source_preview: preview,
-                    });
-                }
+            let mut preview = String::new();
+            for (i, line) in lines[preview_start..preview_end].iter().enumerate() {
+                let line_num = preview_start + i + 1;
+                preview.push_str(&format!("{line_num:>4} | {line}\n"));
             }
+            if preview_end < end_line {
+                preview.push_str(&format!(
+                    "     ... ({} more lines)\n",
+                    end_line - preview_end
+                ));
+            }
+
+            return Some(DefinitionInfo {
+                kind: kind_label(child.kind()).to_string(),
+                name,
+                start_line,
+                end_line,
+                source_preview: preview,
+            });
         }
 
         // Recurse
@@ -584,7 +583,7 @@ pub fn tool() -> ToolEntry {
                 "required": ["path"]
             }),
         },
-        handler: Box::new(|args, ctx| execute(args, ctx)),
+        handler: Box::new(execute),
     }
 }
 

@@ -217,6 +217,8 @@ fn extract_plain_text(line: &Line<'_>) -> String {
 }
 
 /// Render structured message blocks into the given area.
+// Structural — these args are all needed
+#[allow(clippy::too_many_arguments)]
 pub fn render_message_blocks(
     frame: &mut Frame,
     area: Rect,
@@ -767,7 +769,7 @@ pub fn render_message_blocks(
             if line_width == 0 {
                 1u32
             } else {
-                ((line_width + available_width - 1) / available_width) as u32
+                line_width.div_ceil(available_width) as u32
             }
         })
         .sum();
@@ -803,25 +805,25 @@ pub fn render_message_blocks(
     }
 
     // "Copied!" flash overlay
-    if let Some(flash_time) = selection.copied_flash {
-        if flash_time.elapsed().as_millis() < 1000 {
-            let flash_text = " Copied! ";
-            let flash_width = flash_text.len() as u16;
-            if area.width >= flash_width + 2 {
-                let flash_area = Rect::new(
-                    area.x + area.width - flash_width - 1,
-                    area.y,
-                    flash_width,
-                    1,
-                );
-                let flash = Paragraph::new(Line::from(Span::styled(
-                    flash_text,
-                    Style::default()
-                        .fg(theme.success)
-                        .add_modifier(Modifier::BOLD),
-                )));
-                frame.render_widget(flash, flash_area);
-            }
+    if let Some(flash_time) = selection.copied_flash
+        && flash_time.elapsed().as_millis() < 1000
+    {
+        let flash_text = " Copied! ";
+        let flash_width = flash_text.len() as u16;
+        if area.width >= flash_width + 2 {
+            let flash_area = Rect::new(
+                area.x + area.width - flash_width - 1,
+                area.y,
+                flash_width,
+                1,
+            );
+            let flash = Paragraph::new(Line::from(Span::styled(
+                flash_text,
+                Style::default()
+                    .fg(theme.success)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            frame.render_widget(flash, flash_area);
         }
     }
 }

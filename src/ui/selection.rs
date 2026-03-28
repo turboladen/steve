@@ -18,6 +18,7 @@ impl ContentPos {
 }
 
 /// State for click-drag text selection in the message area.
+#[derive(Default)]
 pub struct SelectionState {
     /// Mouse-down position (start of selection).
     pub anchor: Option<ContentPos>,
@@ -27,17 +28,6 @@ pub struct SelectionState {
     pub dragging: bool,
     /// When a successful copy happened (for "Copied!" flash).
     pub copied_flash: Option<Instant>,
-}
-
-impl Default for SelectionState {
-    fn default() -> Self {
-        Self {
-            anchor: None,
-            cursor: None,
-            dragging: false,
-            copied_flash: None,
-        }
-    }
 }
 
 impl SelectionState {
@@ -94,7 +84,7 @@ impl ContentMap {
             let rows = if line_width == 0 {
                 1u32
             } else {
-                ((line_width + available_width - 1) / available_width) as u32
+                line_width.div_ceil(available_width) as u32
             };
             cumulative += rows;
         }

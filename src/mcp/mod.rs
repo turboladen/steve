@@ -239,6 +239,12 @@ pub struct McpManager {
     snapshot: Arc<McpToolSnapshot>,
 }
 
+impl Default for McpManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl McpManager {
     pub fn new() -> Self {
         Self {
@@ -261,10 +267,10 @@ impl McpManager {
         status_tx: Option<oauth::OAuthStatusTx>,
     ) {
         let credential_dir = data_dir.map(|d| d.join("oauth"));
-        if let Some(ref dir) = credential_dir {
-            if let Err(e) = tokio::fs::create_dir_all(dir).await {
-                tracing::warn!(error = %e, "failed to create OAuth credential directory");
-            }
+        if let Some(ref dir) = credential_dir
+            && let Err(e) = tokio::fs::create_dir_all(dir).await
+        {
+            tracing::warn!(error = %e, "failed to create OAuth credential directory");
         }
 
         for (server_id, config) in configs {
@@ -276,16 +282,16 @@ impl McpManager {
                 self.failed_servers.insert(server_id.clone(), e.to_string());
                 continue;
             }
-            if let McpServerConfig::Http { url, .. } = config {
-                if url::Url::parse(url).is_err() {
-                    tracing::error!(server = %server_id, url = %url, "invalid MCP server URL, skipping");
-                    let msg = format!("invalid URL: {url}");
-                    if let Some(ref tx) = status_tx {
-                        let _ = tx.send(format!("\u{26a0} MCP '{server_id}': {msg}"));
-                    }
-                    self.failed_servers.insert(server_id.clone(), msg);
-                    continue;
+            if let McpServerConfig::Http { url, .. } = config
+                && url::Url::parse(url).is_err()
+            {
+                tracing::error!(server = %server_id, url = %url, "invalid MCP server URL, skipping");
+                let msg = format!("invalid URL: {url}");
+                if let Some(ref tx) = status_tx {
+                    let _ = tx.send(format!("\u{26a0} MCP '{server_id}': {msg}"));
                 }
+                self.failed_servers.insert(server_id.clone(), msg);
+                continue;
             }
             match McpServer::spawn(
                 server_id.clone(),
@@ -572,13 +578,13 @@ impl McpManager {
             .iter()
             .map(|(id, server)| {
                 let mut parts = Vec::new();
-                if server.cached_tools.len() > 0 {
+                if !server.cached_tools.is_empty() {
                     parts.push(format!("{} tools", server.cached_tools.len()));
                 }
-                if server.cached_resources.len() > 0 {
+                if !server.cached_resources.is_empty() {
                     parts.push(format!("{} resources", server.cached_resources.len()));
                 }
-                if server.cached_prompts.len() > 0 {
+                if !server.cached_prompts.is_empty() {
                     parts.push(format!("{} prompts", server.cached_prompts.len()));
                 }
                 if parts.is_empty() {
@@ -596,12 +602,12 @@ fn format_call_result(result: &CallToolResult) -> String {
     result
         .content
         .iter()
-        .filter_map(|content| match &content.raw {
-            RawContent::Text(text) => Some(text.text.as_str()),
-            RawContent::Image(_) => Some("[image content]"),
-            RawContent::Audio(_) => Some("[audio content]"),
-            RawContent::Resource(_) => Some("[embedded resource]"),
-            RawContent::ResourceLink(_) => Some("[resource link]"),
+        .map(|content| match &content.raw {
+            RawContent::Text(text) => text.text.as_str(),
+            RawContent::Image(_) => "[image content]",
+            RawContent::Audio(_) => "[audio content]",
+            RawContent::Resource(_) => "[embedded resource]",
+            RawContent::ResourceLink(_) => "[resource link]",
         })
         .collect::<Vec<_>>()
         .join("\n")

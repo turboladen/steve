@@ -27,13 +27,12 @@ impl App {
             &self.current_model,
             &self.provider_registry,
             &self.current_session,
-        ) {
-            if let Ok(resolved) = registry.resolve_model(model_ref) {
-                self.sidebar_state.session_cost = resolved.session_cost(
-                    session.token_usage.prompt_tokens,
-                    session.token_usage.completion_tokens,
-                );
-            }
+        ) && let Ok(resolved) = registry.resolve_model(model_ref)
+        {
+            self.sidebar_state.session_cost = resolved.session_cost(
+                session.token_usage.prompt_tokens,
+                session.token_usage.completion_tokens,
+            );
         }
         // Sync task list for sidebar: open/in_progress tasks + session-closed tasks
         self.sidebar_state.tasks = self
@@ -45,7 +44,7 @@ impl App {
                 t.status != TaskStatus::Done
                     || self.sidebar_state.session_closed_task_ids.contains(&t.id)
             })
-            .map(|t| SidebarTask::from(t))
+            .map(SidebarTask::from)
             .collect();
         // Sort: open/in_progress first (by priority High→Low), then done at bottom
         self.sidebar_state.tasks.sort_by(|a, b| {
@@ -71,10 +70,10 @@ impl App {
     /// Eagerly resolve the current model's context window for border color display.
     /// Call after any change to `current_model` (startup, `/model`, session switch).
     pub(super) fn sync_context_window(&mut self) {
-        if let (Some(model_ref), Some(registry)) = (&self.current_model, &self.provider_registry) {
-            if let Ok(resolved) = registry.resolve_model(model_ref) {
-                self.status_line_state.context_window = resolved.config.context_window as u64;
-            }
+        if let (Some(model_ref), Some(registry)) = (&self.current_model, &self.provider_registry)
+            && let Ok(resolved) = registry.resolve_model(model_ref)
+        {
+            self.status_line_state.context_window = resolved.config.context_window as u64;
         }
     }
 

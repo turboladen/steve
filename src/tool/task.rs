@@ -231,15 +231,15 @@ fn action_list(args: &Value, store: &Arc<TaskStore>) -> Result<ToolOutput> {
     let filtered: Vec<_> = tasks
         .iter()
         .filter(|t| {
-            if let Some(eid) = filter_epic {
-                if t.epic_id.as_deref() != Some(eid) {
-                    return false;
-                }
+            if let Some(eid) = filter_epic
+                && t.epic_id.as_deref() != Some(eid)
+            {
+                return false;
             }
-            if let Some(sid) = filter_session {
-                if t.session_id.as_deref() != Some(sid) {
-                    return false;
-                }
+            if let Some(sid) = filter_session
+                && t.session_id.as_deref() != Some(sid)
+            {
+                return false;
             }
             true
         })

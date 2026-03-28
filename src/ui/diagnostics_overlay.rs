@@ -16,7 +16,7 @@ use crate::diagnostics::{Category, DiagnosticCheck, Severity};
 use super::theme::Theme;
 
 /// State for the diagnostics overlay.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct DiagnosticsOverlayState {
     /// Whether the overlay is currently visible.
     pub visible: bool,
@@ -24,16 +24,6 @@ pub struct DiagnosticsOverlayState {
     checks: Vec<DiagnosticCheck>,
     /// Current scroll offset.
     scroll_offset: usize,
-}
-
-impl Default for DiagnosticsOverlayState {
-    fn default() -> Self {
-        Self {
-            visible: false,
-            checks: Vec::new(),
-            scroll_offset: 0,
-        }
-    }
 }
 
 impl DiagnosticsOverlayState {

@@ -102,10 +102,10 @@ impl Storage {
         for entry in fs::read_dir(&dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "json") {
-                if let Some(stem) = path.file_stem() {
-                    names.push(stem.to_string_lossy().to_string());
-                }
+            if path.extension().is_some_and(|ext| ext == "json")
+                && let Some(stem) = path.file_stem()
+            {
+                names.push(stem.to_string_lossy().to_string());
             }
         }
         Ok(names)

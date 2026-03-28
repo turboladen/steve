@@ -123,10 +123,10 @@ pub fn resolve_ref(file_ref: &FileRef, project_root: &Path) -> Option<ResolvedFi
     }
 
     // If no '/' in path, try basename match
-    if !file_ref.path.contains('/') {
-        if let Some(found) = find_unique_basename(&file_ref.path, project_root) {
-            return build_resolved(file_ref, &found, project_root);
-        }
+    if !file_ref.path.contains('/')
+        && let Some(found) = find_unique_basename(&file_ref.path, project_root)
+    {
+        return build_resolved(file_ref, &found, project_root);
     }
 
     None
@@ -203,14 +203,13 @@ fn find_unique_basename(basename: &str, project_root: &Path) -> Option<PathBuf> 
 
     let mut matches: Vec<PathBuf> = Vec::new();
     for entry in walker.flatten() {
-        if entry.file_type().is_some_and(|ft| ft.is_file()) {
-            if let Some(name) = entry.path().file_name() {
-                if name == basename {
-                    matches.push(entry.path().to_path_buf());
-                    if matches.len() > 1 {
-                        return None; // ambiguous
-                    }
-                }
+        if entry.file_type().is_some_and(|ft| ft.is_file())
+            && let Some(name) = entry.path().file_name()
+            && name == basename
+        {
+            matches.push(entry.path().to_path_buf());
+            if matches.len() > 1 {
+                return None; // ambiguous
             }
         }
     }
@@ -319,10 +318,10 @@ pub fn build_file_index(project_root: &Path) -> Vec<String> {
 
     let mut files = Vec::new();
     for entry in walker.flatten() {
-        if entry.file_type().is_some_and(|ft| ft.is_file()) {
-            if let Ok(rel) = entry.path().strip_prefix(project_root) {
-                files.push(rel.to_string_lossy().to_string());
-            }
+        if entry.file_type().is_some_and(|ft| ft.is_file())
+            && let Ok(rel) = entry.path().strip_prefix(project_root)
+        {
+            files.push(rel.to_string_lossy().to_string());
         }
     }
     files.sort();

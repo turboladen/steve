@@ -20,7 +20,7 @@ use crate::tool::ToolName;
 /// uncompressed (typically the current iteration's tool results, which the
 /// LLM hasn't seen yet).
 pub fn compress_old_tool_results(
-    messages: &mut Vec<ChatCompletionRequestMessage>,
+    messages: &mut [ChatCompletionRequestMessage],
     keep_recent: usize,
 ) {
     // Build mappings from tool_call_id → tool_name and tool_call_id → args
@@ -115,18 +115,18 @@ fn build_tool_maps(
     let mut name_map = HashMap::new();
     let mut args_map = HashMap::new();
     for msg in messages {
-        if let ChatCompletionRequestMessage::Assistant(assistant) = msg {
-            if let Some(tool_calls) = &assistant.tool_calls {
-                for tc in tool_calls {
-                    if let ChatCompletionMessageToolCalls::Function(func_call) = tc {
-                        if let Ok(name) = func_call.function.name.parse::<ToolName>() {
-                            name_map.insert(func_call.id.clone(), name);
-                        }
-                        if let Ok(args) =
-                            serde_json::from_str::<serde_json::Value>(&func_call.function.arguments)
-                        {
-                            args_map.insert(func_call.id.clone(), args);
-                        }
+        if let ChatCompletionRequestMessage::Assistant(assistant) = msg
+            && let Some(tool_calls) = &assistant.tool_calls
+        {
+            for tc in tool_calls {
+                if let ChatCompletionMessageToolCalls::Function(func_call) = tc {
+                    if let Ok(name) = func_call.function.name.parse::<ToolName>() {
+                        name_map.insert(func_call.id.clone(), name);
+                    }
+                    if let Ok(args) =
+                        serde_json::from_str::<serde_json::Value>(&func_call.function.arguments)
+                    {
+                        args_map.insert(func_call.id.clone(), args);
                     }
                 }
             }
@@ -281,7 +281,7 @@ fn compress_grep(content: &str, tool_args: Option<&serde_json::Value>) -> String
 /// Input format: one file path per line
 fn compress_glob(content: &str) -> String {
     if content.starts_with("No files found") {
-        return format!("[Previously globbed: no matches.]");
+        return "[Previously globbed: no matches.]".to_string();
     }
 
     let lines: Vec<&str> = content.lines().collect();
@@ -297,7 +297,7 @@ fn compress_glob(content: &str) -> String {
 /// Input format: "path/file.ext (1.2KB)" or "path/dir/" per line
 fn compress_list(content: &str) -> String {
     if content.ends_with("(empty)") {
-        return format!("[Previously listed: empty directory.]");
+        return "[Previously listed: empty directory.]".to_string();
     }
 
     let lines: Vec<&str> = content.lines().collect();
@@ -350,7 +350,7 @@ fn compress_edit(content: &str) -> String {
     if content.len() < 200 {
         return content.to_string(); // Don't compress short outputs
     }
-    format!("[Previously edited file.]")
+    "[Previously edited file.]".to_string()
 }
 
 /// Compress write tool output.
@@ -358,7 +358,7 @@ fn compress_write(content: &str) -> String {
     if content.len() < 200 {
         return content.to_string();
     }
-    format!("[Previously wrote file.]")
+    "[Previously wrote file.]".to_string()
 }
 
 /// Compress patch tool output.
@@ -366,7 +366,7 @@ fn compress_patch(content: &str) -> String {
     if content.len() < 200 {
         return content.to_string();
     }
-    format!("[Previously patched file.]")
+    "[Previously patched file.]".to_string()
 }
 
 /// Generic compression for unknown tools.

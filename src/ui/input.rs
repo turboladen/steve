@@ -132,7 +132,7 @@ pub fn count_visual_lines(lines: &[String], width: usize) -> u16 {
             if line_width == 0 {
                 1u32
             } else {
-                ((line_width + width - 1) / width) as u32
+                line_width.div_ceil(width) as u32
             }
         })
         .sum();
@@ -323,7 +323,7 @@ impl InputState {
                         .chars()
                         .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
                         .sum();
-                    if line_width > 0 && line_width % width == 0 {
+                    if line_width > 0 && line_width.is_multiple_of(width) {
                         visual_rows = visual_rows.saturating_add(1);
                     }
                 }
@@ -480,10 +480,10 @@ fn render_wrapped_textarea(frame: &mut Frame, area: Rect, state: &mut InputState
 
         let wrapped = wrap_line_with_cursor(line, width, cur_col, normal_style, cursor_style);
 
-        if i == cursor_row {
-            if let Some(row_in_wrapped) = wrapped.cursor_visual_row {
-                cursor_visual_row = all_visual_lines.len() as u16 + row_in_wrapped as u16;
-            }
+        if i == cursor_row
+            && let Some(row_in_wrapped) = wrapped.cursor_visual_row
+        {
+            cursor_visual_row = all_visual_lines.len() as u16 + row_in_wrapped as u16;
         }
 
         all_visual_lines.extend(wrapped.visual_lines);

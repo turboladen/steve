@@ -207,6 +207,8 @@ pub struct App {
 }
 
 impl App {
+    // Structural — these args are all needed
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         project: ProjectInfo,
         config: Config,

@@ -194,22 +194,22 @@ impl MessageBlock {
         args_summary: String,
         diff_content: Option<DiffContent>,
     ) {
-        if let MessageBlock::Assistant { parts, .. } = self {
-            if let Some(AssistantPart::ToolGroup(group)) = parts.last_mut() {
-                group.calls.push(ToolCall {
-                    tool_name,
-                    args_summary,
-                    full_output: None,
-                    result_summary: None,
-                    diff_content,
-                    is_error: false,
-                    expanded: tool_name.is_write_tool(),
-                    agent_progress: None,
-                });
-                group.status = ToolGroupStatus::Running {
-                    current_tool: tool_name,
-                };
-            }
+        if let MessageBlock::Assistant { parts, .. } = self
+            && let Some(AssistantPart::ToolGroup(group)) = parts.last_mut()
+        {
+            group.calls.push(ToolCall {
+                tool_name,
+                args_summary,
+                full_output: None,
+                result_summary: None,
+                diff_content,
+                is_error: false,
+                expanded: tool_name.is_write_tool(),
+                agent_progress: None,
+            });
+            group.status = ToolGroupStatus::Running {
+                current_tool: tool_name,
+            };
         }
     }
 
@@ -258,25 +258,24 @@ impl MessageBlock {
     pub fn update_agent_progress(&mut self, tool_name: ToolName, args_summary: String) {
         if let MessageBlock::Assistant { parts, .. } = self {
             for part in parts.iter_mut().rev() {
-                if let AssistantPart::ToolGroup(group) = part {
-                    if let Some(call) = group
+                if let AssistantPart::ToolGroup(group) = part
+                    && let Some(call) = group
                         .calls
                         .iter_mut()
                         .find(|c| c.tool_name == ToolName::Agent && c.result_summary.is_none())
-                    {
-                        let tool_count = call
-                            .agent_progress
-                            .as_ref()
-                            .map(|p| p.tool_count + 1)
-                            .unwrap_or(1);
-                        call.agent_progress = Some(AgentProgressInfo {
-                            tool_name,
-                            args_summary,
-                            result_summary: None,
-                            tool_count,
-                        });
-                        return;
-                    }
+                {
+                    let tool_count = call
+                        .agent_progress
+                        .as_ref()
+                        .map(|p| p.tool_count + 1)
+                        .unwrap_or(1);
+                    call.agent_progress = Some(AgentProgressInfo {
+                        tool_name,
+                        args_summary,
+                        result_summary: None,
+                        tool_count,
+                    });
+                    return;
                 }
             }
         }
@@ -288,17 +287,16 @@ impl MessageBlock {
     pub fn update_agent_progress_result(&mut self, result_summary: Option<String>) {
         if let MessageBlock::Assistant { parts, .. } = self {
             for part in parts.iter_mut().rev() {
-                if let AssistantPart::ToolGroup(group) = part {
-                    if let Some(call) = group
+                if let AssistantPart::ToolGroup(group) = part
+                    && let Some(call) = group
                         .calls
                         .iter_mut()
                         .find(|c| c.tool_name == ToolName::Agent && c.result_summary.is_none())
-                    {
-                        if let Some(ref mut progress) = call.agent_progress {
-                            progress.result_summary = result_summary;
-                        }
-                        return;
+                {
+                    if let Some(ref mut progress) = call.agent_progress {
+                        progress.result_summary = result_summary;
                     }
+                    return;
                 }
             }
         }

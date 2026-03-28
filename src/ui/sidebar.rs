@@ -166,6 +166,7 @@ impl From<crate::task::Task> for SidebarTask {
 }
 
 /// State for the sidebar panel.
+#[derive(Default)]
 pub struct SidebarState {
     pub session_title: String,
     pub model_name: String,
@@ -191,28 +192,6 @@ pub struct SidebarState {
     pub git_repo_name: Option<String>,
     /// Diagnostics summary for sidebar indicator.
     pub diagnostics_summary: DiagnosticSummary,
-}
-
-impl Default for SidebarState {
-    fn default() -> Self {
-        Self {
-            session_title: String::new(),
-            model_name: String::new(),
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            session_cost: None,
-            tasks: Vec::new(),
-            session_closed_task_ids: Vec::new(),
-            changes: Vec::new(),
-            lsp_servers: Vec::new(),
-            mcp_servers: Vec::new(),
-            git_branch: None,
-            git_dirty: None,
-            git_repo_name: None,
-            diagnostics_summary: DiagnosticSummary::default(),
-        }
-    }
 }
 
 /// Count addition and removal lines from a `DiffContent`.

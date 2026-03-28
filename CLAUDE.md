@@ -40,7 +40,9 @@ Every change that introduces new types, trait impls, or behavior must include un
   dedicated tests
 - **Assertions**: Never use trivially-true assertions — verify the specific behavior under test
 
-Run `cargo test` after every change.
+Run `cargo test` after every change. Run `cargo clippy` and fix all warnings — only use
+`#[allow(clippy::...)]` in rare cases with a justifying comment. The crate enables
+`#![warn(clippy::cargo)]` in both `lib.rs` and `main.rs`.
 
 ## Configuration
 
