@@ -15,13 +15,13 @@ use super::{ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput};
 // ── Language detection ───────────────────────────────────────────────────
 
 /// Supported language info for tree-sitter parsing.
-struct LangInfo {
-    language: Language,
-    name: &'static str,
+pub(crate) struct LangInfo {
+    pub(crate) language: Language,
+    pub(crate) name: &'static str,
 }
 
 /// Detect the programming language from a file extension and return its grammar.
-fn detect_language(path: &Path) -> Option<LangInfo> {
+pub(crate) fn detect_language(path: &Path) -> Option<LangInfo> {
     let ext = path.extension()?.to_str()?;
     let (lang_fn, name): (tree_sitter_language::LanguageFn, &str) = match ext {
         "rs" => (tree_sitter_rust::LANGUAGE, "rust"),
@@ -141,12 +141,12 @@ fn container_node_types(lang_name: &str) -> &'static [&'static str] {
 
 /// A discovered symbol in the AST.
 #[derive(Debug, Clone)]
-struct Symbol {
-    kind: String,
-    name: String,
-    start_line: usize, // 1-indexed
-    end_line: usize,   // 1-indexed
-    children: Vec<Symbol>,
+pub(crate) struct Symbol {
+    pub(crate) kind: String,
+    pub(crate) name: String,
+    pub(crate) start_line: usize, // 1-indexed
+    pub(crate) end_line: usize,   // 1-indexed
+    pub(crate) children: Vec<Symbol>,
 }
 
 /// Extract the human-readable name from an AST node.
@@ -219,7 +219,7 @@ fn node_text(node: Node, source: &[u8]) -> String {
 }
 
 /// Simplify an AST node type name into a human-readable kind label.
-fn kind_label(node_type: &str) -> &str {
+pub(crate) fn kind_label(node_type: &str) -> &str {
     match node_type {
         // Rust
         "function_item" => "fn",
@@ -269,7 +269,12 @@ fn kind_label(node_type: &str) -> &str {
 }
 
 /// Walk the AST and collect symbols up to `max_depth` levels deep.
-fn walk_symbols(node: Node, source: &[u8], lang_name: &str, depth: usize) -> Vec<Symbol> {
+pub(crate) fn walk_symbols(
+    node: Node,
+    source: &[u8],
+    lang_name: &str,
+    depth: usize,
+) -> Vec<Symbol> {
     let symbol_types = symbol_node_types(lang_name);
     let container_types = container_node_types(lang_name);
     let mut symbols = Vec::new();

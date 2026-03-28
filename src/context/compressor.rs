@@ -193,7 +193,7 @@ fn compress_read(content: &str, tool_args: Option<&serde_json::Value>) -> String
         _ => String::new(),
     };
 
-    let lang = detect_language_from_content(content);
+    let lang = detect_language_label(tool_args);
 
     // Extract first few "important" lines (imports, module declarations)
     let key_lines: Vec<String> = lines
@@ -222,7 +222,7 @@ fn compress_read(content: &str, tool_args: Option<&serde_json::Value>) -> String
         .collect();
 
     // Extract key definitions (fn, struct, impl, class, def, etc.)
-    let definitions = extract_definitions(content);
+    let definitions = extract_definitions(tool_args, content);
 
     let key_items = if !key_lines.is_empty() || !definitions.is_empty() {
         let mut items: Vec<String> = key_lines;
@@ -404,193 +404,93 @@ fn compress_generic(content: &str) -> String {
     format!("[Previous tool result: {line_count} lines, {char_count} chars.]")
 }
 
-/// Detect programming language from file content heuristics.
-fn detect_language_from_content(content: &str) -> &'static str {
-    // Check for common language patterns in the numbered-line format
-    // Lines look like "   4 | fn main() {"
-    let sample: String = content.lines().take(30).collect::<Vec<_>>().join("\n");
+/// Detect programming language from file path extension.
+fn detect_language_label(tool_args: Option<&serde_json::Value>) -> &'static str {
+    let path_str = tool_args
+        .and_then(|a| {
+            crate::tool::ToolName::Read
+                .path_arg_keys()
+                .iter()
+                .find_map(|k| a.get(*k))
+        })
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
-    if sample.contains("fn ") && (sample.contains("let ") || sample.contains("use ")) {
-        "Rust"
-    } else if sample.contains("def ") && sample.contains("self") {
-        "Python"
-    } else if sample.contains("function ") || sample.contains("const ") && sample.contains("=>") {
-        "JavaScript/TypeScript"
-    } else if sample.contains("func ") && sample.contains("package ") {
-        "Go"
-    } else if sample.contains("class ") && sample.contains("public ") {
-        "Java/C#"
-    } else if sample.contains("#include") {
-        "C/C++"
-    } else {
-        "text"
-    }
-}
-
-/// Extract function/struct/class definitions from numbered-line file content.
-fn extract_definitions(content: &str) -> Vec<String> {
-    let mut defs = Vec::new();
-
-    for line in content.lines() {
-        // Strip the line number prefix: "   4 | actual content"
-        let stripped = if let Some(pipe_pos) = line.find(" | ") {
-            &line[pipe_pos + 3..]
-        } else {
-            line
-        };
-
-        let trimmed = stripped.trim();
-
-        // Rust: fn, struct, enum, impl, trait, mod, type
-        if let Some(name) = extract_rust_def(trimmed) {
-            defs.push(name);
-        }
-        // Python: def, class
-        else if let Some(name) = extract_python_def(trimmed) {
-            defs.push(name);
-        }
-        // JS/TS: function, class, export
-        else if let Some(name) = extract_js_def(trimmed) {
-            defs.push(name);
-        }
-        // Go: func, type
-        else if let Some(name) = extract_go_def(trimmed) {
-            defs.push(name);
-        }
+    if path_str.is_empty() {
+        return "text";
     }
 
-    defs
+    crate::tool::symbols::detect_language(std::path::Path::new(path_str))
+        .map(|info| info.name)
+        .unwrap_or("text")
 }
 
-fn extract_rust_def(line: &str) -> Option<String> {
-    for keyword in &[
-        "pub fn ",
-        "fn ",
-        "pub struct ",
-        "struct ",
-        "pub enum ",
-        "enum ",
-        "pub trait ",
-        "trait ",
-        "impl ",
-        "pub mod ",
-        "mod ",
-        "pub type ",
-        "type ",
-    ] {
-        let matches = if line.starts_with(keyword) {
-            true
-        } else if keyword.starts_with("pub ") {
-            // Also check for pub(crate) variants
-            line.starts_with(&format!("pub(crate) {}", &keyword[4..]))
-        } else {
-            false
-        };
+/// Extract function/struct/class definitions using tree-sitter.
+/// Falls back to empty vec if the language isn't supported or parsing fails.
+fn extract_definitions(tool_args: Option<&serde_json::Value>, content: &str) -> Vec<String> {
+    let path_str = tool_args
+        .and_then(|a| {
+            crate::tool::ToolName::Read
+                .path_arg_keys()
+                .iter()
+                .find_map(|k| a.get(*k))
+        })
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
-        if matches {
-            let rest = &line[keyword.len()..];
-            let name: String = rest
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '<')
-                .take_while(|c| *c != '<')
-                .collect();
-            if !name.is_empty() {
-                return Some(format!("{keyword}{name}").trim_end().to_string());
+    if path_str.is_empty() {
+        return Vec::new();
+    }
+
+    let path = std::path::Path::new(path_str);
+    let lang_info = match crate::tool::symbols::detect_language(path) {
+        Some(info) => info,
+        None => return Vec::new(),
+    };
+
+    // Strip line-number prefixes to get raw source
+    let raw_source = strip_line_numbers(content);
+
+    // Parse with tree-sitter
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&lang_info.language).is_err() {
+        return Vec::new();
+    }
+    let tree = match parser.parse(raw_source.as_bytes(), None) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+
+    // Walk symbols (depth 0 = top-level only)
+    let symbols = crate::tool::symbols::walk_symbols(
+        tree.root_node(),
+        raw_source.as_bytes(),
+        lang_info.name,
+        0,
+    );
+
+    symbols
+        .iter()
+        .map(|s| {
+            let kind = crate::tool::symbols::kind_label(&s.kind);
+            format!("{kind} {}", s.name)
+        })
+        .collect()
+}
+
+/// Strip "   N | " line-number prefixes from read tool output to get raw source.
+fn strip_line_numbers(content: &str) -> String {
+    content
+        .lines()
+        .map(|line| {
+            if let Some(pipe_pos) = line.find(" | ") {
+                &line[pipe_pos + 3..]
+            } else {
+                line
             }
-        }
-    }
-    None
-}
-
-fn extract_python_def(line: &str) -> Option<String> {
-    if line.starts_with("def ") {
-        let name: String = line[4..]
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_')
-            .collect();
-        if !name.is_empty() {
-            return Some(format!("def {name}"));
-        }
-    }
-    if line.starts_with("class ") {
-        let name: String = line[6..]
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_')
-            .collect();
-        if !name.is_empty() {
-            return Some(format!("class {name}"));
-        }
-    }
-    None
-}
-
-fn extract_js_def(line: &str) -> Option<String> {
-    if line.starts_with("function ") {
-        let name: String = line[9..]
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_')
-            .collect();
-        if !name.is_empty() {
-            return Some(format!("function {name}"));
-        }
-    }
-    if line.starts_with("class ") {
-        let name: String = line[6..]
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_')
-            .collect();
-        if !name.is_empty() {
-            return Some(format!("class {name}"));
-        }
-    }
-    if line.starts_with("export ") {
-        // export function/class/const
-        let rest = line[7..].trim_start();
-        if rest.starts_with("function ") || rest.starts_with("class ") || rest.starts_with("const ")
-        {
-            let keyword_end = rest.find(' ').unwrap_or(0) + 1;
-            let name: String = rest[keyword_end..]
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            if !name.is_empty() {
-                let keyword = &rest[..keyword_end - 1];
-                return Some(format!("export {keyword} {name}"));
-            }
-        }
-    }
-    None
-}
-
-fn extract_go_def(line: &str) -> Option<String> {
-    if line.starts_with("func ") {
-        let rest = &line[5..];
-        // Skip receiver: func (r *Receiver) Name(...)
-        let name_start = if rest.starts_with('(') {
-            rest.find(')').map(|p| p + 2).unwrap_or(0)
-        } else {
-            0
-        };
-        if name_start < rest.len() {
-            let name: String = rest[name_start..]
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            if !name.is_empty() {
-                return Some(format!("func {name}"));
-            }
-        }
-    }
-    if line.starts_with("type ") {
-        let name: String = line[5..]
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_')
-            .collect();
-        if !name.is_empty() {
-            return Some(format!("type {name}"));
-        }
-    }
-    None
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -615,7 +515,7 @@ mod tests {
         let result = compress_read(&content, Some(&args));
         assert!(result.starts_with("[Previously read:"));
         assert!(result.contains("100 lines"));
-        assert!(result.contains("Rust"));
+        assert!(result.contains("rust"));
         assert!(result.contains("src/main.rs"));
         assert!(result.ends_with("]"));
     }
@@ -660,20 +560,35 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_rust_defs() {
-        assert_eq!(
-            extract_rust_def("pub fn main() {"),
-            Some("pub fn main".to_string())
+    fn test_extract_definitions_rust() {
+        let content = "   1 | use std::io;\n   2 | \n   3 | pub fn main() {\n   4 |     let x = 5;\n   5 | }\n   6 | \n   7 | struct Foo {\n   8 |     bar: i32,\n   9 | }";
+        let args = serde_json::json!({"path": "test.rs"});
+        let defs = extract_definitions(Some(&args), content);
+        assert!(
+            defs.iter().any(|d| d.contains("main")),
+            "should find fn main, got: {:?}",
+            defs
         );
-        assert_eq!(
-            extract_rust_def("struct Foo {"),
-            Some("struct Foo".to_string())
+        assert!(
+            defs.iter().any(|d| d.contains("Foo")),
+            "should find struct Foo, got: {:?}",
+            defs
         );
-        assert_eq!(
-            extract_rust_def("impl ToolRegistry {"),
-            Some("impl ToolRegistry".to_string())
-        );
-        assert_eq!(extract_rust_def("let x = 5;"), None);
+    }
+
+    #[test]
+    fn test_extract_definitions_unsupported_language() {
+        let content = "   1 | some content";
+        let args = serde_json::json!({"path": "readme.txt"});
+        let defs = extract_definitions(Some(&args), content);
+        assert!(defs.is_empty());
+    }
+
+    #[test]
+    fn test_extract_definitions_no_args() {
+        let content = "   1 | fn main() {}";
+        let defs = extract_definitions(None, content);
+        assert!(defs.is_empty());
     }
 
     #[test]
