@@ -382,7 +382,7 @@ impl App {
                         if !epic_tasks.is_empty() {
                             output.push_str(&format!("## {} ({})\n", epic.title, epic.id));
                             for t in &epic_tasks {
-                                let marker = if t.status == crate::task::types::TaskStatus::Done {
+                                let marker = if t.status == crate::task::TaskStatus::Done {
                                     "x"
                                 } else {
                                     " "
@@ -407,7 +407,7 @@ impl App {
                         }
                         output.push_str("## Standalone Tasks\n");
                         for t in &standalone {
-                            let marker = if t.status == crate::task::types::TaskStatus::Done {
+                            let marker = if t.status == crate::task::TaskStatus::Done {
                                 "x"
                             } else {
                                 " "
@@ -503,16 +503,15 @@ impl App {
                                         }
                                         "priority" => match val {
                                             "high" => {
-                                                task.priority = crate::task::types::Priority::High;
+                                                task.priority = crate::task::Priority::High;
                                                 changed.push("priority");
                                             }
                                             "medium" => {
-                                                task.priority =
-                                                    crate::task::types::Priority::Medium;
+                                                task.priority = crate::task::Priority::Medium;
                                                 changed.push("priority");
                                             }
                                             "low" => {
-                                                task.priority = crate::task::types::Priority::Low;
+                                                task.priority = crate::task::Priority::Low;
                                                 changed.push("priority");
                                             }
                                             _ => {
@@ -523,16 +522,15 @@ impl App {
                                         },
                                         "status" => match val {
                                             "open" => {
-                                                task.status = crate::task::types::TaskStatus::Open;
+                                                task.status = crate::task::TaskStatus::Open;
                                                 changed.push("status");
                                             }
                                             "in_progress" | "inprogress" => {
-                                                task.status =
-                                                    crate::task::types::TaskStatus::InProgress;
+                                                task.status = crate::task::TaskStatus::InProgress;
                                                 changed.push("status");
                                             }
                                             "done" => {
-                                                task.status = crate::task::types::TaskStatus::Done;
+                                                task.status = crate::task::TaskStatus::Done;
                                                 changed.push("status");
                                             }
                                             _ => {
@@ -601,7 +599,7 @@ impl App {
                     &title,
                     "",
                     None,
-                    crate::task::types::Priority::default(),
+                    crate::task::Priority::default(),
                 ) {
                     Ok(epic) => {
                         self.messages.push(MessageBlock::System {

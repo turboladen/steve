@@ -46,7 +46,7 @@ use crate::{
     },
     storage::Storage,
     stream::{self, StreamRequest},
-    task::types::{Priority, TaskKind, TaskStatus},
+    task::{Priority, TaskKind, TaskStatus},
     tool::{ToolContext, ToolName, ToolRegistry},
     ui,
     ui::{

@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::{
     diagnostics::{DiagnosticSummary, Severity},
-    task::types::{Priority, TaskKind, TaskStatus},
+    task::{Priority, TaskKind, TaskStatus},
     ui::message_block::{DiffContent, DiffLine},
 };
 

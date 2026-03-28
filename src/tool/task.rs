@@ -8,10 +8,7 @@ use serde_json::Value;
 use super::{ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput};
 use crate::{
     DateTimeExt,
-    task::{
-        TaskStore,
-        types::{EpicStatus, Priority, TaskKind, TaskStatus},
-    },
+    task::{EpicStatus, Priority, TaskKind, TaskStatus, TaskStore},
 };
 
 pub fn tool() -> ToolEntry {
