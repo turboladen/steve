@@ -8,12 +8,10 @@ mod key_handling;
 mod prompt;
 mod session;
 mod tool_display;
-mod types;
 
 use constants::*;
 use tool_display::extract_diff_content;
 pub use tool_display::{extract_args_summary, extract_result_summary};
-use types::*;
 
 use std::{
     sync::Arc,
@@ -64,6 +62,25 @@ use crate::{
     },
     usage::{UsageWriter, types::SessionRecord},
 };
+
+/// A permission prompt waiting for user input.
+struct PendingPermission {
+    tool_name: crate::tool::ToolName,
+    #[allow(dead_code)]
+    summary: String,
+    response_tx: tokio::sync::oneshot::Sender<PermissionReply>,
+}
+
+/// A question prompt from the LLM waiting for user input.
+struct PendingQuestion {
+    call_id: String,
+    #[allow(dead_code)]
+    question: String,
+    options: Vec<String>,
+    selected: Option<usize>,
+    free_text: String,
+    response_tx: tokio::sync::oneshot::Sender<String>,
+}
 
 pub struct App {
     // Core state

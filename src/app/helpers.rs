@@ -694,7 +694,7 @@ mod tests {
         let mut app = make_test_app();
         app.streaming_active = true;
         let (tx, mut rx) = tokio::sync::oneshot::channel();
-        app.pending_permission = Some(super::types::PendingPermission {
+        app.pending_permission = Some(PendingPermission {
             tool_name: ToolName::Bash,
             summary: "test".into(),
             response_tx: tx,

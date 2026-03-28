@@ -553,7 +553,7 @@ mod tests {
 
     fn make_pending_permission(app: &mut App) -> tokio::sync::oneshot::Receiver<PermissionReply> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        app.pending_permission = Some(super::super::types::PendingPermission {
+        app.pending_permission = Some(PendingPermission {
             tool_name: ToolName::Bash,
             summary: "test command".into(),
             response_tx: tx,
@@ -567,7 +567,7 @@ mod tests {
     ) -> tokio::sync::oneshot::Receiver<String> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let has_options = !options.is_empty();
-        app.pending_question = Some(super::super::types::PendingQuestion {
+        app.pending_question = Some(PendingQuestion {
             call_id: "call-1".into(),
             question: "Pick one".into(),
             options,
