@@ -20,26 +20,7 @@ impl App {
             .unwrap_or_default();
 
         // Parse and resolve @ file references
-        let refs = file_ref::parse_refs(&text);
-        let resolved: Vec<_> = refs
-            .iter()
-            .filter_map(|r| file_ref::resolve_ref(r, &self.project.root))
-            .collect();
-
-        // Show errors for unresolved refs
-        for r in &refs {
-            if !resolved.iter().any(|rr| rr.file_ref.path == r.path) {
-                self.messages.push(MessageBlock::System {
-                    text: format!("Could not resolve file: {}", r.path),
-                });
-            }
-        }
-
-        let (display_text, api_text) = if resolved.is_empty() {
-            (text.clone(), text.clone())
-        } else {
-            file_ref::augment_message(&text, &resolved)
-        };
+        let (display_text, api_text) = self.resolve_file_refs(&text);
 
         // Create and save user message
         let user_msg = Message::user(&session_id, &api_text);
@@ -52,39 +33,16 @@ impl App {
             .push(MessageBlock::User { text: display_text });
         self.message_area_state.scroll_to_bottom();
 
-        // Try to send to LLM
-        let Some(registry) = &self.provider_registry else {
-            self.messages.push(MessageBlock::Error {
-                text: "No provider configured. Add providers to .steve.jsonc or ~/.config/steve/config.jsonc.".to_string(),
-            });
-            return Ok(());
-        };
-
-        let Some(model_ref) = &self.current_model else {
+        // Resolve provider + model + client
+        let Some(model_ref) = &self.current_model.clone() else {
             self.messages.push(MessageBlock::Error {
                 text: "No model selected. Set 'model' in .steve.jsonc or ~/.config/steve/config.jsonc.".to_string(),
             });
             return Ok(());
         };
 
-        let resolved = match registry.resolve_model(model_ref) {
-            Ok(r) => r,
-            Err(e) => {
-                self.messages.push(MessageBlock::Error {
-                    text: format!("{e}"),
-                });
-                return Ok(());
-            }
-        };
-
-        let client = match registry.client(&resolved.provider_id) {
-            Ok(c) => c,
-            Err(e) => {
-                self.messages.push(MessageBlock::Error {
-                    text: format!("{e}"),
-                });
-                return Ok(());
-            }
+        let Some((resolved, client)) = self.resolve_client(&model_ref) else {
+            return Ok(());
         };
 
         // Create the assistant message that will accumulate streaming deltas
@@ -234,5 +192,146 @@ impl App {
                 // Silently continue without persistence if storage fails
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::tests::{make_test_app, make_test_app_with_storage, make_test_registry, has_error_message, has_system_message};
+
+    #[tokio::test]
+    async fn handle_input_slash_delegates_to_command() {
+        let mut app = make_test_app();
+        // /help is a valid command — should not push an error
+        app.handle_input("/help".into()).await.unwrap();
+        assert!(has_system_message(&app, "Commands:"));
+    }
+
+    #[tokio::test]
+    async fn handle_input_no_model_pushes_error() {
+        let mut app = make_test_app();
+        assert!(app.current_model.is_none());
+        app.handle_input("hello".into()).await.unwrap();
+        assert!(has_error_message(&app, "No model selected"));
+    }
+
+    #[tokio::test]
+    async fn handle_input_no_provider_pushes_error() {
+        let mut app = make_test_app();
+        app.current_model = Some("test/model".into());
+        assert!(app.provider_registry.is_none());
+        app.handle_input("hello".into()).await.unwrap();
+        assert!(has_error_message(&app, "No provider configured"));
+    }
+
+    #[tokio::test]
+    async fn handle_input_saves_user_message() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        app.current_model = Some("test/test-model".into());
+        app.provider_registry = Some(make_test_registry(128_000));
+
+        let stored_before = app.stored_messages.len();
+        app.handle_input("test message".into()).await.unwrap();
+
+        // User message should be saved
+        assert_eq!(app.stored_messages.len(), stored_before + 1);
+        assert!(app.stored_messages.last().unwrap().text_content().contains("test message"));
+    }
+
+    #[tokio::test]
+    async fn handle_input_pushes_user_display_block() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        app.current_model = Some("test/test-model".into());
+        app.provider_registry = Some(make_test_registry(128_000));
+
+        app.handle_input("hello world".into()).await.unwrap();
+
+        // Should have a User message block in display
+        let has_user = app.messages.iter().any(|m| {
+            matches!(m, MessageBlock::User { text } if text.contains("hello world"))
+        });
+        assert!(has_user, "should have User message block");
+    }
+
+    #[tokio::test]
+    async fn handle_input_starts_streaming() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        app.current_model = Some("test/test-model".into());
+        app.provider_registry = Some(make_test_registry(128_000));
+
+        assert!(!app.is_loading);
+        assert!(!app.streaming_active);
+
+        app.handle_input("go".into()).await.unwrap();
+
+        assert!(app.is_loading);
+        assert!(app.streaming_active);
+        assert!(app.stream_start_time.is_some());
+        assert!(app.stream_cancel.is_some());
+        assert!(app.interjection_tx.is_some());
+    }
+
+    #[tokio::test]
+    async fn handle_input_ensures_session() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        app.current_model = Some("test/test-model".into());
+        app.provider_registry = Some(make_test_registry(128_000));
+        app.current_session = None;
+
+        app.handle_input("hello".into()).await.unwrap();
+
+        assert!(app.current_session.is_some());
+    }
+
+    #[test]
+    fn ensure_session_creates_when_none() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        app.current_session = None;
+
+        app.ensure_session();
+
+        assert!(app.current_session.is_some());
+    }
+
+    #[test]
+    fn ensure_session_noop_when_exists() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        app.ensure_session(); // creates one
+        let session_id = app.current_session.as_ref().unwrap().id.clone();
+
+        app.ensure_session(); // should not create another
+
+        assert_eq!(app.current_session.as_ref().unwrap().id, session_id);
+    }
+
+    #[test]
+    fn prune_empty_session_deletes_empty() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        app.ensure_session();
+        let session_id = app.current_session.as_ref().unwrap().id.clone();
+        assert_eq!(app.exchange_count, 0);
+        assert!(app.stored_messages.is_empty());
+
+        app.prune_empty_session();
+
+        // Session should be deleted from storage
+        let mgr = SessionManager::new(&app.storage, &app.project.id);
+        assert!(mgr.load_session(&session_id).is_err());
+    }
+
+    #[test]
+    fn prune_empty_session_keeps_nonempty() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        app.ensure_session();
+        let session_id = app.current_session.as_ref().unwrap().id.clone();
+        // Simulate that we've had exchanges
+        app.exchange_count = 1;
+
+        app.prune_empty_session();
+
+        // Session should still exist
+        let mgr = SessionManager::new(&app.storage, &app.project.id);
+        assert!(mgr.load_session(&session_id).is_ok());
     }
 }

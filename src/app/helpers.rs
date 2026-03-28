@@ -59,6 +59,31 @@ impl App {
         self.status_line_state.set_activity(Activity::Idle);
     }
 
+    /// Parse `@file` references in user text, resolve them against the project root,
+    /// push error messages for unresolved refs, and return (display_text, api_text).
+    /// If no refs are found, both strings equal the input text.
+    pub(super) fn resolve_file_refs(&mut self, text: &str) -> (String, String) {
+        let refs = file_ref::parse_refs(text);
+        let resolved: Vec<_> = refs
+            .iter()
+            .filter_map(|r| file_ref::resolve_ref(r, &self.project.root))
+            .collect();
+
+        for r in &refs {
+            if !resolved.iter().any(|rr| rr.file_ref.path == r.path) {
+                self.messages.push(MessageBlock::System {
+                    text: format!("Could not resolve file: {}", r.path),
+                });
+            }
+        }
+
+        if resolved.is_empty() {
+            (text.to_string(), text.to_string())
+        } else {
+            file_ref::augment_message(text, &resolved)
+        }
+    }
+
     /// Find the last Assistant block in messages.
     /// Permission/System blocks can be interleaved during streaming, so
     /// `messages.last_mut()` may not be the Assistant block we need.
@@ -171,31 +196,11 @@ impl App {
             return;
         }
 
-        let Some(tx) = &self.interjection_tx else {
+        let Some(tx) = self.interjection_tx.clone() else {
             return;
         };
 
-        // Parse and resolve @ file references
-        let refs = file_ref::parse_refs(&text);
-        let resolved: Vec<_> = refs
-            .iter()
-            .filter_map(|r| file_ref::resolve_ref(r, &self.project.root))
-            .collect();
-
-        // Show errors for unresolved refs
-        for r in &refs {
-            if !resolved.iter().any(|rr| rr.file_ref.path == r.path) {
-                self.messages.push(MessageBlock::System {
-                    text: format!("Could not resolve file: {}", r.path),
-                });
-            }
-        }
-
-        let (display_text, api_text) = if resolved.is_empty() {
-            (text.clone(), text.clone())
-        } else {
-            file_ref::augment_message(&text, &resolved)
-        };
+        let (display_text, api_text) = self.resolve_file_refs(&text);
 
         // Send augmented text to stream task via interjection channel
         if tx.send(api_text.clone()).is_err() {
