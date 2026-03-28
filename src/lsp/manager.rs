@@ -64,10 +64,18 @@ impl LspManager {
         let stdout = child.stdout.take().context("no stdout")?;
         let mut transport = super::client::JsonRpcTransport::new(stdin, stdout);
 
-        #[allow(deprecated)]
+        let root_uri = path_to_uri(&self.project_root)?;
         let init_params = lsp_types::InitializeParams {
             process_id: Some(std::process::id()),
-            root_uri: Some(path_to_uri(&self.project_root)?),
+            workspace_folders: Some(vec![lsp_types::WorkspaceFolder {
+                uri: root_uri,
+                name: self
+                    .project_root
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("project")
+                    .to_string(),
+            }]),
             capabilities: lsp_types::ClientCapabilities {
                 text_document: Some(lsp_types::TextDocumentClientCapabilities {
                     publish_diagnostics: Some(lsp_types::PublishDiagnosticsClientCapabilities {
