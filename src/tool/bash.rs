@@ -237,14 +237,9 @@ fn run_command(command: &str, cwd: &Path, timeout_secs: u64) -> Result<CommandRe
     if result.len() > max_len {
         let total_len = result.len();
         // Find safe char boundaries first to avoid panicking on multi-byte UTF-8
-        let safe_head_boundary = {
-            let mut end = 15_000.min(total_len);
-            while end > 0 && !result.is_char_boundary(end) {
-                end -= 1;
-            }
-            end
-        };
+        let safe_head_boundary = crate::floor_char_boundary(&result, 15_000.min(total_len));
         let safe_tail_boundary = {
+            // ceil_char_boundary: advance to the next valid boundary
             let mut start = total_len.saturating_sub(4_000);
             while start < total_len && !result.is_char_boundary(start) {
                 start += 1;

@@ -612,11 +612,7 @@ pub fn mcp_permission_summary(prefixed_name: &str, args: &Value) -> String {
     if let Some((server_id, tool_name)) = parse_prefixed_tool_name(prefixed_name) {
         let args_preview = serde_json::to_string(args).unwrap_or_default();
         let truncated = if args_preview.len() > 80 {
-            // Truncate at a char boundary to avoid panicking on multi-byte UTF-8
-            let mut end = 80;
-            while end > 0 && !args_preview.is_char_boundary(end) {
-                end -= 1;
-            }
+            let end = crate::floor_char_boundary(&args_preview, 80);
             format!("{}...", &args_preview[..end])
         } else {
             args_preview
@@ -645,10 +641,7 @@ pub async fn build_resource_context(manager: &McpManager, max_chars: usize) -> O
         match manager.read_resource(server_id, uri).await {
             Ok(content) if !content.trim().is_empty() => {
                 let truncated = if content.len() > max_chars {
-                    let mut end = max_chars;
-                    while end > 0 && !content.is_char_boundary(end) {
-                        end -= 1;
-                    }
+                    let end = crate::floor_char_boundary(&content, max_chars);
                     format!("{}...\n(truncated)", &content[..end])
                 } else {
                     content

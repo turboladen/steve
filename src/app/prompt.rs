@@ -110,10 +110,7 @@ impl App {
         if let Ok(memory) = Self::read_memory_file(&memory_path) {
             if !memory.trim().is_empty() {
                 let truncated = if memory.len() > 2000 {
-                    let mut end = 2000;
-                    while end > 0 && !memory.is_char_boundary(end) {
-                        end -= 1;
-                    }
+                    let end = crate::floor_char_boundary(&memory, 2000);
                     format!(
                         "{}...\n(use memory tool to read full content)",
                         &memory[..end]
@@ -339,11 +336,7 @@ impl App {
         // Cap total output at ~10K chars
         let mut result = parts.join("\n\n");
         if result.len() > 10_000 {
-            let mut end = 10_000;
-            while end > 0 && !result.is_char_boundary(end) {
-                end -= 1;
-            }
-            result.truncate(end);
+            result.truncate(crate::floor_char_boundary(&result, 10_000));
             result.push_str("\n\n(truncated)");
         }
         result

@@ -128,11 +128,7 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
 
                 let trimmed = line.trim_end();
                 let display_line = if trimmed.len() > 200 {
-                    // Truncate at char boundary before 197 to leave room for "..."
-                    let mut end = 197;
-                    while end > 0 && !trimmed.is_char_boundary(end) {
-                        end -= 1;
-                    }
+                    let end = crate::floor_char_boundary(trimmed, 197);
                     format!("{}...", &trimmed[..end])
                 } else {
                     trimmed.to_string()
