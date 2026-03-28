@@ -1,6 +1,6 @@
 //! Pure diagnostic check functions — each takes typed inputs and returns findings.
 
-use crate::config::types::Config;
+use crate::config::Config;
 
 use super::types::{Category, DiagnosticCheck, Severity};
 
@@ -242,7 +242,7 @@ fn log_path_recommendation(base_msg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::Config;
+    use crate::config::Config;
 
     // -- ai_environment_checks tests --
 

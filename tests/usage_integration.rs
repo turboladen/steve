@@ -11,7 +11,7 @@ use ratatui::{Frame, Terminal, backend::TestBackend, buffer::Buffer, layout::Rec
 use tempfile::TempDir;
 
 use steve::{
-    config::types::{ModelCapabilities, ModelConfig, ModelCost, ProviderConfig},
+    config::{ModelCapabilities, ModelConfig, ModelCost, ProviderConfig},
     data::{
         state::{DataState, View},
         views,

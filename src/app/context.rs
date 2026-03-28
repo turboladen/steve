@@ -368,13 +368,13 @@ mod tests {
         let mut models = std::collections::HashMap::new();
         models.insert(
             "small".to_string(),
-            crate::config::types::ModelConfig {
+            crate::config::ModelConfig {
                 id: "small".to_string(),
                 name: "Small".to_string(),
                 context_window: 32_000,
                 max_output_tokens: None,
                 cost: None,
-                capabilities: crate::config::types::ModelCapabilities {
+                capabilities: crate::config::ModelCapabilities {
                     tool_call: true,
                     reasoning: false,
                 },
@@ -382,19 +382,19 @@ mod tests {
         );
         models.insert(
             "large".to_string(),
-            crate::config::types::ModelConfig {
+            crate::config::ModelConfig {
                 id: "large".to_string(),
                 name: "Large".to_string(),
                 context_window: 200_000,
                 max_output_tokens: None,
                 cost: None,
-                capabilities: crate::config::types::ModelCapabilities {
+                capabilities: crate::config::ModelCapabilities {
                     tool_call: true,
                     reasoning: false,
                 },
             },
         );
-        let provider_config = crate::config::types::ProviderConfig {
+        let provider_config = crate::config::ProviderConfig {
             base_url: "https://api.test.com/v1".to_string(),
             api_key_env: "TEST_KEY".to_string(),
             models,

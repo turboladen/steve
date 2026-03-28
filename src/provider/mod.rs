@@ -4,7 +4,7 @@ use std::{collections::HashMap, env};
 
 use anyhow::{Context, Result};
 
-use crate::config::types::{Config, ModelConfig, ProviderConfig};
+use crate::config::{Config, ModelConfig, ProviderConfig};
 use client::LlmClient;
 
 /// A resolved model with its provider context.
@@ -145,7 +145,7 @@ impl ProviderRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::{ModelCapabilities, ModelConfig, ModelCost, ProviderConfig};
+    use crate::config::{ModelCapabilities, ModelConfig, ModelCost, ProviderConfig};
 
     fn make_test_resolved_model() -> ResolvedModel {
         ResolvedModel {

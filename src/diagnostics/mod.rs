@@ -5,7 +5,7 @@ pub mod types;
 
 pub use types::{Category, DiagnosticCheck, DiagnosticSummary, Severity};
 
-use crate::config::types::Config;
+use crate::config::Config;
 
 /// Bundle of inputs for running all diagnostic checks.
 /// Borrows from existing App state — no cloning required.
@@ -69,7 +69,7 @@ pub fn summarize(checks: &[DiagnosticCheck]) -> DiagnosticSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::Config;
+    use crate::config::Config;
 
     #[test]
     fn run_diagnostics_returns_checks_from_all_categories() {

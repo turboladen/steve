@@ -28,7 +28,7 @@ use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    config::types::ModelCost,
+    config::ModelCost,
     context::cache::{CACHE_REPEAT_PREFIX, ToolResultCache},
     event::{AppEvent, StreamUsage},
     permission::{

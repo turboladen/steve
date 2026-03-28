@@ -32,7 +32,7 @@ use async_openai::types::chat::{
 
 use crate::{
     DateTimeExt,
-    config::types::Config,
+    config::Config,
     context::cache::ToolResultCache,
     event::AppEvent,
     file_ref,
@@ -365,7 +365,7 @@ pub(crate) mod tests {
     /// acceptable because UI rendering tests don't perform storage writes. A
     /// temp-dir approach would require returning `TempDir` to keep it alive.
     pub(crate) fn make_test_app() -> App {
-        use crate::{config::types::Config, project::ProjectInfo, storage::Storage};
+        use crate::{config::Config, project::ProjectInfo, storage::Storage};
         use std::path::PathBuf;
 
         let root = PathBuf::from("/tmp/test");
@@ -391,7 +391,7 @@ pub(crate) mod tests {
 
     /// Create a test app backed by an isolated temp directory for storage tests.
     pub(super) fn make_test_app_with_storage() -> (App, tempfile::TempDir) {
-        use crate::{config::types::Config, project::ProjectInfo, storage::Storage};
+        use crate::{config::Config, project::ProjectInfo, storage::Storage};
         use std::path::PathBuf;
 
         let dir = tempfile::tempdir().expect("temp dir");
@@ -426,7 +426,7 @@ pub(crate) mod tests {
 
     /// Helper: build a ProviderRegistry with a single test model.
     pub(crate) fn make_test_registry(context_window: u32) -> crate::provider::ProviderRegistry {
-        use crate::config::types::{ModelCapabilities, ModelConfig, ProviderConfig};
+        use crate::config::{ModelCapabilities, ModelConfig, ProviderConfig};
         use std::collections::HashMap;
 
         let mut models = HashMap::new();

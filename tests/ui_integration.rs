@@ -11,7 +11,7 @@ use ratatui::{Frame, Terminal, backend::TestBackend, buffer::Buffer, layout::Rec
 
 use steve::{
     app::App,
-    config::types::Config,
+    config::Config,
     project::ProjectInfo,
     storage::Storage,
     ui::{

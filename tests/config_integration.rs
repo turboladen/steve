@@ -5,7 +5,7 @@
 
 use steve::{
     config,
-    config::types::Config,
+    config::Config,
     permission::{
         PermissionProfile,
         types::{PermissionActionSerde, PermissionRule, ToolMatcher},
