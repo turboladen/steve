@@ -22,26 +22,43 @@ pub(crate) struct LangInfo {
 
 /// Detect the programming language from a file extension and return its grammar.
 pub(crate) fn detect_language(path: &Path) -> Option<LangInfo> {
-    let ext = path.extension()?.to_str()?;
-    let (lang_fn, name): (tree_sitter_language::LanguageFn, &str) = match ext {
-        "rs" => (tree_sitter_rust::LANGUAGE, "rust"),
-        "py" | "pyi" => (tree_sitter_python::LANGUAGE, "python"),
-        "js" | "mjs" | "cjs" => (tree_sitter_javascript::LANGUAGE, "javascript"),
-        "ts" => (tree_sitter_typescript::LANGUAGE_TYPESCRIPT, "typescript"),
-        "tsx" => (tree_sitter_typescript::LANGUAGE_TSX, "tsx"),
-        "go" => (tree_sitter_go::LANGUAGE, "go"),
-        "c" | "h" => (tree_sitter_c::LANGUAGE, "c"),
-        "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" => (tree_sitter_cpp::LANGUAGE, "cpp"),
-        "java" => (tree_sitter_java::LANGUAGE, "java"),
-        "rb" => (tree_sitter_ruby::LANGUAGE, "ruby"),
-        "toml" => (tree_sitter_toml_ng::LANGUAGE, "toml"),
-        "json" => (tree_sitter_json::LANGUAGE, "json"),
+    // Try extension first, then fall back to filename (for extensionless files)
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .or_else(|| path.file_name().and_then(|f| f.to_str()))?;
+
+    // Most crates export a LanguageFn constant; some older ones export a language() function.
+    let (language, name): (Language, &str) = match ext {
+        "rs" => (Language::from(tree_sitter_rust::LANGUAGE), "rust"),
+        "py" | "pyi" => (Language::from(tree_sitter_python::LANGUAGE), "python"),
+        "js" | "mjs" | "cjs" => (
+            Language::from(tree_sitter_javascript::LANGUAGE),
+            "javascript",
+        ),
+        "ts" => (
+            Language::from(tree_sitter_typescript::LANGUAGE_TYPESCRIPT),
+            "typescript",
+        ),
+        "tsx" => (Language::from(tree_sitter_typescript::LANGUAGE_TSX), "tsx"),
+        "go" => (Language::from(tree_sitter_go::LANGUAGE), "go"),
+        "c" | "h" => (Language::from(tree_sitter_c::LANGUAGE), "c"),
+        "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" => {
+            (Language::from(tree_sitter_cpp::LANGUAGE), "cpp")
+        }
+        "java" => (Language::from(tree_sitter_java::LANGUAGE), "java"),
+        "rb" => (Language::from(tree_sitter_ruby::LANGUAGE), "ruby"),
+        "toml" => (Language::from(tree_sitter_toml_ng::LANGUAGE), "toml"),
+        "json" => (Language::from(tree_sitter_json::LANGUAGE), "json"),
+        "sh" | "bash" | "zsh" => (Language::from(tree_sitter_bash::LANGUAGE), "bash"),
+        "fish" => (tree_sitter_fish::language(), "fish"),
+        "yml" | "yaml" => (Language::from(tree_sitter_yaml::LANGUAGE), "yaml"),
+        "tf" | "hcl" => (Language::from(tree_sitter_hcl::LANGUAGE), "hcl"),
+        "lua" => (Language::from(tree_sitter_lua::LANGUAGE), "lua"),
+        "css" | "scss" => (Language::from(tree_sitter_css::LANGUAGE), "css"),
         _ => return None,
     };
-    Some(LangInfo {
-        language: Language::from(lang_fn),
-        name,
-    })
+    Some(LangInfo { language, name })
 }
 
 // ── AST node type lists per language ─────────────────────────────────────
@@ -118,6 +135,16 @@ fn symbol_node_types(lang_name: &str) -> &'static [&'static str] {
         "ruby" => &["method", "class", "module", "singleton_method"],
         "toml" => &["table", "table_array_element"],
         "json" => &["pair"],
+        "bash" => &["function_definition", "variable_assignment"],
+        "fish" => &["function_definition"],
+        "yaml" => &["block_mapping_pair"],
+        "hcl" => &["block"],
+        "lua" => &[
+            "function_declaration",
+            "local_function",
+            "variable_declaration",
+        ],
+        "css" => &["rule_set", "media_statement", "import_statement"],
         _ => &[],
     }
 }
@@ -263,6 +290,18 @@ pub(crate) fn kind_label(node_type: &str) -> &str {
         "table" | "table_array_element" => "section",
         // JSON
         "pair" => "key",
+        // Bash
+        "variable_assignment" => "var",
+        // Fish (function_definition already covered by Python)
+        // YAML
+        "block_mapping_pair" => "key",
+        // HCL/Terraform
+        "block" => "block",
+        // Lua
+        "local_function" => "local fn",
+        // CSS
+        "rule_set" => "rule",
+        "media_statement" => "media",
         // Fallback
         _ => node_type,
     }
@@ -785,6 +824,17 @@ mod tests {
             ("test.rb", "ruby"),
             ("test.toml", "toml"),
             ("test.json", "json"),
+            ("test.sh", "bash"),
+            ("test.bash", "bash"),
+            ("test.zsh", "bash"),
+            ("test.fish", "fish"),
+            ("test.yml", "yaml"),
+            ("test.yaml", "yaml"),
+            ("test.tf", "hcl"),
+            ("test.hcl", "hcl"),
+            ("test.lua", "lua"),
+            ("test.css", "css"),
+            ("test.scss", "css"),
         ];
         for (filename, expected_lang) in cases {
             let info = detect_language(Path::new(filename));
