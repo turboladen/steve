@@ -1,6 +1,29 @@
 use super::*;
 
 impl App {
+    /// If providers exist but no model is selected, open the model picker so the
+    /// user can choose one before sending their first message.
+    pub(super) fn prompt_model_if_needed(&mut self) {
+        if self.current_model.is_some() {
+            return;
+        }
+        let Some(registry) = &self.provider_registry else {
+            return;
+        };
+        let models = registry.list_models();
+        if models.is_empty() {
+            return;
+        }
+        let picker_models: Vec<(String, String)> = models
+            .iter()
+            .map(|m| (m.display_ref(), m.config.name.clone()))
+            .collect();
+        self.model_picker.open(&picker_models, None);
+        self.messages.push(MessageBlock::System {
+            text: "No model configured. Pick a model to get started:".to_string(),
+        });
+    }
+
     /// Close all overlay panels (model picker, session picker, diagnostics, MCP).
     /// Called before opening a new overlay to enforce mutual exclusivity.
     pub(super) fn close_all_overlays(&mut self) {
@@ -786,5 +809,41 @@ mod tests {
     fn find_last_completed_call_returns_none_when_no_assistant() {
         let app = make_test_app();
         assert!(app.find_last_completed_call(ToolName::Read).is_none());
+    }
+
+    // -- prompt_model_if_needed tests --
+
+    #[test]
+    fn prompt_model_opens_picker_when_no_model() {
+        let mut app = make_test_app();
+        app.provider_registry = Some(make_test_registry(128_000));
+        assert!(app.current_model.is_none());
+        assert!(!app.model_picker.visible);
+
+        app.prompt_model_if_needed();
+
+        assert!(app.model_picker.visible);
+        assert!(has_system_message(&app, "No model configured"));
+    }
+
+    #[test]
+    fn prompt_model_noop_when_model_set() {
+        let mut app = make_test_app();
+        app.provider_registry = Some(make_test_registry(128_000));
+        app.current_model = Some("test/test-model".into());
+
+        app.prompt_model_if_needed();
+
+        assert!(!app.model_picker.visible);
+    }
+
+    #[test]
+    fn prompt_model_noop_when_no_providers() {
+        let mut app = make_test_app();
+        assert!(app.provider_registry.is_none());
+
+        app.prompt_model_if_needed();
+
+        assert!(!app.model_picker.visible);
     }
 }

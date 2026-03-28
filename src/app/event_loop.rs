@@ -70,6 +70,9 @@ impl App {
             });
         }
 
+        // If providers exist but no model is selected, prompt the user to pick one
+        self.prompt_model_if_needed();
+
         // Initial render
         terminal.draw(|frame| ui::render(frame, self))?;
 
