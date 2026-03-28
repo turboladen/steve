@@ -12,7 +12,7 @@ use rmcp::{
     },
 };
 
-use super::{oauth::OAuthStatusTx, types::expand_env};
+use super::{expand_env, oauth::OAuthStatusTx};
 
 /// Connect to a remote MCP server over Streamable HTTP.
 ///

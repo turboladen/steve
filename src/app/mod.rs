@@ -272,7 +272,7 @@ impl App {
                 let mcp_overrides: std::collections::HashSet<String> = config
                     .allow_tools
                     .iter()
-                    .filter(|s| crate::mcp::types::parse_prefixed_tool_name(s).is_some())
+                    .filter(|s| crate::mcp::parse_prefixed_tool_name(s).is_some())
                     .cloned()
                     .collect();
                 if !mcp_overrides.is_empty() {

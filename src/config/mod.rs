@@ -54,7 +54,7 @@ pub struct Config {
 
     /// MCP server definitions keyed by server ID.
     #[serde(default)]
-    pub mcp_servers: HashMap<String, crate::mcp::types::McpServerConfig>,
+    pub mcp_servers: HashMap<String, crate::mcp::McpServerConfig>,
 }
 
 /// Configuration for a single LLM provider.

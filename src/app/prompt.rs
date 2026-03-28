@@ -179,7 +179,7 @@ impl App {
                 );
                 for (server_id, tool) in &tool_defs {
                     let desc = tool.description.as_deref().unwrap_or("(no description)");
-                    let prefixed = crate::mcp::types::prefixed_tool_name(server_id, &tool.name);
+                    let prefixed = crate::mcp::prefixed_tool_name(server_id, &tool.name);
                     guidance.push_str(&format!("\n- `{prefixed}`: {desc}"));
                 }
                 guidance.push('\n');
