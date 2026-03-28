@@ -393,7 +393,7 @@ fn detect_language_label(tool_args: Option<&serde_json::Value>) -> &'static str 
     }
 
     crate::tool::symbols::detect_language(std::path::Path::new(path_str))
-        .map(|info| info.name)
+        .map(|info| info.lang.as_str())
         .unwrap_or("text")
 }
 
@@ -437,7 +437,7 @@ fn extract_definitions(tool_args: Option<&serde_json::Value>, content: &str) -> 
     let symbols = crate::tool::symbols::walk_symbols(
         tree.root_node(),
         raw_source.as_bytes(),
-        lang_info.name,
+        lang_info.lang,
         0,
     );
 

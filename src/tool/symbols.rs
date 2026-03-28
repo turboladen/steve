@@ -14,10 +14,65 @@ use super::{ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput};
 
 // ── Language detection ───────────────────────────────────────────────────
 
+/// Tree-sitter supported language identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TreeSitterLang {
+    Rust,
+    Python,
+    JavaScript,
+    TypeScript,
+    Tsx,
+    Go,
+    C,
+    Cpp,
+    Java,
+    Ruby,
+    Toml,
+    Json,
+    Bash,
+    Fish,
+    Yaml,
+    Hcl,
+    Lua,
+    Css,
+}
+
+impl TreeSitterLang {
+    /// Return the lowercase string label for this language.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::Python => "python",
+            Self::JavaScript => "javascript",
+            Self::TypeScript => "typescript",
+            Self::Tsx => "tsx",
+            Self::Go => "go",
+            Self::C => "c",
+            Self::Cpp => "cpp",
+            Self::Java => "java",
+            Self::Ruby => "ruby",
+            Self::Toml => "toml",
+            Self::Json => "json",
+            Self::Bash => "bash",
+            Self::Fish => "fish",
+            Self::Yaml => "yaml",
+            Self::Hcl => "hcl",
+            Self::Lua => "lua",
+            Self::Css => "css",
+        }
+    }
+}
+
+impl std::fmt::Display for TreeSitterLang {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Supported language info for tree-sitter parsing.
 pub(crate) struct LangInfo {
     pub(crate) language: Language,
-    pub(crate) name: &'static str,
+    pub(crate) lang: TreeSitterLang,
 }
 
 /// Detect the programming language from a file extension and return its grammar.
@@ -29,44 +84,81 @@ pub(crate) fn detect_language(path: &Path) -> Option<LangInfo> {
         .or_else(|| path.file_name().and_then(|f| f.to_str()))?;
 
     // Most crates export a LanguageFn constant; some older ones export a language() function.
-    let (language, name): (Language, &str) = match ext {
-        "rs" => (Language::from(tree_sitter_rust::LANGUAGE), "rust"),
-        "py" | "pyi" => (Language::from(tree_sitter_python::LANGUAGE), "python"),
+    let (language, lang): (Language, TreeSitterLang) = match ext {
+        "rs" => (
+            Language::from(tree_sitter_rust::LANGUAGE),
+            TreeSitterLang::Rust,
+        ),
+        "py" | "pyi" => (
+            Language::from(tree_sitter_python::LANGUAGE),
+            TreeSitterLang::Python,
+        ),
         "js" | "mjs" | "cjs" => (
             Language::from(tree_sitter_javascript::LANGUAGE),
-            "javascript",
+            TreeSitterLang::JavaScript,
         ),
         "ts" => (
             Language::from(tree_sitter_typescript::LANGUAGE_TYPESCRIPT),
-            "typescript",
+            TreeSitterLang::TypeScript,
         ),
-        "tsx" => (Language::from(tree_sitter_typescript::LANGUAGE_TSX), "tsx"),
-        "go" => (Language::from(tree_sitter_go::LANGUAGE), "go"),
-        "c" | "h" => (Language::from(tree_sitter_c::LANGUAGE), "c"),
-        "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" => {
-            (Language::from(tree_sitter_cpp::LANGUAGE), "cpp")
-        }
-        "java" => (Language::from(tree_sitter_java::LANGUAGE), "java"),
-        "rb" => (Language::from(tree_sitter_ruby::LANGUAGE), "ruby"),
-        "toml" => (Language::from(tree_sitter_toml_ng::LANGUAGE), "toml"),
-        "json" => (Language::from(tree_sitter_json::LANGUAGE), "json"),
-        "sh" | "bash" | "zsh" => (Language::from(tree_sitter_bash::LANGUAGE), "bash"),
-        "fish" => (tree_sitter_fish::language(), "fish"),
-        "yml" | "yaml" => (Language::from(tree_sitter_yaml::LANGUAGE), "yaml"),
-        "tf" | "hcl" => (Language::from(tree_sitter_hcl::LANGUAGE), "hcl"),
-        "lua" => (Language::from(tree_sitter_lua::LANGUAGE), "lua"),
-        "css" | "scss" => (Language::from(tree_sitter_css::LANGUAGE), "css"),
+        "tsx" => (
+            Language::from(tree_sitter_typescript::LANGUAGE_TSX),
+            TreeSitterLang::Tsx,
+        ),
+        "go" => (Language::from(tree_sitter_go::LANGUAGE), TreeSitterLang::Go),
+        "c" | "h" => (Language::from(tree_sitter_c::LANGUAGE), TreeSitterLang::C),
+        "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" => (
+            Language::from(tree_sitter_cpp::LANGUAGE),
+            TreeSitterLang::Cpp,
+        ),
+        "java" => (
+            Language::from(tree_sitter_java::LANGUAGE),
+            TreeSitterLang::Java,
+        ),
+        "rb" => (
+            Language::from(tree_sitter_ruby::LANGUAGE),
+            TreeSitterLang::Ruby,
+        ),
+        "toml" => (
+            Language::from(tree_sitter_toml_ng::LANGUAGE),
+            TreeSitterLang::Toml,
+        ),
+        "json" => (
+            Language::from(tree_sitter_json::LANGUAGE),
+            TreeSitterLang::Json,
+        ),
+        "sh" | "bash" | "zsh" => (
+            Language::from(tree_sitter_bash::LANGUAGE),
+            TreeSitterLang::Bash,
+        ),
+        "fish" => (tree_sitter_fish::language(), TreeSitterLang::Fish),
+        "yml" | "yaml" => (
+            Language::from(tree_sitter_yaml::LANGUAGE),
+            TreeSitterLang::Yaml,
+        ),
+        "tf" | "hcl" => (
+            Language::from(tree_sitter_hcl::LANGUAGE),
+            TreeSitterLang::Hcl,
+        ),
+        "lua" => (
+            Language::from(tree_sitter_lua::LANGUAGE),
+            TreeSitterLang::Lua,
+        ),
+        "css" | "scss" => (
+            Language::from(tree_sitter_css::LANGUAGE),
+            TreeSitterLang::Css,
+        ),
         _ => return None,
     };
-    Some(LangInfo { language, name })
+    Some(LangInfo { language, lang })
 }
 
 // ── AST node type lists per language ─────────────────────────────────────
 
 /// Return the set of AST node types that represent "symbols" for a given language.
-fn symbol_node_types(lang_name: &str) -> &'static [&'static str] {
-    match lang_name {
-        "rust" => &[
+fn symbol_node_types(lang: TreeSitterLang) -> &'static [&'static str] {
+    match lang {
+        TreeSitterLang::Rust => &[
             "function_item",
             "struct_item",
             "enum_item",
@@ -79,20 +171,20 @@ fn symbol_node_types(lang_name: &str) -> &'static [&'static str] {
             "static_item",
             "macro_definition",
         ],
-        "python" => &[
+        TreeSitterLang::Python => &[
             "function_definition",
             "class_definition",
             "import_statement",
             "import_from_statement",
         ],
-        "javascript" => &[
+        TreeSitterLang::JavaScript => &[
             "function_declaration",
             "class_declaration",
             "variable_declaration",
             "import_statement",
             "export_statement",
         ],
-        "typescript" | "tsx" => &[
+        TreeSitterLang::TypeScript | TreeSitterLang::Tsx => &[
             "function_declaration",
             "class_declaration",
             "variable_declaration",
@@ -102,20 +194,20 @@ fn symbol_node_types(lang_name: &str) -> &'static [&'static str] {
             "type_alias_declaration",
             "enum_declaration",
         ],
-        "go" => &[
+        TreeSitterLang::Go => &[
             "function_declaration",
             "method_declaration",
             "type_declaration",
             "import_declaration",
         ],
-        "c" => &[
+        TreeSitterLang::C => &[
             "function_definition",
             "struct_specifier",
             "enum_specifier",
             "type_definition",
             "preproc_include",
         ],
-        "cpp" => &[
+        TreeSitterLang::Cpp => &[
             "function_definition",
             "struct_specifier",
             "enum_specifier",
@@ -125,42 +217,50 @@ fn symbol_node_types(lang_name: &str) -> &'static [&'static str] {
             "namespace_definition",
             "template_declaration",
         ],
-        "java" => &[
+        TreeSitterLang::Java => &[
             "class_declaration",
             "interface_declaration",
             "method_declaration",
             "enum_declaration",
             "import_declaration",
         ],
-        "ruby" => &["method", "class", "module", "singleton_method"],
-        "toml" => &["table", "table_array_element"],
-        "json" => &["pair"],
-        "bash" => &["function_definition", "variable_assignment"],
-        "fish" => &["function_definition"],
-        "yaml" => &["block_mapping_pair"],
-        "hcl" => &["block"],
-        "lua" => &[
+        TreeSitterLang::Ruby => &["method", "class", "module", "singleton_method"],
+        TreeSitterLang::Toml => &["table", "table_array_element"],
+        TreeSitterLang::Json => &["pair"],
+        TreeSitterLang::Bash => &["function_definition", "variable_assignment"],
+        TreeSitterLang::Fish => &["function_definition"],
+        TreeSitterLang::Yaml => &["block_mapping_pair"],
+        TreeSitterLang::Hcl => &["block"],
+        TreeSitterLang::Lua => &[
             "function_declaration",
             "local_function",
             "variable_declaration",
         ],
-        "css" => &["rule_set", "media_statement", "import_statement"],
-        _ => &[],
+        TreeSitterLang::Css => &["rule_set", "media_statement", "import_statement"],
     }
 }
 
 /// Node types that can contain nested symbols (classes, impls, modules, etc.).
-fn container_node_types(lang_name: &str) -> &'static [&'static str] {
-    match lang_name {
-        "rust" => &["impl_item", "trait_item", "mod_item"],
-        "python" => &["class_definition"],
-        "javascript" | "typescript" | "tsx" => &["class_declaration", "class_body"],
-        "go" => &[],
-        "c" => &[],
-        "cpp" => &["class_specifier", "namespace_definition"],
-        "java" => &["class_declaration", "interface_declaration", "class_body"],
-        "ruby" => &["class", "module"],
-        _ => &[],
+fn container_node_types(lang: TreeSitterLang) -> &'static [&'static str] {
+    match lang {
+        TreeSitterLang::Rust => &["impl_item", "trait_item", "mod_item"],
+        TreeSitterLang::Python => &["class_definition"],
+        TreeSitterLang::JavaScript | TreeSitterLang::TypeScript | TreeSitterLang::Tsx => {
+            &["class_declaration", "class_body"]
+        }
+        TreeSitterLang::Go => &[],
+        TreeSitterLang::C => &[],
+        TreeSitterLang::Cpp => &["class_specifier", "namespace_definition"],
+        TreeSitterLang::Java => &["class_declaration", "interface_declaration", "class_body"],
+        TreeSitterLang::Ruby => &["class", "module"],
+        TreeSitterLang::Toml
+        | TreeSitterLang::Json
+        | TreeSitterLang::Bash
+        | TreeSitterLang::Fish
+        | TreeSitterLang::Yaml
+        | TreeSitterLang::Hcl
+        | TreeSitterLang::Lua
+        | TreeSitterLang::Css => &[],
     }
 }
 
@@ -311,11 +411,11 @@ pub(crate) fn kind_label(node_type: &str) -> &str {
 pub(crate) fn walk_symbols(
     node: Node,
     source: &[u8],
-    lang_name: &str,
+    lang: TreeSitterLang,
     depth: usize,
 ) -> Vec<Symbol> {
-    let symbol_types = symbol_node_types(lang_name);
-    let container_types = container_node_types(lang_name);
+    let symbol_types = symbol_node_types(lang);
+    let container_types = container_node_types(lang);
     let mut symbols = Vec::new();
 
     let mut cursor = node.walk();
@@ -327,7 +427,7 @@ pub(crate) fn walk_symbols(
 
             // Collect nested symbols if this is a container (impl, class, etc.)
             let children = if depth < 1 && container_types.contains(&child.kind()) {
-                walk_inner_symbols(child, source, lang_name)
+                walk_inner_symbols(child, source, lang)
             } else {
                 Vec::new()
             };
@@ -346,8 +446,8 @@ pub(crate) fn walk_symbols(
 }
 
 /// Walk inside a container node to find nested symbols (methods, associated fns, etc.).
-fn walk_inner_symbols(container: Node, source: &[u8], lang_name: &str) -> Vec<Symbol> {
-    let symbol_types = symbol_node_types(lang_name);
+fn walk_inner_symbols(container: Node, source: &[u8], lang: TreeSitterLang) -> Vec<Symbol> {
+    let symbol_types = symbol_node_types(lang);
     let mut symbols = Vec::new();
 
     // For some languages, nested symbols are inside a `body`/`declaration_list` child
@@ -403,9 +503,9 @@ fn find_enclosing_scope(
     node: Node,
     source: &[u8],
     target_line: usize,
-    lang_name: &str,
+    lang: TreeSitterLang,
 ) -> Option<ScopeInfo> {
-    let symbol_types = symbol_node_types(lang_name);
+    let symbol_types = symbol_node_types(lang);
     let target_row = target_line - 1; // Convert to 0-indexed
 
     let mut best: Option<ScopeInfo> = None;
@@ -484,9 +584,9 @@ fn find_symbol_by_name(
     node: Node,
     source: &[u8],
     target_name: &str,
-    lang_name: &str,
+    lang: TreeSitterLang,
 ) -> Option<DefinitionInfo> {
-    let symbol_types = symbol_node_types(lang_name);
+    let symbol_types = symbol_node_types(lang);
     find_def_recursive(node, source, target_name, symbol_types)
 }
 
@@ -674,14 +774,14 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
 
     match operation {
         super::SymbolsOperation::ListSymbols => {
-            let symbols = walk_symbols(root, &source, lang_info.name, 0);
+            let symbols = walk_symbols(root, &source, lang_info.lang, 0);
             let total_lines = std::str::from_utf8(&source)
                 .map(|s| s.lines().count())
                 .unwrap_or(0);
 
             let mut output = format!(
                 "Symbols in {path_str} ({}, {total_lines} lines):\n\n",
-                lang_info.name
+                lang_info.lang
             );
 
             if symbols.is_empty() {
@@ -723,7 +823,7 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
                 });
             }
 
-            match find_enclosing_scope(root, &source, line, lang_info.name) {
+            match find_enclosing_scope(root, &source, line, lang_info.lang) {
                 Some(scope) => {
                     let mut output = format!("Line {line} is inside:\n\n");
                     output.push_str(&format!(
@@ -758,7 +858,7 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("find_definition requires 'name' argument"))?;
 
-            match find_symbol_by_name(root, &source, name, lang_info.name) {
+            match find_symbol_by_name(root, &source, name, lang_info.lang) {
                 Some(def) => {
                     let mut output = format!("Definition of '{}':\n\n", def.name);
                     output.push_str(&format!(
@@ -802,44 +902,44 @@ mod tests {
     #[test]
     fn detect_language_all_supported_extensions() {
         let cases = [
-            ("test.rs", "rust"),
-            ("test.py", "python"),
-            ("test.pyi", "python"),
-            ("test.js", "javascript"),
-            ("test.mjs", "javascript"),
-            ("test.cjs", "javascript"),
-            ("test.ts", "typescript"),
-            ("test.tsx", "tsx"),
-            ("test.go", "go"),
-            ("test.c", "c"),
-            ("test.h", "c"),
-            ("test.cpp", "cpp"),
-            ("test.cc", "cpp"),
-            ("test.cxx", "cpp"),
-            ("test.hpp", "cpp"),
-            ("test.hxx", "cpp"),
-            ("test.hh", "cpp"),
-            ("test.java", "java"),
-            ("test.rb", "ruby"),
-            ("test.toml", "toml"),
-            ("test.json", "json"),
-            ("test.sh", "bash"),
-            ("test.bash", "bash"),
-            ("test.zsh", "bash"),
-            ("test.fish", "fish"),
-            ("test.yml", "yaml"),
-            ("test.yaml", "yaml"),
-            ("test.tf", "hcl"),
-            ("test.hcl", "hcl"),
-            ("test.lua", "lua"),
-            ("test.css", "css"),
-            ("test.scss", "css"),
+            ("test.rs", TreeSitterLang::Rust),
+            ("test.py", TreeSitterLang::Python),
+            ("test.pyi", TreeSitterLang::Python),
+            ("test.js", TreeSitterLang::JavaScript),
+            ("test.mjs", TreeSitterLang::JavaScript),
+            ("test.cjs", TreeSitterLang::JavaScript),
+            ("test.ts", TreeSitterLang::TypeScript),
+            ("test.tsx", TreeSitterLang::Tsx),
+            ("test.go", TreeSitterLang::Go),
+            ("test.c", TreeSitterLang::C),
+            ("test.h", TreeSitterLang::C),
+            ("test.cpp", TreeSitterLang::Cpp),
+            ("test.cc", TreeSitterLang::Cpp),
+            ("test.cxx", TreeSitterLang::Cpp),
+            ("test.hpp", TreeSitterLang::Cpp),
+            ("test.hxx", TreeSitterLang::Cpp),
+            ("test.hh", TreeSitterLang::Cpp),
+            ("test.java", TreeSitterLang::Java),
+            ("test.rb", TreeSitterLang::Ruby),
+            ("test.toml", TreeSitterLang::Toml),
+            ("test.json", TreeSitterLang::Json),
+            ("test.sh", TreeSitterLang::Bash),
+            ("test.bash", TreeSitterLang::Bash),
+            ("test.zsh", TreeSitterLang::Bash),
+            ("test.fish", TreeSitterLang::Fish),
+            ("test.yml", TreeSitterLang::Yaml),
+            ("test.yaml", TreeSitterLang::Yaml),
+            ("test.tf", TreeSitterLang::Hcl),
+            ("test.hcl", TreeSitterLang::Hcl),
+            ("test.lua", TreeSitterLang::Lua),
+            ("test.css", TreeSitterLang::Css),
+            ("test.scss", TreeSitterLang::Css),
         ];
         for (filename, expected_lang) in cases {
             let info = detect_language(Path::new(filename));
             assert!(info.is_some(), "should detect language for {filename}");
             assert_eq!(
-                info.unwrap().name,
+                info.unwrap().lang,
                 expected_lang,
                 "wrong language for {filename}"
             );
