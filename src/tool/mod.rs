@@ -319,6 +319,33 @@ pub enum LspOperation {
     Rename,
 }
 
+/// Actions supported by the `memory` tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum MemoryAction {
+    Read,
+    Append,
+    Replace,
+}
+
+/// Actions supported by the `task` tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum TaskAction {
+    Create,
+    CreateBug,
+    List,
+    Update,
+    Complete,
+    Show,
+    Delete,
+    CreateEpic,
+    ListEpics,
+    UpdateEpic,
+}
+
 /// Output from a tool execution.
 #[derive(Debug, Clone)]
 pub struct ToolOutput {

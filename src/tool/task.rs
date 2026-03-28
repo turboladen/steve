@@ -121,10 +121,15 @@ fn require_str<'a>(
 }
 
 fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
-    let action = args
+    let raw_action = args
         .get("action")
         .and_then(|v| v.as_str())
         .unwrap_or("list");
+    let action: super::TaskAction = raw_action.parse().map_err(|_| {
+        anyhow::anyhow!(
+            "unknown task action: '{raw_action}'. Use create, list, update, complete, show, delete, create_epic, list_epics, update_epic."
+        )
+    })?;
 
     let Some(store) = ctx.task_store.as_ref() else {
         return Ok(ToolOutput {
@@ -135,24 +140,16 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
     };
 
     match action {
-        "create" => action_create(&args, store),
-        "create_bug" => action_create_bug(&args, store),
-        "list" => action_list(&args, store),
-        "update" => action_update(&args, store),
-        "complete" => action_complete(&args, store),
-        "show" => action_show(&args, store),
-        "delete" => action_delete(&args, store),
-        "create_epic" => action_create_epic(&args, store),
-        "list_epics" => action_list_epics(store),
-        "update_epic" => action_update_epic(&args, store),
-        _ => Ok(ToolOutput {
-            title: "task".to_string(),
-            output: format!(
-                "Error: unknown action '{action}'. Use create, create_bug, list, update, \
-                 complete, show, delete, create_epic, list_epics, or update_epic."
-            ),
-            is_error: true,
-        }),
+        super::TaskAction::Create => action_create(&args, store),
+        super::TaskAction::CreateBug => action_create_bug(&args, store),
+        super::TaskAction::List => action_list(&args, store),
+        super::TaskAction::Update => action_update(&args, store),
+        super::TaskAction::Complete => action_complete(&args, store),
+        super::TaskAction::Show => action_show(&args, store),
+        super::TaskAction::Delete => action_delete(&args, store),
+        super::TaskAction::CreateEpic => action_create_epic(&args, store),
+        super::TaskAction::ListEpics => action_list_epics(store),
+        super::TaskAction::UpdateEpic => action_update_epic(&args, store),
     }
 }
 
@@ -1036,9 +1033,11 @@ mod tests {
     #[test]
     fn unknown_action_errors() {
         let (ctx, _dir) = test_ctx();
-        let result = execute(serde_json::json!({"action": "fly"}), ctx).unwrap();
-        assert!(result.is_error);
-        assert!(result.output.contains("unknown action"));
+        let err = execute(serde_json::json!({"action": "fly"}), ctx).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown task action"),
+            "expected parse error, got: {err}"
+        );
     }
 
     // ── no task store ──
