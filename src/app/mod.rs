@@ -31,6 +31,7 @@ use async_openai::types::chat::{
 };
 
 use crate::{
+    DateTimeExt,
     config::types::Config,
     context::cache::ToolResultCache,
     event::AppEvent,

@@ -9,6 +9,8 @@ use std::{
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 
+use crate::DateTimeExt;
+
 use crate::{
     session::message::{Message, MessagePart, Role, ToolCallState},
     tool::ToolName,
@@ -67,13 +69,9 @@ fn write_header(out: &mut String, params: &ExportParams) {
     let _ = writeln!(
         out,
         "| Created | {} |",
-        params.session_created_at.format("%Y-%m-%d %H:%M:%S UTC")
+        params.session_created_at.display_full_utc()
     );
-    let _ = writeln!(
-        out,
-        "| Exported | {} |",
-        Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
-    );
+    let _ = writeln!(out, "| Exported | {} |", Utc::now().display_full_utc());
     let _ = writeln!(out, "| Messages | {} |", params.messages.len());
     let _ = writeln!(
         out,
@@ -366,8 +364,8 @@ fn write_logs(out: &mut String, session_start: DateTime<Utc>) {
     }
 
     let now = Utc::now();
-    let session_date = session_start.format("%Y-%m-%d").to_string();
-    let now_date = now.format("%Y-%m-%d").to_string();
+    let session_date = session_start.display_date();
+    let now_date = now.display_date();
 
     // Collect matching log files
     let mut log_files: Vec<PathBuf> = Vec::new();

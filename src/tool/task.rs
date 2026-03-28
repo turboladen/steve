@@ -6,9 +6,12 @@ use anyhow::Result;
 use serde_json::Value;
 
 use super::{ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput};
-use crate::task::{
-    TaskStore,
-    types::{EpicStatus, Priority, TaskKind, TaskStatus},
+use crate::{
+    DateTimeExt,
+    task::{
+        TaskStore,
+        types::{EpicStatus, Priority, TaskKind, TaskStatus},
+    },
 };
 
 pub fn tool() -> ToolEntry {
@@ -433,8 +436,8 @@ fn action_show(args: &Value, store: &Arc<TaskStore>) -> Result<ToolOutput> {
     if let Some(desc) = &task.description {
         lines.push(format!("Description: {desc}"));
     }
-    lines.push(format!("Created: {}", task.created_at.format("%Y-%m-%d")));
-    lines.push(format!("Updated: {}", task.updated_at.format("%Y-%m-%d")));
+    lines.push(format!("Created: {}", task.created_at.display_date()));
+    lines.push(format!("Updated: {}", task.updated_at.display_date()));
 
     Ok(ToolOutput {
         title: "task: show".to_string(),

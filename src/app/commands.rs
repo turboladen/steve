@@ -477,7 +477,7 @@ impl App {
                         task.priority,
                         epic_info,
                         task.description.as_deref().unwrap_or("(none)"),
-                        task.created_at.format("%Y-%m-%d %H:%M"),
+                        task.created_at.display_short(),
                     );
                     self.messages.push(MessageBlock::System { text });
                 }

@@ -41,6 +41,33 @@ mod lib_tests {
     }
 }
 
+/// Extension trait for consistent date/time formatting across the codebase.
+pub trait DateTimeExt {
+    /// Format as `"2026-03-28 14:30"` — for UI display of timestamps.
+    fn display_short(&self) -> String;
+    /// Format as `"2026-03-28"` — date only.
+    fn display_date(&self) -> String;
+    /// Format as `"2026-03-28 14:30:00 UTC"` — for export/debug output.
+    fn display_full_utc(&self) -> String;
+}
+
+impl<Tz: chrono::TimeZone> DateTimeExt for chrono::DateTime<Tz>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    fn display_short(&self) -> String {
+        self.format("%Y-%m-%d %H:%M").to_string()
+    }
+
+    fn display_date(&self) -> String {
+        self.format("%Y-%m-%d").to_string()
+    }
+
+    fn display_full_utc(&self) -> String {
+        self.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+    }
+}
+
 pub mod app;
 pub mod cli;
 pub mod command;
