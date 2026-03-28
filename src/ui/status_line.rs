@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 use crate::tool::ToolName;
 
 /// Braille spinner frames, cycled on each 100ms tick.
-pub const SPINNER_FRAMES: &[char] = &['\u{280b}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283c}', '\u{2834}', '\u{2826}', '\u{2827}'];
+pub const SPINNER_FRAMES: &[char] = &[
+    '\u{280b}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283c}', '\u{2834}', '\u{2826}', '\u{2827}',
+];
 
 /// Current activity shown in the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,9 +290,9 @@ mod tests {
     #[test]
     fn context_usage_pct_uses_last_prompt_tokens() {
         let state = StatusLineState {
-            total_tokens: 500_000,      // cumulative — should NOT be used for pct
+            total_tokens: 500_000, // cumulative — should NOT be used for pct
             context_window: 128_000,
-            last_prompt_tokens: 80_000,  // this is what matters — 62.5%
+            last_prompt_tokens: 80_000, // this is what matters — 62.5%
             ..Default::default()
         };
         assert_eq!(state.context_usage_pct(), 62); // truncated from 62.5
@@ -367,9 +369,18 @@ mod tests {
 
     #[test]
     fn format_elapsed_compact_hours() {
-        assert_eq!(format_elapsed_compact(Duration::from_secs(3600)), "(1:00:00)");
-        assert_eq!(format_elapsed_compact(Duration::from_secs(3661)), "(1:01:01)");
-        assert_eq!(format_elapsed_compact(Duration::from_secs(3735)), "(1:02:15)");
+        assert_eq!(
+            format_elapsed_compact(Duration::from_secs(3600)),
+            "(1:00:00)"
+        );
+        assert_eq!(
+            format_elapsed_compact(Duration::from_secs(3661)),
+            "(1:01:01)"
+        );
+        assert_eq!(
+            format_elapsed_compact(Duration::from_secs(3735)),
+            "(1:02:15)"
+        );
     }
 
     #[test]
@@ -397,7 +408,10 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(5));
         state.set_activity(Activity::WaitingForPermission);
         let second_start = state.activity_start.unwrap();
-        assert!(second_start > first_start, "activity_start should reset on change");
+        assert!(
+            second_start > first_start,
+            "activity_start should reset on change"
+        );
     }
 
     #[test]
@@ -407,7 +421,11 @@ mod tests {
         let first_start = state.activity_start.unwrap();
         std::thread::sleep(std::time::Duration::from_millis(5));
         state.set_activity(Activity::Thinking);
-        assert_eq!(state.activity_start.unwrap(), first_start, "same activity should preserve start");
+        assert_eq!(
+            state.activity_start.unwrap(),
+            first_start,
+            "same activity should preserve start"
+        );
     }
 
     #[test]
@@ -425,6 +443,9 @@ mod tests {
             args_summary: "src/lib.rs".to_string(),
         });
         let second_start = state.activity_start.unwrap();
-        assert!(second_start > first_start, "different tool args should reset timer");
+        assert!(
+            second_start > first_start,
+            "different tool args should reset timer"
+        );
     }
 }

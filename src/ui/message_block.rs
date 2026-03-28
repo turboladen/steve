@@ -255,19 +255,20 @@ impl MessageBlock {
     /// Update agent progress with a new sub-agent tool call.
     /// Finds the pending agent tool call in the last tool group and sets its progress.
     /// No-op on non-Assistant blocks.
-    pub fn update_agent_progress(
-        &mut self,
-        tool_name: ToolName,
-        args_summary: String,
-    ) {
+    pub fn update_agent_progress(&mut self, tool_name: ToolName, args_summary: String) {
         if let MessageBlock::Assistant { parts, .. } = self {
             for part in parts.iter_mut().rev() {
                 if let AssistantPart::ToolGroup(group) = part {
-                    if let Some(call) = group.calls.iter_mut().find(|c| {
-                        c.tool_name == ToolName::Agent && c.result_summary.is_none()
-                    }) {
-                        let tool_count = call.agent_progress.as_ref()
-                            .map(|p| p.tool_count + 1).unwrap_or(1);
+                    if let Some(call) = group
+                        .calls
+                        .iter_mut()
+                        .find(|c| c.tool_name == ToolName::Agent && c.result_summary.is_none())
+                    {
+                        let tool_count = call
+                            .agent_progress
+                            .as_ref()
+                            .map(|p| p.tool_count + 1)
+                            .unwrap_or(1);
                         call.agent_progress = Some(AgentProgressInfo {
                             tool_name,
                             args_summary,
@@ -284,16 +285,15 @@ impl MessageBlock {
     /// Update the result summary on the current agent progress entry.
     /// Called when a sub-agent's tool completes, to show the result inline.
     /// No-op on non-Assistant blocks.
-    pub fn update_agent_progress_result(
-        &mut self,
-        result_summary: Option<String>,
-    ) {
+    pub fn update_agent_progress_result(&mut self, result_summary: Option<String>) {
         if let MessageBlock::Assistant { parts, .. } = self {
             for part in parts.iter_mut().rev() {
                 if let AssistantPart::ToolGroup(group) = part {
-                    if let Some(call) = group.calls.iter_mut().find(|c| {
-                        c.tool_name == ToolName::Agent && c.result_summary.is_none()
-                    }) {
+                    if let Some(call) = group
+                        .calls
+                        .iter_mut()
+                        .find(|c| c.tool_name == ToolName::Agent && c.result_summary.is_none())
+                    {
                         if let Some(ref mut progress) = call.agent_progress {
                             progress.result_summary = result_summary;
                         }
@@ -368,7 +368,9 @@ mod tests {
 
     #[test]
     fn user_block_construction() {
-        let block = MessageBlock::User { text: "hello".into() };
+        let block = MessageBlock::User {
+            text: "hello".into(),
+        };
         match &block {
             MessageBlock::User { text } => assert_eq!(text, "hello"),
             _ => panic!("expected User block"),
@@ -426,8 +428,15 @@ mod tests {
         };
         assert_eq!(group.status, ToolGroupStatus::Preparing);
 
-        group.status = ToolGroupStatus::Running { current_tool: ToolName::Read };
-        assert_eq!(group.status, ToolGroupStatus::Running { current_tool: ToolName::Read });
+        group.status = ToolGroupStatus::Running {
+            current_tool: ToolName::Read,
+        };
+        assert_eq!(
+            group.status,
+            ToolGroupStatus::Running {
+                current_tool: ToolName::Read
+            }
+        );
 
         group.status = ToolGroupStatus::Complete;
         assert_eq!(group.status, ToolGroupStatus::Complete);
@@ -435,8 +444,12 @@ mod tests {
 
     #[test]
     fn system_and_error_blocks() {
-        let sys = MessageBlock::System { text: "Session started.".into() };
-        let err = MessageBlock::Error { text: "Connection failed.".into() };
+        let sys = MessageBlock::System {
+            text: "Session started.".into(),
+        };
+        let err = MessageBlock::Error {
+            text: "Connection failed.".into(),
+        };
         match &sys {
             MessageBlock::System { text } => assert_eq!(text, "Session started."),
             _ => panic!("expected System block"),
@@ -613,9 +626,7 @@ mod tests {
             thinking: None,
             parts: vec![],
         };
-        let u = MessageBlock::User {
-            text: "hi".into(),
-        };
+        let u = MessageBlock::User { text: "hi".into() };
         assert!(a.is_assistant());
         assert!(!u.is_assistant());
     }
@@ -628,7 +639,11 @@ mod tests {
             diff_content: None,
         };
         match &block {
-            MessageBlock::Permission { tool_name, args_summary, .. } => {
+            MessageBlock::Permission {
+                tool_name,
+                args_summary,
+                ..
+            } => {
                 assert_eq!(tool_name, "bash");
                 assert_eq!(args_summary, "ls -la");
             }
@@ -898,19 +913,13 @@ mod tests {
                     Some("10 lines"),
                     "first result should go to first call (a.rs)"
                 );
-                assert_eq!(
-                    group.calls[0].full_output.as_deref(),
-                    Some("content_a"),
-                );
+                assert_eq!(group.calls[0].full_output.as_deref(), Some("content_a"),);
                 assert_eq!(
                     group.calls[1].result_summary.as_deref(),
                     Some("20 lines"),
                     "second result should go to second call (b.rs)"
                 );
-                assert_eq!(
-                    group.calls[1].full_output.as_deref(),
-                    Some("content_b"),
-                );
+                assert_eq!(group.calls[1].full_output.as_deref(), Some("content_b"),);
                 assert_eq!(group.status, ToolGroupStatus::Complete);
             }
             _ => panic!("expected Assistant"),
@@ -932,7 +941,9 @@ mod tests {
                     expanded: false,
                     agent_progress: None,
                 }],
-                status: ToolGroupStatus::Running { current_tool: ToolName::Agent },
+                status: ToolGroupStatus::Running {
+                    current_tool: ToolName::Agent,
+                },
             })],
         };
         block.update_agent_progress(ToolName::Read, "src/main.rs".into());
@@ -967,7 +978,9 @@ mod tests {
                     expanded: false,
                     agent_progress: None,
                 }],
-                status: ToolGroupStatus::Running { current_tool: ToolName::Agent },
+                status: ToolGroupStatus::Running {
+                    current_tool: ToolName::Agent,
+                },
             })],
         };
         block.update_agent_progress(ToolName::Read, "a.rs".into());
@@ -979,7 +992,11 @@ mod tests {
                     _ => panic!("expected ToolGroup"),
                 };
                 let progress = group.calls[0].agent_progress.as_ref().unwrap();
-                assert_eq!(progress.tool_name, ToolName::Grep, "should show latest tool");
+                assert_eq!(
+                    progress.tool_name,
+                    ToolName::Grep,
+                    "should show latest tool"
+                );
                 assert_eq!(progress.tool_count, 2, "should increment count");
             }
             _ => panic!("expected Assistant"),
@@ -1006,7 +1023,9 @@ mod tests {
                         tool_count: 3,
                     }),
                 }],
-                status: ToolGroupStatus::Running { current_tool: ToolName::Agent },
+                status: ToolGroupStatus::Running {
+                    current_tool: ToolName::Agent,
+                },
             })],
         };
         block.update_agent_progress_result(Some("200 lines".into()));
@@ -1044,7 +1063,9 @@ mod tests {
                         tool_count: 10,
                     }),
                 }],
-                status: ToolGroupStatus::Running { current_tool: ToolName::Agent },
+                status: ToolGroupStatus::Running {
+                    current_tool: ToolName::Agent,
+                },
             })],
         };
         block.complete_tool_call(ToolName::Agent, "done".into(), "full result".into(), false);
@@ -1086,7 +1107,9 @@ mod tests {
     fn code_fence_open_bare() {
         assert_eq!(
             CodeFence::classify("```", false),
-            CodeFence::Open { lang: String::new() }
+            CodeFence::Open {
+                lang: String::new()
+            }
         );
     }
 
@@ -1094,11 +1117,15 @@ mod tests {
     fn code_fence_open_with_lang() {
         assert_eq!(
             CodeFence::classify("```rust", false),
-            CodeFence::Open { lang: "rust".to_string() }
+            CodeFence::Open {
+                lang: "rust".to_string()
+            }
         );
         assert_eq!(
             CodeFence::classify("```  python  ", false),
-            CodeFence::Open { lang: "python".to_string() }
+            CodeFence::Open {
+                lang: "python".to_string()
+            }
         );
     }
 
@@ -1119,7 +1146,9 @@ mod tests {
     fn code_fence_three_spaces_is_fence() {
         assert_eq!(
             CodeFence::classify("   ```", false),
-            CodeFence::Open { lang: String::new() }
+            CodeFence::Open {
+                lang: String::new()
+            }
         );
         assert_eq!(CodeFence::classify("   ```", true), CodeFence::Close);
     }

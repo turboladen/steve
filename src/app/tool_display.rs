@@ -1,7 +1,9 @@
 use serde_json::Value;
 
-use crate::tool::ToolName;
-use crate::ui::message_block::{DiffContent, DiffLine};
+use crate::{
+    tool::ToolName,
+    ui::message_block::{DiffContent, DiffLine},
+};
 
 /// Extract a compact argument summary for display in tool call lines.
 /// Build a compact argument summary for a tool call (e.g., path for read, pattern for grep).
@@ -31,7 +33,10 @@ pub fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
             .to_string(),
         ToolName::Symbols => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let op = args.get("operation").and_then(|v| v.as_str()).unwrap_or("list_symbols");
+            let op = args
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .unwrap_or("list_symbols");
             match op {
                 "find_scope" => {
                     let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -102,7 +107,10 @@ pub fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
             .to_string(),
         ToolName::Lsp => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let op = args.get("operation").and_then(|v| v.as_str()).unwrap_or("diagnostics");
+            let op = args
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .unwrap_or("diagnostics");
             match op {
                 "diagnostics" => format!("{path} diagnostics"),
                 _ => {
@@ -112,7 +120,10 @@ pub fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
             }
         }
         ToolName::Agent => {
-            let agent_type = args.get("agent_type").and_then(|v| v.as_str()).unwrap_or("explore");
+            let agent_type = args
+                .get("agent_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("explore");
             let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
             let truncated = if task.chars().count() > 30 {
                 let t: String = task.chars().take(27).collect();
@@ -209,10 +220,14 @@ pub(super) fn extract_diff_content(tool_name: ToolName, args: &Value) -> Option<
                     let mut lines = Vec::new();
                     if let Some(edits) = edits {
                         for edit in edits {
-                            let old =
-                                edit.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-                            let new =
-                                edit.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+                            let old = edit
+                                .get("old_string")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let new = edit
+                                .get("new_string")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
                             for line in old.lines() {
                                 lines.push(DiffLine::Removal(line.to_string()));
                             }

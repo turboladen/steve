@@ -1,16 +1,16 @@
 pub mod state;
 pub mod views;
 
-use std::path::Path;
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use rusqlite::Connection;
 
-use crate::ui::theme::Theme;
-use crate::usage::db;
-use crate::usage::types::SessionFilter;
+use crate::{
+    ui::theme::Theme,
+    usage::{db, types::SessionFilter},
+};
 
 use state::{DataState, FilterField, View};
 
@@ -334,10 +334,7 @@ pub fn run(db_path: &Path) -> Result<()> {
 }
 
 /// Synchronous event loop — poll at 100ms, render, handle key events.
-fn run_event_loop(
-    terminal: &mut crate::ui::Tui,
-    app: &mut DataApp,
-) -> Result<()> {
+fn run_event_loop(terminal: &mut crate::ui::Tui, app: &mut DataApp) -> Result<()> {
     loop {
         // Render
         terminal.draw(|frame| {
@@ -366,8 +363,10 @@ fn run_event_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::usage::db::open_in_memory;
-    use crate::usage::types::{ApiCallRecord, ProjectRecord, SessionRecord};
+    use crate::usage::{
+        db::open_in_memory,
+        types::{ApiCallRecord, ProjectRecord, SessionRecord},
+    };
     use chrono::Utc;
     use state::SortColumn;
 

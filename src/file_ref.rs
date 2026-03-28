@@ -3,8 +3,10 @@
 //! - `@path` (hint): injects a compact metadata note so the LLM can decide whether to read it
 //! - `@!path` (inject): injects the full file contents into context immediately
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use ignore::WalkBuilder;
 
@@ -448,7 +450,11 @@ mod tests {
         let root = dir.path();
 
         fs::create_dir_all(root.join("src")).unwrap();
-        fs::write(root.join("src/main.rs"), "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
+        fs::write(
+            root.join("src/main.rs"),
+            "fn main() {\n    println!(\"hello\");\n}\n",
+        )
+        .unwrap();
         fs::write(root.join("src/lib.rs"), "pub mod app;\n").unwrap();
         fs::write(root.join("Cargo.toml"), "[package]\nname = \"test\"\n").unwrap();
         // Binary file

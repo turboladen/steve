@@ -8,13 +8,17 @@ use ratatui::{
 
 use std::time::Duration;
 
-use super::markdown::{MarkdownLine, is_table_row, render_markdown_line, render_table};
-use super::message_block::{AssistantPart, CodeFence, DiffContent, DiffLine, MessageBlock, ToolGroup, ToolGroupStatus};
-use super::primitives;
-use super::selection::{ContentMap, ContentPos, SelectionState};
-use super::status_line::format_elapsed_compact;
-use super::syntax;
-use super::theme::Theme;
+use super::{
+    markdown::{MarkdownLine, is_table_row, render_markdown_line, render_table},
+    message_block::{
+        AssistantPart, CodeFence, DiffContent, DiffLine, MessageBlock, ToolGroup, ToolGroupStatus,
+    },
+    primitives,
+    selection::{ContentMap, ContentPos, SelectionState},
+    status_line::format_elapsed_compact,
+    syntax,
+    theme::Theme,
+};
 use crate::tool::{IntentCategory, ToolName, ToolVisualCategory};
 
 /// State for the scrollable message area.
@@ -135,12 +139,14 @@ fn gutter_spans(mark: GutterMark, theme: &Theme) -> Vec<Span<'static>> {
             ),
             Span::styled(" \u{2502}", Style::default().fg(theme.dim)),
         ],
-        GutterMark::Continuation(_) => vec![
-            Span::styled("\u{2502} \u{2502}", Style::default().fg(theme.dim)),
-        ],
-        GutterMark::Intent => vec![
-            Span::styled("\u{2500} \u{2502}", Style::default().fg(theme.dim)),
-        ],
+        GutterMark::Continuation(_) => vec![Span::styled(
+            "\u{2502} \u{2502}",
+            Style::default().fg(theme.dim),
+        )],
+        GutterMark::Intent => vec![Span::styled(
+            "\u{2500} \u{2502}",
+            Style::default().fg(theme.dim),
+        )],
     }
 }
 
@@ -166,7 +172,11 @@ struct GutteredLines<'a> {
 
 impl<'a> GutteredLines<'a> {
     fn new(theme: &'a Theme) -> Self {
-        Self { lines: Vec::new(), texts: Vec::new(), theme }
+        Self {
+            lines: Vec::new(),
+            texts: Vec::new(),
+            theme,
+        }
     }
 
     fn push(&mut self, line: Line<'a>, mark: GutterMark) {
@@ -233,10 +243,18 @@ pub fn render_message_blocks(
         // "steve" in accent
         let steve_label = "steve";
         let steve_pad = content_width.saturating_sub(steve_label.len()) / 2;
-        glines.push(Line::from(vec![
-            Span::raw(" ".repeat(steve_pad)),
-            Span::styled(steve_label, Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
-        ]), GutterMark::Empty);
+        glines.push(
+            Line::from(vec![
+                Span::raw(" ".repeat(steve_pad)),
+                Span::styled(
+                    steve_label,
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            GutterMark::Empty,
+        );
 
         // Subtitle lines in dim
         let lines_text = [
@@ -245,10 +263,13 @@ pub fn render_message_blocks(
         ];
         for subtitle in lines_text {
             let pad = content_width.saturating_sub(subtitle.len()) / 2;
-            glines.push(Line::from(vec![
-                Span::raw(" ".repeat(pad)),
-                Span::styled(subtitle, Style::default().fg(theme.dim)),
-            ]), GutterMark::Empty);
+            glines.push(
+                Line::from(vec![
+                    Span::raw(" ".repeat(pad)),
+                    Span::styled(subtitle, Style::default().fg(theme.dim)),
+                ]),
+                GutterMark::Empty,
+            );
         }
 
         // Render and return early — skip the message loop
@@ -273,15 +294,13 @@ pub fn render_message_blocks(
         match msg {
             MessageBlock::User { text } => {
                 for text_line in text.lines() {
-                    let mut spans = vec![
-                        Span::styled(
-                            "│ ",
-                            Style::default()
-                                .fg(theme.user_msg)
-                                .bg(theme.user_msg_bg)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ];
+                    let mut spans = vec![Span::styled(
+                        "│ ",
+                        Style::default()
+                            .fg(theme.user_msg)
+                            .bg(theme.user_msg_bg)
+                            .add_modifier(Modifier::BOLD),
+                    )];
                     spans.extend(style_file_refs(text_line, theme));
                     // Use push_with_text to exclude the "│ " decoration from clipboard text
                     let line = Line::from(spans).style(Style::default().bg(theme.user_msg_bg));
@@ -289,32 +308,38 @@ pub fn render_message_blocks(
                 }
             }
 
-            MessageBlock::Assistant {
-                thinking,
-                parts,
-            } => {
+            MessageBlock::Assistant { thinking, parts } => {
                 // Thinking block (collapsed by default)
                 if let Some(t) = thinking {
                     if t.expanded {
-                        glines.push(Line::from(Span::styled(
-                            format!("\u{25bc} Thinking ({} tokens)", t.token_count),
-                            Style::default()
-                                .fg(theme.reasoning)
-                                .add_modifier(Modifier::ITALIC),
-                        )), GutterMark::Empty);
+                        glines.push(
+                            Line::from(Span::styled(
+                                format!("\u{25bc} Thinking ({} tokens)", t.token_count),
+                                Style::default()
+                                    .fg(theme.reasoning)
+                                    .add_modifier(Modifier::ITALIC),
+                            )),
+                            GutterMark::Empty,
+                        );
                         for content_line in t.content.lines() {
-                            glines.push(Line::from(Span::styled(
-                                format!("  {content_line}"),
-                                Style::default().fg(theme.reasoning),
-                            )), GutterMark::Empty);
+                            glines.push(
+                                Line::from(Span::styled(
+                                    format!("  {content_line}"),
+                                    Style::default().fg(theme.reasoning),
+                                )),
+                                GutterMark::Empty,
+                            );
                         }
                     } else {
-                        glines.push(Line::from(Span::styled(
-                            format!("\u{25b6} Thinking ({} tokens)", t.token_count),
-                            Style::default()
-                                .fg(theme.reasoning)
-                                .add_modifier(Modifier::ITALIC),
-                        )), GutterMark::Empty);
+                        glines.push(
+                            Line::from(Span::styled(
+                                format!("\u{25b6} Thinking ({} tokens)", t.token_count),
+                                Style::default()
+                                    .fg(theme.reasoning)
+                                    .add_modifier(Modifier::ITALIC),
+                            )),
+                            GutterMark::Empty,
+                        );
                     }
                 }
 
@@ -336,7 +361,10 @@ pub fn render_message_blocks(
                             // Intent indicator — suppressed if same as previous group
                             if let Some(category) = infer_group_intent(group) {
                                 if last_intent != Some(category) {
-                                    glines.push(render_intent_line(category, content_width, theme), GutterMark::Intent);
+                                    glines.push(
+                                        render_intent_line(category, content_width, theme),
+                                        GutterMark::Intent,
+                                    );
                                 }
                                 last_intent = Some(category);
                             } else {
@@ -355,7 +383,9 @@ pub fn render_message_blocks(
                                     Some(summary) => format!(" \u{2192} {summary}"),
                                     None => match &group.status {
                                         ToolGroupStatus::Preparing => " preparing...".to_string(),
-                                        ToolGroupStatus::Running { .. } => " running...".to_string(),
+                                        ToolGroupStatus::Running { .. } => {
+                                            " running...".to_string()
+                                        }
                                         ToolGroupStatus::Complete => String::new(),
                                     },
                                 };
@@ -366,48 +396,72 @@ pub fn render_message_blocks(
                                     tool_color(call.tool_name, theme)
                                 };
 
-                                glines.push(Line::from(vec![
-                                    Span::styled(
-                                        format!("{status_indicator} "),
-                                        Style::default().fg(color),
-                                    ),
-                                    Span::styled(
-                                        call.tool_name.to_string(),
-                                        Style::default().fg(color).add_modifier(Modifier::BOLD),
-                                    ),
-                                    Span::styled(
-                                        format!(" {}{}", call.args_summary, result_part),
-                                        Style::default().fg(color),
-                                    ),
-                                ]), GutterMark::ToolMarker(call.tool_name));
+                                glines.push(
+                                    Line::from(vec![
+                                        Span::styled(
+                                            format!("{status_indicator} "),
+                                            Style::default().fg(color),
+                                        ),
+                                        Span::styled(
+                                            call.tool_name.to_string(),
+                                            Style::default().fg(color).add_modifier(Modifier::BOLD),
+                                        ),
+                                        Span::styled(
+                                            format!(" {}{}", call.args_summary, result_part),
+                                            Style::default().fg(color),
+                                        ),
+                                    ]),
+                                    GutterMark::ToolMarker(call.tool_name),
+                                );
 
                                 // Sub-agent live progress — show what tool the agent is calling
                                 if let Some(progress) = &call.agent_progress {
-                                    let progress_text = if let Some(ref result) = progress.result_summary {
-                                        format!("    {} {} \u{2192} {result}",
-                                            progress.tool_name, progress.args_summary)
-                                    } else {
-                                        format!("    {} {} ...",
-                                            progress.tool_name, progress.args_summary)
-                                    };
-                                    glines.push(Line::from(Span::styled(
-                                        progress_text,
-                                        Style::default().fg(theme.dim),
-                                    )), GutterMark::Continuation(call.tool_name));
+                                    let progress_text =
+                                        if let Some(ref result) = progress.result_summary {
+                                            format!(
+                                                "    {} {} \u{2192} {result}",
+                                                progress.tool_name, progress.args_summary
+                                            )
+                                        } else {
+                                            format!(
+                                                "    {} {} ...",
+                                                progress.tool_name, progress.args_summary
+                                            )
+                                        };
+                                    glines.push(
+                                        Line::from(Span::styled(
+                                            progress_text,
+                                            Style::default().fg(theme.dim),
+                                        )),
+                                        GutterMark::Continuation(call.tool_name),
+                                    );
                                 }
 
                                 // Expanded output — diff content or raw output fallback
                                 if call.expanded {
                                     if let Some(diff) = &call.diff_content {
                                         let mut diff_output: Vec<Line> = Vec::new();
-                                        render_diff_lines(&mut diff_output, diff, call.result_summary.as_deref(), theme, context_pct, content_width);
-                                        glines.extend(diff_output, GutterMark::Continuation(call.tool_name));
+                                        render_diff_lines(
+                                            &mut diff_output,
+                                            diff,
+                                            call.result_summary.as_deref(),
+                                            theme,
+                                            context_pct,
+                                            content_width,
+                                        );
+                                        glines.extend(
+                                            diff_output,
+                                            GutterMark::Continuation(call.tool_name),
+                                        );
                                     } else if let Some(output) = &call.full_output {
                                         for output_line in output.lines() {
-                                            glines.push(Line::from(Span::styled(
-                                                format!("  {output_line}"),
-                                                Style::default().fg(theme.dim),
-                                            )), GutterMark::Continuation(call.tool_name));
+                                            glines.push(
+                                                Line::from(Span::styled(
+                                                    format!("  {output_line}"),
+                                                    Style::default().fg(theme.dim),
+                                                )),
+                                                GutterMark::Continuation(call.tool_name),
+                                            );
                                         }
                                     }
                                 }
@@ -425,27 +479,36 @@ pub fn render_message_blocks(
                         let prefix_chars = prefix.chars().count();
                         let dash_count = content_width.saturating_sub(prefix_chars);
                         let dashes = "\u{2500}".repeat(dash_count);
-                        glines.push(Line::from(Span::styled(
-                            format!("{prefix}{dashes}"),
-                            Style::default().fg(theme.system_msg),
-                        )), GutterMark::Empty);
+                        glines.push(
+                            Line::from(Span::styled(
+                                format!("{prefix}{dashes}"),
+                                Style::default().fg(theme.system_msg),
+                            )),
+                            GutterMark::Empty,
+                        );
                     } else {
-                        glines.push(Line::from(Span::styled(
-                            format!("   {text_line}"),
-                            Style::default()
-                                .fg(theme.system_msg)
-                                .add_modifier(Modifier::ITALIC),
-                        )), GutterMark::Empty);
+                        glines.push(
+                            Line::from(Span::styled(
+                                format!("   {text_line}"),
+                                Style::default()
+                                    .fg(theme.system_msg)
+                                    .add_modifier(Modifier::ITALIC),
+                            )),
+                            GutterMark::Empty,
+                        );
                     }
                 }
             }
 
             MessageBlock::Error { text } => {
                 for text_line in text.lines() {
-                    glines.push(Line::from(Span::styled(
-                        text_line.to_string(),
-                        Style::default().fg(theme.error),
-                    )), GutterMark::Empty);
+                    glines.push(
+                        Line::from(Span::styled(
+                            text_line.to_string(),
+                            Style::default().fg(theme.error),
+                        )),
+                        GutterMark::Empty,
+                    );
                 }
             }
 
@@ -460,57 +523,70 @@ pub fn render_message_blocks(
                     GutterMark::Empty,
                 );
                 // Prompt line
-                glines.push(Line::from(vec![
-                    Span::styled(
-                        "\u{26a0} Allow ",
-                        Style::default()
-                            .fg(theme.permission)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        tool_name.to_string(),
-                        Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!(": {args_summary}?"),
-                        Style::default()
-                            .fg(theme.permission)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]), GutterMark::Empty);
+                glines.push(
+                    Line::from(vec![
+                        Span::styled(
+                            "\u{26a0} Allow ",
+                            Style::default()
+                                .fg(theme.permission)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            tool_name.to_string(),
+                            Style::default()
+                                .fg(theme.accent)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!(": {args_summary}?"),
+                            Style::default()
+                                .fg(theme.permission)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    GutterMark::Empty,
+                );
                 // Inline diff preview if available
                 if let Some(diff) = diff_content {
                     let mut diff_output: Vec<Line> = Vec::new();
-                    render_diff_lines(&mut diff_output, diff, None, theme, context_pct, content_width);
+                    render_diff_lines(
+                        &mut diff_output,
+                        diff,
+                        None,
+                        theme,
+                        context_pct,
+                        content_width,
+                    );
                     glines.extend(diff_output, GutterMark::Empty);
                 }
                 // Options line with highlighted key letters
-                glines.push(Line::from(vec![
-                    Span::raw("  ["),
-                    Span::styled(
-                        "y",
-                        Style::default()
-                            .fg(theme.success)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw("]es / ["),
-                    Span::styled(
-                        "n",
-                        Style::default()
-                            .fg(theme.error)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw("]o / ["),
-                    Span::styled(
-                        "a",
-                        Style::default()
-                            .fg(theme.permission)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw("]lways"),
-                ]), GutterMark::Empty);
+                glines.push(
+                    Line::from(vec![
+                        Span::raw("  ["),
+                        Span::styled(
+                            "y",
+                            Style::default()
+                                .fg(theme.success)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("]es / ["),
+                        Span::styled(
+                            "n",
+                            Style::default()
+                                .fg(theme.error)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("]o / ["),
+                        Span::styled(
+                            "a",
+                            Style::default()
+                                .fg(theme.permission)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw("]lways"),
+                    ]),
+                    GutterMark::Empty,
+                );
                 // Bottom rule
                 glines.push(
                     primitives::horizontal_rule(content_width, theme.permission),
@@ -538,31 +614,32 @@ pub fn render_message_blocks(
                 } else {
                     " [selecting]"
                 };
-                glines.push(Line::from(vec![
-                    Span::styled(
-                        "? ",
-                        Style::default()
-                            .fg(theme.question)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        question.to_string(),
-                        Style::default()
-                            .fg(theme.fg)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        mode_badge.to_string(),
-                        Style::default().fg(theme.question),
-                    ),
-                ]), GutterMark::Empty);
+                glines.push(
+                    Line::from(vec![
+                        Span::styled(
+                            "? ",
+                            Style::default()
+                                .fg(theme.question)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            question.to_string(),
+                            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(mode_badge.to_string(), Style::default().fg(theme.question)),
+                    ]),
+                    GutterMark::Empty,
+                );
 
                 if let Some(answer) = answered {
                     // Answered state — show the answer
-                    glines.push(Line::from(Span::styled(
-                        format!("  \u{2192} {answer}"),
-                        Style::default().fg(theme.success),
-                    )), GutterMark::Empty);
+                    glines.push(
+                        Line::from(Span::styled(
+                            format!("  \u{2192} {answer}"),
+                            Style::default().fg(theme.success),
+                        )),
+                        GutterMark::Empty,
+                    );
                 } else {
                     // Active state — show options or free-text input
                     let in_free_text_mode = selected.is_none();
@@ -585,10 +662,13 @@ pub fn render_message_blocks(
 
                     // Free-text input (when no options or Tab toggled to free-text)
                     if selected.is_none() {
-                        glines.push(Line::from(Span::styled(
-                            format!("  > {free_text}\u{258f}"),
-                            Style::default().fg(theme.fg),
-                        )), GutterMark::Empty);
+                        glines.push(
+                            Line::from(Span::styled(
+                                format!("  > {free_text}\u{258f}"),
+                                Style::default().fg(theme.fg),
+                            )),
+                            GutterMark::Empty,
+                        );
                     }
 
                     // Help line
@@ -597,14 +677,22 @@ pub fn render_message_blocks(
                         help_spans.push(Span::raw("  ["));
                         help_spans.push(Span::styled(
                             "1-9",
-                            Style::default().fg(theme.question).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(theme.question)
+                                .add_modifier(Modifier::BOLD),
                         ));
                         help_spans.push(Span::raw("] select  ["));
                         help_spans.push(Span::styled(
                             "Tab",
-                            Style::default().fg(theme.question).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(theme.question)
+                                .add_modifier(Modifier::BOLD),
                         ));
-                        let tab_label = if selected.is_some() { "] free text  " } else { "] options  " };
+                        let tab_label = if selected.is_some() {
+                            "] free text  "
+                        } else {
+                            "] options  "
+                        };
                         help_spans.push(Span::raw(tab_label));
                     } else {
                         help_spans.push(Span::raw("  "));
@@ -612,12 +700,16 @@ pub fn render_message_blocks(
                     help_spans.push(Span::raw("["));
                     help_spans.push(Span::styled(
                         "Enter",
-                        Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(theme.success)
+                            .add_modifier(Modifier::BOLD),
                     ));
                     help_spans.push(Span::raw("] confirm  ["));
                     help_spans.push(Span::styled(
                         "Esc",
-                        Style::default().fg(theme.error).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(theme.error)
+                            .add_modifier(Modifier::BOLD),
                     ));
                     help_spans.push(Span::raw("] skip"));
                     glines.push(Line::from(help_spans), GutterMark::Empty);
@@ -642,12 +734,10 @@ pub fn render_message_blocks(
             activity_text.push(' ');
             activity_text.push_str(&format_elapsed_compact(elapsed));
         }
-        let mut spans = vec![
-            Span::styled(
-                activity_text,
-                Style::default().fg(theme.accent),
-            ),
-        ];
+        let mut spans = vec![Span::styled(
+            activity_text,
+            Style::default().fg(theme.accent),
+        )];
         if has_pending {
             spans.push(Span::styled(
                 "  (message queued)",
@@ -703,12 +793,7 @@ pub fn render_message_blocks(
         let indicator = format!(" \u{2191} {} lines above ", lines_above);
         let ind_width = indicator.chars().count() as u16;
         if area.width >= ind_width + 2 {
-            let ind_area = Rect::new(
-                area.x + area.width - ind_width - 1,
-                area.y,
-                ind_width,
-                1,
-            );
+            let ind_area = Rect::new(area.x + area.width - ind_width - 1, area.y, ind_width, 1);
             let ind_widget = Paragraph::new(Line::from(Span::styled(
                 indicator,
                 Style::default().fg(theme.dim),
@@ -731,7 +816,9 @@ pub fn render_message_blocks(
                 );
                 let flash = Paragraph::new(Line::from(Span::styled(
                     flash_text,
-                    Style::default().fg(theme.success).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.success)
+                        .add_modifier(Modifier::BOLD),
                 )));
                 frame.render_widget(flash, flash_area);
             }
@@ -756,7 +843,11 @@ fn apply_selection_highlight(
         }
 
         // Determine the character range to highlight within this line's content (after gutter)
-        let line_start = if line_idx == start.line { start.char_offset } else { 0 };
+        let line_start = if line_idx == start.line {
+            start.char_offset
+        } else {
+            0
+        };
         let line_end = if line_idx == end.line {
             end.char_offset
         } else {
@@ -805,12 +896,8 @@ fn apply_selection_highlight(
                     new_spans.push(Span::styled(before, span.style));
                 }
                 // Selected portion
-                let selected: String =
-                    chars[sel_start_in_span..sel_end_in_span].iter().collect();
-                new_spans.push(Span::styled(
-                    selected,
-                    span.style.bg(theme.selection_bg),
-                ));
+                let selected: String = chars[sel_start_in_span..sel_end_in_span].iter().collect();
+                new_spans.push(Span::styled(selected, span.style.bg(theme.selection_bg)));
                 // After selection
                 if sel_end_in_span < span_char_count {
                     let after: String = chars[sel_end_in_span..].iter().collect();
@@ -852,10 +939,7 @@ fn render_diff_lines(
                 };
                 lines.push(Line::from(vec![
                     Span::styled("  \u{2502} ", Style::default().fg(border_color)),
-                    Span::styled(
-                        format!("{prefix}{text}"),
-                        Style::default().fg(color),
-                    ),
+                    Span::styled(format!("{prefix}{text}"), Style::default().fg(color)),
                 ]));
             }
 
@@ -1207,7 +1291,10 @@ mod tests {
         let line = Line::from("hello");
         let guttered = prepend_gutter(line, GutterMark::Empty, &theme);
         let text: String = guttered.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.starts_with("   "), "empty gutter should be 3 spaces, got: {text}");
+        assert!(
+            text.starts_with("   "),
+            "empty gutter should be 3 spaces, got: {text}"
+        );
         assert!(text.ends_with("hello"), "content should be preserved");
     }
 
@@ -1217,9 +1304,18 @@ mod tests {
         let line = Line::from("read(src/main.rs)");
         let guttered = prepend_gutter(line, GutterMark::ToolMarker(ToolName::Read), &theme);
         let text: String = guttered.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.starts_with("\u{00b7}"), "read gutter should start with · marker, got: {text}");
-        assert!(text.contains("\u{2502}"), "gutter should contain │ separator");
-        assert!(text.ends_with("read(src/main.rs)"), "content should be preserved");
+        assert!(
+            text.starts_with("\u{00b7}"),
+            "read gutter should start with · marker, got: {text}"
+        );
+        assert!(
+            text.contains("\u{2502}"),
+            "gutter should contain │ separator"
+        );
+        assert!(
+            text.ends_with("read(src/main.rs)"),
+            "content should be preserved"
+        );
         // Marker span should have tool_read color
         assert_eq!(guttered.spans[0].style.fg, Some(theme.tool_read));
     }
@@ -1230,7 +1326,10 @@ mod tests {
         let line = Line::from("edit(src/main.rs)");
         let guttered = prepend_gutter(line, GutterMark::ToolMarker(ToolName::Edit), &theme);
         let text: String = guttered.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.starts_with("\u{270e}"), "write gutter should start with ✎ marker, got: {text}");
+        assert!(
+            text.starts_with("\u{270e}"),
+            "write gutter should start with ✎ marker, got: {text}"
+        );
         // Marker span should have tool_write color
         assert_eq!(guttered.spans[0].style.fg, Some(theme.tool_write));
     }
@@ -1242,7 +1341,10 @@ mod tests {
         let guttered = prepend_gutter(line, GutterMark::Continuation(ToolName::Edit), &theme);
         let text: String = guttered.spans.iter().map(|s| s.content.as_ref()).collect();
         // Continuation: "│ │" (two pipes separated by space)
-        assert!(text.starts_with("\u{2502} \u{2502}"), "continuation gutter should be │ │, got: {text}");
+        assert!(
+            text.starts_with("\u{2502} \u{2502}"),
+            "continuation gutter should be │ │, got: {text}"
+        );
         assert!(text.ends_with("+new_code"), "content preserved");
         // Continuation uses dim color
         assert_eq!(guttered.spans[0].style.fg, Some(theme.dim));
@@ -1254,7 +1356,10 @@ mod tests {
         let line = Line::from("── exploring ──");
         let guttered = prepend_gutter(line, GutterMark::Intent, &theme);
         let text: String = guttered.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.starts_with("\u{2500} \u{2502}"), "intent gutter should be ─ │, got: {text}");
+        assert!(
+            text.starts_with("\u{2500} \u{2502}"),
+            "intent gutter should be ─ │, got: {text}"
+        );
         assert!(text.ends_with("exploring ──"), "content preserved");
     }
 
@@ -1271,7 +1376,7 @@ mod tests {
         let text: String = guttered.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "   hello world", "gutter + original content");
         // Original spans should be at the end
-        let last_two = &guttered.spans[guttered.spans.len()-2..];
+        let last_two = &guttered.spans[guttered.spans.len() - 2..];
         assert_eq!(last_two[0].content.as_ref(), "hello ");
         assert_eq!(last_two[1].content.as_ref(), "world");
     }
@@ -1281,7 +1386,11 @@ mod tests {
         let theme = Theme::default();
         let line = Line::from("code").style(Style::default().bg(theme.code_bg));
         let guttered = prepend_gutter(line, GutterMark::Empty, &theme);
-        assert_eq!(guttered.style.bg, Some(theme.code_bg), "line style should be preserved");
+        assert_eq!(
+            guttered.style.bg,
+            Some(theme.code_bg),
+            "line style should be preserved"
+        );
     }
 
     #[test]
@@ -1290,7 +1399,11 @@ mod tests {
         for t in ToolName::iter() {
             let m = gutter_marker(t);
             assert!(!m.is_empty(), "{t} gutter marker should be non-empty");
-            assert_eq!(m.chars().count(), 1, "{t} gutter marker should be exactly 1 char, got '{m}'");
+            assert_eq!(
+                m.chars().count(),
+                1,
+                "{t} gutter marker should be exactly 1 char, got '{m}'"
+            );
         }
     }
 
@@ -1310,14 +1423,19 @@ mod tests {
         for mark in marks {
             let spans = gutter_spans(mark, &theme);
             let width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-            assert_eq!(width, GUTTER_WIDTH, "gutter mark {mark:?} should be {GUTTER_WIDTH} chars, got {width}");
+            assert_eq!(
+                width, GUTTER_WIDTH,
+                "gutter mark {mark:?} should be {GUTTER_WIDTH} chars, got {width}"
+            );
         }
     }
 
     // -- render_diff_lines tests --
 
-    use super::super::message_block::{DiffContent, DiffLine};
-    use super::super::theme::Theme;
+    use super::super::{
+        message_block::{DiffContent, DiffLine},
+        theme::Theme,
+    };
 
     #[test]
     fn render_diff_lines_edit_diff_structure() {
@@ -1356,7 +1474,14 @@ mod tests {
         let theme = Theme::default();
         let diff = DiffContent::WriteSummary { line_count: 10 };
         let mut output: Vec<Line> = Vec::new();
-        render_diff_lines(&mut output, &diff, Some("Created /tmp/foo (42 bytes)"), &theme, 0, 60);
+        render_diff_lines(
+            &mut output,
+            &diff,
+            Some("Created /tmp/foo (42 bytes)"),
+            &theme,
+            0,
+            60,
+        );
         assert_eq!(output.len(), 1);
         let text = format!("{:?}", output[0]);
         assert!(text.contains("Created"), "verb should be Created");
@@ -1368,7 +1493,14 @@ mod tests {
         let theme = Theme::default();
         let diff = DiffContent::WriteSummary { line_count: 5 };
         let mut output: Vec<Line> = Vec::new();
-        render_diff_lines(&mut output, &diff, Some("Overwrote /tmp/foo (20 bytes)"), &theme, 0, 60);
+        render_diff_lines(
+            &mut output,
+            &diff,
+            Some("Overwrote /tmp/foo (20 bytes)"),
+            &theme,
+            0,
+            60,
+        );
         assert_eq!(output.len(), 1);
         let text = format!("{:?}", output[0]);
         assert!(text.contains("Overwrote"), "verb should be Overwrote");
@@ -1382,7 +1514,10 @@ mod tests {
         render_diff_lines(&mut output, &diff, None, &theme, 0, 60);
         assert_eq!(output.len(), 1);
         let text = format!("{:?}", output[0]);
-        assert!(text.contains("Overwrote"), "should default to Overwrote when no summary");
+        assert!(
+            text.contains("Overwrote"),
+            "should default to Overwrote when no summary"
+        );
     }
 
     #[test]
@@ -1400,8 +1535,8 @@ mod tests {
     // These test the actual render pipeline through ratatui's TestBackend,
     // catching layout bugs that pure data-model tests miss.
 
-    use ratatui::layout::Rect;
     use super::super::message_block::{ThinkingBlock, ToolCall, ToolGroup, ToolGroupStatus};
+    use ratatui::layout::Rect;
 
     /// Helper: render message blocks into a buffer and return the buffer text as a single string.
     fn render_messages_to_string(
@@ -1442,7 +1577,10 @@ mod tests {
             text: "Hello world".to_string(),
         }];
         let text = render_messages_to_string(60, 10, &messages, None);
-        assert!(text.contains("│ Hello world"), "user message should have '│ ' prefix, got:\n{text}");
+        assert!(
+            text.contains("│ Hello world"),
+            "user message should have '│ ' prefix, got:\n{text}"
+        );
     }
 
     #[test]
@@ -1452,9 +1590,15 @@ mod tests {
             parts: vec![AssistantPart::Text("Response text here".to_string())],
         }];
         let text = render_messages_to_string(60, 10, &messages, None);
-        assert!(text.contains("Response text here"), "assistant text should appear, got:\n{text}");
+        assert!(
+            text.contains("Response text here"),
+            "assistant text should appear, got:\n{text}"
+        );
         // Should NOT have "│ " prefix
-        assert!(!text.contains("│ Response"), "assistant should not have user prefix");
+        assert!(
+            !text.contains("│ Response"),
+            "assistant should not have user prefix"
+        );
     }
 
     #[test]
@@ -1468,7 +1612,10 @@ mod tests {
             parts: vec![],
         }];
         let text = render_messages_to_string(60, 10, &messages, None);
-        assert!(text.contains("\u{25b6}"), "collapsed thinking should show ▶");
+        assert!(
+            text.contains("\u{25b6}"),
+            "collapsed thinking should show ▶"
+        );
         assert!(text.contains("Thinking"), "should show 'Thinking'");
         assert!(text.contains("42"), "should show token count");
     }
@@ -1485,7 +1632,10 @@ mod tests {
         }];
         let text = render_messages_to_string(60, 10, &messages, None);
         assert!(text.contains("\u{25bc}"), "expanded thinking should show ▼");
-        assert!(text.contains("my thoughts"), "expanded thinking should show content");
+        assert!(
+            text.contains("my thoughts"),
+            "expanded thinking should show content"
+        );
     }
 
     #[test]
@@ -1507,7 +1657,10 @@ mod tests {
             })],
         }];
         let text = render_messages_to_string(80, 10, &messages, None);
-        assert!(text.contains("preparing..."), "preparing tool should show 'preparing...'");
+        assert!(
+            text.contains("preparing..."),
+            "preparing tool should show 'preparing...'"
+        );
     }
 
     #[test]
@@ -1529,7 +1682,10 @@ mod tests {
             })],
         }];
         let text = render_messages_to_string(80, 10, &messages, None);
-        assert!(text.contains("\u{25b6}"), "collapsed complete should show ▶");
+        assert!(
+            text.contains("\u{25b6}"),
+            "collapsed complete should show ▶"
+        );
         assert!(text.contains("read"), "should show tool name");
         assert!(text.contains("src/main.rs"), "should show args");
         assert!(text.contains("150 lines"), "should show result summary");
@@ -1561,7 +1717,10 @@ mod tests {
         let text = render_messages_to_string(80, 15, &messages, None);
         // Box-drawing frame
         assert!(text.contains("\u{250c}"), "should have top-left corner ┌");
-        assert!(text.contains("\u{2514}"), "should have bottom-left corner └");
+        assert!(
+            text.contains("\u{2514}"),
+            "should have bottom-left corner └"
+        );
         assert!(text.contains("-old line"), "should show removal with -");
         assert!(text.contains("+new line"), "should show addition with +");
     }
@@ -1572,7 +1731,10 @@ mod tests {
             text: "System notice".to_string(),
         }];
         let text = render_messages_to_string(60, 10, &messages, None);
-        assert!(text.contains("System notice"), "system message should appear");
+        assert!(
+            text.contains("System notice"),
+            "system message should appear"
+        );
     }
 
     #[test]
@@ -1581,7 +1743,10 @@ mod tests {
             text: "Something broke".to_string(),
         }];
         let text = render_messages_to_string(60, 10, &messages, None);
-        assert!(text.contains("Something broke"), "error message should appear");
+        assert!(
+            text.contains("Something broke"),
+            "error message should appear"
+        );
     }
 
     #[test]
@@ -1625,15 +1790,24 @@ mod tests {
     #[test]
     fn buffer_activity_spinner_inline() {
         let messages = vec![];
-        let text = render_messages_to_string(60, 10, &messages, Some(('⠋', "Thinking...".to_string(), false, None)));
+        let text = render_messages_to_string(
+            60,
+            10,
+            &messages,
+            Some(('⠋', "Thinking...".to_string(), false, None)),
+        );
         assert!(text.contains("Thinking..."), "activity text should appear");
     }
 
     #[test]
     fn buffer_blank_line_between_messages() {
         let messages = vec![
-            MessageBlock::User { text: "msg1".to_string() },
-            MessageBlock::User { text: "msg2".to_string() },
+            MessageBlock::User {
+                text: "msg1".to_string(),
+            },
+            MessageBlock::User {
+                text: "msg2".to_string(),
+            },
         ];
         let text = render_messages_to_string(60, 10, &messages, None);
         // Find positions — msg2 should not immediately follow msg1
@@ -1642,7 +1816,10 @@ mod tests {
         // There should be at least one blank line between them (newline + spaces + newline)
         let between = &text[pos1..pos2];
         let line_count = between.lines().count();
-        assert!(line_count >= 2, "should have blank line separation, got {line_count} lines between messages");
+        assert!(
+            line_count >= 2,
+            "should have blank line separation, got {line_count} lines between messages"
+        );
     }
 
     // -- infer_group_intent tests --
@@ -1674,18 +1851,40 @@ mod tests {
 
     #[test]
     fn infer_group_intent_read_only_tools() {
-        for tool in [ToolName::Read, ToolName::Grep, ToolName::Glob, ToolName::List, ToolName::Webfetch] {
+        for tool in [
+            ToolName::Read,
+            ToolName::Grep,
+            ToolName::Glob,
+            ToolName::List,
+            ToolName::Webfetch,
+        ] {
             let group = make_tool_group(&[tool]);
-            assert_eq!(infer_group_intent(&group), Some(IntentCategory::Exploring), "{tool} should produce Exploring");
+            assert_eq!(
+                infer_group_intent(&group),
+                Some(IntentCategory::Exploring),
+                "{tool} should produce Exploring"
+            );
         }
     }
 
     #[test]
     fn infer_group_intent_write_tools() {
-        for tool in [ToolName::Edit, ToolName::Write, ToolName::Patch, ToolName::Move,
-                     ToolName::Copy, ToolName::Delete, ToolName::Mkdir, ToolName::Memory] {
+        for tool in [
+            ToolName::Edit,
+            ToolName::Write,
+            ToolName::Patch,
+            ToolName::Move,
+            ToolName::Copy,
+            ToolName::Delete,
+            ToolName::Mkdir,
+            ToolName::Memory,
+        ] {
             let group = make_tool_group(&[tool]);
-            assert_eq!(infer_group_intent(&group), Some(IntentCategory::Editing), "{tool} should produce Editing");
+            assert_eq!(
+                infer_group_intent(&group),
+                Some(IntentCategory::Editing),
+                "{tool} should produce Editing"
+            );
         }
     }
 
@@ -1698,49 +1897,86 @@ mod tests {
     #[test]
     fn infer_group_intent_mixed_read_write() {
         let group = make_tool_group(&[ToolName::Read, ToolName::Edit]);
-        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Editing), "editing takes priority over exploring");
+        assert_eq!(
+            infer_group_intent(&group),
+            Some(IntentCategory::Editing),
+            "editing takes priority over exploring"
+        );
     }
 
     #[test]
     fn infer_group_intent_mixed_read_bash() {
         let group = make_tool_group(&[ToolName::Read, ToolName::Bash]);
-        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Executing), "executing takes priority over exploring");
+        assert_eq!(
+            infer_group_intent(&group),
+            Some(IntentCategory::Executing),
+            "executing takes priority over exploring"
+        );
     }
 
     #[test]
     fn infer_group_intent_mixed_edit_bash() {
         let group = make_tool_group(&[ToolName::Edit, ToolName::Bash]);
-        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Editing), "editing takes priority over executing");
+        assert_eq!(
+            infer_group_intent(&group),
+            Some(IntentCategory::Editing),
+            "editing takes priority over executing"
+        );
     }
 
     #[test]
     fn infer_group_intent_only_asking_tools() {
         let group = make_tool_group(&[ToolName::Question, ToolName::Task]);
-        assert_eq!(infer_group_intent(&group), None, "asking tools should not produce a label");
+        assert_eq!(
+            infer_group_intent(&group),
+            None,
+            "asking tools should not produce a label"
+        );
     }
 
     #[test]
     fn infer_group_intent_asking_plus_exploring() {
         let group = make_tool_group(&[ToolName::Task, ToolName::Read]);
-        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Exploring), "exploring should show even with asking tools");
+        assert_eq!(
+            infer_group_intent(&group),
+            Some(IntentCategory::Exploring),
+            "exploring should show even with asking tools"
+        );
     }
 
     #[test]
     fn infer_group_intent_all_categories() {
-        let group = make_tool_group(&[ToolName::Read, ToolName::Edit, ToolName::Bash, ToolName::Question]);
-        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Editing), "editing has highest priority");
+        let group = make_tool_group(&[
+            ToolName::Read,
+            ToolName::Edit,
+            ToolName::Bash,
+            ToolName::Question,
+        ]);
+        assert_eq!(
+            infer_group_intent(&group),
+            Some(IntentCategory::Editing),
+            "editing has highest priority"
+        );
     }
 
     #[test]
     fn infer_group_intent_agent_tool() {
         let group = make_tool_group(&[ToolName::Agent]);
-        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Delegating), "agent should produce Delegating");
+        assert_eq!(
+            infer_group_intent(&group),
+            Some(IntentCategory::Delegating),
+            "agent should produce Delegating"
+        );
     }
 
     #[test]
     fn infer_group_intent_agent_plus_read() {
         let group = make_tool_group(&[ToolName::Read, ToolName::Agent]);
-        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Delegating), "delegating takes priority over exploring");
+        assert_eq!(
+            infer_group_intent(&group),
+            Some(IntentCategory::Delegating),
+            "delegating takes priority over exploring"
+        );
     }
 
     #[test]
@@ -1750,10 +1986,18 @@ mod tests {
         assert_eq!(infer_group_intent(&group), Some(IntentCategory::Delegating));
 
         let group = make_tool_group(&[ToolName::Agent, ToolName::Bash]);
-        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Executing), "executing takes priority over delegating");
+        assert_eq!(
+            infer_group_intent(&group),
+            Some(IntentCategory::Executing),
+            "executing takes priority over delegating"
+        );
 
         let group = make_tool_group(&[ToolName::Agent, ToolName::Edit]);
-        assert_eq!(infer_group_intent(&group), Some(IntentCategory::Editing), "editing takes priority over delegating");
+        assert_eq!(
+            infer_group_intent(&group),
+            Some(IntentCategory::Editing),
+            "editing takes priority over delegating"
+        );
     }
 
     // -- render_intent_line tests --
@@ -1763,7 +2007,10 @@ mod tests {
         let theme = Theme::default();
         let line = render_intent_line(IntentCategory::Exploring, 40, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.starts_with("\u{2500}\u{2500} exploring "), "should start with '── exploring '");
+        assert!(
+            text.starts_with("\u{2500}\u{2500} exploring "),
+            "should start with '── exploring '"
+        );
         assert!(text.ends_with('\u{2500}'), "should end with ─ dashes");
         assert_eq!(text.chars().count(), 40, "should fill to width");
         // Color should be tool_read for exploring
@@ -1800,15 +2047,29 @@ mod tests {
         let prefix_len = "\u{2500}\u{2500} exploring ".chars().count(); // 13 chars
         let line = render_intent_line(IntentCategory::Exploring, prefix_len, &theme);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "\u{2500}\u{2500} exploring ", "at exact prefix width, no dashes appended");
-        assert_eq!(text.chars().count(), prefix_len, "should be exactly prefix length");
+        assert_eq!(
+            text, "\u{2500}\u{2500} exploring ",
+            "at exact prefix width, no dashes appended"
+        );
+        assert_eq!(
+            text.chars().count(),
+            prefix_len,
+            "should be exactly prefix length"
+        );
 
         // Width smaller than prefix — no dashes, no panic
         let line2 = render_intent_line(IntentCategory::Exploring, 5, &theme);
         let text2: String = line2.spans.iter().map(|s| s.content.as_ref()).collect();
         // Still contains the full prefix (saturating_sub produces 0 dashes)
-        assert!(text2.starts_with("\u{2500}\u{2500} exploring "), "prefix always rendered");
-        assert_eq!(text2.chars().count(), prefix_len, "output is prefix-length when width < prefix");
+        assert!(
+            text2.starts_with("\u{2500}\u{2500} exploring "),
+            "prefix always rendered"
+        );
+        assert_eq!(
+            text2.chars().count(),
+            prefix_len,
+            "output is prefix-length when width < prefix"
+        );
     }
 
     // -- per-group intent rendering buffer tests --
@@ -1850,12 +2111,21 @@ mod tests {
             ],
         }];
         let text = render_messages_to_string(80, 20, &messages, None);
-        assert!(text.contains("exploring"), "should have exploring label for read group");
-        assert!(text.contains("editing"), "should have editing label for edit group");
+        assert!(
+            text.contains("exploring"),
+            "should have exploring label for read group"
+        );
+        assert!(
+            text.contains("editing"),
+            "should have editing label for edit group"
+        );
         // exploring should appear before editing in the output
         let pos_exploring = text.find("exploring").unwrap();
         let pos_editing = text.find("editing").unwrap();
-        assert!(pos_exploring < pos_editing, "exploring should come before editing");
+        assert!(
+            pos_exploring < pos_editing,
+            "exploring should come before editing"
+        );
     }
 
     #[test]
@@ -1865,9 +2135,18 @@ mod tests {
             parts: vec![AssistantPart::Text("Just a text response.".into())],
         }];
         let text = render_messages_to_string(80, 10, &messages, None);
-        assert!(!text.contains("exploring"), "no intent label for text-only response");
-        assert!(!text.contains("editing"), "no intent label for text-only response");
-        assert!(!text.contains("executing"), "no intent label for text-only response");
+        assert!(
+            !text.contains("exploring"),
+            "no intent label for text-only response"
+        );
+        assert!(
+            !text.contains("editing"),
+            "no intent label for text-only response"
+        );
+        assert!(
+            !text.contains("executing"),
+            "no intent label for text-only response"
+        );
     }
 
     #[test]
@@ -1889,9 +2168,18 @@ mod tests {
             })],
         }];
         let text = render_messages_to_string(80, 10, &messages, None);
-        assert!(!text.contains("exploring"), "no exploring label for question tool");
-        assert!(!text.contains("editing"), "no editing label for question tool");
-        assert!(!text.contains("executing"), "no executing label for question tool");
+        assert!(
+            !text.contains("exploring"),
+            "no exploring label for question tool"
+        );
+        assert!(
+            !text.contains("editing"),
+            "no editing label for question tool"
+        );
+        assert!(
+            !text.contains("executing"),
+            "no executing label for question tool"
+        );
     }
 
     #[test]
@@ -1986,7 +2274,10 @@ mod tests {
         }];
         let text = render_messages_to_string(80, 20, &messages, None);
         let count = text.matches("exploring").count();
-        assert_eq!(count, 2, "expected 2 'exploring' labels (text resets dedup) but found {count}");
+        assert_eq!(
+            count, 2,
+            "expected 2 'exploring' labels (text resets dedup) but found {count}"
+        );
     }
 
     #[test]
@@ -2081,7 +2372,10 @@ mod tests {
         }];
         let text = render_messages_to_string(80, 20, &messages, None);
         let count = text.matches("exploring").count();
-        assert_eq!(count, 2, "expected 2 'exploring' labels (asking resets dedup) but found {count}");
+        assert_eq!(
+            count, 2,
+            "expected 2 'exploring' labels (asking resets dedup) but found {count}"
+        );
     }
 
     // -- render_text_with_code_blocks tests --
@@ -2094,9 +2388,20 @@ mod tests {
         // "before", header, "fn main() {}", closing rule, "after" = 5 output lines
         assert_eq!(ml.len(), 5, "expected 5 lines, got {}", ml.len());
         // Header should contain language label with dash fill
-        let header_text: String = ml[1].styled.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(header_text.contains("rust"), "header should contain 'rust', got: {header_text}");
-        assert!(header_text.contains("\u{2500}"), "header should contain dash fill");
+        let header_text: String = ml[1]
+            .styled
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            header_text.contains("rust"),
+            "header should contain 'rust', got: {header_text}"
+        );
+        assert!(
+            header_text.contains("\u{2500}"),
+            "header should contain dash fill"
+        );
     }
 
     #[test]
@@ -2107,12 +2412,29 @@ mod tests {
         // Header rule + code line + closing rule = 3 lines
         assert_eq!(ml.len(), 3, "expected 3 lines, got {}", ml.len());
         // Middle line is the code
-        let code_text: String = ml[1].styled.spans.iter().map(|s| s.content.as_ref()).collect();
+        let code_text: String = ml[1]
+            .styled
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
         assert_eq!(code_text, "code");
-        assert_eq!(ml[1].styled.style.bg, Some(theme.code_bg), "code line should have code_bg");
+        assert_eq!(
+            ml[1].styled.style.bg,
+            Some(theme.code_bg),
+            "code line should have code_bg"
+        );
         // Header and closing should have code_bg
-        assert_eq!(ml[0].styled.style.bg, Some(theme.code_bg), "header rule should have code_bg");
-        assert_eq!(ml[2].styled.style.bg, Some(theme.code_bg), "closing rule should have code_bg");
+        assert_eq!(
+            ml[0].styled.style.bg,
+            Some(theme.code_bg),
+            "header rule should have code_bg"
+        );
+        assert_eq!(
+            ml[2].styled.style.bg,
+            Some(theme.code_bg),
+            "closing rule should have code_bg"
+        );
     }
 
     #[test]
@@ -2125,7 +2447,8 @@ mod tests {
         // Lines 2 and 3 (code lines) should have code_bg background on Line.style
         for i in 2..4 {
             assert_eq!(
-                ml[i].styled.style.bg, Some(theme.code_bg),
+                ml[i].styled.style.bg,
+                Some(theme.code_bg),
                 "unclosed code line {i} should have code_bg"
             );
         }
@@ -2137,9 +2460,22 @@ mod tests {
         let text = "```\n```";
         let ml = render_text_with_code_blocks(text, &theme, 20);
         // Header rule + closing rule = 2 lines (no code content in between)
-        assert_eq!(ml.len(), 2, "expected 2 lines (header + closing), got {}", ml.len());
-        assert_eq!(ml[0].styled.style.bg, Some(theme.code_bg), "header rule should have code_bg");
-        assert_eq!(ml[1].styled.style.bg, Some(theme.code_bg), "closing rule should have code_bg");
+        assert_eq!(
+            ml.len(),
+            2,
+            "expected 2 lines (header + closing), got {}",
+            ml.len()
+        );
+        assert_eq!(
+            ml[0].styled.style.bg,
+            Some(theme.code_bg),
+            "header rule should have code_bg"
+        );
+        assert_eq!(
+            ml[1].styled.style.bg,
+            Some(theme.code_bg),
+            "closing rule should have code_bg"
+        );
     }
 
     #[test]
@@ -2149,7 +2485,10 @@ mod tests {
         let ml = render_text_with_code_blocks(text, &theme, 40);
         assert_eq!(ml.len(), 1);
         // Should have no code_bg on the Line.style (inline code bg is on individual spans)
-        assert_eq!(ml[0].styled.style.bg, None, "inline backticks should not trigger code block");
+        assert_eq!(
+            ml[0].styled.style.bg, None,
+            "inline backticks should not trigger code block"
+        );
     }
 
     #[test]
@@ -2164,8 +2503,16 @@ mod tests {
         assert_eq!(ml[4].styled.style.bg, None, "text2 should not have bg");
         assert_eq!(ml[8].styled.style.bg, None, "text3 should not have bg");
         // Code lines should have code_bg
-        assert_eq!(ml[2].styled.style.bg, Some(theme.code_bg), "code line 1 should have bg");
-        assert_eq!(ml[6].styled.style.bg, Some(theme.code_bg), "code line 2 should have bg");
+        assert_eq!(
+            ml[2].styled.style.bg,
+            Some(theme.code_bg),
+            "code line 1 should have bg"
+        );
+        assert_eq!(
+            ml[6].styled.style.bg,
+            Some(theme.code_bg),
+            "code line 2 should have bg"
+        );
     }
 
     #[test]
@@ -2175,8 +2522,14 @@ mod tests {
         let ml = render_text_with_code_blocks(text, &theme, 40);
         // 4 spaces = not a fence, both lines rendered as normal text
         assert_eq!(ml.len(), 2);
-        assert_eq!(ml[0].styled.style.bg, None, "4-space indented fence should be normal text");
-        assert_eq!(ml[1].styled.style.bg, None, "following line should be normal text");
+        assert_eq!(
+            ml[0].styled.style.bg, None,
+            "4-space indented fence should be normal text"
+        );
+        assert_eq!(
+            ml[1].styled.style.bg, None,
+            "following line should be normal text"
+        );
     }
 
     #[test]
@@ -2199,10 +2552,25 @@ mod tests {
         let ml = render_text_with_code_blocks(text, &theme, 40);
         // Header rule + "code" + closing rule + "after" = 4 lines
         assert_eq!(ml.len(), 4, "expected 4 lines, got {}", ml.len());
-        assert_eq!(ml[0].styled.style.bg, Some(theme.code_bg), "header rule should have code_bg");
-        assert_eq!(ml[1].styled.style.bg, Some(theme.code_bg), "code line should have code_bg");
-        assert_eq!(ml[2].styled.style.bg, Some(theme.code_bg), "closing rule should have code_bg");
-        assert_eq!(ml[3].styled.style.bg, None, "line after closing fence should be normal text");
+        assert_eq!(
+            ml[0].styled.style.bg,
+            Some(theme.code_bg),
+            "header rule should have code_bg"
+        );
+        assert_eq!(
+            ml[1].styled.style.bg,
+            Some(theme.code_bg),
+            "code line should have code_bg"
+        );
+        assert_eq!(
+            ml[2].styled.style.bg,
+            Some(theme.code_bg),
+            "closing rule should have code_bg"
+        );
+        assert_eq!(
+            ml[3].styled.style.bg, None,
+            "line after closing fence should be normal text"
+        );
     }
 
     #[test]
@@ -2212,8 +2580,14 @@ mod tests {
         let ml = render_text_with_code_blocks(text, &theme, 40);
         // Tab is not a space — fence should not be recognized
         assert_eq!(ml.len(), 2);
-        assert_eq!(ml[0].styled.style.bg, None, "tab-indented fence should be normal text");
-        assert_eq!(ml[1].styled.style.bg, None, "following line should be normal text");
+        assert_eq!(
+            ml[0].styled.style.bg, None,
+            "tab-indented fence should be normal text"
+        );
+        assert_eq!(
+            ml[1].styled.style.bg, None,
+            "following line should be normal text"
+        );
     }
 
     #[test]
@@ -2226,15 +2600,27 @@ mod tests {
         }];
         let text = render_messages_to_string(60, 15, &messages, None);
         // The header should appear with language label
-        assert!(text.contains("rust"), "should contain language label 'rust'");
+        assert!(
+            text.contains("rust"),
+            "should contain language label 'rust'"
+        );
         // Code block framing now uses ─ for header/footer rules
-        assert!(text.contains('\u{2500}'), "should contain ─ in code block framing");
+        assert!(
+            text.contains('\u{2500}'),
+            "should contain ─ in code block framing"
+        );
         // The code line should appear
         assert!(text.contains("fn main() {}"), "should contain code content");
         // The fence lines (```) should NOT appear
-        assert!(!text.contains("```"), "fence markers should be consumed, not rendered");
+        assert!(
+            !text.contains("```"),
+            "fence markers should be consumed, not rendered"
+        );
         // Normal text should appear
-        assert!(text.contains("Here is code:"), "text before block should appear");
+        assert!(
+            text.contains("Here is code:"),
+            "text before block should appear"
+        );
         assert!(text.contains("Done."), "text after block should appear");
     }
 
@@ -2252,7 +2638,12 @@ mod tests {
             ml[1].styled.spans.len() > 1,
             "highlighted code should produce >1 span, got {} spans: {:?}",
             ml[1].styled.spans.len(),
-            ml[1].styled.spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>()
+            ml[1]
+                .styled
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<Vec<_>>()
         );
         // All spans should have code_bg background
         for span in &ml[1].styled.spans {
@@ -2298,11 +2689,26 @@ mod tests {
             answered: None,
         }];
         let text = render_messages_to_string(80, 15, &messages, None);
-        assert!(text.contains("? What approach?"), "should show question, got:\n{text}");
-        assert!(text.contains("1. Option A"), "should show option 1, got:\n{text}");
-        assert!(text.contains("2. Option B"), "should show option 2, got:\n{text}");
-        assert!(text.contains("Enter"), "should show Enter key hint, got:\n{text}");
-        assert!(text.contains("Esc"), "should show Esc key hint, got:\n{text}");
+        assert!(
+            text.contains("? What approach?"),
+            "should show question, got:\n{text}"
+        );
+        assert!(
+            text.contains("1. Option A"),
+            "should show option 1, got:\n{text}"
+        );
+        assert!(
+            text.contains("2. Option B"),
+            "should show option 2, got:\n{text}"
+        );
+        assert!(
+            text.contains("Enter"),
+            "should show Enter key hint, got:\n{text}"
+        );
+        assert!(
+            text.contains("Esc"),
+            "should show Esc key hint, got:\n{text}"
+        );
     }
 
     #[test]
@@ -2315,10 +2721,19 @@ mod tests {
             answered: Some("Option A".to_string()),
         }];
         let text = render_messages_to_string(80, 15, &messages, None);
-        assert!(text.contains("? What approach?"), "should show question, got:\n{text}");
-        assert!(text.contains("Option A"), "should show answer, got:\n{text}");
+        assert!(
+            text.contains("? What approach?"),
+            "should show question, got:\n{text}"
+        );
+        assert!(
+            text.contains("Option A"),
+            "should show answer, got:\n{text}"
+        );
         // Should NOT show the help line when answered
-        assert!(!text.contains("Enter"), "should not show key hints when answered, got:\n{text}");
+        assert!(
+            !text.contains("Enter"),
+            "should not show key hints when answered, got:\n{text}"
+        );
     }
 
     #[test]
@@ -2331,8 +2746,14 @@ mod tests {
             answered: None,
         }];
         let text = render_messages_to_string(80, 15, &messages, None);
-        assert!(text.contains("? What do you think?"), "should show question, got:\n{text}");
-        assert!(text.contains("my answer"), "should show free text input, got:\n{text}");
+        assert!(
+            text.contains("? What do you think?"),
+            "should show question, got:\n{text}"
+        );
+        assert!(
+            text.contains("my answer"),
+            "should show free text input, got:\n{text}"
+        );
     }
 
     #[test]
@@ -2356,7 +2777,10 @@ mod tests {
         let ml = render_text_with_code_blocks(text, &theme, 60);
         // Table (3 lines) + empty line + prose = 5 lines
         assert_eq!(ml.len(), 5, "expected 5 lines, got {}", ml.len());
-        assert!(ml[4].plain.contains("Some prose after"), "prose after table");
+        assert!(
+            ml[4].plain.contains("Some prose after"),
+            "prose after table"
+        );
     }
 
     // -- Phase review: missing test coverage --
@@ -2364,18 +2788,32 @@ mod tests {
     #[test]
     fn buffer_empty_state_welcome() {
         let text = render_messages_to_string(60, 20, &[], None);
-        assert!(text.contains("steve"), "welcome should show 'steve', got:\n{text}");
-        assert!(text.contains("Type a message"), "welcome should show subtitle, got:\n{text}");
+        assert!(
+            text.contains("steve"),
+            "welcome should show 'steve', got:\n{text}"
+        );
+        assert!(
+            text.contains("Type a message"),
+            "welcome should show subtitle, got:\n{text}"
+        );
     }
 
     #[test]
     fn buffer_activity_spinner_message_queued() {
         let text = render_messages_to_string(
-            80, 10, &[],
+            80,
+            10,
+            &[],
             Some(('\u{280b}', "Running edit...".to_string(), true, None)),
         );
-        assert!(text.contains("Running edit..."), "activity text should appear");
-        assert!(text.contains("message queued"), "should show '(message queued)' when has_pending_input, got:\n{text}");
+        assert!(
+            text.contains("Running edit..."),
+            "activity text should appear"
+        );
+        assert!(
+            text.contains("message queued"),
+            "should show '(message queued)' when has_pending_input, got:\n{text}"
+        );
     }
 
     #[test]
@@ -2384,8 +2822,14 @@ mod tests {
             text: "Session started".to_string(),
         }];
         let text = render_messages_to_string(60, 10, &messages, None);
-        assert!(text.contains("Session started"), "system text should appear");
-        assert!(text.contains("\u{2500}\u{2500}"), "system message should have ── rule prefix, got:\n{text}");
+        assert!(
+            text.contains("Session started"),
+            "system text should appear"
+        );
+        assert!(
+            text.contains("\u{2500}\u{2500}"),
+            "system message should have ── rule prefix, got:\n{text}"
+        );
     }
 
     #[test]
@@ -2398,7 +2842,10 @@ mod tests {
             answered: None,
         }];
         let text = render_messages_to_string(80, 15, &messages, None);
-        assert!(text.contains("[selecting]"), "unanswered with selection should show [selecting], got:\n{text}");
+        assert!(
+            text.contains("[selecting]"),
+            "unanswered with selection should show [selecting], got:\n{text}"
+        );
     }
 
     #[test]
@@ -2411,7 +2858,10 @@ mod tests {
             answered: None,
         }];
         let text = render_messages_to_string(80, 15, &messages, None);
-        assert!(text.contains("[typing]"), "free-text mode should show [typing], got:\n{text}");
+        assert!(
+            text.contains("[typing]"),
+            "free-text mode should show [typing], got:\n{text}"
+        );
     }
 
     #[test]
@@ -2424,7 +2874,10 @@ mod tests {
             answered: Some("A".to_string()),
         }];
         let text = render_messages_to_string(80, 15, &messages, None);
-        assert!(!text.contains("[selecting]"), "answered should not show badge");
+        assert!(
+            !text.contains("[selecting]"),
+            "answered should not show badge"
+        );
         assert!(!text.contains("[typing]"), "answered should not show badge");
     }
 
@@ -2448,7 +2901,10 @@ mod tests {
         }];
         let text = render_messages_to_string(80, 10, &messages, None);
         // New format: tool name followed by space and args (no parens)
-        assert!(!text.contains("read("), "should NOT have parens format 'read(', got:\n{text}");
+        assert!(
+            !text.contains("read("),
+            "should NOT have parens format 'read(', got:\n{text}"
+        );
         assert!(text.contains("read"), "should show tool name");
         assert!(text.contains("src/main.rs"), "should show args");
     }
@@ -2457,7 +2913,10 @@ mod tests {
     fn buffer_scroll_indicator_not_shown_at_bottom() {
         // When auto_scroll is true (default), no indicator should appear
         let text = render_messages_to_string(60, 10, &[], None);
-        assert!(!text.contains("lines above"), "should not show scroll indicator when at bottom");
+        assert!(
+            !text.contains("lines above"),
+            "should not show scroll indicator when at bottom"
+        );
     }
 
     #[test]
@@ -2489,9 +2948,14 @@ mod tests {
                     break;
                 }
             }
-            if found_bg { break; }
+            if found_bg {
+                break;
+            }
         }
-        assert!(found_bg, "user message should have theme.user_msg_bg background");
+        assert!(
+            found_bg,
+            "user message should have theme.user_msg_bg background"
+        );
     }
 
     #[test]
@@ -2517,15 +2981,26 @@ mod tests {
                         tool_count: 3,
                     }),
                 }],
-                status: ToolGroupStatus::Running { current_tool: ToolName::Agent },
+                status: ToolGroupStatus::Running {
+                    current_tool: ToolName::Agent,
+                },
             })],
         }];
         let text = render_messages_to_string(80, 10, &messages, None);
         // The agent tool call header should be present
-        assert!(text.contains("agent"), "should show agent tool name, got:\n{text}");
+        assert!(
+            text.contains("agent"),
+            "should show agent tool name, got:\n{text}"
+        );
         // The progress line should show the sub-agent's current tool and args
-        assert!(text.contains("read"), "should show sub-agent tool name 'read', got:\n{text}");
-        assert!(text.contains("src/main.rs"), "should show sub-agent args, got:\n{text}");
+        assert!(
+            text.contains("read"),
+            "should show sub-agent tool name 'read', got:\n{text}"
+        );
+        assert!(
+            text.contains("src/main.rs"),
+            "should show sub-agent args, got:\n{text}"
+        );
         // Progress sub-line format: "    read src/main.rs ..."
         // (must match the specific format, not just "..." which appears in "running...")
         assert!(
@@ -2557,18 +3032,35 @@ mod tests {
                         tool_count: 5,
                     }),
                 }],
-                status: ToolGroupStatus::Running { current_tool: ToolName::Agent },
+                status: ToolGroupStatus::Running {
+                    current_tool: ToolName::Agent,
+                },
             })],
         }];
         let text = render_messages_to_string(80, 10, &messages, None);
         // Should show the arrow and result instead of "..."
-        assert!(text.contains("grep"), "should show sub-agent tool name 'grep', got:\n{text}");
-        assert!(text.contains("ToolName"), "should show sub-agent args, got:\n{text}");
-        assert!(text.contains("\u{2192}"), "should show arrow for completed result, got:\n{text}");
-        assert!(text.contains("12 matches"), "should show result summary, got:\n{text}");
+        assert!(
+            text.contains("grep"),
+            "should show sub-agent tool name 'grep', got:\n{text}"
+        );
+        assert!(
+            text.contains("ToolName"),
+            "should show sub-agent args, got:\n{text}"
+        );
+        assert!(
+            text.contains("\u{2192}"),
+            "should show arrow for completed result, got:\n{text}"
+        );
+        assert!(
+            text.contains("12 matches"),
+            "should show result summary, got:\n{text}"
+        );
         // The progress line itself should use arrow, not "..."
         // (Note: the header "running..." is separate from the progress line)
-        assert!(text.contains("\u{2192} 12 matches"), "progress line should show arrow + result, got:\n{text}");
+        assert!(
+            text.contains("\u{2192} 12 matches"),
+            "progress line should show arrow + result, got:\n{text}"
+        );
     }
 
     // --- apply_selection_highlight tests ---
@@ -2589,12 +3081,22 @@ mod tests {
         let mut lines = vec![make_line_with_gutter(vec![Span::raw("Hello World")])];
 
         // Select chars 2..5 ("llo") within the content
-        let start = ContentPos { line: 0, char_offset: 2 };
-        let end = ContentPos { line: 0, char_offset: 5 };
+        let start = ContentPos {
+            line: 0,
+            char_offset: 2,
+        };
+        let end = ContentPos {
+            line: 0,
+            char_offset: 5,
+        };
         apply_selection_highlight(&mut lines, &start, &end, 80, &theme);
 
         // Gutter (1 span) + before "He" + selected "llo" + after " World" = 4 spans
-        assert_eq!(lines[0].spans.len(), 4, "expected 4 spans: gutter + before + selected + after");
+        assert_eq!(
+            lines[0].spans.len(),
+            4,
+            "expected 4 spans: gutter + before + selected + after"
+        );
         assert_eq!(lines[0].spans[1].content, "He");
         assert_eq!(lines[0].spans[2].content, "llo");
         assert_eq!(lines[0].spans[2].style.bg, Some(theme.selection_bg));
@@ -2616,15 +3118,29 @@ mod tests {
         ])];
 
         // Select chars 3..8 → "lo" from first span + " Wor" from second
-        let start = ContentPos { line: 0, char_offset: 3 };
-        let end = ContentPos { line: 0, char_offset: 8 };
+        let start = ContentPos {
+            line: 0,
+            char_offset: 3,
+        };
+        let end = ContentPos {
+            line: 0,
+            char_offset: 8,
+        };
         apply_selection_highlight(&mut lines, &start, &end, 80, &theme);
 
         // "Hello" spans chars 0..5, " World" spans chars 5..11
         // Selection 3..8 → "lo" (chars 3-4) from first, " Wo" (chars 5-7) from second
         // gutter + "Hel" + "lo" (selected) + " Wo" (selected) + "rld" = 5 spans
-        assert_eq!(lines[0].spans.len(), 5, "expected 5 spans, got: {:?}",
-            lines[0].spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>());
+        assert_eq!(
+            lines[0].spans.len(),
+            5,
+            "expected 5 spans, got: {:?}",
+            lines[0]
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<Vec<_>>()
+        );
         assert_eq!(lines[0].spans[1].content, "Hel");
         assert_eq!(lines[0].spans[1].style.bg, None); // original style_a, no bg
         assert_eq!(lines[0].spans[2].content, "lo");
@@ -2644,8 +3160,14 @@ mod tests {
         let mut lines = vec![make_line_with_gutter(vec![Span::raw("Hello")])];
 
         // Select entire span: chars 0..5
-        let start = ContentPos { line: 0, char_offset: 0 };
-        let end = ContentPos { line: 0, char_offset: 5 };
+        let start = ContentPos {
+            line: 0,
+            char_offset: 0,
+        };
+        let end = ContentPos {
+            line: 0,
+            char_offset: 5,
+        };
         apply_selection_highlight(&mut lines, &start, &end, 80, &theme);
 
         // gutter + single fully-highlighted span = 2 spans
@@ -2664,8 +3186,14 @@ mod tests {
         ])];
 
         // Select all content
-        let start = ContentPos { line: 0, char_offset: 0 };
-        let end = ContentPos { line: 0, char_offset: 100 };
+        let start = ContentPos {
+            line: 0,
+            char_offset: 0,
+        };
+        let end = ContentPos {
+            line: 0,
+            char_offset: 100,
+        };
         apply_selection_highlight(&mut lines, &start, &end, 80, &theme);
 
         // Gutter span should retain original style — no selection_bg
@@ -2685,8 +3213,14 @@ mod tests {
 
         // Select from char 6 on line 0 to char 5 on line 2
         // Middle line (line 1) should use line_end=usize::MAX, highlighting everything
-        let start = ContentPos { line: 0, char_offset: 6 };
-        let end = ContentPos { line: 2, char_offset: 5 };
+        let start = ContentPos {
+            line: 0,
+            char_offset: 6,
+        };
+        let end = ContentPos {
+            line: 2,
+            char_offset: 5,
+        };
         apply_selection_highlight(&mut lines, &start, &end, 80, &theme);
 
         // Line 0: "first " (no highlight) + "line" (highlighted)
@@ -2712,8 +3246,14 @@ mod tests {
         let mut lines = vec![make_line_with_gutter(vec![Span::raw("Hello")])];
 
         // Zero-width selection (start == end on same line) should skip
-        let start = ContentPos { line: 0, char_offset: 3 };
-        let end = ContentPos { line: 0, char_offset: 3 };
+        let start = ContentPos {
+            line: 0,
+            char_offset: 3,
+        };
+        let end = ContentPos {
+            line: 0,
+            char_offset: 3,
+        };
         apply_selection_highlight(&mut lines, &start, &end, 80, &theme);
 
         // Should remain unchanged: gutter + original span
@@ -2726,20 +3266,40 @@ mod tests {
     fn buffer_activity_spinner_with_elapsed() {
         let messages = vec![];
         let text = render_messages_to_string(
-            60, 10, &messages,
-            Some(('⠋', "Thinking...".to_string(), false, Some(Duration::from_secs(42)))),
+            60,
+            10,
+            &messages,
+            Some((
+                '⠋',
+                "Thinking...".to_string(),
+                false,
+                Some(Duration::from_secs(42)),
+            )),
         );
         assert!(text.contains("Thinking..."), "activity text should appear");
-        assert!(text.contains("(42s)"), "elapsed should appear after activity, got:\n{text}");
+        assert!(
+            text.contains("(42s)"),
+            "elapsed should appear after activity, got:\n{text}"
+        );
     }
 
     #[test]
     fn buffer_activity_spinner_minute_elapsed() {
         let messages = vec![];
         let text = render_messages_to_string(
-            60, 10, &messages,
-            Some(('⠋', "Running read...".to_string(), false, Some(Duration::from_secs(83)))),
+            60,
+            10,
+            &messages,
+            Some((
+                '⠋',
+                "Running read...".to_string(),
+                false,
+                Some(Duration::from_secs(83)),
+            )),
         );
-        assert!(text.contains("(1:23)"), "should show minute format, got:\n{text}");
+        assert!(
+            text.contains("(1:23)"),
+            "should show minute format, got:\n{text}"
+        );
     }
 }

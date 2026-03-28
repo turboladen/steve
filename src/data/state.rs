@@ -1,6 +1,4 @@
-use crate::usage::types::{
-    ApiCallDetail, ProjectInfo, SessionFilter, SessionSummary, UsageStats,
-};
+use crate::usage::types::{ApiCallDetail, ProjectInfo, SessionFilter, SessionSummary, UsageStats};
 
 /// Which view is currently active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

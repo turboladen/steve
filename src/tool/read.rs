@@ -1,7 +1,9 @@
 //! Read tool — reads file contents with optional line range, tail, count, or multi-file support.
 
-use std::io::Read as _;
-use std::path::{Path, PathBuf};
+use std::{
+    io::Read as _,
+    path::{Path, PathBuf},
+};
 
 use serde_json::Value;
 
@@ -32,7 +34,9 @@ pub fn tool() -> ToolEntry {
     ToolEntry {
         def: ToolDef {
             name: ToolName::Read,
-            description: "Read file contents, line counts, or tail. Supports single or multiple paths.".to_string(),
+            description:
+                "Read file contents, line counts, or tail. Supports single or multiple paths."
+                    .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -97,12 +101,12 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
     }
 
     // Determine mode (precedence: count > tail > normal)
-    let is_count = args
-        .get("count")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let is_count = args.get("count").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    let tail_n = args.get("tail").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let tail_n = args
+        .get("tail")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
 
     let mode = if is_count {
         ReadMode::Count
@@ -224,9 +228,7 @@ fn read_single_file(
 
     // Count mode — just return metadata
     if matches!(mode, ReadMode::Count) {
-        let size = std::fs::metadata(resolved)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let size = std::fs::metadata(resolved).map(|m| m.len()).unwrap_or(0);
 
         if is_binary(resolved).unwrap_or(false) {
             return Ok(format!("{path_str}: binary file ({size} bytes)"));
@@ -244,9 +246,7 @@ fn read_single_file(
 
     // Detect binary files
     if is_binary(resolved).unwrap_or(false) {
-        let size = std::fs::metadata(resolved)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let size = std::fs::metadata(resolved).map(|m| m.len()).unwrap_or(0);
         return Ok(format!("Binary file ({size} bytes), not displayed."));
     }
 
@@ -260,7 +260,9 @@ fn read_single_file(
     }
 
     match mode {
-        ReadMode::Count => return Err("internal error: count mode should be handled earlier".into()),
+        ReadMode::Count => {
+            return Err("internal error: count mode should be handled earlier".into());
+        }
         ReadMode::Tail { n } => {
             let capped = (*n).min(max_lines);
             let start = lines.len().saturating_sub(capped);
@@ -723,7 +725,10 @@ mod tests {
         let result = execute(args, ctx).unwrap();
 
         // Partial failure: one file exists, one doesn't — should NOT be is_error
-        assert!(!result.is_error, "partial failure should not mark entire result as error");
+        assert!(
+            !result.is_error,
+            "partial failure should not mark entire result as error"
+        );
         assert!(result.output.contains("content"));
         assert!(result.output.contains("Error:"));
     }

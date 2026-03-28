@@ -150,8 +150,16 @@ mod tests {
         let args = json!({ "pattern": "*.rs" });
         let result = execute(args, make_ctx(dir.path())).unwrap();
         assert!(!result.is_error);
-        assert!(result.output.contains("test.rs"), "output should contain test.rs: {}", result.output);
-        assert!(!result.output.contains("test.txt"), "output should not contain test.txt: {}", result.output);
+        assert!(
+            result.output.contains("test.rs"),
+            "output should contain test.rs: {}",
+            result.output
+        );
+        assert!(
+            !result.output.contains("test.txt"),
+            "output should not contain test.txt: {}",
+            result.output
+        );
     }
 
     #[test]
@@ -175,7 +183,11 @@ mod tests {
         let args = json!({ "pattern": "[invalid" });
         let result = execute(args, make_ctx(dir.path())).unwrap();
         assert!(result.is_error);
-        assert!(result.output.contains("invalid glob pattern"), "output: {}", result.output);
+        assert!(
+            result.output.contains("invalid glob pattern"),
+            "output: {}",
+            result.output
+        );
     }
 
     #[test]
@@ -186,7 +198,11 @@ mod tests {
         let args = json!({ "pattern": "*.xyz" });
         let result = execute(args, make_ctx(dir.path())).unwrap();
         assert!(!result.is_error);
-        assert!(result.output.contains("No files found"), "output: {}", result.output);
+        assert!(
+            result.output.contains("No files found"),
+            "output: {}",
+            result.output
+        );
     }
 
     #[test]
@@ -200,7 +216,15 @@ mod tests {
         let args = json!({ "pattern": "*.rs", "path": "sub" });
         let result = execute(args, make_ctx(dir.path())).unwrap();
         assert!(!result.is_error);
-        assert!(result.output.contains("nested.rs"), "output should contain nested.rs: {}", result.output);
-        assert!(!result.output.contains("root.rs"), "output should not contain root.rs: {}", result.output);
+        assert!(
+            result.output.contains("nested.rs"),
+            "output should contain nested.rs: {}",
+            result.output
+        );
+        assert!(
+            !result.output.contains("root.rs"),
+            "output should not contain root.rs: {}",
+            result.output
+        );
     }
 }

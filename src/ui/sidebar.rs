@@ -6,13 +6,13 @@ use ratatui::{
     widgets::{Block, Paragraph, Wrap},
 };
 
-use crate::diagnostics::{DiagnosticSummary, Severity};
-use crate::task::types::{Priority, TaskKind, TaskStatus};
-use crate::ui::message_block::{DiffContent, DiffLine};
+use crate::{
+    diagnostics::{DiagnosticSummary, Severity},
+    task::types::{Priority, TaskKind, TaskStatus},
+    ui::message_block::{DiffContent, DiffLine},
+};
 
-use super::primitives;
-use super::status_line::format_tokens;
-use super::theme::Theme;
+use super::{primitives, status_line::format_tokens, theme::Theme};
 
 /// Maximum number of tasks shown in the sidebar.
 pub const MAX_SIDEBAR_TASKS: usize = 10;
@@ -401,7 +401,11 @@ pub fn render_sidebar(
                 lines.push(Line::from(spans));
             }
             let (total_add, total_rem) = state.total_changes();
-            let file_word = if state.changes.len() == 1 { "file" } else { "files" };
+            let file_word = if state.changes.len() == 1 {
+                "file"
+            } else {
+                "files"
+            };
             let mut summary_spans: Vec<Span> = vec![Span::styled(
                 format!(" {} {file_word}", state.changes.len()),
                 Style::default().fg(theme.dim),
@@ -467,10 +471,7 @@ pub fn render_sidebar(
                     format!("{} ({})", server.server_id, counts.join(" "))
                 }
             } else {
-                let suffix = server
-                    .error
-                    .as_deref()
-                    .unwrap_or("disconnected");
+                let suffix = server.error.as_deref().unwrap_or("disconnected");
                 format!("{} ({})", server.server_id, suffix)
             };
             lines.push(Line::from(vec![
@@ -531,10 +532,10 @@ pub fn render_sidebar(
         // Individual task lines (2-3 lines each, pre-capped at MAX_SIDEBAR_TASKS by update_sidebar)
         for task in &state.tasks {
             let (icon, icon_color) = match (task.kind, task.status) {
-                (_, TaskStatus::Done) => ("\u{2713}", theme.success),           // ✓
+                (_, TaskStatus::Done) => ("\u{2713}", theme.success), // ✓
                 (TaskKind::Bug, TaskStatus::Open) => ("\u{2298}", theme.error), // ⊘
                 (TaskKind::Bug, TaskStatus::InProgress) => ("\u{2298}", theme.accent), // ⊘
-                (TaskKind::Task, TaskStatus::Open) => ("\u{25cb}", theme.dim),  // ○
+                (TaskKind::Task, TaskStatus::Open) => ("\u{25cb}", theme.dim), // ○
                 (TaskKind::Task, TaskStatus::InProgress) => ("\u{25cf}", theme.accent), // ●
             };
             // Line 1: icon + short ID
@@ -545,7 +546,11 @@ pub fn render_sidebar(
             // Line 2: truncated title
             let max_title = max_task_title_chars(sidebar_width);
             let title = if max_title > 3 && task.title.chars().count() > max_title {
-                let truncated: String = task.title.chars().take(max_title.saturating_sub(3)).collect();
+                let truncated: String = task
+                    .title
+                    .chars()
+                    .take(max_title.saturating_sub(3))
+                    .collect();
                 format!("{truncated}...")
             } else {
                 task.title.clone()
@@ -563,7 +568,10 @@ pub fn render_sidebar(
             if let Some(summary) = &task.summary {
                 let max_summary = max_task_title_chars(sidebar_width);
                 let display_summary = if max_summary > 3 && summary.chars().count() > max_summary {
-                    let truncated: String = summary.chars().take(max_summary.saturating_sub(3)).collect();
+                    let truncated: String = summary
+                        .chars()
+                        .take(max_summary.saturating_sub(3))
+                        .collect();
                     format!("{truncated}...")
                 } else {
                     summary.clone()
@@ -579,9 +587,7 @@ pub fn render_sidebar(
     // 1-char left padding via Block::padding keeps content off the vertical divider.
     let block = Block::default().padding(ratatui::widgets::Padding::new(1, 0, 0, 0));
 
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap { trim: true });
+    let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
 
     frame.render_widget(paragraph, area);
 }
@@ -823,12 +829,30 @@ mod tests {
         let text = render_sidebar_to_string(40, 20, &state);
         // Verify each value appears on the correct labeled line
         let lines: Vec<&str> = text.lines().collect();
-        let in_line = lines.iter().find(|l| l.contains("In:")).expect("should have In: line");
-        assert!(in_line.contains("23.4k"), "In: line should show prompt tokens, got: {in_line}");
-        let out_line = lines.iter().find(|l| l.contains("Out:")).expect("should have Out: line");
-        assert!(out_line.contains("6.6k"), "Out: line should show completion tokens, got: {out_line}");
-        let tot_line = lines.iter().find(|l| l.contains("Tot:")).expect("should have Tot: line");
-        assert!(tot_line.contains("30.0k"), "Tot: line should show total tokens, got: {tot_line}");
+        let in_line = lines
+            .iter()
+            .find(|l| l.contains("In:"))
+            .expect("should have In: line");
+        assert!(
+            in_line.contains("23.4k"),
+            "In: line should show prompt tokens, got: {in_line}"
+        );
+        let out_line = lines
+            .iter()
+            .find(|l| l.contains("Out:"))
+            .expect("should have Out: line");
+        assert!(
+            out_line.contains("6.6k"),
+            "Out: line should show completion tokens, got: {out_line}"
+        );
+        let tot_line = lines
+            .iter()
+            .find(|l| l.contains("Tot:"))
+            .expect("should have Tot: line");
+        assert!(
+            tot_line.contains("30.0k"),
+            "Tot: line should show total tokens, got: {tot_line}"
+        );
         assert!(!text.contains("Ctx:"), "should not show old Ctx: format");
     }
 
@@ -849,7 +873,10 @@ mod tests {
             ..Default::default()
         };
         let text = render_sidebar_to_string(40, 20, &state);
-        assert!(text.contains("Cost: N/A"), "should show N/A when cost not configured");
+        assert!(
+            text.contains("Cost: N/A"),
+            "should show N/A when cost not configured"
+        );
     }
 
     #[test]
@@ -861,14 +888,23 @@ mod tests {
         };
         state.record_file_change("src/main.rs".into(), 10, 3);
         let text = render_sidebar_to_string(40, 20, &state);
-        assert!(!text.contains("Changes"), "no standalone 'Changes' header — merged into Git");
+        assert!(
+            !text.contains("Changes"),
+            "no standalone 'Changes' header — merged into Git"
+        );
         assert!(text.contains("Git"), "should show 'Git' header");
         assert!(text.contains("src/main.rs"), "should show file path");
         assert!(text.contains("+10"), "should show additions in green");
         assert!(text.contains("-3"), "should show removals in red");
     }
 
-    fn make_sidebar_task(id: &str, title: &str, kind: TaskKind, priority: Priority, status: TaskStatus) -> SidebarTask {
+    fn make_sidebar_task(
+        id: &str,
+        title: &str,
+        kind: TaskKind,
+        priority: Priority,
+        status: TaskStatus,
+    ) -> SidebarTask {
         SidebarTask {
             id: id.to_string(),
             kind,
@@ -879,7 +915,14 @@ mod tests {
         }
     }
 
-    fn make_sidebar_task_with_summary(id: &str, title: &str, summary: &str, kind: TaskKind, priority: Priority, status: TaskStatus) -> SidebarTask {
+    fn make_sidebar_task_with_summary(
+        id: &str,
+        title: &str,
+        summary: &str,
+        kind: TaskKind,
+        priority: Priority,
+        status: TaskStatus,
+    ) -> SidebarTask {
         SidebarTask {
             id: id.to_string(),
             kind,
@@ -894,41 +937,86 @@ mod tests {
     fn buffer_sidebar_tasks_section_shows_individual_tasks() {
         let state = SidebarState {
             tasks: vec![
-                make_sidebar_task("task-a1b2c3d4", "Fix sidebar rendering", TaskKind::Task, Priority::High, TaskStatus::Open),
-                make_sidebar_task("task-e5f6g7h8", "Add new feature", TaskKind::Task, Priority::Medium, TaskStatus::InProgress),
+                make_sidebar_task(
+                    "task-a1b2c3d4",
+                    "Fix sidebar rendering",
+                    TaskKind::Task,
+                    Priority::High,
+                    TaskStatus::Open,
+                ),
+                make_sidebar_task(
+                    "task-e5f6g7h8",
+                    "Add new feature",
+                    TaskKind::Task,
+                    Priority::Medium,
+                    TaskStatus::InProgress,
+                ),
             ],
             ..Default::default()
         };
         let text = render_sidebar_to_string(40, 30, &state);
-        assert!(text.contains("Tasks (2 open)"), "should show header with count, got:\n{text}");
+        assert!(
+            text.contains("Tasks (2 open)"),
+            "should show header with count, got:\n{text}"
+        );
         assert!(text.contains("task-a1b2c3d4"), "should show task ID");
-        assert!(text.contains("Fix sidebar rendering"), "should show task title");
+        assert!(
+            text.contains("Fix sidebar rendering"),
+            "should show task title"
+        );
         assert!(text.contains("task-e5f6g7h8"), "should show second task ID");
-        assert!(text.contains("Add new feature"), "should show second task title");
+        assert!(
+            text.contains("Add new feature"),
+            "should show second task title"
+        );
     }
 
     #[test]
     fn buffer_sidebar_tasks_section_shows_done_count() {
         let state = SidebarState {
             tasks: vec![
-                make_sidebar_task("task-a1b2c3d4", "Open task", TaskKind::Task, Priority::Medium, TaskStatus::Open),
-                make_sidebar_task("task-e5f6g7h8", "Done task", TaskKind::Task, Priority::Low, TaskStatus::Done),
+                make_sidebar_task(
+                    "task-a1b2c3d4",
+                    "Open task",
+                    TaskKind::Task,
+                    Priority::Medium,
+                    TaskStatus::Open,
+                ),
+                make_sidebar_task(
+                    "task-e5f6g7h8",
+                    "Done task",
+                    TaskKind::Task,
+                    Priority::Low,
+                    TaskStatus::Done,
+                ),
             ],
             ..Default::default()
         };
         let text = render_sidebar_to_string(40, 30, &state);
-        assert!(text.contains("Tasks (1 open, 1 done)"), "should show open and done counts, got:\n{text}");
+        assert!(
+            text.contains("Tasks (1 open, 1 done)"),
+            "should show open and done counts, got:\n{text}"
+        );
     }
 
     #[test]
     fn buffer_sidebar_tasks_truncates_long_titles() {
         let long_title = "This is a very long task title that should be truncated in the sidebar";
         let state = SidebarState {
-            tasks: vec![make_sidebar_task("task-a1b2c3d4", long_title, TaskKind::Task, Priority::Medium, TaskStatus::Open)],
+            tasks: vec![make_sidebar_task(
+                "task-a1b2c3d4",
+                long_title,
+                TaskKind::Task,
+                Priority::Medium,
+                TaskStatus::Open,
+            )],
             ..Default::default()
         };
         let text = render_sidebar_to_string(40, 30, &state);
-        assert!(text.contains("..."), "long title should be truncated with ellipsis");
+        assert!(
+            text.contains("..."),
+            "long title should be truncated with ellipsis"
+        );
         assert!(!text.contains(long_title), "full title should not appear");
     }
 
@@ -936,15 +1024,36 @@ mod tests {
     fn buffer_sidebar_tasks_status_icons() {
         let state = SidebarState {
             tasks: vec![
-                make_sidebar_task("task-open0001", "Open task", TaskKind::Task, Priority::Low, TaskStatus::Open),
-                make_sidebar_task("task-prog0001", "Active task", TaskKind::Task, Priority::High, TaskStatus::InProgress),
-                make_sidebar_task("task-done0001", "Finished task", TaskKind::Task, Priority::Medium, TaskStatus::Done),
+                make_sidebar_task(
+                    "task-open0001",
+                    "Open task",
+                    TaskKind::Task,
+                    Priority::Low,
+                    TaskStatus::Open,
+                ),
+                make_sidebar_task(
+                    "task-prog0001",
+                    "Active task",
+                    TaskKind::Task,
+                    Priority::High,
+                    TaskStatus::InProgress,
+                ),
+                make_sidebar_task(
+                    "task-done0001",
+                    "Finished task",
+                    TaskKind::Task,
+                    Priority::Medium,
+                    TaskStatus::Done,
+                ),
             ],
             ..Default::default()
         };
         let text = render_sidebar_to_string(40, 30, &state);
         assert!(text.contains("\u{25cb}"), "should show open icon (○)");
-        assert!(text.contains("\u{25cf}"), "should show in-progress icon (●)");
+        assert!(
+            text.contains("\u{25cf}"),
+            "should show in-progress icon (●)"
+        );
         assert!(text.contains("\u{2713}"), "should show done icon (✓)");
     }
 
@@ -1001,14 +1110,20 @@ mod tests {
         let mut state = SidebarState::default();
         state.record_file_change("file.rs".into(), 1, 0);
         let text = render_sidebar_to_string(40, 20, &state);
-        assert!(!text.contains("file.rs"), "no git branch = changes not shown");
+        assert!(
+            !text.contains("file.rs"),
+            "no git branch = changes not shown"
+        );
     }
 
     #[test]
     fn buffer_sidebar_no_changes_no_header() {
         let state = SidebarState::default();
         let text = render_sidebar_to_string(40, 20, &state);
-        assert!(!text.contains("Changes"), "no changes = no 'Changes' header");
+        assert!(
+            !text.contains("Changes"),
+            "no changes = no 'Changes' header"
+        );
     }
 
     #[test]
@@ -1032,7 +1147,10 @@ mod tests {
     fn buffer_sidebar_empty_title_shows_untitled() {
         let state = SidebarState::default();
         let text = render_sidebar_to_string(40, 20, &state);
-        assert!(text.contains("(untitled)"), "empty title should show '(untitled)'");
+        assert!(
+            text.contains("(untitled)"),
+            "empty title should show '(untitled)'"
+        );
     }
 
     #[test]
@@ -1103,7 +1221,10 @@ mod tests {
         state.record_file_change("file.rs".into(), 1, 0);
         let text = render_sidebar_to_string(40, 25, &state);
         assert!(text.contains("Git"), "should show Git header");
-        assert!(text.contains("file.rs"), "changes should appear in Git section");
+        assert!(
+            text.contains("file.rs"),
+            "changes should appear in Git section"
+        );
         assert!(!text.contains("Changes"), "no standalone Changes header");
     }
 
@@ -1134,8 +1255,14 @@ mod tests {
     fn buffer_sidebar_lsp_section_shows_running_servers() {
         let state = SidebarState {
             lsp_servers: vec![
-                SidebarLsp { binary: "rust-analyzer".to_string(), running: true },
-                SidebarLsp { binary: "ty".to_string(), running: true },
+                SidebarLsp {
+                    binary: "rust-analyzer".to_string(),
+                    running: true,
+                },
+                SidebarLsp {
+                    binary: "ty".to_string(),
+                    running: true,
+                },
             ],
             ..Default::default()
         };
@@ -1144,21 +1271,36 @@ mod tests {
         assert!(text.contains("rust-analyzer"), "should show rust-analyzer");
         assert!(text.contains("ty"), "should show ty");
         // Running servers get filled circle
-        assert!(text.contains("\u{25cf}"), "running server should show ● icon");
+        assert!(
+            text.contains("\u{25cf}"),
+            "running server should show ● icon"
+        );
     }
 
     #[test]
     fn buffer_sidebar_lsp_section_shows_not_running() {
         let state = SidebarState {
             lsp_servers: vec![
-                SidebarLsp { binary: "rust-analyzer".to_string(), running: true },
-                SidebarLsp { binary: "solargraph".to_string(), running: false },
+                SidebarLsp {
+                    binary: "rust-analyzer".to_string(),
+                    running: true,
+                },
+                SidebarLsp {
+                    binary: "solargraph".to_string(),
+                    running: false,
+                },
             ],
             ..Default::default()
         };
         let text = render_sidebar_to_string(40, 20, &state);
-        assert!(text.contains("\u{25cf}"), "running server should show ● icon");
-        assert!(text.contains("\u{25cb}"), "not-running server should show ○ icon");
+        assert!(
+            text.contains("\u{25cf}"),
+            "running server should show ● icon"
+        );
+        assert!(
+            text.contains("\u{25cb}"),
+            "not-running server should show ○ icon"
+        );
         assert!(text.contains("rust-analyzer"), "should show rust-analyzer");
         assert!(text.contains("solargraph"), "should show solargraph");
     }
@@ -1168,9 +1310,10 @@ mod tests {
         let mut state = SidebarState {
             git_branch: Some("main".to_string()),
             git_dirty: Some(true),
-            lsp_servers: vec![
-                SidebarLsp { binary: "rust-analyzer".to_string(), running: true },
-            ],
+            lsp_servers: vec![SidebarLsp {
+                binary: "rust-analyzer".to_string(),
+                running: true,
+            }],
             ..Default::default()
         };
         state.record_file_change("file.rs".into(), 1, 0);
@@ -1178,7 +1321,10 @@ mod tests {
         // Changes appear inside Git (before LSP), not after LSP
         let file_pos = text.find("file.rs").expect("file.rs not found");
         let lsp_pos = text.find("LSP").expect("LSP header not found");
-        assert!(file_pos < lsp_pos, "changes should appear inside Git section, before LSP");
+        assert!(
+            file_pos < lsp_pos,
+            "changes should appear inside Git section, before LSP"
+        );
     }
 
     #[test]
@@ -1186,9 +1332,10 @@ mod tests {
         let state = SidebarState {
             git_branch: Some("main".to_string()),
             git_dirty: Some(false),
-            lsp_servers: vec![
-                SidebarLsp { binary: "typescript-language-server".to_string(), running: true },
-            ],
+            lsp_servers: vec![SidebarLsp {
+                binary: "typescript-language-server".to_string(),
+                running: true,
+            }],
             ..Default::default()
         };
         let text = render_sidebar_to_string(40, 25, &state);
@@ -1241,9 +1388,15 @@ mod tests {
         assert!(text.contains("5T"), "should show tool count");
         assert!(text.contains("atlassian"), "should show atlassian server");
         assert!(text.contains("3T"), "should show tool count for atlassian");
-        assert!(text.contains("2R"), "should show resource count for atlassian");
+        assert!(
+            text.contains("2R"),
+            "should show resource count for atlassian"
+        );
         // Connected servers get filled circle
-        assert!(text.contains("\u{25cf}"), "connected server should show \u{25cf} icon");
+        assert!(
+            text.contains("\u{25cf}"),
+            "connected server should show \u{25cf} icon"
+        );
     }
 
     #[test]
@@ -1270,8 +1423,14 @@ mod tests {
             ..Default::default()
         };
         let text = render_sidebar_to_string(50, 20, &state);
-        assert!(text.contains("\u{25cf}"), "connected server should show \u{25cf} icon");
-        assert!(text.contains("\u{25cb}"), "disconnected server should show \u{25cb} icon");
+        assert!(
+            text.contains("\u{25cf}"),
+            "connected server should show \u{25cf} icon"
+        );
+        assert!(
+            text.contains("\u{25cb}"),
+            "disconnected server should show \u{25cb} icon"
+        );
         assert!(text.contains("broken"), "should show broken server");
         assert!(text.contains("timeout"), "should show error message");
     }
@@ -1290,7 +1449,10 @@ mod tests {
             ..Default::default()
         };
         let text = render_sidebar_to_string(50, 20, &state);
-        assert!(text.contains("disconnected"), "should show default 'disconnected' label");
+        assert!(
+            text.contains("disconnected"),
+            "should show default 'disconnected' label"
+        );
     }
 
     #[test]
@@ -1369,7 +1531,11 @@ mod tests {
     fn summarize_description_long_text_word_boundary() {
         let long = "This is a description that goes well beyond eighty characters and should be truncated at a word boundary somewhere around here";
         let result = summarize_description(long).unwrap();
-        assert!(result.chars().count() <= 80, "should truncate to ~80 chars, got len {}", result.chars().count());
+        assert!(
+            result.chars().count() <= 80,
+            "should truncate to ~80 chars, got len {}",
+            result.chars().count()
+        );
         assert!(!result.ends_with(' '), "should not end with space");
     }
 
@@ -1378,7 +1544,10 @@ mod tests {
         // 40 ASCII + 50 é (2 bytes each) = 90 chars, 140 bytes — must not panic on slice
         let desc = "a".repeat(40) + &"\u{00e9}".repeat(50);
         let result = summarize_description(&desc).unwrap();
-        assert!(result.chars().count() <= 80, "should truncate multi-byte text safely");
+        assert!(
+            result.chars().count() <= 80,
+            "should truncate multi-byte text safely"
+        );
     }
 
     #[test]
@@ -1402,7 +1571,10 @@ mod tests {
     #[test]
     fn summarize_description_trailing_period() {
         let result = summarize_description("Single sentence ending with period.");
-        assert_eq!(result, Some("Single sentence ending with period".to_string()));
+        assert_eq!(
+            result,
+            Some("Single sentence ending with period".to_string())
+        );
     }
 
     #[test]
@@ -1467,7 +1639,10 @@ mod tests {
         // "hi" appears in "Health" header, so check it doesn't appear on the task ID line
         // by checking the line doesn't contain " hi" after the ID
         let id_line = text.lines().find(|l| l.contains("task-nopr0001")).unwrap();
-        assert!(!id_line.contains(" hi"), "should not show priority abbreviation on ID line");
+        assert!(
+            !id_line.contains(" hi"),
+            "should not show priority abbreviation on ID line"
+        );
     }
 
     // -- shorten_path tests --
@@ -1500,7 +1675,10 @@ mod tests {
         // max_width=5, "s/file.rs" (9 chars) still too long → truncated with ellipsis
         let result = shorten_path("src/file.rs", 5);
         assert_eq!(result.chars().count(), 5);
-        assert!(result.ends_with('\u{2026}'), "should end with ellipsis, got: {result}");
+        assert!(
+            result.ends_with('\u{2026}'),
+            "should end with ellipsis, got: {result}"
+        );
     }
 
     #[test]
@@ -1537,7 +1715,10 @@ mod tests {
             "result should fit in max_width, got: {result} ({})",
             result.chars().count()
         );
-        assert!(result.ends_with('\u{2026}'), "should end with ellipsis, got: {result}");
+        assert!(
+            result.ends_with('\u{2026}'),
+            "should end with ellipsis, got: {result}"
+        );
     }
 
     // -- Changes sorting test --
@@ -1583,4 +1764,3 @@ mod tests {
         );
     }
 }
-

@@ -206,8 +206,7 @@ mod tests {
 
     #[test]
     fn parse_prefixed_tool_name_with_underscores_in_tool() {
-        let (server, tool) =
-            parse_prefixed_tool_name("mcp__my_server__my_cool_tool").unwrap();
+        let (server, tool) = parse_prefixed_tool_name("mcp__my_server__my_cool_tool").unwrap();
         assert_eq!(server, "my_server");
         assert_eq!(tool, "my_cool_tool");
     }
@@ -308,7 +307,13 @@ mod tests {
         match &config {
             McpServerConfig::Stdio { command, args, env } => {
                 assert_eq!(command, "npx");
-                assert_eq!(args, &vec!["-y".to_string(), "@modelcontextprotocol/server-github".to_string()]);
+                assert_eq!(
+                    args,
+                    &vec![
+                        "-y".to_string(),
+                        "@modelcontextprotocol/server-github".to_string()
+                    ]
+                );
                 assert_eq!(env["GITHUB_TOKEN"], "${GITHUB_TOKEN}");
             }
             McpServerConfig::Http { .. } => panic!("expected Stdio variant"),

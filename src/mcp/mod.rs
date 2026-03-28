@@ -8,19 +8,23 @@ pub mod oauth;
 mod transport;
 pub mod types;
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use std::process::Stdio;
 
 use anyhow::{Context, Result};
-use rmcp::ServiceExt;
-use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Prompt, RawContent, ReadResourceRequestParams, Resource,
-    ResourceContents, Tool,
+use rmcp::{
+    ServiceExt,
+    model::{
+        CallToolRequestParams, CallToolResult, Prompt, RawContent, ReadResourceRequestParams,
+        Resource, ResourceContents, Tool,
+    },
+    service::{Peer, RoleClient, RunningService},
+    transport::TokioChildProcess,
 };
-use rmcp::service::{Peer, RoleClient, RunningService};
-use rmcp::transport::TokioChildProcess;
 use serde_json::Value;
 use tokio::io::AsyncBufReadExt;
 
@@ -82,25 +86,37 @@ impl McpServer {
                 }
 
                 // Perform the MCP handshake — `()` implements the default ClientHandler
-                let svc: RunningService<RoleClient, ()> = ().serve(transport).await
+                let svc: RunningService<RoleClient, ()> = ()
+                    .serve(transport)
+                    .await
                     .map_err(|e| anyhow::anyhow!("MCP handshake failed for '{server_id}': {e}"))?;
                 svc
             }
-            McpServerConfig::Http { url, headers, client_id, client_secret } => {
+            McpServerConfig::Http {
+                url,
+                headers,
+                client_id,
+                client_secret,
+            } => {
                 let expanded_secret = client_secret.as_ref().map(|s| types::expand_env_single(s));
-                transport::connect_http(&server_id, url, headers.as_ref(), client_id.as_deref(), expanded_secret.as_deref(), credential_dir, status_tx).await?
+                transport::connect_http(
+                    &server_id,
+                    url,
+                    headers.as_ref(),
+                    client_id.as_deref(),
+                    expanded_secret.as_deref(),
+                    credential_dir,
+                    status_tx,
+                )
+                .await?
             }
         };
 
         // Cache tool definitions
-        let cached_tools = service
-            .peer()
-            .list_all_tools()
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(server = %server_id, error = %e, "failed to list MCP tools");
-                Vec::new()
-            });
+        let cached_tools = service.peer().list_all_tools().await.unwrap_or_else(|e| {
+            tracing::warn!(server = %server_id, error = %e, "failed to list MCP tools");
+            Vec::new()
+        });
 
         // Cache resource list (best-effort)
         let cached_resources = service
@@ -146,7 +162,11 @@ impl McpServer {
     }
 
     /// Call a tool on this server.
-    async fn call_tool(&self, name: &str, args: Option<serde_json::Map<String, Value>>) -> Result<CallToolResult> {
+    async fn call_tool(
+        &self,
+        name: &str,
+        args: Option<serde_json::Map<String, Value>>,
+    ) -> Result<CallToolResult> {
         let mut params = CallToolRequestParams::new(name.to_string());
         if let Some(args) = args {
             params = params.with_arguments(args);
@@ -160,11 +180,9 @@ impl McpServer {
     /// Read a resource by URI.
     async fn read_resource(&self, uri: &str) -> Result<String> {
         let params = ReadResourceRequestParams::new(uri);
-        let result = self
-            .peer()
-            .read_resource(params)
-            .await
-            .map_err(|e| anyhow::anyhow!("MCP read_resource failed on '{}': {e}", self.server_id))?;
+        let result = self.peer().read_resource(params).await.map_err(|e| {
+            anyhow::anyhow!("MCP read_resource failed on '{}': {e}", self.server_id)
+        })?;
 
         // Concatenate all text content from the resource
         let text: String = result
@@ -284,7 +302,11 @@ impl McpManager {
                     tracing::error!(server = %server_id, error = %e, "failed to start MCP server");
                     // Truncate error to first line for sidebar display.
                     let msg = e.to_string();
-                    let short = msg.lines().next().unwrap_or("connection failed").to_string();
+                    let short = msg
+                        .lines()
+                        .next()
+                        .unwrap_or("connection failed")
+                        .to_string();
                     self.failed_servers.insert(server_id.clone(), short.clone());
                     // Also send to TUI so user sees the failure even if logs aren't working.
                     if let Some(ref tx) = status_tx {
@@ -308,10 +330,7 @@ impl McpManager {
                 let prefixed = prefixed_tool_name(server_id, &tool.name);
                 known_tools.insert(prefixed.clone());
 
-                let description = tool
-                    .description
-                    .as_deref()
-                    .unwrap_or("MCP tool");
+                let description = tool.description.as_deref().unwrap_or("MCP tool");
                 let parameters = tool.schema_as_json_value();
                 tool_defs.push(serde_json::json!({
                     "type": "function",
@@ -345,7 +364,10 @@ impl McpManager {
         self.servers
             .iter()
             .flat_map(|(id, server)| {
-                server.cached_tools.iter().map(move |tool| (id.as_str(), tool))
+                server
+                    .cached_tools
+                    .iter()
+                    .map(move |tool| (id.as_str(), tool))
             })
             .collect()
     }
@@ -371,10 +393,7 @@ impl McpManager {
                     tool = %prefixed_name,
                     "MCP tool args is not an object or null, wrapping in {{\"input\": ...}}"
                 );
-                Some(serde_json::Map::from_iter([(
-                    "input".to_string(),
-                    other,
-                )]))
+                Some(serde_json::Map::from_iter([("input".to_string(), other)]))
             }
         };
 
@@ -387,9 +406,7 @@ impl McpManager {
     pub fn all_prompts(&self) -> Vec<(&str, &Prompt)> {
         self.servers
             .iter()
-            .flat_map(|(id, server)| {
-                server.cached_prompts.iter().map(move |p| (id.as_str(), p))
-            })
+            .flat_map(|(id, server)| server.cached_prompts.iter().map(move |p| (id.as_str(), p)))
             .collect()
     }
 
@@ -398,7 +415,10 @@ impl McpManager {
         self.servers
             .iter()
             .flat_map(|(id, server)| {
-                server.cached_resources.iter().map(move |r| (id.as_str(), r))
+                server
+                    .cached_resources
+                    .iter()
+                    .map(move |r| (id.as_str(), r))
             })
             .collect()
     }
@@ -590,8 +610,7 @@ fn format_call_result(result: &CallToolResult) -> String {
 /// Build a human-readable permission summary for an MCP tool call.
 pub fn mcp_permission_summary(prefixed_name: &str, args: &Value) -> String {
     if let Some((server_id, tool_name)) = parse_prefixed_tool_name(prefixed_name) {
-        let args_preview = serde_json::to_string(args)
-            .unwrap_or_default();
+        let args_preview = serde_json::to_string(args).unwrap_or_default();
         let truncated = if args_preview.len() > 80 {
             // Truncate at a char boundary to avoid panicking on multi-byte UTF-8
             let mut end = 80;
@@ -680,10 +699,7 @@ mod tests {
 
     #[test]
     fn format_call_result_multiple_contents() {
-        let result = CallToolResult::success(vec![
-            text_content("line 1"),
-            text_content("line 2"),
-        ]);
+        let result = CallToolResult::success(vec![text_content("line 1"), text_content("line 2")]);
         assert_eq!(format_call_result(&result), "line 1\nline 2");
     }
 

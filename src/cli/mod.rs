@@ -3,9 +3,7 @@ use std::str::FromStr;
 use anyhow::{Result, bail};
 use clap::Subcommand;
 
-use crate::task::{
-    Epic, EpicStatus, Priority, Task, TaskKind, TaskStatus, TaskStore,
-};
+use crate::task::{Epic, EpicStatus, Priority, Task, TaskKind, TaskStatus, TaskStore};
 
 /// Subcommands under `steve task`.
 #[derive(Debug, Subcommand)]
@@ -114,7 +112,8 @@ fn detect_entity(id: &str) -> Result<EntityKind> {
 }
 
 fn parse_priority(s: &str) -> Result<Priority> {
-    Priority::from_str(s).map_err(|_| anyhow::anyhow!("invalid priority: {s} (expected high, medium, low)"))
+    Priority::from_str(s)
+        .map_err(|_| anyhow::anyhow!("invalid priority: {s} (expected high, medium, low)"))
 }
 
 fn parse_task_status(s: &str) -> Result<TaskStatus> {
@@ -131,8 +130,8 @@ fn parse_epic_status(s: &str) -> Result<EpicStatus> {
 pub fn run_task(command: TaskCommand) -> Result<()> {
     let project_info = crate::project::detect_or_cwd();
     let storage = crate::storage::Storage::new(&project_info.id)?;
-    let repo_name = crate::project::git_repo_name(&project_info.root)
-        .unwrap_or_else(|| "proj".to_string());
+    let repo_name =
+        crate::project::git_repo_name(&project_info.root).unwrap_or_else(|| "proj".to_string());
     let store = TaskStore::new(storage, repo_name);
 
     match command {
@@ -156,10 +155,23 @@ pub fn run_task(command: TaskCommand) -> Result<()> {
         } => {
             let priority = parse_priority(&priority)?;
             if epic {
-                cmd_create_epic(&store, &title, description.as_deref(), external_ref.as_deref(), priority)
+                cmd_create_epic(
+                    &store,
+                    &title,
+                    description.as_deref(),
+                    external_ref.as_deref(),
+                    priority,
+                )
             } else {
                 let kind = if bug { TaskKind::Bug } else { TaskKind::Task };
-                cmd_create_task(&store, &title, description.as_deref(), epic_id.as_deref(), priority, kind)
+                cmd_create_task(
+                    &store,
+                    &title,
+                    description.as_deref(),
+                    epic_id.as_deref(),
+                    priority,
+                    kind,
+                )
             }
         }
 
@@ -172,7 +184,15 @@ pub fn run_task(command: TaskCommand) -> Result<()> {
             status,
             priority,
             external_ref,
-        } => cmd_update(&store, &id, title, description, status, priority, external_ref),
+        } => cmd_update(
+            &store,
+            &id,
+            title,
+            description,
+            status,
+            priority,
+            external_ref,
+        ),
     }
 }
 
@@ -404,10 +424,7 @@ fn format_epic_table(epics: &[Epic], store: &TaskStore) -> String {
         .max(6);
 
     for epic in epics {
-        let task_count = store
-            .tasks_by_epic(&epic.id)
-            .map(|t| t.len())
-            .unwrap_or(0);
+        let task_count = store.tasks_by_epic(&epic.id).map(|t| t.len()).unwrap_or(0);
         out.push_str(&format!(
             "  {:<id_w$}  {:<status_w$}  {:<6}  {} ({} tasks)\n",
             epic.id,
@@ -448,8 +465,14 @@ fn format_task_detail(task: &Task, store: &TaskStore) -> String {
     if let Some(ref sid) = task.session_id {
         out.push_str(&format!("  Session:     {}\n", sid));
     }
-    out.push_str(&format!("  Created:     {}\n", task.created_at.format("%Y-%m-%d %H:%M")));
-    out.push_str(&format!("  Updated:     {}\n", task.updated_at.format("%Y-%m-%d %H:%M")));
+    out.push_str(&format!(
+        "  Created:     {}\n",
+        task.created_at.format("%Y-%m-%d %H:%M")
+    ));
+    out.push_str(&format!(
+        "  Updated:     {}\n",
+        task.updated_at.format("%Y-%m-%d %H:%M")
+    ));
     out
 }
 
@@ -465,13 +488,23 @@ fn format_epic_detail(epic: &Epic, tasks: &[Task]) -> String {
     if let Some(ref ext) = epic.external_ref {
         out.push_str(&format!("  External:    {}\n", ext));
     }
-    out.push_str(&format!("  Created:     {}\n", epic.created_at.format("%Y-%m-%d %H:%M")));
-    out.push_str(&format!("  Updated:     {}\n", epic.updated_at.format("%Y-%m-%d %H:%M")));
+    out.push_str(&format!(
+        "  Created:     {}\n",
+        epic.created_at.format("%Y-%m-%d %H:%M")
+    ));
+    out.push_str(&format!(
+        "  Updated:     {}\n",
+        epic.updated_at.format("%Y-%m-%d %H:%M")
+    ));
 
     if !tasks.is_empty() {
         out.push_str(&format!("  Tasks ({}):\n", tasks.len()));
         for task in tasks {
-            let check = if task.status == TaskStatus::Done { "x" } else { " " };
+            let check = if task.status == TaskStatus::Done {
+                "x"
+            } else {
+                " "
+            };
             out.push_str(&format!("    [{}] {} — {}\n", check, task.id, task.title));
         }
     }
@@ -573,7 +606,10 @@ mod tests {
     #[test]
     fn parse_task_status_valid() {
         assert_eq!(parse_task_status("open").unwrap(), TaskStatus::Open);
-        assert_eq!(parse_task_status("in_progress").unwrap(), TaskStatus::InProgress);
+        assert_eq!(
+            parse_task_status("in_progress").unwrap(),
+            TaskStatus::InProgress
+        );
         assert_eq!(parse_task_status("done").unwrap(), TaskStatus::Done);
     }
 
@@ -585,7 +621,10 @@ mod tests {
     #[test]
     fn parse_epic_status_valid() {
         assert_eq!(parse_epic_status("open").unwrap(), EpicStatus::Open);
-        assert_eq!(parse_epic_status("in_progress").unwrap(), EpicStatus::InProgress);
+        assert_eq!(
+            parse_epic_status("in_progress").unwrap(),
+            EpicStatus::InProgress
+        );
         assert_eq!(parse_epic_status("done").unwrap(), EpicStatus::Done);
     }
 
@@ -594,8 +633,26 @@ mod tests {
     #[test]
     fn format_task_table_contains_all_tasks() {
         let (store, _dir) = test_store();
-        let t1 = store.create_task("Fix bug", None, None, None, Priority::High, TaskKind::default()).unwrap();
-        let t2 = store.create_task("Add feature", None, None, None, Priority::Low, TaskKind::default()).unwrap();
+        let t1 = store
+            .create_task(
+                "Fix bug",
+                None,
+                None,
+                None,
+                Priority::High,
+                TaskKind::default(),
+            )
+            .unwrap();
+        let t2 = store
+            .create_task(
+                "Add feature",
+                None,
+                None,
+                None,
+                Priority::Low,
+                TaskKind::default(),
+            )
+            .unwrap();
 
         let tasks = store.list_tasks().unwrap();
         let output = format_task_table(&tasks);
@@ -618,10 +675,24 @@ mod tests {
             .create_epic("Big feature", "desc", None, Priority::Medium)
             .unwrap();
         store
-            .create_task("Sub-task 1", None, Some(&epic.id), None, Priority::Medium, TaskKind::default())
+            .create_task(
+                "Sub-task 1",
+                None,
+                Some(&epic.id),
+                None,
+                Priority::Medium,
+                TaskKind::default(),
+            )
             .unwrap();
         store
-            .create_task("Sub-task 2", None, Some(&epic.id), None, Priority::Medium, TaskKind::default())
+            .create_task(
+                "Sub-task 2",
+                None,
+                Some(&epic.id),
+                None,
+                Priority::Medium,
+                TaskKind::default(),
+            )
             .unwrap();
 
         let epics = store.list_epics().unwrap();
@@ -637,9 +708,18 @@ mod tests {
     #[test]
     fn format_task_detail_shows_all_fields() {
         let (store, _dir) = test_store();
-        let epic = store.create_epic("My Epic", "desc", None, Priority::Medium).unwrap();
+        let epic = store
+            .create_epic("My Epic", "desc", None, Priority::Medium)
+            .unwrap();
         let task = store
-            .create_task("Fix bug", Some("Segfault on exit"), Some(&epic.id), None, Priority::High, TaskKind::default())
+            .create_task(
+                "Fix bug",
+                Some("Segfault on exit"),
+                Some(&epic.id),
+                None,
+                Priority::High,
+                TaskKind::default(),
+            )
             .unwrap();
 
         let output = format_task_detail(&task, &store);
@@ -655,7 +735,14 @@ mod tests {
     fn format_task_detail_without_optional_fields() {
         let (store, _dir) = test_store();
         let task = store
-            .create_task("Simple", None, None, None, Priority::Medium, TaskKind::default())
+            .create_task(
+                "Simple",
+                None,
+                None,
+                None,
+                Priority::Medium,
+                TaskKind::default(),
+            )
             .unwrap();
 
         let output = format_task_detail(&task, &store);
@@ -671,14 +758,33 @@ mod tests {
     fn format_epic_detail_shows_child_tasks() {
         let (store, _dir) = test_store();
         let epic = store
-            .create_epic("Big feature", "Do everything", Some("https://gh.com/1"), Priority::High)
+            .create_epic(
+                "Big feature",
+                "Do everything",
+                Some("https://gh.com/1"),
+                Priority::High,
+            )
             .unwrap();
         let t1 = store
-            .create_task("Step 1", None, Some(&epic.id), None, Priority::Medium, TaskKind::default())
+            .create_task(
+                "Step 1",
+                None,
+                Some(&epic.id),
+                None,
+                Priority::Medium,
+                TaskKind::default(),
+            )
             .unwrap();
         store.complete_task(&t1.id).unwrap();
         let t2 = store
-            .create_task("Step 2", None, Some(&epic.id), None, Priority::Medium, TaskKind::default())
+            .create_task(
+                "Step 2",
+                None,
+                Some(&epic.id),
+                None,
+                Priority::Medium,
+                TaskKind::default(),
+            )
             .unwrap();
 
         let tasks = store.tasks_by_epic(&epic.id).unwrap();
@@ -699,8 +805,26 @@ mod tests {
     #[test]
     fn cmd_list_status_filter() {
         let (store, _dir) = test_store();
-        store.create_task("Open one", None, None, None, Priority::Medium, TaskKind::default()).unwrap();
-        let t2 = store.create_task("Done one", None, None, None, Priority::Medium, TaskKind::default()).unwrap();
+        store
+            .create_task(
+                "Open one",
+                None,
+                None,
+                None,
+                Priority::Medium,
+                TaskKind::default(),
+            )
+            .unwrap();
+        let t2 = store
+            .create_task(
+                "Done one",
+                None,
+                None,
+                None,
+                Priority::Medium,
+                TaskKind::default(),
+            )
+            .unwrap();
         store.complete_task(&t2.id).unwrap();
 
         let mut tasks = store.list_tasks().unwrap();
@@ -714,9 +838,29 @@ mod tests {
     #[test]
     fn cmd_list_epic_filter() {
         let (store, _dir) = test_store();
-        let epic = store.create_epic("E1", "desc", None, Priority::Medium).unwrap();
-        store.create_task("In epic", None, Some(&epic.id), None, Priority::Medium, TaskKind::default()).unwrap();
-        store.create_task("No epic", None, None, None, Priority::Medium, TaskKind::default()).unwrap();
+        let epic = store
+            .create_epic("E1", "desc", None, Priority::Medium)
+            .unwrap();
+        store
+            .create_task(
+                "In epic",
+                None,
+                Some(&epic.id),
+                None,
+                Priority::Medium,
+                TaskKind::default(),
+            )
+            .unwrap();
+        store
+            .create_task(
+                "No epic",
+                None,
+                None,
+                None,
+                Priority::Medium,
+                TaskKind::default(),
+            )
+            .unwrap();
 
         let tasks = store.tasks_by_epic(&epic.id).unwrap();
         assert_eq!(tasks.len(), 1);
@@ -749,8 +893,26 @@ mod tests {
     #[test]
     fn format_task_table_labels_bugs() {
         let (store, _dir) = test_store();
-        store.create_task("Normal task", None, None, None, Priority::Medium, TaskKind::Task).unwrap();
-        store.create_task("Crash on exit", None, None, None, Priority::High, TaskKind::Bug).unwrap();
+        store
+            .create_task(
+                "Normal task",
+                None,
+                None,
+                None,
+                Priority::Medium,
+                TaskKind::Task,
+            )
+            .unwrap();
+        store
+            .create_task(
+                "Crash on exit",
+                None,
+                None,
+                None,
+                Priority::High,
+                TaskKind::Bug,
+            )
+            .unwrap();
 
         let tasks = store.list_tasks().unwrap();
         let output = format_task_table(&tasks);
@@ -764,7 +926,14 @@ mod tests {
     fn format_task_detail_shows_bug_header() {
         let (store, _dir) = test_store();
         let bug = store
-            .create_task("Crash on exit", Some("Segfault"), None, None, Priority::High, TaskKind::Bug)
+            .create_task(
+                "Crash on exit",
+                Some("Segfault"),
+                None,
+                None,
+                Priority::High,
+                TaskKind::Bug,
+            )
             .unwrap();
 
         let output = format_task_detail(&bug, &store);
@@ -790,7 +959,9 @@ mod tests {
     #[test]
     fn delete_epic_removes_it() {
         let (store, _dir) = test_store();
-        let epic = store.create_epic("Temp", "desc", None, Priority::Medium).unwrap();
+        let epic = store
+            .create_epic("Temp", "desc", None, Priority::Medium)
+            .unwrap();
         assert!(store.get_epic(&epic.id).is_ok());
         store.delete_epic(&epic.id).unwrap();
         assert!(store.get_epic(&epic.id).is_err());
@@ -801,7 +972,16 @@ mod tests {
     #[test]
     fn update_task_changes_fields() {
         let (store, _dir) = test_store();
-        let task = store.create_task("Original", None, None, None, Priority::Low, TaskKind::default()).unwrap();
+        let task = store
+            .create_task(
+                "Original",
+                None,
+                None,
+                None,
+                Priority::Low,
+                TaskKind::default(),
+            )
+            .unwrap();
 
         let mut task = store.get_task(&task.id).unwrap();
         task.title = "Updated".to_string();
@@ -818,7 +998,9 @@ mod tests {
     #[test]
     fn update_epic_changes_fields() {
         let (store, _dir) = test_store();
-        let epic = store.create_epic("Original", "desc", None, Priority::Low).unwrap();
+        let epic = store
+            .create_epic("Original", "desc", None, Priority::Low)
+            .unwrap();
 
         let mut epic = store.get_epic(&epic.id).unwrap();
         epic.title = "Updated".to_string();

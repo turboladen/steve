@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 
 use async_openai::types::chat::{
-    ChatCompletionMessageToolCalls, ChatCompletionRequestMessage,
-    ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
+    ChatCompletionMessageToolCalls, ChatCompletionRequestMessage, ChatCompletionRequestToolMessage,
+    ChatCompletionRequestToolMessageContent,
 };
 
 use crate::tool::ToolName;
@@ -71,12 +71,10 @@ pub fn compress_old_tool_results(
             saved_chars += content.len().saturating_sub(compressed.len());
             compressed_count += 1;
 
-            messages[idx] = ChatCompletionRequestMessage::Tool(
-                ChatCompletionRequestToolMessage {
-                    content: ChatCompletionRequestToolMessageContent::Text(compressed),
-                    tool_call_id,
-                },
-            );
+            messages[idx] = ChatCompletionRequestMessage::Tool(ChatCompletionRequestToolMessage {
+                content: ChatCompletionRequestToolMessageContent::Text(compressed),
+                tool_call_id,
+            });
         }
     }
 
@@ -110,7 +108,10 @@ fn extract_text(msg: &ChatCompletionRequestToolMessage) -> String {
 /// Build mappings from tool_call_id → (tool_name, args) in a single pass.
 fn build_tool_maps(
     messages: &[ChatCompletionRequestMessage],
-) -> (HashMap<String, ToolName>, HashMap<String, serde_json::Value>) {
+) -> (
+    HashMap<String, ToolName>,
+    HashMap<String, serde_json::Value>,
+) {
     let mut name_map = HashMap::new();
     let mut args_map = HashMap::new();
     for msg in messages {
@@ -121,9 +122,9 @@ fn build_tool_maps(
                         if let Ok(name) = func_call.function.name.parse::<ToolName>() {
                             name_map.insert(func_call.id.clone(), name);
                         }
-                        if let Ok(args) = serde_json::from_str::<serde_json::Value>(
-                            &func_call.function.arguments,
-                        ) {
+                        if let Ok(args) =
+                            serde_json::from_str::<serde_json::Value>(&func_call.function.arguments)
+                        {
                             args_map.insert(func_call.id.clone(), args);
                         }
                     }
@@ -134,9 +135,12 @@ fn build_tool_maps(
     (name_map, args_map)
 }
 
-
 /// Compress a tool output into a compact summary based on the tool type.
-fn compress_tool_output(tool_name: ToolName, content: &str, tool_args: Option<&serde_json::Value>) -> String {
+fn compress_tool_output(
+    tool_name: ToolName,
+    content: &str,
+    tool_args: Option<&serde_json::Value>,
+) -> String {
     match tool_name {
         ToolName::Read => compress_read(content, tool_args),
         ToolName::Grep => compress_grep(content, tool_args),
@@ -146,11 +150,17 @@ fn compress_tool_output(tool_name: ToolName, content: &str, tool_args: Option<&s
         ToolName::Edit => compress_edit(content),
         ToolName::Write => compress_write(content),
         ToolName::Patch => compress_patch(content),
-        ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
-        | ToolName::Question | ToolName::Task | ToolName::Webfetch | ToolName::Memory
-        | ToolName::Symbols | ToolName::Lsp | ToolName::Agent => {
-            compress_generic(content)
-        }
+        ToolName::Move
+        | ToolName::Copy
+        | ToolName::Delete
+        | ToolName::Mkdir
+        | ToolName::Question
+        | ToolName::Task
+        | ToolName::Webfetch
+        | ToolName::Memory
+        | ToolName::Symbols
+        | ToolName::Lsp
+        | ToolName::Agent => compress_generic(content),
     }
 }
 
@@ -159,10 +169,7 @@ fn compress_tool_output(tool_name: ToolName, content: &str, tool_args: Option<&s
 fn compress_read(content: &str, tool_args: Option<&serde_json::Value>) -> String {
     let lines: Vec<&str> = content.lines().collect();
     // Exclude truncation footer lines from the count (e.g., "... (showing N of M lines ...)")
-    let line_count = lines
-        .iter()
-        .filter(|l| !l.starts_with("... ("))
-        .count();
+    let line_count = lines.iter().filter(|l| !l.starts_with("... (")).count();
 
     // Extract file path and line range from tool args if available
     let file_path = tool_args
@@ -174,8 +181,12 @@ fn compress_read(content: &str, tool_args: Option<&serde_json::Value>) -> String
         })
         .and_then(|v| v.as_str())
         .unwrap_or("(unknown)");
-    let offset = tool_args.and_then(|a| a.get("offset")).and_then(|v| v.as_u64());
-    let limit = tool_args.and_then(|a| a.get("limit")).and_then(|v| v.as_u64());
+    let offset = tool_args
+        .and_then(|a| a.get("offset"))
+        .and_then(|v| v.as_u64());
+    let limit = tool_args
+        .and_then(|a| a.get("limit"))
+        .and_then(|v| v.as_u64());
     let range_str = match (offset, limit) {
         (Some(o), Some(l)) => format!(" lines {}-{}", o, o + l),
         (Some(o), None) => format!(" from line {}", o),
@@ -185,7 +196,8 @@ fn compress_read(content: &str, tool_args: Option<&serde_json::Value>) -> String
     let lang = detect_language_from_content(content);
 
     // Extract first few "important" lines (imports, module declarations)
-    let key_lines: Vec<String> = lines.iter()
+    let key_lines: Vec<String> = lines
+        .iter()
         .filter_map(|line| {
             let stripped = if let Some(pipe_pos) = line.find(" | ") {
                 &line[pipe_pos + 3..]
@@ -193,9 +205,12 @@ fn compress_read(content: &str, tool_args: Option<&serde_json::Value>) -> String
                 line
             };
             let trimmed = stripped.trim();
-            if trimmed.starts_with("use ") || trimmed.starts_with("import ")
-                || trimmed.starts_with("from ") || trimmed.starts_with("mod ")
-                || trimmed.starts_with("#include") || trimmed.starts_with("package ")
+            if trimmed.starts_with("use ")
+                || trimmed.starts_with("import ")
+                || trimmed.starts_with("from ")
+                || trimmed.starts_with("mod ")
+                || trimmed.starts_with("#include")
+                || trimmed.starts_with("package ")
             {
                 let truncated: String = trimmed.chars().take(60).collect();
                 Some(truncated)
@@ -225,9 +240,7 @@ fn compress_read(content: &str, tool_args: Option<&serde_json::Value>) -> String
         String::new()
     };
 
-    format!(
-        "[Previously read: {file_path}{range_str} ({line_count} lines, {lang}).{key_items}]"
-    )
+    format!("[Previously read: {file_path}{range_str} ({line_count} lines, {lang}).{key_items}]")
 }
 
 /// Compress grep tool output.
@@ -324,9 +337,7 @@ fn compress_list(content: &str) -> String {
     let dir_count = lines.iter().filter(|l| l.ends_with('/')).count();
     let file_count = entry_count - dir_count;
 
-    format!(
-        "[Previously listed: {entry_count} entries ({file_count} files, {dir_count} dirs).]"
-    )
+    format!("[Previously listed: {entry_count} entries ({file_count} files, {dir_count} dirs).]")
 }
 
 /// Compress bash tool output.
@@ -358,9 +369,7 @@ fn compress_bash(content: &str) -> String {
         "success".to_string()
     };
 
-    format!(
-        "[Previously ran: {exit_info}, {line_count} lines output.]"
-    )
+    format!("[Previously ran: {exit_info}, {line_count} lines output.]")
 }
 
 /// Compress edit tool output (already short, but standardize format).
@@ -454,9 +463,21 @@ fn extract_definitions(content: &str) -> Vec<String> {
 }
 
 fn extract_rust_def(line: &str) -> Option<String> {
-    for keyword in &["pub fn ", "fn ", "pub struct ", "struct ", "pub enum ", "enum ",
-                      "pub trait ", "trait ", "impl ", "pub mod ", "mod ",
-                      "pub type ", "type "] {
+    for keyword in &[
+        "pub fn ",
+        "fn ",
+        "pub struct ",
+        "struct ",
+        "pub enum ",
+        "enum ",
+        "pub trait ",
+        "trait ",
+        "impl ",
+        "pub mod ",
+        "mod ",
+        "pub type ",
+        "type ",
+    ] {
         let matches = if line.starts_with(keyword) {
             true
         } else if keyword.starts_with("pub ") {
@@ -468,7 +489,8 @@ fn extract_rust_def(line: &str) -> Option<String> {
 
         if matches {
             let rest = &line[keyword.len()..];
-            let name: String = rest.chars()
+            let name: String = rest
+                .chars()
                 .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '<')
                 .take_while(|c| *c != '<')
                 .collect();
@@ -482,13 +504,19 @@ fn extract_rust_def(line: &str) -> Option<String> {
 
 fn extract_python_def(line: &str) -> Option<String> {
     if line.starts_with("def ") {
-        let name: String = line[4..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        let name: String = line[4..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
         if !name.is_empty() {
             return Some(format!("def {name}"));
         }
     }
     if line.starts_with("class ") {
-        let name: String = line[6..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        let name: String = line[6..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
         if !name.is_empty() {
             return Some(format!("class {name}"));
         }
@@ -498,13 +526,19 @@ fn extract_python_def(line: &str) -> Option<String> {
 
 fn extract_js_def(line: &str) -> Option<String> {
     if line.starts_with("function ") {
-        let name: String = line[9..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        let name: String = line[9..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
         if !name.is_empty() {
             return Some(format!("function {name}"));
         }
     }
     if line.starts_with("class ") {
-        let name: String = line[6..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        let name: String = line[6..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
         if !name.is_empty() {
             return Some(format!("class {name}"));
         }
@@ -512,9 +546,13 @@ fn extract_js_def(line: &str) -> Option<String> {
     if line.starts_with("export ") {
         // export function/class/const
         let rest = line[7..].trim_start();
-        if rest.starts_with("function ") || rest.starts_with("class ") || rest.starts_with("const ") {
+        if rest.starts_with("function ") || rest.starts_with("class ") || rest.starts_with("const ")
+        {
             let keyword_end = rest.find(' ').unwrap_or(0) + 1;
-            let name: String = rest[keyword_end..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            let name: String = rest[keyword_end..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
             if !name.is_empty() {
                 let keyword = &rest[..keyword_end - 1];
                 return Some(format!("export {keyword} {name}"));
@@ -534,14 +572,20 @@ fn extract_go_def(line: &str) -> Option<String> {
             0
         };
         if name_start < rest.len() {
-            let name: String = rest[name_start..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            let name: String = rest[name_start..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
             if !name.is_empty() {
                 return Some(format!("func {name}"));
             }
         }
     }
     if line.starts_with("type ") {
-        let name: String = line[5..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        let name: String = line[5..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
         if !name.is_empty() {
             return Some(format!("type {name}"));
         }
@@ -578,7 +622,8 @@ mod tests {
 
     #[test]
     fn test_compress_grep() {
-        let content = "src/app.rs:10: let x = 1;\nsrc/app.rs:20: let y = 2;\nsrc/stream.rs:5: let z = 3;";
+        let content =
+            "src/app.rs:10: let x = 1;\nsrc/app.rs:20: let y = 2;\nsrc/stream.rs:5: let z = 3;";
         let args = serde_json::json!({"pattern": "let.*="});
         let result = compress_grep(content, Some(&args));
         assert!(result.starts_with("[Previously searched"));
@@ -616,9 +661,18 @@ mod tests {
 
     #[test]
     fn test_extract_rust_defs() {
-        assert_eq!(extract_rust_def("pub fn main() {"), Some("pub fn main".to_string()));
-        assert_eq!(extract_rust_def("struct Foo {"), Some("struct Foo".to_string()));
-        assert_eq!(extract_rust_def("impl ToolRegistry {"), Some("impl ToolRegistry".to_string()));
+        assert_eq!(
+            extract_rust_def("pub fn main() {"),
+            Some("pub fn main".to_string())
+        );
+        assert_eq!(
+            extract_rust_def("struct Foo {"),
+            Some("struct Foo".to_string())
+        );
+        assert_eq!(
+            extract_rust_def("impl ToolRegistry {"),
+            Some("impl ToolRegistry".to_string())
+        );
         assert_eq!(extract_rust_def("let x = 5;"), None);
     }
 
@@ -638,7 +692,9 @@ mod tests {
     }
 
     /// Helper to build an assistant message with tool calls.
-    fn make_assistant_with_tool_calls(call_ids_and_names: &[(&str, &str)]) -> ChatCompletionRequestMessage {
+    fn make_assistant_with_tool_calls(
+        call_ids_and_names: &[(&str, &str)],
+    ) -> ChatCompletionRequestMessage {
         let tool_calls: Vec<ChatCompletionMessageToolCalls> = call_ids_and_names
             .iter()
             .map(|(id, name)| {
@@ -670,15 +726,18 @@ mod tests {
     #[test]
     fn test_compress_all_tool_results_with_zero_keep() {
         // Build a conversation: user → assistant+tool_calls → tool results
-        let long_content: String = (1..=100).map(|i| format!("{:>4} | line {i}\n", i)).collect();
+        let long_content: String = (1..=100)
+            .map(|i| format!("{:>4} | line {i}\n", i))
+            .collect();
         assert!(long_content.len() > 200); // must exceed skip threshold
 
         let mut messages = vec![
             ChatCompletionRequestMessage::User(
                 async_openai::types::chat::ChatCompletionRequestUserMessage {
-                    content: async_openai::types::chat::ChatCompletionRequestUserMessageContent::Text(
-                        "Read files".to_string(),
-                    ),
+                    content:
+                        async_openai::types::chat::ChatCompletionRequestUserMessageContent::Text(
+                            "Read files".to_string(),
+                        ),
                     name: None,
                 },
             ),
@@ -708,7 +767,9 @@ mod tests {
 
     #[test]
     fn test_compress_all_preserves_tool_call_ids() {
-        let long_content: String = (1..=100).map(|i| format!("{:>4} | line {i}\n", i)).collect();
+        let long_content: String = (1..=100)
+            .map(|i| format!("{:>4} | line {i}\n", i))
+            .collect();
 
         let mut messages = vec![
             make_assistant_with_tool_calls(&[("call_a", "read"), ("call_b", "grep")]),
@@ -751,7 +812,10 @@ mod tests {
         assert!(result.contains("src/stream.rs"), "should include file path");
         assert!(result.contains("lines 10-101"), "should include line range");
         assert!(result.contains("Key items:"), "should include key items");
-        assert!(result.contains("use std::collections::HashMap"), "should include imports");
+        assert!(
+            result.contains("use std::collections::HashMap"),
+            "should include imports"
+        );
     }
 
     #[test]
@@ -768,12 +832,19 @@ mod tests {
 
     #[test]
     fn test_compress_grep_includes_pattern_and_matches() {
-        let content = "src/app.rs:10: let x = 1;\nsrc/app.rs:20: let y = 2;\nsrc/stream.rs:5: let z = 3;";
+        let content =
+            "src/app.rs:10: let x = 1;\nsrc/app.rs:20: let y = 2;\nsrc/stream.rs:5: let z = 3;";
         let args = serde_json::json!({"pattern": "let\\s+"});
         let result = compress_grep(content, Some(&args));
         assert!(result.contains("let\\s+"), "should include search pattern");
-        assert!(result.contains("Top matches:"), "should include top matches");
-        assert!(result.contains("src/app.rs:10"), "should include match lines");
+        assert!(
+            result.contains("Top matches:"),
+            "should include top matches"
+        );
+        assert!(
+            result.contains("src/app.rs:10"),
+            "should include match lines"
+        );
     }
 
     #[test]
@@ -786,29 +857,27 @@ mod tests {
 
     #[test]
     fn test_build_tool_maps() {
-        let tool_calls = vec![
-            ChatCompletionMessageToolCalls::Function(
-                async_openai::types::chat::ChatCompletionMessageToolCall {
-                    id: "call_1".to_string(),
-                    function: async_openai::types::chat::FunctionCall {
-                        name: "read".to_string(),
-                        arguments: r#"{"file_path":"src/main.rs"}"#.to_string(),
-                    },
+        let tool_calls = vec![ChatCompletionMessageToolCalls::Function(
+            async_openai::types::chat::ChatCompletionMessageToolCall {
+                id: "call_1".to_string(),
+                function: async_openai::types::chat::FunctionCall {
+                    name: "read".to_string(),
+                    arguments: r#"{"file_path":"src/main.rs"}"#.to_string(),
                 },
-            ),
-        ];
+            },
+        )];
 
         #[allow(deprecated)]
-        let messages = vec![
-            ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
+        let messages = vec![ChatCompletionRequestMessage::Assistant(
+            ChatCompletionRequestAssistantMessage {
                 content: None,
                 name: None,
                 audio: None,
                 tool_calls: Some(tool_calls),
                 function_call: None,
                 refusal: None,
-            }),
-        ];
+            },
+        )];
 
         let (name_map, args_map) = build_tool_maps(&messages);
         assert_eq!(name_map.len(), 1);

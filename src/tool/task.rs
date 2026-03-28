@@ -6,19 +6,22 @@ use anyhow::Result;
 use serde_json::Value;
 
 use super::{ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput};
-use crate::task::types::{Priority, TaskKind, TaskStatus, EpicStatus};
-use crate::task::TaskStore;
+use crate::task::{
+    TaskStore,
+    types::{EpicStatus, Priority, TaskKind, TaskStatus},
+};
 
 pub fn tool() -> ToolEntry {
     ToolEntry {
         def: ToolDef {
             name: ToolName::Task,
-            description: "Manage persistent tasks, bugs, and epics for multi-step work. Always use \
+            description:
+                "Manage persistent tasks, bugs, and epics for multi-step work. Always use \
                 this FIRST when given multi-step work: create tasks for each step, then work \
                 through them sequentially. Actions: create (new task), create_bug (new bug), \
                 list (show tasks/bugs), update (change status/fields), complete (mark done), \
                 show (details), delete, create_epic (new epic), list_epics, update_epic."
-                .to_string(),
+                    .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -102,7 +105,11 @@ fn parse_epic_status(s: &str) -> Option<EpicStatus> {
 }
 
 /// Helper to get a required string arg.
-fn require_str<'a>(args: &'a Value, field: &str, action: &str) -> std::result::Result<&'a str, ToolOutput> {
+fn require_str<'a>(
+    args: &'a Value,
+    field: &str,
+    action: &str,
+) -> std::result::Result<&'a str, ToolOutput> {
     args.get(field)
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
@@ -159,7 +166,11 @@ fn action_create_bug(args: &Value, store: &Arc<TaskStore>) -> Result<ToolOutput>
     action_create_with_kind(args, store, TaskKind::Bug)
 }
 
-fn action_create_with_kind(args: &Value, store: &Arc<TaskStore>, kind: TaskKind) -> Result<ToolOutput> {
+fn action_create_with_kind(
+    args: &Value,
+    store: &Arc<TaskStore>,
+    kind: TaskKind,
+) -> Result<ToolOutput> {
     let label = match kind {
         TaskKind::Task => "task",
         TaskKind::Bug => "bug",
@@ -177,11 +188,13 @@ fn action_create_with_kind(args: &Value, store: &Arc<TaskStore>, kind: TaskKind)
     let priority = match args.get("priority").and_then(|v| v.as_str()) {
         Some(s) => match parse_priority(s) {
             Some(p) => p,
-            None => return Ok(ToolOutput {
-                title: format!("task: {action_name}"),
-                output: format!("Error: invalid priority '{s}'. Use high, medium, or low."),
-                is_error: true,
-            }),
+            None => {
+                return Ok(ToolOutput {
+                    title: format!("task: {action_name}"),
+                    output: format!("Error: invalid priority '{s}'. Use high, medium, or low."),
+                    is_error: true,
+                });
+            }
         },
         None => Priority::default(),
     };
@@ -191,7 +204,10 @@ fn action_create_with_kind(args: &Value, store: &Arc<TaskStore>, kind: TaskKind)
 
     let task = store.create_task(title, description, epic_id, session_id, priority, kind)?;
 
-    let mut msg = format!("Created {label} {}: {} [{}]", task.id, task.title, task.priority);
+    let mut msg = format!(
+        "Created {label} {}: {} [{}]",
+        task.id, task.title, task.priority
+    );
     if let Some(eid) = &task.epic_id {
         msg.push_str(&format!(" (epic: {eid})"));
     }
@@ -234,7 +250,10 @@ fn action_list(args: &Value, store: &Arc<TaskStore>) -> Result<ToolOutput> {
         });
     }
 
-    let open_count = filtered.iter().filter(|t| t.status != TaskStatus::Done).count();
+    let open_count = filtered
+        .iter()
+        .filter(|t| t.status != TaskStatus::Done)
+        .count();
     let bug_count = filtered.iter().filter(|t| t.kind == TaskKind::Bug).count();
     let epics = store.list_epics().unwrap_or_default();
 
@@ -245,17 +264,25 @@ fn action_list(args: &Value, store: &Arc<TaskStore>) -> Result<ToolOutput> {
     };
     let mut lines = vec![header];
     for task in &filtered {
-        let marker = if task.status == TaskStatus::Done { "x" } else { " " };
+        let marker = if task.status == TaskStatus::Done {
+            "x"
+        } else {
+            " "
+        };
         let kind_label = match task.kind {
             TaskKind::Task => "",
             TaskKind::Bug => " [bug]",
         };
-        let mut line = format!("- [{marker}] {}: {}{kind_label} [{}]", task.id, task.title, task.priority);
+        let mut line = format!(
+            "- [{marker}] {}: {}{kind_label} [{}]",
+            task.id, task.title, task.priority
+        );
         if task.status == TaskStatus::InProgress {
             line.push_str(" *in progress*");
         }
         if let Some(eid) = &task.epic_id {
-            let epic_title = epics.iter()
+            let epic_title = epics
+                .iter()
                 .find(|e| e.id == *eid)
                 .map(|e| e.title.as_str())
                 .unwrap_or(eid);
@@ -305,7 +332,9 @@ fn action_update(args: &Value, store: &Arc<TaskStore>) -> Result<ToolOutput> {
         } else {
             return Ok(ToolOutput {
                 title: "task: update".to_string(),
-                output: format!("Error: invalid status '{status_str}'. Use open, inprogress, or done."),
+                output: format!(
+                    "Error: invalid status '{status_str}'. Use open, inprogress, or done."
+                ),
                 is_error: true,
             });
         }
@@ -316,11 +345,15 @@ fn action_update(args: &Value, store: &Arc<TaskStore>) -> Result<ToolOutput> {
                 task.priority = p;
                 changed.push("priority");
             }
-            None => return Ok(ToolOutput {
-                title: "task: update".to_string(),
-                output: format!("Error: invalid priority '{priority_str}'. Use high, medium, or low."),
-                is_error: true,
-            }),
+            None => {
+                return Ok(ToolOutput {
+                    title: "task: update".to_string(),
+                    output: format!(
+                        "Error: invalid priority '{priority_str}'. Use high, medium, or low."
+                    ),
+                    is_error: true,
+                });
+            }
         }
     }
 
@@ -387,7 +420,9 @@ fn action_show(args: &Value, store: &Arc<TaskStore>) -> Result<ToolOutput> {
     ];
 
     if let Some(eid) = &task.epic_id {
-        let epic_label = store.get_epic(eid).ok()
+        let epic_label = store
+            .get_epic(eid)
+            .ok()
             .map(|e| format!("{eid} ({})", e.title))
             .unwrap_or_else(|| eid.clone());
         lines.push(format!("Epic: {epic_label}"));
@@ -436,23 +471,31 @@ fn action_create_epic(args: &Value, store: &Arc<TaskStore>) -> Result<ToolOutput
         Ok(t) => t,
         Err(e) => return Ok(e),
     };
-    let description = args.get("description").and_then(|v| v.as_str()).unwrap_or("");
+    let description = args
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let external_ref = args.get("external_ref").and_then(|v| v.as_str());
     let priority = match args.get("priority").and_then(|v| v.as_str()) {
         Some(s) => match parse_priority(s) {
             Some(p) => p,
-            None => return Ok(ToolOutput {
-                title: "task: create_epic".to_string(),
-                output: format!("Error: invalid priority '{s}'. Use high, medium, or low."),
-                is_error: true,
-            }),
+            None => {
+                return Ok(ToolOutput {
+                    title: "task: create_epic".to_string(),
+                    output: format!("Error: invalid priority '{s}'. Use high, medium, or low."),
+                    is_error: true,
+                });
+            }
         },
         None => Priority::default(),
     };
 
     let epic = store.create_epic(title, description, external_ref, priority)?;
 
-    let mut msg = format!("Created epic {}: {} [{}]", epic.id, epic.title, epic.priority);
+    let mut msg = format!(
+        "Created epic {}: {} [{}]",
+        epic.id, epic.title, epic.priority
+    );
     if let Some(ext) = &epic.external_ref {
         msg.push_str(&format!(" (ref: {ext})"));
     }
@@ -478,8 +521,12 @@ fn action_list_epics(store: &Arc<TaskStore>) -> Result<ToolOutput> {
 
     let mut lines = vec![format!("## Epics ({})", epics.len())];
     for epic in &epics {
-        let task_count = tasks.iter().filter(|t| t.epic_id.as_deref() == Some(&epic.id)).count();
-        let done_count = tasks.iter()
+        let task_count = tasks
+            .iter()
+            .filter(|t| t.epic_id.as_deref() == Some(&epic.id))
+            .count();
+        let done_count = tasks
+            .iter()
             .filter(|t| t.epic_id.as_deref() == Some(&epic.id) && t.status == TaskStatus::Done)
             .count();
         let mut line = format!(
@@ -536,7 +583,9 @@ fn action_update_epic(args: &Value, store: &Arc<TaskStore>) -> Result<ToolOutput
         } else {
             return Ok(ToolOutput {
                 title: "task: update_epic".to_string(),
-                output: format!("Error: invalid status '{status_str}'. Use open, inprogress, or done."),
+                output: format!(
+                    "Error: invalid status '{status_str}'. Use open, inprogress, or done."
+                ),
                 is_error: true,
             });
         }
@@ -547,11 +596,15 @@ fn action_update_epic(args: &Value, store: &Arc<TaskStore>) -> Result<ToolOutput
                 epic.priority = p;
                 changed.push("priority");
             }
-            None => return Ok(ToolOutput {
-                title: "task: update_epic".to_string(),
-                output: format!("Error: invalid priority '{priority_str}'. Use high, medium, or low."),
-                is_error: true,
-            }),
+            None => {
+                return Ok(ToolOutput {
+                    title: "task: update_epic".to_string(),
+                    output: format!(
+                        "Error: invalid priority '{priority_str}'. Use high, medium, or low."
+                    ),
+                    is_error: true,
+                });
+            }
         }
     }
     if let Some(ext) = args.get("external_ref").and_then(|v| v.as_str()) {
@@ -616,8 +669,14 @@ mod tests {
     #[test]
     fn parse_task_status_valid() {
         assert_eq!(parse_task_status("open"), Some(TaskStatus::Open));
-        assert_eq!(parse_task_status("in_progress"), Some(TaskStatus::InProgress));
-        assert_eq!(parse_task_status("inprogress"), Some(TaskStatus::InProgress));
+        assert_eq!(
+            parse_task_status("in_progress"),
+            Some(TaskStatus::InProgress)
+        );
+        assert_eq!(
+            parse_task_status("inprogress"),
+            Some(TaskStatus::InProgress)
+        );
         assert_eq!(parse_task_status("done"), Some(TaskStatus::Done));
     }
 
@@ -632,8 +691,14 @@ mod tests {
     #[test]
     fn parse_epic_status_valid() {
         assert_eq!(parse_epic_status("open"), Some(EpicStatus::Open));
-        assert_eq!(parse_epic_status("in_progress"), Some(EpicStatus::InProgress));
-        assert_eq!(parse_epic_status("inprogress"), Some(EpicStatus::InProgress));
+        assert_eq!(
+            parse_epic_status("in_progress"),
+            Some(EpicStatus::InProgress)
+        );
+        assert_eq!(
+            parse_epic_status("inprogress"),
+            Some(EpicStatus::InProgress)
+        );
         assert_eq!(parse_epic_status("done"), Some(EpicStatus::Done));
     }
 
@@ -673,7 +738,8 @@ mod tests {
         let result = execute(
             serde_json::json!({"action": "create", "title": "Fix bug"}),
             ctx,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(!result.is_error);
         assert!(result.output.contains("Fix bug"));
         assert!(result.output.contains("test-t"));
@@ -682,10 +748,7 @@ mod tests {
     #[test]
     fn create_task_missing_title() {
         let (ctx, _dir) = test_ctx();
-        let result = execute(
-            serde_json::json!({"action": "create"}),
-            ctx,
-        ).unwrap();
+        let result = execute(serde_json::json!({"action": "create"}), ctx).unwrap();
         assert!(result.is_error);
         assert!(result.output.contains("'title'"));
     }
@@ -696,7 +759,8 @@ mod tests {
         let result = execute(
             serde_json::json!({"action": "create", "title": "Test", "priority": "critical"}),
             ctx,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(result.is_error);
         assert!(result.output.contains("invalid priority"));
     }
@@ -717,11 +781,13 @@ mod tests {
         execute(
             serde_json::json!({"action": "create", "title": "Task A"}),
             ctx.clone(),
-        ).unwrap();
+        )
+        .unwrap();
         execute(
             serde_json::json!({"action": "create", "title": "Task B"}),
             ctx.clone(),
-        ).unwrap();
+        )
+        .unwrap();
         let result = execute(serde_json::json!({"action": "list"}), ctx).unwrap();
         assert!(!result.is_error);
         assert!(result.output.contains("Task A"));
@@ -737,15 +803,19 @@ mod tests {
         let create_result = execute(
             serde_json::json!({"action": "create", "title": "Completable"}),
             ctx.clone(),
-        ).unwrap();
+        )
+        .unwrap();
         // Extract task ID from output
-        let id = create_result.output.split(':').next().unwrap()
-            .replace("Created task ", "").trim().to_string();
+        let id = create_result
+            .output
+            .split(':')
+            .next()
+            .unwrap()
+            .replace("Created task ", "")
+            .trim()
+            .to_string();
 
-        let result = execute(
-            serde_json::json!({"action": "complete", "id": id}),
-            ctx,
-        ).unwrap();
+        let result = execute(serde_json::json!({"action": "complete", "id": id}), ctx).unwrap();
         assert!(!result.is_error);
         assert!(result.output.contains("Completed"));
     }
@@ -756,7 +826,8 @@ mod tests {
         let result = execute(
             serde_json::json!({"action": "complete", "id": "task-nope"}),
             ctx,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(result.is_error);
         assert!(result.output.contains("not found"));
     }
@@ -769,7 +840,8 @@ mod tests {
         let result = execute(
             serde_json::json!({"action": "show", "id": "task-missing"}),
             ctx,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(result.is_error);
         assert!(result.output.contains("not found"));
     }
@@ -782,7 +854,8 @@ mod tests {
         let result = execute(
             serde_json::json!({"action": "delete", "id": "task-nope"}),
             ctx,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(result.is_error);
     }
 
@@ -794,14 +867,22 @@ mod tests {
         let create = execute(
             serde_json::json!({"action": "create", "title": "Updatable"}),
             ctx.clone(),
-        ).unwrap();
-        let id = create.output.split(':').next().unwrap()
-            .replace("Created task ", "").trim().to_string();
+        )
+        .unwrap();
+        let id = create
+            .output
+            .split(':')
+            .next()
+            .unwrap()
+            .replace("Created task ", "")
+            .trim()
+            .to_string();
 
         let result = execute(
             serde_json::json!({"action": "update", "id": id, "priority": "urgent"}),
             ctx,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(result.is_error);
         assert!(result.output.contains("invalid priority"));
     }
@@ -812,14 +893,18 @@ mod tests {
         let create = execute(
             serde_json::json!({"action": "create", "title": "NoChange"}),
             ctx.clone(),
-        ).unwrap();
-        let id = create.output.split(':').next().unwrap()
-            .replace("Created task ", "").trim().to_string();
+        )
+        .unwrap();
+        let id = create
+            .output
+            .split(':')
+            .next()
+            .unwrap()
+            .replace("Created task ", "")
+            .trim()
+            .to_string();
 
-        let result = execute(
-            serde_json::json!({"action": "update", "id": id}),
-            ctx,
-        ).unwrap();
+        let result = execute(serde_json::json!({"action": "update", "id": id}), ctx).unwrap();
         assert!(result.is_error);
         assert!(result.output.contains("No fields"));
     }
@@ -832,7 +917,8 @@ mod tests {
         let result = execute(
             serde_json::json!({"action": "create_epic", "title": "Big Feature"}),
             ctx,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(!result.is_error);
         assert!(result.output.contains("Big Feature"));
         assert!(result.output.contains("test-e"));
@@ -844,7 +930,8 @@ mod tests {
         let result = execute(
             serde_json::json!({"action": "create_epic", "title": "Test", "priority": "asap"}),
             ctx,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(result.is_error);
         assert!(result.output.contains("invalid priority"));
     }
@@ -867,7 +954,8 @@ mod tests {
         let result = execute(
             serde_json::json!({"action": "create_bug", "title": "Crash on exit"}),
             ctx,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(!result.is_error);
         assert!(result.output.contains("Crash on exit"));
         assert!(result.output.contains("test-b"));
@@ -877,10 +965,7 @@ mod tests {
     #[test]
     fn create_bug_missing_title() {
         let (ctx, _dir) = test_ctx();
-        let result = execute(
-            serde_json::json!({"action": "create_bug"}),
-            ctx,
-        ).unwrap();
+        let result = execute(serde_json::json!({"action": "create_bug"}), ctx).unwrap();
         assert!(result.is_error);
         assert!(result.output.contains("'title'"));
     }
@@ -891,7 +976,8 @@ mod tests {
         let result = execute(
             serde_json::json!({"action": "create_bug", "title": "Test", "priority": "critical"}),
             ctx,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(result.is_error);
         assert!(result.output.contains("invalid priority"));
     }
@@ -902,14 +988,20 @@ mod tests {
         execute(
             serde_json::json!({"action": "create", "title": "Task A"}),
             ctx.clone(),
-        ).unwrap();
+        )
+        .unwrap();
         execute(
             serde_json::json!({"action": "create_bug", "title": "Bug B"}),
             ctx.clone(),
-        ).unwrap();
+        )
+        .unwrap();
         let result = execute(serde_json::json!({"action": "list"}), ctx).unwrap();
         assert!(!result.is_error);
-        assert!(result.output.contains("[bug]"), "list should show [bug] label, got:\n{}", result.output);
+        assert!(
+            result.output.contains("[bug]"),
+            "list should show [bug] label, got:\n{}",
+            result.output
+        );
         assert!(result.output.contains("Bugs"), "header should mention bugs");
     }
 
@@ -919,16 +1011,24 @@ mod tests {
         let create_result = execute(
             serde_json::json!({"action": "create_bug", "title": "Crash"}),
             ctx.clone(),
-        ).unwrap();
-        let id = create_result.output.split(':').next().unwrap()
-            .replace("Created bug ", "").trim().to_string();
+        )
+        .unwrap();
+        let id = create_result
+            .output
+            .split(':')
+            .next()
+            .unwrap()
+            .replace("Created bug ", "")
+            .trim()
+            .to_string();
 
-        let result = execute(
-            serde_json::json!({"action": "show", "id": id}),
-            ctx,
-        ).unwrap();
+        let result = execute(serde_json::json!({"action": "show", "id": id}), ctx).unwrap();
         assert!(!result.is_error);
-        assert!(result.output.contains("Type: bug"), "show should display type, got:\n{}", result.output);
+        assert!(
+            result.output.contains("Type: bug"),
+            "show should display type, got:\n{}",
+            result.output
+        );
     }
 
     // ── unknown action ──
@@ -936,10 +1036,7 @@ mod tests {
     #[test]
     fn unknown_action_errors() {
         let (ctx, _dir) = test_ctx();
-        let result = execute(
-            serde_json::json!({"action": "fly"}),
-            ctx,
-        ).unwrap();
+        let result = execute(serde_json::json!({"action": "fly"}), ctx).unwrap();
         assert!(result.is_error);
         assert!(result.output.contains("unknown action"));
     }

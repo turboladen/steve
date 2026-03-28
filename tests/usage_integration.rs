@@ -7,23 +7,22 @@
 //! - Sidebar cost display
 
 use chrono::Utc;
-use ratatui::{
-    Terminal,
-    backend::TestBackend,
-    buffer::Buffer,
-    layout::Rect,
-    Frame,
-};
+use ratatui::{Frame, Terminal, backend::TestBackend, buffer::Buffer, layout::Rect};
 use tempfile::TempDir;
 
-use steve::config::types::{ModelCapabilities, ModelConfig, ModelCost, ProviderConfig};
-use steve::data::state::{DataState, View};
-use steve::data::views;
-use steve::provider::ResolvedModel;
-use steve::ui::sidebar::{SidebarState, render_sidebar};
-use steve::ui::theme::Theme;
-use steve::usage::types::*;
-use steve::usage::{db, spawn_usage_writer};
+use steve::{
+    config::types::{ModelCapabilities, ModelConfig, ModelCost, ProviderConfig},
+    data::{
+        state::{DataState, View},
+        views,
+    },
+    provider::ResolvedModel,
+    ui::{
+        sidebar::{SidebarState, render_sidebar},
+        theme::Theme,
+    },
+    usage::{db, spawn_usage_writer, types::*},
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -425,7 +424,13 @@ fn render_session_list_shows_titles_and_costs() {
     let theme = Theme::default();
     let mut state = DataState::new();
     state.sessions = vec![
-        make_session_summary("s1", "Refactor auth module", "openai/gpt-4o", 12000, Some(0.060)),
+        make_session_summary(
+            "s1",
+            "Refactor auth module",
+            "openai/gpt-4o",
+            12000,
+            Some(0.060),
+        ),
         make_session_summary("s2", "Fix login bug", "anthropic/claude", 6000, Some(1.25)),
     ];
     state.stats = UsageStats {
@@ -442,15 +447,24 @@ fn render_session_list_shows_titles_and_costs() {
     let text = full_buffer_text(&buf);
 
     // Session titles should appear
-    assert!(text.contains("Refactor auth module"), "missing first title in:\n{text}");
-    assert!(text.contains("Fix login bug"), "missing second title in:\n{text}");
+    assert!(
+        text.contains("Refactor auth module"),
+        "missing first title in:\n{text}"
+    );
+    assert!(
+        text.contains("Fix login bug"),
+        "missing second title in:\n{text}"
+    );
 
     // Cost values should appear (format_cost: <$1 → "$0.060", >=$1 → "$1.25")
     assert!(text.contains("$0.060"), "missing $0.060 in:\n{text}");
     assert!(text.contains("$1.25"), "missing $1.25 in:\n{text}");
 
     // Stats footer should show aggregated data
-    assert!(text.contains("2 sessions"), "missing session count in:\n{text}");
+    assert!(
+        text.contains("2 sessions"),
+        "missing session count in:\n{text}"
+    );
 }
 
 #[test]
@@ -503,7 +517,10 @@ fn render_detail_view_shows_call_data() {
     let text = full_buffer_text(&buf);
 
     // Session title in header
-    assert!(text.contains("Debug rendering"), "missing session title in:\n{text}");
+    assert!(
+        text.contains("Debug rendering"),
+        "missing session title in:\n{text}"
+    );
 
     // Iteration numbers (0, 1, 2) should appear in the table
     // Row numbers (1, 2, 3) should appear
@@ -540,8 +557,14 @@ fn render_session_list_shows_null_cost_as_dashes() {
     let text = full_buffer_text(&buf);
 
     // None cost renders as "--"
-    assert!(text.contains("--"), "missing '--' for null cost in:\n{text}");
-    assert!(text.contains("No pricing configured"), "missing title in:\n{text}");
+    assert!(
+        text.contains("--"),
+        "missing '--' for null cost in:\n{text}"
+    );
+    assert!(
+        text.contains("No pricing configured"),
+        "missing title in:\n{text}"
+    );
 }
 
 #[test]
@@ -574,9 +597,18 @@ fn render_with_filter_shows_only_matching() {
     });
     let text = full_buffer_text(&buf);
 
-    assert!(text.contains("Alpha Work"), "missing Alpha session in:\n{text}");
-    assert!(!text.contains("Beta Work"), "Beta session should be filtered out:\n{text}");
-    assert!(text.contains("1 sessions"), "stats should reflect filter in:\n{text}");
+    assert!(
+        text.contains("Alpha Work"),
+        "missing Alpha session in:\n{text}"
+    );
+    assert!(
+        !text.contains("Beta Work"),
+        "Beta session should be filtered out:\n{text}"
+    );
+    assert!(
+        text.contains("1 sessions"),
+        "stats should reflect filter in:\n{text}"
+    );
 }
 
 // ===========================================================================
@@ -598,7 +630,10 @@ fn sidebar_renders_cost_and_na() {
         render_sidebar(frame, area, &state_with_cost, &theme, 0);
     });
     let text = full_buffer_text(&buf);
-    assert!(text.contains("$0.0512"), "missing cost '$0.0512' in:\n{text}");
+    assert!(
+        text.contains("$0.0512"),
+        "missing cost '$0.0512' in:\n{text}"
+    );
 
     // Without cost (no pricing)
     let state_no_cost = SidebarState {
@@ -611,5 +646,8 @@ fn sidebar_renders_cost_and_na() {
         render_sidebar(frame, area, &state_no_cost, &theme, 0);
     });
     let text = full_buffer_text(&buf);
-    assert!(text.contains("N/A"), "missing 'N/A' for no cost in:\n{text}");
+    assert!(
+        text.contains("N/A"),
+        "missing 'N/A' for no cost in:\n{text}"
+    );
 }

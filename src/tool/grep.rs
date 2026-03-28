@@ -2,9 +2,10 @@
 
 use serde_json::Value;
 
-use grep::regex::RegexMatcher;
-use grep::searcher::sinks::UTF8;
-use grep::searcher::Searcher;
+use grep::{
+    regex::RegexMatcher,
+    searcher::{Searcher, sinks::UTF8},
+};
 use ignore::WalkBuilder;
 
 use super::{ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput};

@@ -50,39 +50,70 @@ fn detect_language(path: &Path) -> Option<LangInfo> {
 fn symbol_node_types(lang_name: &str) -> &'static [&'static str] {
     match lang_name {
         "rust" => &[
-            "function_item", "struct_item", "enum_item", "impl_item", "trait_item",
-            "mod_item", "use_declaration", "type_item", "const_item", "static_item",
+            "function_item",
+            "struct_item",
+            "enum_item",
+            "impl_item",
+            "trait_item",
+            "mod_item",
+            "use_declaration",
+            "type_item",
+            "const_item",
+            "static_item",
             "macro_definition",
         ],
         "python" => &[
-            "function_definition", "class_definition",
-            "import_statement", "import_from_statement",
+            "function_definition",
+            "class_definition",
+            "import_statement",
+            "import_from_statement",
         ],
         "javascript" => &[
-            "function_declaration", "class_declaration", "variable_declaration",
-            "import_statement", "export_statement",
+            "function_declaration",
+            "class_declaration",
+            "variable_declaration",
+            "import_statement",
+            "export_statement",
         ],
         "typescript" | "tsx" => &[
-            "function_declaration", "class_declaration", "variable_declaration",
-            "import_statement", "export_statement",
-            "interface_declaration", "type_alias_declaration", "enum_declaration",
+            "function_declaration",
+            "class_declaration",
+            "variable_declaration",
+            "import_statement",
+            "export_statement",
+            "interface_declaration",
+            "type_alias_declaration",
+            "enum_declaration",
         ],
         "go" => &[
-            "function_declaration", "method_declaration",
-            "type_declaration", "import_declaration",
+            "function_declaration",
+            "method_declaration",
+            "type_declaration",
+            "import_declaration",
         ],
         "c" => &[
-            "function_definition", "struct_specifier", "enum_specifier",
-            "type_definition", "preproc_include",
+            "function_definition",
+            "struct_specifier",
+            "enum_specifier",
+            "type_definition",
+            "preproc_include",
         ],
         "cpp" => &[
-            "function_definition", "struct_specifier", "enum_specifier",
-            "type_definition", "preproc_include",
-            "class_specifier", "namespace_definition", "template_declaration",
+            "function_definition",
+            "struct_specifier",
+            "enum_specifier",
+            "type_definition",
+            "preproc_include",
+            "class_specifier",
+            "namespace_definition",
+            "template_declaration",
         ],
         "java" => &[
-            "class_declaration", "interface_declaration", "method_declaration",
-            "enum_declaration", "import_declaration",
+            "class_declaration",
+            "interface_declaration",
+            "method_declaration",
+            "enum_declaration",
+            "import_declaration",
         ],
         "ruby" => &["method", "class", "module", "singleton_method"],
         "toml" => &["table", "table_array_element"],
@@ -336,7 +367,14 @@ fn find_enclosing_scope(
     let mut best: Option<ScopeInfo> = None;
     let mut parent: Option<ScopeInfo> = None;
 
-    find_scope_recursive(node, source, target_row, symbol_types, &mut best, &mut parent);
+    find_scope_recursive(
+        node,
+        source,
+        target_row,
+        symbol_types,
+        &mut best,
+        &mut parent,
+    );
 
     // Attach parent info if we found a nested scope
     if let Some(ref mut scope) = best {
@@ -435,7 +473,10 @@ fn find_def_recursive(
                         preview.push_str(&format!("{line_num:>4} | {line}\n"));
                     }
                     if preview_end < end_line {
-                        preview.push_str(&format!("     ... ({} more lines)\n", end_line - preview_end));
+                        preview.push_str(&format!(
+                            "     ... ({} more lines)\n",
+                            end_line - preview_end
+                        ));
                     }
 
                     return Some(DefinitionInfo {
@@ -539,7 +580,9 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
                 .unwrap_or("(none)");
             return Ok(ToolOutput {
                 title: format!("symbols {path_str}"),
-                output: format!("Unsupported file type: .{ext}. Supported: rs, py, js, ts, tsx, go, c, cpp, java, rb, toml, json"),
+                output: format!(
+                    "Unsupported file type: .{ext}. Supported: rs, py, js, ts, tsx, go, c, cpp, java, rb, toml, json"
+                ),
                 is_error: true,
             });
         }
@@ -741,12 +784,10 @@ mod tests {
         ];
         for (filename, expected_lang) in cases {
             let info = detect_language(Path::new(filename));
-            assert!(
-                info.is_some(),
-                "should detect language for {filename}"
-            );
+            assert!(info.is_some(), "should detect language for {filename}");
             assert_eq!(
-                info.unwrap().name, expected_lang,
+                info.unwrap().name,
+                expected_lang,
                 "wrong language for {filename}"
             );
         }
@@ -766,7 +807,9 @@ mod tests {
     fn list_symbols_rust_file() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("test.rs");
-        std::fs::write(&file, r#"
+        std::fs::write(
+            &file,
+            r#"
 use std::io;
 
 pub struct Foo {
@@ -791,7 +834,9 @@ enum Color {
     Red,
     Blue,
 }
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let args = serde_json::json!({"path": file.to_str().unwrap()});
         let result = execute(args, test_ctx(dir.path())).unwrap();
@@ -810,7 +855,9 @@ enum Color {
     fn list_symbols_python_file() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("test.py");
-        std::fs::write(&file, r#"
+        std::fs::write(
+            &file,
+            r#"
 import os
 from pathlib import Path
 
@@ -823,7 +870,9 @@ class MyClass:
 
 def standalone_func():
     pass
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let args = serde_json::json!({"path": file.to_str().unwrap()});
         let result = execute(args, test_ctx(dir.path())).unwrap();
@@ -840,7 +889,9 @@ def standalone_func():
     fn list_symbols_javascript_file() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("test.js");
-        std::fs::write(&file, r#"
+        std::fs::write(
+            &file,
+            r#"
 import { foo } from './bar';
 
 function greet(name) {
@@ -852,7 +903,9 @@ class Greeter {
         this.name = name;
     }
 }
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let args = serde_json::json!({"path": file.to_str().unwrap()});
         let result = execute(args, test_ctx(dir.path())).unwrap();
@@ -866,7 +919,9 @@ class Greeter {
     fn list_symbols_typescript_file() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("test.ts");
-        std::fs::write(&file, r#"
+        std::fs::write(
+            &file,
+            r#"
 interface Config {
     host: string;
     port: number;
@@ -884,7 +939,9 @@ function process(config: Config): void {}
 class Processor {
     run(): void {}
 }
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let args = serde_json::json!({"path": file.to_str().unwrap()});
         let result = execute(args, test_ctx(dir.path())).unwrap();
@@ -903,7 +960,11 @@ class Processor {
     fn find_scope_inside_function() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("test.rs");
-        std::fs::write(&file, "fn main() {\n    let x = 5;\n    println!(\"{x}\");\n}\n").unwrap();
+        std::fs::write(
+            &file,
+            "fn main() {\n    let x = 5;\n    println!(\"{x}\");\n}\n",
+        )
+        .unwrap();
 
         let args = serde_json::json!({
             "path": file.to_str().unwrap(),
@@ -921,13 +982,17 @@ class Processor {
     fn find_scope_nested_method() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("test.rs");
-        std::fs::write(&file, r#"
+        std::fs::write(
+            &file,
+            r#"
 impl Foo {
     fn bar(&self) -> i32 {
         42
     }
 }
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let args = serde_json::json!({
             "path": file.to_str().unwrap(),
@@ -965,7 +1030,9 @@ impl Foo {
     fn find_definition_found() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("test.rs");
-        std::fs::write(&file, r#"
+        std::fs::write(
+            &file,
+            r#"
 struct Foo {
     x: i32,
     y: String,
@@ -974,7 +1041,9 @@ struct Foo {
 fn bar() -> bool {
     true
 }
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let args = serde_json::json!({
             "path": file.to_str().unwrap(),

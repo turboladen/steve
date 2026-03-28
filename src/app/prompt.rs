@@ -53,7 +53,13 @@ impl App {
         if self.agents_files.is_empty() {
             None
         } else {
-            Some(self.agents_files.iter().map(|f| f.content.as_str()).collect::<Vec<_>>().join("\n\n"))
+            Some(
+                self.agents_files
+                    .iter()
+                    .map(|f| f.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+            )
         }
     }
 
@@ -65,7 +71,11 @@ impl App {
         // Identity and environment context
         let model_name = self.current_model.as_deref().unwrap_or("unknown");
         let git_branch = self.sidebar_state.git_branch.clone();
-        let mode_name = if self.input.mode == AgentMode::Plan { "Plan" } else { "Build" };
+        let mode_name = if self.input.mode == AgentMode::Plan {
+            "Plan"
+        } else {
+            "Build"
+        };
 
         let mut identity = format!(
             "You are Steve, a TUI AI coding agent. You help users understand, modify, and build software \
@@ -116,7 +126,9 @@ impl App {
         }
 
         // Inject open tasks summary
-        let session_id = self.current_session.as_ref()
+        let session_id = self
+            .current_session
+            .as_ref()
             .map(|s| s.id.as_str())
             .unwrap_or("");
         let task_summary = self.task_store.summary_for_prompt(session_id);
@@ -127,7 +139,9 @@ impl App {
         if !self.agents_files.is_empty() {
             let mut section = String::from("\n---\n\n## Project Instructions (AGENTS.md)\n");
             for file in &self.agents_files {
-                let label = file.path.strip_prefix(&self.project.root)
+                let label = file
+                    .path
+                    .strip_prefix(&self.project.root)
                     .unwrap_or(&file.path)
                     .display();
                 section.push_str(&format!("\n### {label}\n\n{}\n", file.content));
@@ -160,9 +174,11 @@ impl App {
                 // Add MCP tool guidance
                 let tool_defs = mgr.all_tool_defs();
                 if !tool_defs.is_empty() {
-                    let mut guidance = String::from("\n## MCP Tools\n\nExternal tools provided by MCP servers. \
+                    let mut guidance = String::from(
+                        "\n## MCP Tools\n\nExternal tools provided by MCP servers. \
                         These tools use prefixed names (`mcp__{server}__{tool}`). Use them when native tools \
-                        don't cover the task.\n");
+                        don't cover the task.\n",
+                    );
                     for (server_id, tool) in &tool_defs {
                         let desc = tool.description.as_deref().unwrap_or("(no description)");
                         let prefixed = crate::mcp::types::prefixed_tool_name(server_id, &tool.name);
@@ -273,8 +289,13 @@ impl App {
 
         // 2. Key config files (first 100 lines each)
         let config_files = [
-            "Cargo.toml", "package.json", "pyproject.toml", "go.mod",
-            "Makefile", "Dockerfile", ".gitignore",
+            "Cargo.toml",
+            "package.json",
+            "pyproject.toml",
+            "go.mod",
+            "Makefile",
+            "Dockerfile",
+            ".gitignore",
         ];
         for name in &config_files {
             let path = self.project.root.join(name);
@@ -287,14 +308,20 @@ impl App {
         // 3. Current AGENTS.md
         if !self.agents_files.is_empty() {
             for file in &self.agents_files {
-                parts.push(format!("## Current AGENTS.md ({})\n\n{}", file.path.display(), file.content));
+                parts.push(format!(
+                    "## Current AGENTS.md ({})\n\n{}",
+                    file.path.display(),
+                    file.content
+                ));
             }
         } else {
             parts.push("## Current AGENTS.md\n\n(No AGENTS.md exists yet)".to_string());
         }
 
         // 4. Recent conversation (last 5 user messages)
-        let user_msgs: Vec<&Message> = self.stored_messages.iter()
+        let user_msgs: Vec<&Message> = self
+            .stored_messages
+            .iter()
             .filter(|m| m.role == Role::User)
             .collect();
         let recent: Vec<&Message> = user_msgs.iter().rev().take(5).rev().copied().collect();
@@ -348,9 +375,6 @@ mod tests {
             prompt.contains("Build mode"),
             "should explain permission model"
         );
-        assert!(
-            prompt.contains("Date"),
-            "should contain current date"
-        );
+        assert!(prompt.contains("Date"), "should contain current date");
     }
 }

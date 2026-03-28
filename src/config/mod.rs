@@ -97,11 +97,7 @@ fn find_global_config_in(dir_override: Option<&Path>) -> Option<PathBuf> {
         None => global_config_dir()?,
     };
     let path = config_dir.join("config.jsonc");
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
+    if path.exists() { Some(path) } else { None }
 }
 
 /// Returns `~/.config/steve/` — the global config directory.
@@ -131,10 +127,12 @@ pub fn persist_allow_tool(project_root: &Path, tool_name: &str) -> Result<()> {
     };
 
     // Ensure allow_tools array exists and add the tool if not present
-    let obj = value.as_object_mut()
+    let obj = value
+        .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("config root is not an object"))?;
 
-    let allow_tools = obj.entry("allow_tools")
+    let allow_tools = obj
+        .entry("allow_tools")
         .or_insert_with(|| serde_json::Value::Array(Vec::new()));
 
     if let serde_json::Value::Array(arr) = allow_tools {
@@ -144,8 +142,7 @@ pub fn persist_allow_tool(project_root: &Path, tool_name: &str) -> Result<()> {
         }
     }
 
-    let json_str = serde_json::to_string_pretty(&value)
-        .context("failed to serialize config")?;
+    let json_str = serde_json::to_string_pretty(&value).context("failed to serialize config")?;
 
     // Atomic write: write to uniquely-named tmp file then rename to avoid
     // partial writes on crash and races between concurrent persist calls.
@@ -156,8 +153,13 @@ pub fn persist_allow_tool(project_root: &Path, tool_name: &str) -> Result<()> {
     ));
     std::fs::write(&tmp_path, json_str.as_bytes())
         .with_context(|| format!("failed to write {}", tmp_path.display()))?;
-    std::fs::rename(&tmp_path, &config_path)
-        .with_context(|| format!("failed to rename {} → {}", tmp_path.display(), config_path.display()))?;
+    std::fs::rename(&tmp_path, &config_path).with_context(|| {
+        format!(
+            "failed to rename {} → {}",
+            tmp_path.display(),
+            config_path.display()
+        )
+    })?;
 
     tracing::info!(tool = tool_name, path = %config_path.display(), "persisted tool to allow_tools");
     Ok(())
@@ -183,12 +185,19 @@ pub struct AgentsFile {
 pub fn load_agents_md_chain(project_root: &Path, cwd: &Path) -> Vec<AgentsFile> {
     let mut files = Vec::new();
     // Guard: if cwd is not under project_root, fall back to project_root
-    let effective_cwd = if cwd.starts_with(project_root) { cwd } else { project_root };
+    let effective_cwd = if cwd.starts_with(project_root) {
+        cwd
+    } else {
+        project_root
+    };
     let mut dir = effective_cwd.to_path_buf();
     loop {
         let agents_path = dir.join("AGENTS.md");
         if let Ok(content) = std::fs::read_to_string(&agents_path) {
-            files.push(AgentsFile { path: agents_path, content });
+            files.push(AgentsFile {
+                path: agents_path,
+                content,
+            });
         }
         if dir == project_root {
             break;
@@ -245,7 +254,10 @@ mod tests {
         std::fs::write(dir.path().join(".steve.jsonc"), "{{invalid").unwrap();
         let (config, warnings) = load(dir.path()).unwrap();
         assert!(!warnings.is_empty(), "should have a config warning");
-        assert!(warnings[0].contains(".steve.jsonc"), "warning mentions the file");
+        assert!(
+            warnings[0].contains(".steve.jsonc"),
+            "warning mentions the file"
+        );
         assert_eq!(config.model, None, "falls back to default config");
     }
 
@@ -266,11 +278,7 @@ mod tests {
     #[test]
     fn partial_config_uses_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join(".steve.jsonc"),
-            r#"{"model": "test/m"}"#,
-        )
-        .unwrap();
+        std::fs::write(dir.path().join(".steve.jsonc"), r#"{"model": "test/m"}"#).unwrap();
         let (config, _warnings) = load(dir.path()).unwrap();
         assert_eq!(config.model, Some("test/m".into()));
         assert!(config.auto_compact);
@@ -324,7 +332,8 @@ mod tests {
         std::fs::write(
             dir.path().join("config.jsonc"),
             r#"{"model": "openai/gpt-4o", "providers": {}}"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let found = find_global_config_in(Some(dir.path()));
         assert!(found.is_some(), "should find config.jsonc");
@@ -335,7 +344,10 @@ mod tests {
     fn global_config_missing_returns_none() {
         let dir = tempfile::tempdir().unwrap();
         let found = find_global_config_in(Some(dir.path()));
-        assert!(found.is_none(), "should return None when no config file exists");
+        assert!(
+            found.is_none(),
+            "should return None when no config file exists"
+        );
     }
 
     #[test]
@@ -344,7 +356,8 @@ mod tests {
         std::fs::write(
             dir.path().join("config.json"),
             r#"{"model": "openai/gpt-4o"}"#,
-        ).unwrap();
+        )
+        .unwrap();
         let found = find_global_config_in(Some(dir.path()));
         assert!(found.is_none(), "config.json (old name) should be ignored");
     }
@@ -355,14 +368,16 @@ mod tests {
         std::fs::write(
             dir.path().join("steve.json"),
             r#"{"model": "openai/gpt-4o"}"#,
-        ).unwrap();
+        )
+        .unwrap();
         let (config, _warnings) = load(dir.path()).unwrap();
         assert_eq!(config.model, None, "steve.json should not be loaded");
 
         std::fs::write(
             dir.path().join("steve.jsonc"),
             r#"{"model": "openai/gpt-4o"}"#,
-        ).unwrap();
+        )
+        .unwrap();
         let (config, _warnings) = load(dir.path()).unwrap();
         assert_eq!(config.model, None, "steve.jsonc should not be loaded");
     }
@@ -389,7 +404,10 @@ mod tests {
         let merged = global.merge(project);
 
         assert_eq!(merged.model, Some("openai/gpt-4o".into()));
-        assert!(merged.providers.contains_key("openai"), "global providers preserved");
+        assert!(
+            merged.providers.contains_key("openai"),
+            "global providers preserved"
+        );
     }
 
     // -- persist_allow_tool tests --
@@ -409,14 +427,25 @@ mod tests {
         std::fs::write(
             dir.path().join(".steve.jsonc"),
             r#"{"model": "openai/gpt-4o", "allow_tools": ["bash"]}"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         persist_allow_tool(dir.path(), "edit").unwrap();
 
         let (config, _warnings) = load(dir.path()).unwrap();
-        assert!(config.allow_tools.contains(&"bash".to_string()), "existing tool preserved");
-        assert!(config.allow_tools.contains(&"edit".to_string()), "new tool added");
-        assert_eq!(config.model, Some("openai/gpt-4o".into()), "other fields preserved");
+        assert!(
+            config.allow_tools.contains(&"bash".to_string()),
+            "existing tool preserved"
+        );
+        assert!(
+            config.allow_tools.contains(&"edit".to_string()),
+            "new tool added"
+        );
+        assert_eq!(
+            config.model,
+            Some("openai/gpt-4o".into()),
+            "other fields preserved"
+        );
     }
 
     #[test]
@@ -425,7 +454,8 @@ mod tests {
         std::fs::write(
             dir.path().join(".steve.jsonc"),
             r#"{"allow_tools": ["edit"]}"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         persist_allow_tool(dir.path(), "edit").unwrap();
 
@@ -518,6 +548,9 @@ mod tests {
         // cwd is not under project_root — should fall back to project_root
         let chain = load_agents_md_chain(root_dir.path(), other_dir.path());
         assert_eq!(chain.len(), 1);
-        assert_eq!(chain[0].content, "# Root", "should only find root, not the unrelated dir");
+        assert_eq!(
+            chain[0].content, "# Root",
+            "should only find root, not the unrelated dir"
+        );
     }
 }

@@ -6,9 +6,11 @@
 pub mod client;
 pub mod types;
 
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Stdio};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    process::{Child, Stdio},
+};
 
 use anyhow::{Context, Result};
 use lsp_types::*;
@@ -243,7 +245,10 @@ impl LspServer {
             partial_result_params: Default::default(),
         };
 
-        match self.transport.send_request("textDocument/documentSymbol", &params) {
+        match self
+            .transport
+            .send_request("textDocument/documentSymbol", &params)
+        {
             Ok((_result, notifications)) => {
                 self.process_notifications(notifications);
             }
@@ -293,9 +298,7 @@ impl LspServer {
         let uri = self.ensure_open(path)?;
 
         if self.capabilities.references_provider.is_none() {
-            return Err(anyhow::anyhow!(
-                "server does not support find-references"
-            ));
+            return Err(anyhow::anyhow!("server does not support find-references"));
         }
 
         let params = ReferenceParams {
@@ -494,14 +497,21 @@ mod tests {
     fn language_status_detected_but_not_running() {
         let dir = tempdir().unwrap();
         // Create a Cargo.toml so Rust is detected
-        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"\n").unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"test\"\n",
+        )
+        .unwrap();
         let mut mgr = LspManager::new(dir.path().to_path_buf());
         // Populate detected_languages without starting servers
         mgr.detected_languages = Language::detect_from_project(dir.path());
         let status = mgr.language_status();
         // Both detected languages should be present but not running
         assert!(status.len() >= 2, "expected at least 2 detected languages");
-        assert!(status.iter().all(|(_, r)| !r), "no servers should be running");
+        assert!(
+            status.iter().all(|(_, r)| !r),
+            "no servers should be running"
+        );
     }
 
     #[test]
@@ -632,8 +642,7 @@ mod tests {
         // Inline the same logic as process_notifications
         if notif.method == "textDocument/publishDiagnostics" {
             if let Some(params) = notif.params {
-                if let Ok(diag_params) =
-                    serde_json::from_value::<PublishDiagnosticsParams>(params)
+                if let Ok(diag_params) = serde_json::from_value::<PublishDiagnosticsParams>(params)
                 {
                     diagnostics.insert(diag_params.uri, diag_params.diagnostics);
                 }

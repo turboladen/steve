@@ -6,47 +6,52 @@
 //! 3. Accumulates tool call fragments from the stream
 //! 4. When the stream finishes with tool calls, executes them and loops back
 
-use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
 use async_openai::{
+    Client,
     config::OpenAIConfig,
     types::chat::{
         ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
         ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
-        ChatCompletionRequestMessage,
-        ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageContent,
-        ChatCompletionRequestToolMessage, ChatCompletionRequestToolMessageContent,
-        ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
-        ChatCompletionResponseStream, ChatCompletionStreamOptions,
-        ChatCompletionTool, ChatCompletionTools,
-        CreateChatCompletionRequest, FunctionCall, FunctionObject, FinishReason,
+        ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
+        ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessage,
+        ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessage,
+        ChatCompletionRequestUserMessageContent, ChatCompletionResponseStream,
+        ChatCompletionStreamOptions, ChatCompletionTool, ChatCompletionTools,
+        CreateChatCompletionRequest, FinishReason, FunctionCall, FunctionObject,
     },
-    Client,
 };
-use tokio_stream::StreamExt;
 use serde_json::Value;
 use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::types::ModelCost;
-use crate::context::cache::{ToolResultCache, CACHE_REPEAT_PREFIX};
-use crate::event::{AppEvent, StreamUsage};
-use crate::permission::PermissionEngine;
-use crate::permission::types::{PermissionAction, PermissionReply, PermissionRequest};
-use crate::tool::{ToolContext, ToolName, ToolRegistry};
-use crate::tool::agent::AgentType;
-use crate::usage::UsageWriter;
-use crate::usage::types::ApiCallRecord;
+use crate::{
+    config::types::ModelCost,
+    context::cache::{CACHE_REPEAT_PREFIX, ToolResultCache},
+    event::{AppEvent, StreamUsage},
+    permission::{
+        PermissionEngine,
+        types::{PermissionAction, PermissionReply, PermissionRequest},
+    },
+    tool::{ToolContext, ToolName, ToolRegistry, agent::AgentType},
+    usage::{UsageWriter, types::ApiCallRecord},
+};
 
 /// Abstraction over LLM stream creation — enables mock testing of the tool loop.
 pub trait ChatStreamProvider: Send + Sync {
     fn create_stream(
         &self,
         request: CreateChatCompletionRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<ChatCompletionResponseStream, async_openai::error::OpenAIError>> + Send + '_>>;
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<ChatCompletionResponseStream, async_openai::error::OpenAIError>,
+                > + Send
+                + '_,
+        >,
+    >;
 }
 
 /// Production implementation wrapping async-openai's Client.
@@ -64,10 +69,15 @@ impl ChatStreamProvider for OpenAIChatStream {
     fn create_stream(
         &self,
         request: CreateChatCompletionRequest,
-    ) -> Pin<Box<dyn Future<Output = Result<ChatCompletionResponseStream, async_openai::error::OpenAIError>> + Send + '_>> {
-        Box::pin(async move {
-            self.client.chat().create_stream(request).await
-        })
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<ChatCompletionResponseStream, async_openai::error::OpenAIError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move { self.client.chat().create_stream(request).await })
     }
 }
 
@@ -201,7 +211,10 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         Some(ChatCompletionTools::Function(ChatCompletionTool {
             function: FunctionObject {
                 name: func.get("name")?.as_str()?.to_string(),
-                description: func.get("description").and_then(|d| d.as_str()).map(String::from),
+                description: func
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .map(String::from),
                 parameters: func.get("parameters").cloned(),
                 strict: None,
             },
@@ -211,16 +224,19 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
     // Get a lock-free snapshot of MCP tool metadata. We briefly await the lock
     // only to clone the Arc, then drop it so streams always get a consistent
     // view of available MCP tools.
-    let mcp_snapshot: Option<std::sync::Arc<crate::mcp::McpToolSnapshot>> = if let Some(ref mgr) = mcp_manager {
-        let mgr = mgr.lock().await;
-        let snap = mgr.tool_snapshot();
-        if !snap.is_empty() { Some(snap) } else { None }
-    } else {
-        None
-    };
+    let mcp_snapshot: Option<std::sync::Arc<crate::mcp::McpToolSnapshot>> =
+        if let Some(ref mgr) = mcp_manager {
+            let mgr = mgr.lock().await;
+            let snap = mgr.tool_snapshot();
+            if !snap.is_empty() { Some(snap) } else { None }
+        } else {
+            None
+        };
 
     // Helper closure rebuilds tools from the registry + MCP snapshot (no mutex needed).
-    let build_tools = |registry: &ToolRegistry, snap: &Option<std::sync::Arc<crate::mcp::McpToolSnapshot>>| -> Vec<ChatCompletionTools> {
+    let build_tools = |registry: &ToolRegistry,
+                       snap: &Option<std::sync::Arc<crate::mcp::McpToolSnapshot>>|
+     -> Vec<ChatCompletionTools> {
         let mut tools: Vec<ChatCompletionTools> = registry
             .tool_definitions()
             .into_iter()
@@ -229,12 +245,18 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
         // Append MCP tool definitions from the lock-free snapshot
         if let Some(snap) = snap {
-            tools.extend(snap.tool_definitions().iter().filter_map(|def| json_to_tool(def)));
+            tools.extend(
+                snap.tool_definitions()
+                    .iter()
+                    .filter_map(|def| json_to_tool(def)),
+            );
         }
 
         tools
     };
-    let mut tools: Option<Vec<ChatCompletionTools>> = tool_registry.as_ref().map(|r| build_tools(r, &mcp_snapshot));
+    let mut tools: Option<Vec<ChatCompletionTools>> = tool_registry
+        .as_ref()
+        .map(|r| build_tools(r, &mcp_snapshot));
 
     let mut total_usage = StreamUsage::default();
     let mut current_iteration_tool_count: usize = 0;
@@ -249,7 +271,11 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
     // Plan mode uses a lower limit since it's read-only analysis.
     const MAX_TOOL_ITERATIONS: u32 = 75;
     const MAX_PLAN_ITERATIONS: u32 = 55;
-    let effective_max = if is_plan_mode { MAX_PLAN_ITERATIONS } else { MAX_TOOL_ITERATIONS };
+    let effective_max = if is_plan_mode {
+        MAX_PLAN_ITERATIONS
+    } else {
+        MAX_TOOL_ITERATIONS
+    };
     let mut iteration_count: u32 = 0;
     let mut total_iteration_count: u32 = 0;
 
@@ -303,7 +329,9 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             if tools_stripped {
                 tools_stripped = false;
                 final_chance_taken = false;
-                tools = tool_registry.as_ref().map(|r| build_tools(r, &mcp_snapshot));
+                tools = tool_registry
+                    .as_ref()
+                    .map(|r| build_tools(r, &mcp_snapshot));
             }
         }
 
@@ -324,7 +352,8 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                         content: ChatCompletionRequestUserMessageContent::Text(
                             "[SYSTEM: Maximum tool calls exceeded. Provide your complete response \
                              NOW. Summarize everything you found and answer the user's question. \
-                             This is your final opportunity to respond.]".to_string(),
+                             This is your final opportunity to respond.]"
+                                .to_string(),
                         ),
                         name: None,
                     },
@@ -363,7 +392,9 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         // Deferred: only compress when context usage exceeds 40% of the window.
         // This prevents destroying tool results the LLM still needs early on.
         // Keep the last 2 iterations uncompressed so the LLM has recent context.
-        let has_tool_messages = messages.iter().any(|m| matches!(m, ChatCompletionRequestMessage::Tool(_)));
+        let has_tool_messages = messages
+            .iter()
+            .any(|m| matches!(m, ChatCompletionRequestMessage::Tool(_)));
         let keep_recent = current_iteration_tool_count + prev_iteration_tool_count;
         if has_tool_messages || current_iteration_tool_count > 0 {
             let payload_estimate: usize = messages.iter().map(|m| estimate_message_chars(m)).sum();
@@ -375,10 +406,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 .unwrap_or(true); // Compress if we don't know the window size
 
             if should_compress {
-                crate::context::compressor::compress_old_tool_results(
-                    &mut messages,
-                    keep_recent,
-                );
+                crate::context::compressor::compress_old_tool_results(&mut messages, keep_recent);
             }
         }
 
@@ -405,8 +433,9 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         current_iteration_cache_repeats = 0;
 
         // Estimate payload size for diagnostics
-        let payload_chars: usize = messages.iter().map(|m| {
-            match m {
+        let payload_chars: usize = messages
+            .iter()
+            .map(|m| match m {
                 ChatCompletionRequestMessage::System(s) => match &s.content {
                     ChatCompletionRequestSystemMessageContent::Text(t) => t.len(),
                     _ => 0,
@@ -424,8 +453,8 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                     _ => 0,
                 },
                 _ => 0,
-            }
-        }).sum();
+            })
+            .sum();
         tracing::info!(
             message_count = messages.len(),
             payload_chars,
@@ -732,7 +761,9 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                     tools = None;
 
                     if matches!(cause, LengthCause::ContextPressure) {
-                        tracing::warn!("finish_reason=Length with no tool calls (context pressured) — compressing and retrying without tools");
+                        tracing::warn!(
+                            "finish_reason=Length with no tool calls (context pressured) — compressing and retrying without tools"
+                        );
                         crate::context::compressor::compress_old_tool_results(&mut messages, 0);
                     } else {
                         tracing::info!(
@@ -849,7 +880,9 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 tools = None;
 
                 if matches!(cause, LengthCause::ContextPressure) {
-                    tracing::warn!("all tool calls truncated (context pressured) — compressing and retrying without tools");
+                    tracing::warn!(
+                        "all tool calls truncated (context pressured) — compressing and retrying without tools"
+                    );
                     crate::context::compressor::compress_old_tool_results(&mut messages, 0);
                 } else {
                     tracing::info!(
@@ -994,9 +1027,10 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                     // Must provide a tool result for every tool_call_id in the assistant message
                     messages.push(ChatCompletionRequestMessage::Tool(
                         ChatCompletionRequestToolMessage {
-                            content: ChatCompletionRequestToolMessageContent::Text(
-                                format!("Error: unknown tool '{}'", tc.function_name),
-                            ),
+                            content: ChatCompletionRequestToolMessageContent::Text(format!(
+                                "Error: unknown tool '{}'",
+                                tc.function_name
+                            )),
                             tool_call_id: tc.id.clone(),
                         },
                     ));
@@ -1038,19 +1072,22 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
         // Write tools (edit, write, patch), memory tool (append action),
         // task tool (writes to storage), and LSP tool (holds mutex across
         // blocking I/O) always go to sequential phase.
-        let (auto_allowed, needs_interaction): (Vec<_>, Vec<_>) = prepared
-            .into_iter()
-            .partition(|tc| {
+        let (auto_allowed, needs_interaction): (Vec<_>, Vec<_>) =
+            prepared.into_iter().partition(|tc| {
                 matches!(tc.action, PermissionAction::Allow)
                     && !tc.tool_name.is_write_tool()
                     && !tc.tool_name.is_memory()
                     && !tc.tool_name.is_task()
-                    && !matches!(tc.tool_name, ToolName::Question | ToolName::Lsp | ToolName::Agent)
+                    && !matches!(
+                        tc.tool_name,
+                        ToolName::Question | ToolName::Lsp | ToolName::Agent
+                    )
             });
 
         // Log partition results for diagnostics
         if !needs_interaction.is_empty() {
-            let tool_names: Vec<ToolName> = needs_interaction.iter().map(|tc| tc.tool_name).collect();
+            let tool_names: Vec<ToolName> =
+                needs_interaction.iter().map(|tc| tc.tool_name).collect();
             tracing::info!(
                 count = needs_interaction.len(),
                 tools = ?tool_names,
@@ -1095,20 +1132,22 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             );
 
             // Spawn all cache-miss tools in parallel via spawn_blocking
-            let handles: Vec<(String, ToolName, Value, tokio::task::JoinHandle<anyhow::Result<crate::tool::ToolOutput>>)> =
-                tasks_to_spawn
-                    .into_iter()
-                    .map(|task| {
-                        let reg = registry.clone();
-                        let c = ctx.clone();
-                        let name = task.tool_name;
-                        let a = task.args.clone();
-                        let handle = tokio::task::spawn_blocking(move || {
-                            reg.execute(name, a, c)
-                        });
-                        (task.id, task.tool_name, task.args, handle)
-                    })
-                    .collect();
+            let handles: Vec<(
+                String,
+                ToolName,
+                Value,
+                tokio::task::JoinHandle<anyhow::Result<crate::tool::ToolOutput>>,
+            )> = tasks_to_spawn
+                .into_iter()
+                .map(|task| {
+                    let reg = registry.clone();
+                    let c = ctx.clone();
+                    let name = task.tool_name;
+                    let a = task.args.clone();
+                    let handle = tokio::task::spawn_blocking(move || reg.execute(name, a, c));
+                    (task.id, task.tool_name, task.args, handle)
+                })
+                .collect();
 
             // Collect results
             for (call_id, tool_name, args, handle) in handles {
@@ -1197,13 +1236,21 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
             // Question tool: special interactive flow (bypass permission)
             if matches!(tc.tool_name, ToolName::Question) {
-                let question = tc.args.get("question")
+                let question = tc
+                    .args
+                    .get("question")
                     .and_then(|v| v.as_str())
                     .unwrap_or("(no question provided)")
                     .to_string();
-                let options: Vec<String> = tc.args.get("options")
+                let options: Vec<String> = tc
+                    .args
+                    .get("options")
                     .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default();
 
                 // Emit LlmToolCall so the UI shows this in the tool group
@@ -1270,22 +1317,31 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                     arguments: tc.args.clone(),
                 });
 
-                let agent_type_str = tc.args.get("agent_type")
+                let agent_type_str = tc
+                    .args
+                    .get("agent_type")
                     .and_then(|v| v.as_str())
                     .unwrap_or("explore");
-                let task_str = tc.args.get("task")
+                let task_str = tc
+                    .args
+                    .get("task")
                     .and_then(|v| v.as_str())
                     .unwrap_or("(no task provided)")
                     .to_string();
-                let context_str = tc.args.get("context")
+                let context_str = tc
+                    .args
+                    .get("context")
                     .and_then(|v| v.as_str())
                     .map(String::from);
 
                 let output = if let Some(ref spawner) = agent_spawner {
-                    let agent_type: AgentType = agent_type_str.parse().unwrap_or(AgentType::Explore);
+                    let agent_type: AgentType =
+                        agent_type_str.parse().unwrap_or(AgentType::Explore);
 
                     // For General agents in Ask mode, we still need permission
-                    if agent_type == AgentType::General && matches!(tc.action, PermissionAction::Ask) {
+                    if agent_type == AgentType::General
+                        && matches!(tc.action, PermissionAction::Ask)
+                    {
                         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
                         let summary = build_permission_summary(tc.tool_name, &tc.args);
 
@@ -1332,7 +1388,8 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                                 context_str.as_deref(),
                                 &event_tx,
                                 &tc.id,
-                            ).await;
+                            )
+                            .await;
                             total_usage += usage;
                             match result {
                                 Ok(text) => crate::tool::ToolOutput {
@@ -1356,7 +1413,8 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                             context_str.as_deref(),
                             &event_tx,
                             &tc.id,
-                        ).await;
+                        )
+                        .await;
                         total_usage += usage;
                         match result {
                             Ok(text) => crate::tool::ToolOutput {
@@ -1375,7 +1433,8 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                     // No agent_spawner — we're already a sub-agent, can't recurse
                     crate::tool::ToolOutput {
                         title: "Agent".to_string(),
-                        output: "Error: agent tool is not available in sub-agent context.".to_string(),
+                        output: "Error: agent tool is not available in sub-agent context."
+                            .to_string(),
                         is_error: true,
                     }
                 };
@@ -1407,7 +1466,10 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
                     let output = crate::tool::ToolOutput {
                         title: tc.tool_name.to_string(),
-                        output: format!("Permission denied: {} is not allowed in the current mode.", tc.tool_name),
+                        output: format!(
+                            "Permission denied: {} is not allowed in the current mode.",
+                            tc.tool_name
+                        ),
                         is_error: true,
                     };
 
@@ -1495,13 +1557,19 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
                     tracing::info!(tool = %tc.tool_name, "executing tool");
 
-                    let output = if let Some(cached) = tool_cache.lock().unwrap().get(tc.tool_name, &tc.args) {
+                    let output = if let Some(cached) =
+                        tool_cache.lock().unwrap().get(tc.tool_name, &tc.args)
+                    {
                         if cached.output.starts_with(CACHE_REPEAT_PREFIX) {
                             current_iteration_cache_repeats += 1;
                         }
                         cached
                     } else {
-                        let result = match registry.execute(tc.tool_name, tc.args.clone(), ctx.clone()) {
+                        let result = match registry.execute(
+                            tc.tool_name,
+                            tc.args.clone(),
+                            ctx.clone(),
+                        ) {
                             Ok(output) => output,
                             Err(e) => {
                                 tracing::error!(tool = %tc.tool_name, error = %e, "tool execution failed");
@@ -1547,13 +1615,19 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
                     tracing::info!(tool = %tc.tool_name, "executing allowed tool (sequential)");
 
-                    let output = if let Some(cached) = tool_cache.lock().unwrap().get(tc.tool_name, &tc.args) {
+                    let output = if let Some(cached) =
+                        tool_cache.lock().unwrap().get(tc.tool_name, &tc.args)
+                    {
                         if cached.output.starts_with(CACHE_REPEAT_PREFIX) {
                             current_iteration_cache_repeats += 1;
                         }
                         cached
                     } else {
-                        let result = match registry.execute(tc.tool_name, tc.args.clone(), ctx.clone()) {
+                        let result = match registry.execute(
+                            tc.tool_name,
+                            tc.args.clone(),
+                            ctx.clone(),
+                        ) {
                             Ok(output) => output,
                             Err(e) => {
                                 tracing::error!(tool = %tc.tool_name, error = %e, "tool execution failed");
@@ -1618,7 +1692,8 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
             if matches!(mcp_tc.action, PermissionAction::Ask) {
                 // Send permission request to UI
-                let summary = crate::mcp::mcp_permission_summary(&mcp_tc.prefixed_name, &mcp_tc.args);
+                let summary =
+                    crate::mcp::mcp_permission_summary(&mcp_tc.prefixed_name, &mcp_tc.args);
                 let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                 // Use the first native tool name just for the PermissionRequest type
                 // (the UI will show the MCP summary string, not the tool name)
@@ -1662,7 +1737,10 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             // this iteration. The snapshot handles all read-only access without locking.
             let (result_text, is_error) = if let Some(ref mgr) = mcp_manager {
                 let mgr = mgr.lock().await;
-                match mgr.call_tool(&mcp_tc.prefixed_name, mcp_tc.args.clone()).await {
+                match mgr
+                    .call_tool(&mcp_tc.prefixed_name, mcp_tc.args.clone())
+                    .await
+                {
                     Ok((text, is_err)) => (text, is_err),
                     Err(e) => (format!("MCP tool error: {e}"), true),
                 }
@@ -1675,7 +1753,8 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             // because that would misclassify MCP calls in the UI: wrong tool grouping,
             // wrong gutter markers, and app-level side effects (e.g., git refresh on
             // bash success) would trigger incorrectly.
-            let mcp_summary = crate::mcp::mcp_permission_summary(&mcp_tc.prefixed_name, &mcp_tc.args);
+            let mcp_summary =
+                crate::mcp::mcp_permission_summary(&mcp_tc.prefixed_name, &mcp_tc.args);
             if is_error {
                 let _ = event_tx.send(AppEvent::StreamNotice {
                     text: format!("⚠ {mcp_summary} → error"),
@@ -1709,7 +1788,9 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             if tools_stripped {
                 tools_stripped = false;
                 final_chance_taken = false;
-                tools = tool_registry.as_ref().map(|r| build_tools(r, &mcp_snapshot));
+                tools = tool_registry
+                    .as_ref()
+                    .map(|r| build_tools(r, &mcp_snapshot));
             }
         }
 
@@ -1733,7 +1814,9 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                                 any more tool calls.]";
                 for msg in messages.iter_mut().rev() {
                     if let ChatCompletionRequestMessage::Tool(tool_msg) = msg {
-                        if let ChatCompletionRequestToolMessageContent::Text(content) = &mut tool_msg.content {
+                        if let ChatCompletionRequestToolMessageContent::Text(content) =
+                            &mut tool_msg.content
+                        {
                             content.push_str(stop_msg);
                         }
                         break;
@@ -1751,13 +1834,15 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
         // Escalating warnings: append a nudge to the last tool result message
         // so the LLM sees iteration pressure as contextual feedback.
-        if let Some(text) = check_iteration_warning(
-            iteration_count, effective_max, &mut warnings_sent,
-        ) {
+        if let Some(text) =
+            check_iteration_warning(iteration_count, effective_max, &mut warnings_sent)
+        {
             // Append warning to the last Tool message in the conversation
             for msg in messages.iter_mut().rev() {
                 if let ChatCompletionRequestMessage::Tool(tool_msg) = msg {
-                    if let ChatCompletionRequestToolMessageContent::Text(content) = &mut tool_msg.content {
+                    if let ChatCompletionRequestToolMessageContent::Text(content) =
+                        &mut tool_msg.content
+                    {
                         content.push_str(&text);
                     }
                     break;
@@ -1766,9 +1851,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             // Also notify the TUI so the user sees why the LLM might wrap up
             let stripped = text.trim().trim_start_matches('[').trim_end_matches(']');
             let display_text = format!("⚙ {stripped}");
-            let _ = event_tx.send(AppEvent::StreamNotice {
-                text: display_text,
-            });
+            let _ = event_tx.send(AppEvent::StreamNotice { text: display_text });
             tracing::info!(
                 iteration_count,
                 total_iteration_count,
@@ -1810,18 +1893,24 @@ fn build_sub_agent_prompt(agent_type: AgentType, task: &str, context: Option<&st
     };
 
     let tool_guidance = match agent_type {
-        AgentType::Explore => "\
+        AgentType::Explore => {
+            "\
 You have read-only tools: read, grep, glob, list, symbols. \
 Search efficiently — use grep to find relevant code, then read specific sections. \
-Use glob for file discovery. Use symbols for structural queries.",
-        AgentType::Plan => "\
+Use glob for file discovery. Use symbols for structural queries."
+        }
+        AgentType::Plan => {
+            "\
 You have read-only tools plus LSP for semantic analysis: read, grep, glob, list, symbols, lsp. \
 Use LSP diagnostics, go-to-definition, and find-references for accurate cross-file analysis. \
-Focus on architecture, design, and feasibility.",
-        AgentType::General => "\
+Focus on architecture, design, and feasibility."
+        }
+        AgentType::General => {
+            "\
 You have full tool access (read, write, edit, bash, etc.). \
 Follow the same safety practices as the parent agent. \
-Write operations may require user permission.",
+Write operations may require user permission."
+        }
     };
 
     let ctx_section = context
@@ -1989,12 +2078,16 @@ async fn run_sub_agent(
     let result = if let Some(error) = last_error {
         if !final_text.is_empty() {
             // Prefer returning text even if there was a transient error.
-            Ok(format!("{final_text}\n\n[Agent encountered an error: {error}]"))
+            Ok(format!(
+                "{final_text}\n\n[Agent encountered an error: {error}]"
+            ))
         } else {
             Err(error)
         }
     } else if final_text.is_empty() {
-        Ok(format!("Sub-agent ({agent_type}) completed with {tool_count} tool calls but produced no text response."))
+        Ok(format!(
+            "Sub-agent ({agent_type}) completed with {tool_count} tool calls but produced no text response."
+        ))
     } else {
         Ok(final_text)
     };
@@ -2021,10 +2114,7 @@ struct LengthRecoveryMessages {
 }
 
 /// Determine whether `finish_reason=Length` is due to context pressure or output truncation.
-fn classify_length_cause(
-    prompt_tokens: u32,
-    context_window: Option<u64>,
-) -> LengthCause {
+fn classify_length_cause(prompt_tokens: u32, context_window: Option<u64>) -> LengthCause {
     let pressured = context_window
         .map(|cw| cw > 0 && (prompt_tokens as u64) > cw * CONTEXT_PRESSURE_PCT / 100)
         .unwrap_or(true); // Assume pressured if we don't know the window
@@ -2209,26 +2299,54 @@ fn build_permission_summary(tool_name: ToolName, args: &Value) -> String {
             format!("Patch file: {file}")
         }
         ToolName::Move | ToolName::Copy => {
-            let from = args.get("from_path").and_then(|v| v.as_str()).unwrap_or("(unknown)");
-            let to = args.get("to_path").and_then(|v| v.as_str()).unwrap_or("(unknown)");
+            let from = args
+                .get("from_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown)");
+            let to = args
+                .get("to_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown)");
             format!("{tool_name}: {from} \u{2192} {to}")
         }
         ToolName::Delete => {
-            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("(unknown)");
+            let path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown)");
             format!("Delete: {path}")
         }
         ToolName::Mkdir => {
-            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("(unknown)");
+            let path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(unknown)");
             format!("Create directory: {path}")
         }
-        ToolName::Read | ToolName::Grep | ToolName::Glob | ToolName::List
-        | ToolName::Question | ToolName::Task | ToolName::Webfetch | ToolName::Memory
-        | ToolName::Symbols | ToolName::Lsp => {
-            format!("{tool_name}: {}", serde_json::to_string(args).unwrap_or_default())
+        ToolName::Read
+        | ToolName::Grep
+        | ToolName::Glob
+        | ToolName::List
+        | ToolName::Question
+        | ToolName::Task
+        | ToolName::Webfetch
+        | ToolName::Memory
+        | ToolName::Symbols
+        | ToolName::Lsp => {
+            format!(
+                "{tool_name}: {}",
+                serde_json::to_string(args).unwrap_or_default()
+            )
         }
         ToolName::Agent => {
-            let agent_type = args.get("agent_type").and_then(|v| v.as_str()).unwrap_or("explore");
-            let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("(no task)");
+            let agent_type = args
+                .get("agent_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("explore");
+            let task = args
+                .get("task")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no task)");
             format!("Spawn {agent_type} agent: {task}")
         }
     }
@@ -2244,7 +2362,9 @@ fn is_transient_error(err: &async_openai::error::OpenAIError) -> bool {
     match err {
         OpenAIError::Reqwest(e) => {
             // Network-level failures: timeout, connection refused, DNS, 5xx, etc.
-            e.is_timeout() || e.is_connect() || e.is_request()
+            e.is_timeout()
+                || e.is_connect()
+                || e.is_request()
                 || e.status().is_some_and(|s| s.is_server_error())
         }
         OpenAIError::ApiError(api_err) => {
@@ -2307,11 +2427,7 @@ fn is_valid_tool_call(tc: &PendingToolCall) -> bool {
 /// - `edit`/`write`/`patch` use `"file_path"`
 /// - `move`/`copy` use `"from_path"` and `"to_path"`
 /// - `delete`/`mkdir` use `"path"`
-fn invalidate_write_tool_cache(
-    tool_name: ToolName,
-    args: &Value,
-    cache: &mut ToolResultCache,
-) {
+fn invalidate_write_tool_cache(tool_name: ToolName, args: &Value, cache: &mut ToolResultCache) {
     // Guard: only write tools should invalidate cache entries. Read tools also
     // have non-empty path_arg_keys() but must not trigger invalidation.
     if !tool_name.is_write_tool() {
@@ -2383,38 +2499,56 @@ mod tests {
     #[test]
     fn transient_rate_limit() {
         let err = make_api_error("Rate limit exceeded", Some("rate_limit_exceeded"));
-        assert!(is_transient_error(&err), "rate_limit_exceeded should be transient");
+        assert!(
+            is_transient_error(&err),
+            "rate_limit_exceeded should be transient"
+        );
     }
 
     #[test]
     fn transient_overloaded() {
         let err = make_api_error("The server is overloaded, please try again later", None);
-        assert!(is_transient_error(&err), "overloaded message should be transient");
+        assert!(
+            is_transient_error(&err),
+            "overloaded message should be transient"
+        );
     }
 
     #[test]
     fn transient_temporarily_unavailable() {
         let err = make_api_error("Service is temporarily unavailable", None);
-        assert!(is_transient_error(&err), "temporarily unavailable message should be transient");
+        assert!(
+            is_transient_error(&err),
+            "temporarily unavailable message should be transient"
+        );
     }
 
     #[test]
     fn not_transient_auth_error() {
         let err = make_api_error("Invalid API key provided", Some("invalid_api_key"));
-        assert!(!is_transient_error(&err), "invalid_api_key should not be transient");
+        assert!(
+            !is_transient_error(&err),
+            "invalid_api_key should not be transient"
+        );
     }
 
     #[test]
     fn not_transient_invalid_argument() {
         let err = OpenAIError::InvalidArgument("bad argument".to_string());
-        assert!(!is_transient_error(&err), "InvalidArgument should not be transient");
+        assert!(
+            !is_transient_error(&err),
+            "InvalidArgument should not be transient"
+        );
     }
 
     #[test]
     fn not_transient_json_deserialize() {
         let json_err = serde_json::from_str::<serde_json::Value>("invalid json").unwrap_err();
         let err = OpenAIError::JSONDeserialize(json_err, "invalid json".to_string());
-        assert!(!is_transient_error(&err), "JSONDeserialize should not be transient");
+        assert!(
+            !is_transient_error(&err),
+            "JSONDeserialize should not be transient"
+        );
     }
 
     #[test]
@@ -2439,8 +2573,11 @@ mod tests {
     fn accumulate_new_tool_call() {
         let mut pending = HashMap::new();
         let is_new = accumulate_tool_call(
-            &mut pending, 0,
-            Some("call_123"), Some("read"), Some("{\"path\":")
+            &mut pending,
+            0,
+            Some("call_123"),
+            Some("read"),
+            Some("{\"path\":"),
         );
         assert!(is_new);
         assert_eq!(pending.len(), 1);
@@ -2453,7 +2590,13 @@ mod tests {
     #[test]
     fn accumulate_appends_arguments() {
         let mut pending = HashMap::new();
-        accumulate_tool_call(&mut pending, 0, Some("call_123"), Some("read"), Some("{\"path\":"));
+        accumulate_tool_call(
+            &mut pending,
+            0,
+            Some("call_123"),
+            Some("read"),
+            Some("{\"path\":"),
+        );
         let is_new = accumulate_tool_call(&mut pending, 0, None, None, Some("\"src/main.rs\"}"));
         assert!(!is_new); // No new name, just appending
         assert_eq!(pending.len(), 1);
@@ -2525,13 +2668,11 @@ mod tests {
     // -- MockChatStream infrastructure --
 
     use async_openai::types::chat::{
-        ChatChoiceStream, ChatCompletionStreamResponseDelta,
-        ChatCompletionMessageToolCallChunk, FunctionCallStream, FunctionType,
-        CreateChatCompletionStreamResponse, CompletionUsage,
+        ChatChoiceStream, ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta,
+        CompletionUsage, CreateChatCompletionStreamResponse, FunctionCallStream, FunctionType,
+        Role as OaiRole,
     };
-    use async_openai::types::chat::Role as OaiRole;
-    use std::collections::VecDeque;
-    use std::sync::Mutex;
+    use std::{collections::VecDeque, sync::Mutex};
 
     /// Mock stream provider that returns pre-built response chunks.
     /// Each `create_stream` call pops the next set of chunks from `streams`.
@@ -2551,10 +2692,11 @@ mod tests {
         fn create_stream(
             &self,
             _request: CreateChatCompletionRequest,
-        ) -> Pin<Box<dyn Future<Output = Result<ChatCompletionResponseStream, OpenAIError>> + Send + '_>> {
+        ) -> Pin<
+            Box<dyn Future<Output = Result<ChatCompletionResponseStream, OpenAIError>> + Send + '_>,
+        > {
             Box::pin(async move {
-                let chunks = self.streams.lock().unwrap().pop_front()
-                    .unwrap_or_default();
+                let chunks = self.streams.lock().unwrap().pop_front().unwrap_or_default();
                 let stream = tokio_stream::iter(chunks);
                 Ok(Box::pin(stream) as ChatCompletionResponseStream)
             })
@@ -2704,9 +2846,9 @@ mod tests {
             tool_registry: None,
             tool_context: None,
             permission_engine: None,
-            tool_cache: Arc::new(std::sync::Mutex::new(
-                ToolResultCache::new(std::path::PathBuf::from("/tmp/test"))
-            )),
+            tool_cache: Arc::new(std::sync::Mutex::new(ToolResultCache::new(
+                std::path::PathBuf::from("/tmp/test"),
+            ))),
             cancel_token: CancellationToken::new(),
             context_window: None,
             interjection_rx,
@@ -2735,51 +2877,71 @@ mod tests {
 
     #[tokio::test]
     async fn stream_simple_text_response() {
-        let mock = Arc::new(MockChatStream::new(vec![
-            vec![
-                Ok(text_delta("Hello")),
-                Ok(text_delta(" world")),
-                Ok(text_delta("!")),
-                Ok(finish_chunk(FinishReason::Stop, 100, 10)),
-            ],
-        ]));
+        let mock = Arc::new(MockChatStream::new(vec![vec![
+            Ok(text_delta("Hello")),
+            Ok(text_delta(" world")),
+            Ok(text_delta("!")),
+            Ok(finish_chunk(FinishReason::Stop, 100, 10)),
+        ]]));
         let (tx, rx) = mpsc::unbounded_channel();
         let req = mock_stream_request(mock, tx);
         run_stream(req).await.expect("stream should succeed");
         let events = collect_events(rx).await;
 
         // Should have delta events for text content
-        let deltas: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmDelta { .. })).collect();
-        assert!(deltas.len() >= 3, "should have at least 3 delta events, got {}", deltas.len());
+        let deltas: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmDelta { .. }))
+            .collect();
+        assert!(
+            deltas.len() >= 3,
+            "should have at least 3 delta events, got {}",
+            deltas.len()
+        );
 
         // Should have a usage update
-        let usage_updates: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmUsageUpdate { .. })).collect();
+        let usage_updates: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmUsageUpdate { .. }))
+            .collect();
         assert!(!usage_updates.is_empty(), "should have usage update");
 
         // Should have a finish event
-        let finishes: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmFinish { .. })).collect();
+        let finishes: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
+            .collect();
         assert_eq!(finishes.len(), 1, "should have exactly 1 finish event");
     }
 
     #[tokio::test]
     async fn stream_cancel_before_call() {
-        let mock = Arc::new(MockChatStream::new(vec![
-            vec![
-                Ok(text_delta("should not appear")),
-                Ok(finish_chunk(FinishReason::Stop, 10, 5)),
-            ],
-        ]));
+        let mock = Arc::new(MockChatStream::new(vec![vec![
+            Ok(text_delta("should not appear")),
+            Ok(finish_chunk(FinishReason::Stop, 10, 5)),
+        ]]));
         let (tx, rx) = mpsc::unbounded_channel();
         let req = mock_stream_request(mock, tx);
         req.cancel_token.cancel(); // Cancel before stream starts
-        run_stream(req).await.expect("should handle cancellation gracefully");
+        run_stream(req)
+            .await
+            .expect("should handle cancellation gracefully");
         let events = collect_events(rx).await;
 
         // Should have LlmFinish but no deltas (cancellation checked before stream opens)
-        let deltas: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmDelta { .. })).collect();
-        assert!(deltas.is_empty(), "cancelled stream should produce no deltas");
+        let deltas: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmDelta { .. }))
+            .collect();
+        assert!(
+            deltas.is_empty(),
+            "cancelled stream should produce no deltas"
+        );
 
-        let finishes: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmFinish { .. })).collect();
+        let finishes: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
+            .collect();
         assert_eq!(finishes.len(), 1, "should still get LlmFinish on cancel");
     }
 
@@ -2790,7 +2952,12 @@ mod tests {
         let mock = Arc::new(MockChatStream::new(vec![
             // First stream: tool call
             vec![
-                Ok(tool_call_chunk(0, Some("call_1"), Some("read"), Some(r#"{"path":"src/main.rs"}"#))),
+                Ok(tool_call_chunk(
+                    0,
+                    Some("call_1"),
+                    Some("read"),
+                    Some(r#"{"path":"src/main.rs"}"#),
+                )),
                 Ok(finish_chunk(FinishReason::ToolCalls, 50, 20)),
             ],
             // Second stream: final text response
@@ -2803,7 +2970,9 @@ mod tests {
         let mut req = mock_stream_request(mock, tx);
 
         // Add tool registry with a read tool
-        req.tool_registry = Some(Arc::new(ToolRegistry::new(std::path::PathBuf::from("/tmp/test"))));
+        req.tool_registry = Some(Arc::new(ToolRegistry::new(std::path::PathBuf::from(
+            "/tmp/test",
+        ))));
         req.tool_context = Some(ToolContext {
             project_root: std::path::PathBuf::from("/tmp/test"),
             storage_dir: None,
@@ -2814,23 +2983,43 @@ mod tests {
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
         )));
 
-        run_stream(req).await.expect("stream with tool call should succeed");
+        run_stream(req)
+            .await
+            .expect("stream with tool call should succeed");
         let events = collect_events(rx).await;
 
         // Should have tool call streaming events
-        let tool_calls: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmToolCallStreaming { .. })).collect();
-        assert!(!tool_calls.is_empty(), "should have tool call streaming events");
+        let tool_calls: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmToolCallStreaming { .. }))
+            .collect();
+        assert!(
+            !tool_calls.is_empty(),
+            "should have tool call streaming events"
+        );
 
         // Should have tool result
-        let tool_results: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::ToolResult { .. })).collect();
+        let tool_results: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::ToolResult { .. }))
+            .collect();
         assert!(!tool_results.is_empty(), "should have tool result events");
 
         // Should have text delta from second call
-        let deltas: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmDelta { .. })).collect();
-        assert!(!deltas.is_empty(), "should have text deltas from second LLM call");
+        let deltas: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmDelta { .. }))
+            .collect();
+        assert!(
+            !deltas.is_empty(),
+            "should have text deltas from second LLM call"
+        );
 
         // Should have exactly 1 finish event (from the final call)
-        let finishes: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmFinish { .. })).collect();
+        let finishes: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
+            .collect();
         assert_eq!(finishes.len(), 1, "should have exactly 1 finish event");
     }
 
@@ -2842,7 +3031,12 @@ mod tests {
         let mock = Arc::new(MockChatStream::new(vec![
             // First call: tool call with truncated args
             vec![
-                Ok(tool_call_chunk(0, Some("call_1"), Some("read"), Some(r#"{"path":"src/main"#))), // truncated!
+                Ok(tool_call_chunk(
+                    0,
+                    Some("call_1"),
+                    Some("read"),
+                    Some(r#"{"path":"src/main"#),
+                )), // truncated!
                 Ok(finish_chunk(FinishReason::Length, 50, 20)),
             ],
             // Retry: tool-free response after compression
@@ -2853,7 +3047,9 @@ mod tests {
         ]));
         let (tx, rx) = mpsc::unbounded_channel();
         let mut req = mock_stream_request(mock, tx);
-        req.tool_registry = Some(Arc::new(ToolRegistry::new(std::path::PathBuf::from("/tmp/test"))));
+        req.tool_registry = Some(Arc::new(ToolRegistry::new(std::path::PathBuf::from(
+            "/tmp/test",
+        ))));
         req.tool_context = Some(ToolContext {
             project_root: std::path::PathBuf::from("/tmp/test"),
             storage_dir: None,
@@ -2864,15 +3060,29 @@ mod tests {
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
         )));
 
-        run_stream(req).await.expect("stream should handle truncated tool calls");
+        run_stream(req)
+            .await
+            .expect("stream should handle truncated tool calls");
         let events = collect_events(rx).await;
 
         // The retry should produce a text response and LlmFinish, not an error
-        let notices: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::StreamNotice { .. })).collect();
-        assert!(!notices.is_empty(), "should get a StreamNotice about the retry");
-        let deltas: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmDelta { .. })).collect();
+        let notices: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::StreamNotice { .. }))
+            .collect();
+        assert!(
+            !notices.is_empty(),
+            "should get a StreamNotice about the retry"
+        );
+        let deltas: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmDelta { .. }))
+            .collect();
         assert!(!deltas.is_empty(), "retry should produce text deltas");
-        let finishes: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmFinish { .. })).collect();
+        let finishes: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
+            .collect();
         assert_eq!(finishes.len(), 1, "should get LlmFinish from the retry");
     }
 
@@ -2881,16 +3091,21 @@ mod tests {
         // Verify the stream handles a minimal response (just a finish chunk)
         // correctly. Retry logic for transient errors is covered by
         // is_transient_error unit tests above.
-        let mock = Arc::new(MockChatStream::new(vec![
-            vec![
-                Ok(finish_chunk(FinishReason::Stop, 10, 5)),
-            ],
-        ]));
+        let mock = Arc::new(MockChatStream::new(vec![vec![Ok(finish_chunk(
+            FinishReason::Stop,
+            10,
+            5,
+        ))]]));
         let (tx, rx) = mpsc::unbounded_channel();
         let req = mock_stream_request(mock, tx);
-        run_stream(req).await.expect("empty stream with finish should work");
+        run_stream(req)
+            .await
+            .expect("empty stream with finish should work");
         let events = collect_events(rx).await;
-        let finishes: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmFinish { .. })).collect();
+        let finishes: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
+            .collect();
         assert_eq!(finishes.len(), 1, "should get finish event");
     }
 
@@ -2900,9 +3115,24 @@ mod tests {
         let mock = Arc::new(MockChatStream::new(vec![
             // First stream: 3 tool calls
             vec![
-                Ok(tool_call_chunk(0, Some("call_a"), Some("glob"), Some(r#"{"pattern":"*.rs"}"#))),
-                Ok(tool_call_chunk(1, Some("call_b"), Some("glob"), Some(r#"{"pattern":"*.txt"}"#))),
-                Ok(tool_call_chunk(2, Some("call_c"), Some("glob"), Some(r#"{"pattern":"*.md"}"#))),
+                Ok(tool_call_chunk(
+                    0,
+                    Some("call_a"),
+                    Some("glob"),
+                    Some(r#"{"pattern":"*.rs"}"#),
+                )),
+                Ok(tool_call_chunk(
+                    1,
+                    Some("call_b"),
+                    Some("glob"),
+                    Some(r#"{"pattern":"*.txt"}"#),
+                )),
+                Ok(tool_call_chunk(
+                    2,
+                    Some("call_c"),
+                    Some("glob"),
+                    Some(r#"{"pattern":"*.md"}"#),
+                )),
                 Ok(finish_chunk(FinishReason::ToolCalls, 50, 20)),
             ],
             // Second stream: final response
@@ -2913,7 +3143,9 @@ mod tests {
         ]));
         let (tx, rx) = mpsc::unbounded_channel();
         let mut req = mock_stream_request(mock, tx);
-        req.tool_registry = Some(Arc::new(ToolRegistry::new(std::path::PathBuf::from("/tmp/test"))));
+        req.tool_registry = Some(Arc::new(ToolRegistry::new(std::path::PathBuf::from(
+            "/tmp/test",
+        ))));
         req.tool_context = Some(ToolContext {
             project_root: std::path::PathBuf::from("/tmp/test"),
             storage_dir: None,
@@ -2924,24 +3156,41 @@ mod tests {
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
         )));
 
-        run_stream(req).await.expect("parallel tool calls should succeed");
+        run_stream(req)
+            .await
+            .expect("parallel tool calls should succeed");
         let events = collect_events(rx).await;
 
         // Should have tool results for all 3 calls
-        let tool_results: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::ToolResult { .. })).collect();
-        assert_eq!(tool_results.len(), 3, "should have 3 tool results, got {}", tool_results.len());
+        let tool_results: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::ToolResult { .. }))
+            .collect();
+        assert_eq!(
+            tool_results.len(),
+            3,
+            "should have 3 tool results, got {}",
+            tool_results.len()
+        );
 
         // Results should arrive in original call order (a, b, c)
-        let tool_call_events: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmToolCall { .. })).collect();
-        assert_eq!(tool_call_events.len(), 3, "should have 3 LlmToolCall events");
+        let tool_call_events: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmToolCall { .. }))
+            .collect();
+        assert_eq!(
+            tool_call_events.len(),
+            3,
+            "should have 3 LlmToolCall events"
+        );
     }
 
     #[tokio::test]
     async fn stream_cache_hit_skips_execution() {
         // Pre-populate the cache, then run a stream that calls the same tool
-        let cache = Arc::new(std::sync::Mutex::new(
-            ToolResultCache::new(std::path::PathBuf::from("/tmp/test"))
-        ));
+        let cache = Arc::new(std::sync::Mutex::new(ToolResultCache::new(
+            std::path::PathBuf::from("/tmp/test"),
+        )));
 
         // Pre-populate with a glob result
         {
@@ -2957,7 +3206,12 @@ mod tests {
 
         let mock = Arc::new(MockChatStream::new(vec![
             vec![
-                Ok(tool_call_chunk(0, Some("call_1"), Some("glob"), Some(r#"{"pattern":"*.rs"}"#))),
+                Ok(tool_call_chunk(
+                    0,
+                    Some("call_1"),
+                    Some("glob"),
+                    Some(r#"{"pattern":"*.rs"}"#),
+                )),
                 Ok(finish_chunk(FinishReason::ToolCalls, 50, 20)),
             ],
             vec![
@@ -2974,7 +3228,9 @@ mod tests {
             history: vec![],
             user_message: "test".to_string(),
             event_tx: tx,
-            tool_registry: Some(Arc::new(ToolRegistry::new(std::path::PathBuf::from("/tmp/test")))),
+            tool_registry: Some(Arc::new(ToolRegistry::new(std::path::PathBuf::from(
+                "/tmp/test",
+            )))),
             tool_context: Some(ToolContext {
                 project_root: std::path::PathBuf::from("/tmp/test"),
                 storage_dir: None,
@@ -2997,12 +3253,20 @@ mod tests {
             mcp_manager: None,
         };
 
-        run_stream(req).await.expect("cache hit stream should succeed");
+        run_stream(req)
+            .await
+            .expect("cache hit stream should succeed");
         let events = collect_events(rx).await;
 
         // Should still have a tool result (from cache)
-        let tool_results: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::ToolResult { .. })).collect();
-        assert!(!tool_results.is_empty(), "should have tool result even from cache");
+        let tool_results: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::ToolResult { .. }))
+            .collect();
+        assert!(
+            !tool_results.is_empty(),
+            "should have tool result even from cache"
+        );
     }
 
     #[tokio::test]
@@ -3025,9 +3289,9 @@ mod tests {
         let mock = Arc::new(MockChatStream::new(streams));
         let (tx, rx) = mpsc::unbounded_channel();
         let mut req = mock_stream_request(mock, tx);
-        req.tool_registry = Some(Arc::new(ToolRegistry::new(
-            std::path::PathBuf::from("/tmp/test"),
-        )));
+        req.tool_registry = Some(Arc::new(ToolRegistry::new(std::path::PathBuf::from(
+            "/tmp/test",
+        ))));
         req.tool_context = Some(ToolContext {
             project_root: std::path::PathBuf::from("/tmp/test"),
             storage_dir: None,
@@ -3059,7 +3323,11 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
             .collect();
-        assert_eq!(finishes.len(), 1, "should get LlmFinish to persist token usage");
+        assert_eq!(
+            finishes.len(),
+            1,
+            "should get LlmFinish to persist token usage"
+        );
     }
 
     #[tokio::test]
@@ -3080,7 +3348,9 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let req = mock_stream_request(mock, tx);
 
-        run_stream(req).await.expect("should recover from mid-stream error");
+        run_stream(req)
+            .await
+            .expect("should recover from mid-stream error");
         let events = collect_events(rx).await;
 
         // Should have a retry notification (LlmRetry, not LlmError)
@@ -3088,8 +3358,17 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, AppEvent::LlmRetry { .. }))
             .collect();
-        assert_eq!(retries.len(), 1, "should have 1 LlmRetry for the retry notification");
-        if let AppEvent::LlmRetry { attempt, max_attempts, .. } = retries[0] {
+        assert_eq!(
+            retries.len(),
+            1,
+            "should have 1 LlmRetry for the retry notification"
+        );
+        if let AppEvent::LlmRetry {
+            attempt,
+            max_attempts,
+            ..
+        } = retries[0]
+        {
             assert_eq!(*attempt, 1);
             assert_eq!(*max_attempts, 2);
         }
@@ -3099,7 +3378,11 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
             .collect();
-        assert_eq!(finishes.len(), 1, "should get LlmFinish after successful retry");
+        assert_eq!(
+            finishes.len(),
+            1,
+            "should get LlmFinish after successful retry"
+        );
 
         // Should have text deltas from the successful retry
         let deltas: Vec<&AppEvent> = events
@@ -3112,19 +3395,21 @@ mod tests {
     #[tokio::test]
     async fn stream_exhausts_mid_stream_retries() {
         // All streams fail with errors — retries should be exhausted
-        let error_streams: Vec<Vec<Result<CreateChatCompletionStreamResponse, OpenAIError>>> =
-            (0..5)
-                .map(|_| {
-                    vec![Err(OpenAIError::StreamError(Box::new(
-                        StreamError::EventStream("error decoding response body".to_string()),
-                    )))]
-                })
-                .collect();
+        let error_streams: Vec<Vec<Result<CreateChatCompletionStreamResponse, OpenAIError>>> = (0
+            ..5)
+            .map(|_| {
+                vec![Err(OpenAIError::StreamError(Box::new(
+                    StreamError::EventStream("error decoding response body".to_string()),
+                )))]
+            })
+            .collect();
         let mock = Arc::new(MockChatStream::new(error_streams));
         let (tx, rx) = mpsc::unbounded_channel();
         let req = mock_stream_request(mock, tx);
 
-        run_stream(req).await.expect("should handle exhausted retries gracefully");
+        run_stream(req)
+            .await
+            .expect("should handle exhausted retries gracefully");
         let events = collect_events(rx).await;
 
         // Should have 2 LlmRetry events + 1 final LlmError
@@ -3132,20 +3417,34 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, AppEvent::LlmRetry { .. }))
             .collect();
-        assert_eq!(retries.len(), 2, "should have 2 LlmRetry events, got {}", retries.len());
+        assert_eq!(
+            retries.len(),
+            2,
+            "should have 2 LlmRetry events, got {}",
+            retries.len()
+        );
 
         let errors: Vec<&AppEvent> = events
             .iter()
             .filter(|e| matches!(e, AppEvent::LlmError { .. }))
             .collect();
-        assert_eq!(errors.len(), 1, "should have 1 final LlmError, got {}", errors.len());
+        assert_eq!(
+            errors.len(),
+            1,
+            "should have 1 final LlmError, got {}",
+            errors.len()
+        );
 
         // Should get LlmFinish to persist usage
         let finishes: Vec<&AppEvent> = events
             .iter()
             .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
             .collect();
-        assert_eq!(finishes.len(), 1, "should get LlmFinish even after exhausted retries");
+        assert_eq!(
+            finishes.len(),
+            1,
+            "should get LlmFinish even after exhausted retries"
+        );
     }
 
     #[tokio::test]
@@ -3153,7 +3452,12 @@ mod tests {
         // Stream: tool call -> (interjection injected) -> text response
         let mock = Arc::new(MockChatStream::new(vec![
             vec![
-                Ok(tool_call_chunk(0, Some("call_1"), Some("glob"), Some(r#"{"pattern":"*.rs"}"#))),
+                Ok(tool_call_chunk(
+                    0,
+                    Some("call_1"),
+                    Some("glob"),
+                    Some(r#"{"pattern":"*.rs"}"#),
+                )),
                 Ok(finish_chunk(FinishReason::ToolCalls, 50, 20)),
             ],
             vec![
@@ -3165,11 +3469,15 @@ mod tests {
         let (interjection_tx, interjection_rx) = mpsc::unbounded_channel();
 
         // Pre-load the interjection before running the stream
-        interjection_tx.send("focus on tests instead".to_string()).unwrap();
+        interjection_tx
+            .send("focus on tests instead".to_string())
+            .unwrap();
 
         let mut req = mock_stream_request(mock, tx);
         req.interjection_rx = interjection_rx;
-        req.tool_registry = Some(Arc::new(ToolRegistry::new(std::path::PathBuf::from("/tmp/test"))));
+        req.tool_registry = Some(Arc::new(ToolRegistry::new(std::path::PathBuf::from(
+            "/tmp/test",
+        ))));
         req.tool_context = Some(ToolContext {
             project_root: std::path::PathBuf::from("/tmp/test"),
             storage_dir: None,
@@ -3180,15 +3488,23 @@ mod tests {
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
         )));
 
-        run_stream(req).await.expect("interjection stream should succeed");
+        run_stream(req)
+            .await
+            .expect("interjection stream should succeed");
         let events = collect_events(rx).await;
 
         // Should complete successfully
-        let finishes: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmFinish { .. })).collect();
+        let finishes: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
+            .collect();
         assert_eq!(finishes.len(), 1, "should get LlmFinish");
 
         // Should have text deltas from the second call
-        let deltas: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmDelta { .. })).collect();
+        let deltas: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmDelta { .. }))
+            .collect();
         assert!(!deltas.is_empty(), "should have text deltas");
     }
 
@@ -3196,7 +3512,12 @@ mod tests {
     async fn multiple_interjections_all_consumed() {
         let mock = Arc::new(MockChatStream::new(vec![
             vec![
-                Ok(tool_call_chunk(0, Some("call_1"), Some("glob"), Some(r#"{"pattern":"*.rs"}"#))),
+                Ok(tool_call_chunk(
+                    0,
+                    Some("call_1"),
+                    Some("glob"),
+                    Some(r#"{"pattern":"*.rs"}"#),
+                )),
                 Ok(finish_chunk(FinishReason::ToolCalls, 50, 20)),
             ],
             vec![
@@ -3214,7 +3535,9 @@ mod tests {
 
         let mut req = mock_stream_request(mock, tx);
         req.interjection_rx = interjection_rx;
-        req.tool_registry = Some(Arc::new(ToolRegistry::new(std::path::PathBuf::from("/tmp/test"))));
+        req.tool_registry = Some(Arc::new(ToolRegistry::new(std::path::PathBuf::from(
+            "/tmp/test",
+        ))));
         req.tool_context = Some(ToolContext {
             project_root: std::path::PathBuf::from("/tmp/test"),
             storage_dir: None,
@@ -3225,32 +3548,43 @@ mod tests {
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
         )));
 
-        run_stream(req).await.expect("multi-interjection stream should succeed");
+        run_stream(req)
+            .await
+            .expect("multi-interjection stream should succeed");
         let events = collect_events(rx).await;
 
         // Should complete with LlmFinish (not error)
-        let finishes: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmFinish { .. })).collect();
+        let finishes: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
+            .collect();
         assert_eq!(finishes.len(), 1);
-        let errors: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmError { .. })).collect();
+        let errors: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmError { .. }))
+            .collect();
         assert!(errors.is_empty(), "should have no errors");
     }
 
     #[tokio::test]
     async fn empty_interjection_channel_is_noop() {
         // Basic text response with no interjections — existing behavior unchanged
-        let mock = Arc::new(MockChatStream::new(vec![
-            vec![
-                Ok(text_delta("Hello")),
-                Ok(finish_chunk(FinishReason::Stop, 50, 10)),
-            ],
-        ]));
+        let mock = Arc::new(MockChatStream::new(vec![vec![
+            Ok(text_delta("Hello")),
+            Ok(finish_chunk(FinishReason::Stop, 50, 10)),
+        ]]));
         let (tx, rx) = mpsc::unbounded_channel();
         let req = mock_stream_request(mock, tx);
 
-        run_stream(req).await.expect("empty interjection channel should be fine");
+        run_stream(req)
+            .await
+            .expect("empty interjection channel should be fine");
         let events = collect_events(rx).await;
 
-        let finishes: Vec<&AppEvent> = events.iter().filter(|e| matches!(e, AppEvent::LlmFinish { .. })).collect();
+        let finishes: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
+            .collect();
         assert_eq!(finishes.len(), 1);
     }
 
@@ -3284,7 +3618,9 @@ mod tests {
 
         let mut req = mock_stream_request(mock, tx);
         req.interjection_rx = interjection_rx;
-        req.tool_registry = Some(Arc::new(ToolRegistry::new(std::path::PathBuf::from("/tmp/test"))));
+        req.tool_registry = Some(Arc::new(ToolRegistry::new(std::path::PathBuf::from(
+            "/tmp/test",
+        ))));
         req.tool_context = Some(ToolContext {
             project_root: std::path::PathBuf::from("/tmp/test"),
             storage_dir: None,
@@ -3295,7 +3631,9 @@ mod tests {
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
         )));
 
-        run_stream(req).await.expect("interjection with tool calls should succeed");
+        run_stream(req)
+            .await
+            .expect("interjection with tool calls should succeed");
         let events = collect_events(rx).await;
 
         // Should complete without errors
@@ -3354,7 +3692,10 @@ mod tests {
         assert!(fin.is_some());
         assert!(fin.unwrap().contains("FINAL:"));
         // All bits set
-        assert_eq!(sent, WARN_NUDGE_BIT | WARN_WARNING_BIT | WARN_CRITICAL_BIT | WARN_FINAL_BIT);
+        assert_eq!(
+            sent,
+            WARN_NUDGE_BIT | WARN_WARNING_BIT | WARN_CRITICAL_BIT | WARN_FINAL_BIT
+        );
     }
 
     #[test]
@@ -3469,9 +3810,9 @@ mod tests {
     async fn stream_cache_loop_emits_stop_notice() {
         // Pre-populate the cache and exhaust the repeat threshold so all
         // subsequent gets return the cache-repeat summary.
-        let cache = Arc::new(std::sync::Mutex::new(
-            ToolResultCache::new(std::path::PathBuf::from("/tmp/test"))
-        ));
+        let cache = Arc::new(std::sync::Mutex::new(ToolResultCache::new(
+            std::path::PathBuf::from("/tmp/test"),
+        )));
 
         let glob_args = serde_json::json!({"pattern": "*.rs"});
         {
@@ -3512,9 +3853,9 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut req = mock_stream_request(mock, tx);
         req.tool_cache = cache;
-        req.tool_registry = Some(Arc::new(ToolRegistry::new(
-            std::path::PathBuf::from("/tmp/test"),
-        )));
+        req.tool_registry = Some(Arc::new(ToolRegistry::new(std::path::PathBuf::from(
+            "/tmp/test",
+        ))));
         req.tool_context = Some(ToolContext {
             project_root: std::path::PathBuf::from("/tmp/test"),
             storage_dir: None,
@@ -3525,7 +3866,9 @@ mod tests {
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
         )));
 
-        run_stream(req).await.expect("cache loop stream should succeed");
+        run_stream(req)
+            .await
+            .expect("cache loop stream should succeed");
         let events = collect_events(rx).await;
 
         // Should have a StreamNotice about cache loop detection
@@ -3536,7 +3879,10 @@ mod tests {
         assert!(
             !notices.is_empty(),
             "should emit StreamNotice about cache loop, events: {:?}",
-            events.iter().filter(|e| matches!(e, AppEvent::StreamNotice { .. })).collect::<Vec<_>>()
+            events
+                .iter()
+                .filter(|e| matches!(e, AppEvent::StreamNotice { .. }))
+                .collect::<Vec<_>>()
         );
 
         // Should still complete normally with LlmFinish
@@ -3555,22 +3901,42 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         std::fs::create_dir_all(root.join("src")).unwrap();
-        std::fs::write(root.join("src/main.rs"), "fn main() { println!(\"hello\"); }\n").unwrap();
-        std::fs::write(root.join("src/lib.rs"), "pub fn greet() -> &'static str { \"hi\" }\n").unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            "fn main() { println!(\"hello\"); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/lib.rs"),
+            "pub fn greet() -> &'static str { \"hi\" }\n",
+        )
+        .unwrap();
 
         let mock = Arc::new(MockChatStream::new(vec![
             // First stream: glob to find .rs files
             vec![
-                Ok(tool_call_chunk(0, Some("call_glob"), Some("glob"), Some(
-                    &format!(r#"{{"pattern":"**/*.rs","path":"{}"}}"#, root.to_string_lossy())
-                ))),
+                Ok(tool_call_chunk(
+                    0,
+                    Some("call_glob"),
+                    Some("glob"),
+                    Some(&format!(
+                        r#"{{"pattern":"**/*.rs","path":"{}"}}"#,
+                        root.to_string_lossy()
+                    )),
+                )),
                 Ok(finish_chunk(FinishReason::ToolCalls, 50, 20)),
             ],
             // Second stream: read main.rs after seeing glob results
             vec![
-                Ok(tool_call_chunk(0, Some("call_read"), Some("read"), Some(
-                    &format!(r#"{{"path":"{}"}}"#, root.join("src/main.rs").to_string_lossy())
-                ))),
+                Ok(tool_call_chunk(
+                    0,
+                    Some("call_read"),
+                    Some("read"),
+                    Some(&format!(
+                        r#"{{"path":"{}"}}"#,
+                        root.join("src/main.rs").to_string_lossy()
+                    )),
+                )),
                 Ok(finish_chunk(FinishReason::ToolCalls, 80, 30)),
             ],
             // Third stream: final text response
@@ -3593,14 +3959,21 @@ mod tests {
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
         )));
 
-        run_stream(req).await.expect("multi-tool chain should succeed");
+        run_stream(req)
+            .await
+            .expect("multi-tool chain should succeed");
         let events = collect_events(rx).await;
 
         // Should have tool results for both glob and read
-        let tool_results: Vec<&AppEvent> = events.iter()
+        let tool_results: Vec<&AppEvent> = events
+            .iter()
             .filter(|e| matches!(e, AppEvent::ToolResult { .. }))
             .collect();
-        assert_eq!(tool_results.len(), 2, "should have 2 tool results (glob + read)");
+        assert_eq!(
+            tool_results.len(),
+            2,
+            "should have 2 tool results (glob + read)"
+        );
 
         // Verify glob result contains .rs files
         let AppEvent::ToolResult { output, .. } = tool_results[0] else {
@@ -3608,7 +3981,8 @@ mod tests {
         };
         assert!(
             output.output.contains("main.rs"),
-            "glob result should contain main.rs, got: {}", output.output
+            "glob result should contain main.rs, got: {}",
+            output.output
         );
 
         // Verify read result contains file content
@@ -3617,11 +3991,13 @@ mod tests {
         };
         assert!(
             output.output.contains("fn main()"),
-            "read result should contain fn main(), got: {}", output.output
+            "read result should contain fn main(), got: {}",
+            output.output
         );
 
         // Should finish normally
-        let finishes: Vec<&AppEvent> = events.iter()
+        let finishes: Vec<&AppEvent> = events
+            .iter()
             .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
             .collect();
         assert_eq!(finishes.len(), 1);
@@ -3642,9 +4018,15 @@ mod tests {
 
         let mock = Arc::new(MockChatStream::new(vec![
             vec![
-                Ok(tool_call_chunk(0, Some("call_edit"), Some("edit"), Some(
-                    &format!(r#"{{"file_path":"{}","old_string":"fn main() {{}}","new_string":"fn main() {{ println!(\"hi\"); }}"}}"#, file_path)
-                ))),
+                Ok(tool_call_chunk(
+                    0,
+                    Some("call_edit"),
+                    Some("edit"),
+                    Some(&format!(
+                        r#"{{"file_path":"{}","old_string":"fn main() {{}}","new_string":"fn main() {{ println!(\"hi\"); }}"}}"#,
+                        file_path
+                    )),
+                )),
                 Ok(finish_chunk(FinishReason::ToolCalls, 50, 20)),
             ],
             // After permission granted, LLM sees tool result and responds
@@ -3670,41 +4052,49 @@ mod tests {
 
         // Spawn the stream, then drain events auto-granting any permission requests
         let mut perm_rx = rx;
-        let stream_handle = tokio::spawn(async move {
-            run_stream(req).await
-        });
+        let stream_handle = tokio::spawn(async move { run_stream(req).await });
 
         let mut events = Vec::new();
         let mut saw_permission = false;
         loop {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                perm_rx.recv(),
-            ).await {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), perm_rx.recv()).await {
                 Ok(Some(event)) => {
                     // Must move out of event to access response_tx (oneshot::Sender)
                     if let AppEvent::PermissionRequest(pr) = event {
                         saw_permission = true;
-                        let _ = pr.response_tx.send(crate::permission::types::PermissionReply::AllowOnce);
+                        let _ = pr
+                            .response_tx
+                            .send(crate::permission::types::PermissionReply::AllowOnce);
                         continue;
                     }
                     let is_finish = matches!(event, AppEvent::LlmFinish { .. });
                     events.push(event);
-                    if is_finish { break; }
+                    if is_finish {
+                        break;
+                    }
                 }
                 Ok(None) => break, // Channel closed — stream finished
-                Err(_) => panic!("timed out waiting for stream events — stream likely hung on unanswered PermissionRequest"),
+                Err(_) => panic!(
+                    "timed out waiting for stream events — stream likely hung on unanswered PermissionRequest"
+                ),
             }
         }
         stream_handle.await.unwrap().expect("stream should succeed");
 
-        assert!(saw_permission, "edit tool should trigger PermissionRequest in standard mode");
+        assert!(
+            saw_permission,
+            "edit tool should trigger PermissionRequest in standard mode"
+        );
 
         // Should have tool result (edit was allowed)
-        let tool_results: Vec<&AppEvent> = events.iter()
+        let tool_results: Vec<&AppEvent> = events
+            .iter()
             .filter(|e| matches!(e, AppEvent::ToolResult { .. }))
             .collect();
-        assert!(!tool_results.is_empty(), "should have tool result after permission grant");
+        assert!(
+            !tool_results.is_empty(),
+            "should have tool result after permission grant"
+        );
     }
 
     #[tokio::test]
@@ -3719,9 +4109,15 @@ mod tests {
         let mock = Arc::new(MockChatStream::new(vec![
             // LLM tries to edit in plan mode
             vec![
-                Ok(tool_call_chunk(0, Some("call_edit"), Some("edit"), Some(
-                    &format!(r#"{{"file_path":"{}","old_string":"fn main() {{}}","new_string":"fn main() {{ changed(); }}"}}"#, file_path)
-                ))),
+                Ok(tool_call_chunk(
+                    0,
+                    Some("call_edit"),
+                    Some("edit"),
+                    Some(&format!(
+                        r#"{{"file_path":"{}","old_string":"fn main() {{}}","new_string":"fn main() {{ changed(); }}"}}"#,
+                        file_path
+                    )),
+                )),
                 Ok(finish_chunk(FinishReason::ToolCalls, 50, 20)),
             ],
             // LLM responds after seeing denied tool result
@@ -3750,9 +4146,7 @@ mod tests {
             permission_engine: Some(Arc::new(tokio::sync::Mutex::new(
                 crate::permission::PermissionEngine::new(crate::permission::plan_mode_rules()),
             ))),
-            tool_cache: Arc::new(std::sync::Mutex::new(
-                ToolResultCache::new(root)
-            )),
+            tool_cache: Arc::new(std::sync::Mutex::new(ToolResultCache::new(root))),
             cancel_token: CancellationToken::new(),
             context_window: None,
             interjection_rx,
@@ -3765,27 +4159,38 @@ mod tests {
             mcp_manager: None,
         };
 
-        run_stream(req).await.expect("plan mode stream should succeed");
+        run_stream(req)
+            .await
+            .expect("plan mode stream should succeed");
         let events = collect_events(rx).await;
 
         // Should have a tool result that indicates denial
-        let tool_results: Vec<&AppEvent> = events.iter()
+        let tool_results: Vec<&AppEvent> = events
+            .iter()
             .filter(|e| matches!(e, AppEvent::ToolResult { .. }))
             .collect();
-        assert!(!tool_results.is_empty(), "should have tool result for denied edit");
+        assert!(
+            !tool_results.is_empty(),
+            "should have tool result for denied edit"
+        );
 
         let AppEvent::ToolResult { output, .. } = tool_results[0] else {
             panic!("expected ToolResult, got {:?}", tool_results[0]);
         };
         assert!(output.is_error, "denied tool result should be an error");
         assert!(
-            output.output.to_lowercase().contains("denied") || output.output.to_lowercase().contains("not allowed"),
-            "tool result should mention denial, got: {}", output.output
+            output.output.to_lowercase().contains("denied")
+                || output.output.to_lowercase().contains("not allowed"),
+            "tool result should mention denial, got: {}",
+            output.output
         );
 
         // File should be unchanged
         let content = std::fs::read_to_string(dir.path().join("src/main.rs")).unwrap();
-        assert_eq!(content, "fn main() {}\n", "file should be unchanged in plan mode");
+        assert_eq!(
+            content, "fn main() {}\n",
+            "file should be unchanged in plan mode"
+        );
     }
 
     #[tokio::test]
@@ -3797,7 +4202,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
         std::fs::create_dir_all(root.join("src")).unwrap();
-        std::fs::write(root.join("src/main.rs"), "fn main() { println!(\"hello\"); }\n").unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            "fn main() { println!(\"hello\"); }\n",
+        )
+        .unwrap();
         let file_path = root.join("src/main.rs").to_string_lossy().to_string();
 
         // Pre-populate cache with a read result
@@ -3816,20 +4225,24 @@ mod tests {
         }
 
         // Trust mode: all tools allowed
-        let trust_rules = vec![
-            crate::permission::types::PermissionRule {
-                tool: ToolMatcher::All,
-                pattern: "*".into(),
-                action: PermissionActionSerde::Allow,
-            },
-        ];
+        let trust_rules = vec![crate::permission::types::PermissionRule {
+            tool: ToolMatcher::All,
+            pattern: "*".into(),
+            action: PermissionActionSerde::Allow,
+        }];
 
         let mock = Arc::new(MockChatStream::new(vec![
             // Edit the file
             vec![
-                Ok(tool_call_chunk(0, Some("call_edit"), Some("edit"), Some(
-                    &format!(r#"{{"file_path":"{}","old_string":"println!(\"hello\")","new_string":"println!(\"world\")"}}"#, file_path)
-                ))),
+                Ok(tool_call_chunk(
+                    0,
+                    Some("call_edit"),
+                    Some("edit"),
+                    Some(&format!(
+                        r#"{{"file_path":"{}","old_string":"println!(\"hello\")","new_string":"println!(\"world\")"}}"#,
+                        file_path
+                    )),
+                )),
                 Ok(finish_chunk(FinishReason::ToolCalls, 50, 20)),
             ],
             // Final response
@@ -3871,18 +4284,25 @@ mod tests {
             mcp_manager: None,
         };
 
-        run_stream(req).await.expect("trust-mode edit stream should succeed");
+        run_stream(req)
+            .await
+            .expect("trust-mode edit stream should succeed");
         let events = collect_events(rx).await;
 
         // Edit should have succeeded
-        let tool_results: Vec<&AppEvent> = events.iter()
+        let tool_results: Vec<&AppEvent> = events
+            .iter()
             .filter(|e| matches!(e, AppEvent::ToolResult { .. }))
             .collect();
         assert!(!tool_results.is_empty(), "should have tool result for edit");
         let AppEvent::ToolResult { output, .. } = tool_results[0] else {
             panic!("expected ToolResult, got {:?}", tool_results[0]);
         };
-        assert!(!output.is_error, "edit should succeed in trust mode: {}", output.output);
+        assert!(
+            !output.is_error,
+            "edit should succeed in trust mode: {}",
+            output.output
+        );
 
         // Cache should be invalidated for the edited file
         {
@@ -3896,6 +4316,9 @@ mod tests {
 
         // File should actually be changed
         let content = std::fs::read_to_string(dir.path().join("src/main.rs")).unwrap();
-        assert!(content.contains("println!(\"world\")"), "file should be updated");
+        assert!(
+            content.contains("println!(\"world\")"),
+            "file should be updated"
+        );
     }
 }

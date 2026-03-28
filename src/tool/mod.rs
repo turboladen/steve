@@ -18,17 +18,14 @@ pub mod task;
 pub mod webfetch;
 pub mod write;
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use strum::{Display, EnumIter, EnumString, IntoStaticStr};
 
-use crate::lsp::LspManager;
-use crate::task::TaskStore;
+use crate::{lsp::LspManager, task::TaskStore};
 
 /// Visual category for tool color and gutter marker resolution.
 ///
@@ -63,8 +60,20 @@ pub enum IntentCategory {
 }
 
 /// Names of all registered tools.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize,
-         EnumString, Display, EnumIter, IntoStaticStr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    EnumString,
+    Display,
+    EnumIter,
+    IntoStaticStr,
+)]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum ToolName {
@@ -101,8 +110,13 @@ impl ToolName {
     pub fn is_write_tool(self) -> bool {
         matches!(
             self,
-            ToolName::Edit | ToolName::Write | ToolName::Patch
-            | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
+            ToolName::Edit
+                | ToolName::Write
+                | ToolName::Patch
+                | ToolName::Move
+                | ToolName::Copy
+                | ToolName::Delete
+                | ToolName::Mkdir
         )
     }
 
@@ -110,8 +124,7 @@ impl ToolName {
     pub fn is_read_only(self) -> bool {
         matches!(
             self,
-            ToolName::Read | ToolName::Grep | ToolName::Glob | ToolName::List
-            | ToolName::Symbols
+            ToolName::Read | ToolName::Grep | ToolName::Glob | ToolName::List | ToolName::Symbols
         )
     }
 
@@ -119,8 +132,7 @@ impl ToolName {
     pub fn is_cacheable(self) -> bool {
         matches!(
             self,
-            ToolName::Read | ToolName::Grep | ToolName::Glob | ToolName::List
-            | ToolName::Symbols
+            ToolName::Read | ToolName::Grep | ToolName::Glob | ToolName::List | ToolName::Symbols
         )
     }
 
@@ -141,12 +153,22 @@ impl ToolName {
     /// can use `.last()`.
     pub fn path_arg_keys(self) -> &'static [&'static str] {
         match self {
-            ToolName::Read | ToolName::Grep | ToolName::Glob | ToolName::List
-            | ToolName::Symbols | ToolName::Lsp | ToolName::Delete | ToolName::Mkdir => &["path"],
+            ToolName::Read
+            | ToolName::Grep
+            | ToolName::Glob
+            | ToolName::List
+            | ToolName::Symbols
+            | ToolName::Lsp
+            | ToolName::Delete
+            | ToolName::Mkdir => &["path"],
             ToolName::Edit | ToolName::Write | ToolName::Patch => &["file_path"],
             ToolName::Move | ToolName::Copy => &["from_path", "to_path"],
-            ToolName::Bash | ToolName::Question | ToolName::Task
-            | ToolName::Webfetch | ToolName::Memory | ToolName::Agent => &[],
+            ToolName::Bash
+            | ToolName::Question
+            | ToolName::Task
+            | ToolName::Webfetch
+            | ToolName::Memory
+            | ToolName::Agent => &[],
         }
     }
 
@@ -155,11 +177,20 @@ impl ToolName {
     /// Exhaustive match — adding a new variant forces updating this.
     pub fn intent_category(self) -> IntentCategory {
         match self {
-            ToolName::Read | ToolName::Grep | ToolName::Glob
-            | ToolName::List | ToolName::Webfetch | ToolName::Symbols
+            ToolName::Read
+            | ToolName::Grep
+            | ToolName::Glob
+            | ToolName::List
+            | ToolName::Webfetch
+            | ToolName::Symbols
             | ToolName::Lsp => IntentCategory::Exploring,
-            ToolName::Edit | ToolName::Write | ToolName::Patch
-            | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
+            ToolName::Edit
+            | ToolName::Write
+            | ToolName::Patch
+            | ToolName::Move
+            | ToolName::Copy
+            | ToolName::Delete
+            | ToolName::Mkdir
             | ToolName::Memory => IntentCategory::Editing,
             ToolName::Bash => IntentCategory::Executing,
             ToolName::Question | ToolName::Task => IntentCategory::Asking,
@@ -172,14 +203,24 @@ impl ToolName {
     /// Exhaustive match — adding a new variant forces updating this.
     pub fn visual_category(self) -> ToolVisualCategory {
         match self {
-            ToolName::Read | ToolName::Grep | ToolName::Glob
-            | ToolName::List | ToolName::Webfetch | ToolName::Symbols
+            ToolName::Read
+            | ToolName::Grep
+            | ToolName::Glob
+            | ToolName::List
+            | ToolName::Webfetch
+            | ToolName::Symbols
             | ToolName::Lsp => ToolVisualCategory::Read,
-            ToolName::Edit | ToolName::Write | ToolName::Patch
-            | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
+            ToolName::Edit
+            | ToolName::Write
+            | ToolName::Patch
+            | ToolName::Move
+            | ToolName::Copy
+            | ToolName::Delete
+            | ToolName::Mkdir
             | ToolName::Memory => ToolVisualCategory::Write,
-            ToolName::Bash | ToolName::Question | ToolName::Task
-            | ToolName::Agent => ToolVisualCategory::Accent,
+            ToolName::Bash | ToolName::Question | ToolName::Task | ToolName::Agent => {
+                ToolVisualCategory::Accent
+            }
         }
     }
 
@@ -189,12 +230,21 @@ impl ToolName {
     /// returns a single-column character suitable for the gutter.
     pub fn gutter_char(self) -> &'static str {
         match self {
-            ToolName::Read | ToolName::Grep | ToolName::Glob
-            | ToolName::List | ToolName::Webfetch | ToolName::Symbols
-            | ToolName::Lsp => "\u{00b7}",       // · (1 col)
-            ToolName::Edit | ToolName::Write | ToolName::Patch
-            | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
-            | ToolName::Memory => "\u{270e}",     // ✎ (1 col)
+            ToolName::Read
+            | ToolName::Grep
+            | ToolName::Glob
+            | ToolName::List
+            | ToolName::Webfetch
+            | ToolName::Symbols
+            | ToolName::Lsp => "\u{00b7}", // · (1 col)
+            ToolName::Edit
+            | ToolName::Write
+            | ToolName::Patch
+            | ToolName::Move
+            | ToolName::Copy
+            | ToolName::Delete
+            | ToolName::Mkdir
+            | ToolName::Memory => "\u{270e}", // ✎ (1 col)
             ToolName::Bash => "$",
             ToolName::Question | ToolName::Task => "!",
             ToolName::Agent => ">",
@@ -208,14 +258,23 @@ impl ToolName {
     /// isn't in the read-only permission/caching group.
     pub fn tool_marker(self) -> &'static str {
         match self {
-            ToolName::Read | ToolName::Grep | ToolName::Glob
-            | ToolName::List | ToolName::Webfetch | ToolName::Symbols
-            | ToolName::Lsp => "\u{00b7}",       // ·
-            ToolName::Edit | ToolName::Write | ToolName::Patch
-            | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
-            | ToolName::Memory => "\u{270e}",                           // ✎
+            ToolName::Read
+            | ToolName::Grep
+            | ToolName::Glob
+            | ToolName::List
+            | ToolName::Webfetch
+            | ToolName::Symbols
+            | ToolName::Lsp => "\u{00b7}", // ·
+            ToolName::Edit
+            | ToolName::Write
+            | ToolName::Patch
+            | ToolName::Move
+            | ToolName::Copy
+            | ToolName::Delete
+            | ToolName::Mkdir
+            | ToolName::Memory => "\u{270e}", // ✎
             ToolName::Bash => "$",
-            ToolName::Question | ToolName::Task => "\u{26a1}",          // ⚡
+            ToolName::Question | ToolName::Task => "\u{26a1}", // ⚡
             ToolName::Agent => ">",
         }
     }
@@ -336,12 +395,7 @@ impl ToolRegistry {
     }
 
     /// Execute a tool by name.
-    pub fn execute(
-        &self,
-        name: ToolName,
-        args: Value,
-        ctx: ToolContext,
-    ) -> Result<ToolOutput> {
+    pub fn execute(&self, name: ToolName, args: Value, ctx: ToolContext) -> Result<ToolOutput> {
         let entry = self
             .tools
             .get(&name)
@@ -446,8 +500,13 @@ mod tests {
     #[test]
     fn is_write_tool_correct() {
         let write_tools = [
-            ToolName::Edit, ToolName::Write, ToolName::Patch,
-            ToolName::Move, ToolName::Copy, ToolName::Delete, ToolName::Mkdir,
+            ToolName::Edit,
+            ToolName::Write,
+            ToolName::Patch,
+            ToolName::Move,
+            ToolName::Copy,
+            ToolName::Delete,
+            ToolName::Mkdir,
         ];
         let non_write = [
             ToolName::Read,
@@ -473,7 +532,13 @@ mod tests {
 
     #[test]
     fn is_read_only_correct() {
-        let read_only = [ToolName::Read, ToolName::Grep, ToolName::Glob, ToolName::List, ToolName::Symbols];
+        let read_only = [
+            ToolName::Read,
+            ToolName::Grep,
+            ToolName::Glob,
+            ToolName::List,
+            ToolName::Symbols,
+        ];
         let not_read_only = [
             ToolName::Edit,
             ToolName::Write,
@@ -500,7 +565,13 @@ mod tests {
 
     #[test]
     fn is_cacheable_correct() {
-        let cacheable = [ToolName::Read, ToolName::Grep, ToolName::Glob, ToolName::List, ToolName::Symbols];
+        let cacheable = [
+            ToolName::Read,
+            ToolName::Grep,
+            ToolName::Glob,
+            ToolName::List,
+            ToolName::Symbols,
+        ];
         let not_cacheable = [
             ToolName::Edit,
             ToolName::Write,
@@ -530,21 +601,41 @@ mod tests {
     #[test]
     fn tool_marker_exhaustive() {
         for t in ToolName::iter() {
-            assert!(!t.tool_marker().is_empty(), "{t} marker should be non-empty");
+            assert!(
+                !t.tool_marker().is_empty(),
+                "{t} marker should be non-empty"
+            );
         }
 
         // Read tools get ·
-        for t in [ToolName::Read, ToolName::Grep, ToolName::Glob, ToolName::List, ToolName::Webfetch, ToolName::Symbols, ToolName::Lsp] {
+        for t in [
+            ToolName::Read,
+            ToolName::Grep,
+            ToolName::Glob,
+            ToolName::List,
+            ToolName::Webfetch,
+            ToolName::Symbols,
+            ToolName::Lsp,
+        ] {
             assert_eq!(t.tool_marker(), "\u{00b7}", "{t} should have read marker ·");
         }
 
         // Write tools get ✎
         for t in [
-            ToolName::Edit, ToolName::Write, ToolName::Patch,
-            ToolName::Move, ToolName::Copy, ToolName::Delete, ToolName::Mkdir,
+            ToolName::Edit,
+            ToolName::Write,
+            ToolName::Patch,
+            ToolName::Move,
+            ToolName::Copy,
+            ToolName::Delete,
+            ToolName::Mkdir,
             ToolName::Memory,
         ] {
-            assert_eq!(t.tool_marker(), "\u{270e}", "{t} should have write marker ✎");
+            assert_eq!(
+                t.tool_marker(),
+                "\u{270e}",
+                "{t} should have write marker ✎"
+            );
         }
 
         // Bash gets $
@@ -552,7 +643,11 @@ mod tests {
 
         // Interactive tools get ⚡
         for t in [ToolName::Question, ToolName::Task] {
-            assert_eq!(t.tool_marker(), "\u{26a1}", "{t} should have interactive marker ⚡");
+            assert_eq!(
+                t.tool_marker(),
+                "\u{26a1}",
+                "{t} should have interactive marker ⚡"
+            );
         }
 
         // Agent gets >
@@ -566,21 +661,33 @@ mod tests {
     fn tool_marker_categories_consistent() {
         for t in ToolName::iter() {
             if t.is_read_only() {
-                assert_eq!(t.tool_marker(), "\u{00b7}", "{t} is read-only but doesn't have read marker");
+                assert_eq!(
+                    t.tool_marker(),
+                    "\u{00b7}",
+                    "{t} is read-only but doesn't have read marker"
+                );
             } else if t.is_write_tool() || t.is_memory() {
-                assert_eq!(t.tool_marker(), "\u{270e}", "{t} is write/memory but doesn't have write marker");
+                assert_eq!(
+                    t.tool_marker(),
+                    "\u{270e}",
+                    "{t} is write/memory but doesn't have write marker"
+                );
             } else {
                 // Bash, Question, Task, Webfetch, Agent — not covered by predicates
                 assert!(
                     ["\u{00b7}", "$", "\u{26a1}", ">"].contains(&t.tool_marker()),
-                    "{t} has unexpected marker '{}'", t.tool_marker()
+                    "{t} has unexpected marker '{}'",
+                    t.tool_marker()
                 );
             }
         }
 
         // Webfetch specifically: read marker despite is_read_only() == false
-        assert_eq!(ToolName::Webfetch.tool_marker(), "\u{00b7}",
-            "Webfetch should have read marker (UI-only, not in is_read_only() group)");
+        assert_eq!(
+            ToolName::Webfetch.tool_marker(),
+            "\u{00b7}",
+            "Webfetch should have read marker (UI-only, not in is_read_only() group)"
+        );
     }
 
     /// Every variant maps to the expected intent category.
@@ -636,7 +743,11 @@ mod tests {
         for t in ToolName::iter() {
             let ch = t.gutter_char();
             assert!(!ch.is_empty(), "{t} gutter_char should be non-empty");
-            assert_eq!(ch.chars().count(), 1, "{t} gutter_char should be 1 char, got '{ch}'");
+            assert_eq!(
+                ch.chars().count(),
+                1,
+                "{t} gutter_char should be 1 char, got '{ch}'"
+            );
         }
     }
 
@@ -649,14 +760,22 @@ mod tests {
             let registry = ToolRegistry::filtered(std::path::PathBuf::from("/tmp"), &allowed);
             // All allowed tools present
             for &name in &allowed {
-                assert!(registry.has_tool(name), "{at} registry should contain {name}");
+                assert!(
+                    registry.has_tool(name),
+                    "{at} registry should contain {name}"
+                );
             }
             // Agent is never present
-            assert!(!registry.has_tool(ToolName::Agent),
-                "{at} registry should not contain Agent");
+            assert!(
+                !registry.has_tool(ToolName::Agent),
+                "{at} registry should not contain Agent"
+            );
             // No extra tools beyond what's allowed
-            assert_eq!(registry.tool_names().len(), allowed.len(),
-                "{at} registry has wrong number of tools");
+            assert_eq!(
+                registry.tool_names().len(),
+                allowed.len(),
+                "{at} registry has wrong number of tools"
+            );
         }
     }
 
@@ -665,14 +784,25 @@ mod tests {
     fn path_arg_keys_exhaustive() {
         for t in ToolName::iter() {
             let keys = t.path_arg_keys();
-            if t.is_read_only() || t == ToolName::Lsp || t == ToolName::Delete || t == ToolName::Mkdir {
+            if t.is_read_only()
+                || t == ToolName::Lsp
+                || t == ToolName::Delete
+                || t == ToolName::Mkdir
+            {
                 assert_eq!(keys, &["path"], "{t} should have [\"path\"]");
             } else if matches!(t, ToolName::Edit | ToolName::Write | ToolName::Patch) {
                 assert_eq!(keys, &["file_path"], "{t} should have [\"file_path\"]");
             } else if matches!(t, ToolName::Move | ToolName::Copy) {
-                assert_eq!(keys, &["from_path", "to_path"], "{t} should have [\"from_path\", \"to_path\"]");
+                assert_eq!(
+                    keys,
+                    &["from_path", "to_path"],
+                    "{t} should have [\"from_path\", \"to_path\"]"
+                );
             } else {
-                assert!(keys.is_empty(), "{t} should have no path keys, got {keys:?}");
+                assert!(
+                    keys.is_empty(),
+                    "{t} should have no path keys, got {keys:?}"
+                );
             }
         }
     }
@@ -706,12 +836,17 @@ mod tests {
                     assert_eq!(t.gutter_char(), "\u{00b7}", "{t} Read should have · gutter");
                 }
                 ToolVisualCategory::Write => {
-                    assert_eq!(t.gutter_char(), "\u{270e}", "{t} Write should have ✎ gutter");
+                    assert_eq!(
+                        t.gutter_char(),
+                        "\u{270e}",
+                        "{t} Write should have ✎ gutter"
+                    );
                 }
                 ToolVisualCategory::Accent => {
                     assert!(
                         ["$", "!", ">"].contains(&t.gutter_char()),
-                        "{t} Accent should have $, !, or > gutter, got '{}'", t.gutter_char()
+                        "{t} Accent should have $, !, or > gutter, got '{}'",
+                        t.gutter_char()
                     );
                 }
             }

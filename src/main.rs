@@ -43,10 +43,7 @@ async fn main() -> Result<()> {
                 .with_target(true)
                 .with_thread_ids(false),
         )
-        .with(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("steve=info")),
-        )
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("steve=info")))
         .init();
 
     tracing::info!("steve starting up");
@@ -84,16 +81,17 @@ async fn main() -> Result<()> {
     }
 
     // Build provider registry (may fail if env vars not set)
-    let (provider_registry, provider_error) = match steve::provider::ProviderRegistry::from_config(&cfg) {
-        Ok(registry) => {
-            tracing::info!("provider registry initialized");
-            (Some(registry), None)
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "provider registry failed");
-            (None, Some(e.to_string()))
-        }
-    };
+    let (provider_registry, provider_error) =
+        match steve::provider::ProviderRegistry::from_config(&cfg) {
+            Ok(registry) => {
+                tracing::info!("provider registry initialized");
+                (Some(registry), None)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "provider registry failed");
+                (None, Some(e.to_string()))
+            }
+        };
 
     // Initialize usage analytics (SQLite background writer)
     let data_dir = directories::ProjectDirs::from("", "", "steve")
@@ -101,15 +99,28 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp/steve-data"));
     std::fs::create_dir_all(&data_dir)?;
     let usage_handle = steve::usage::spawn_usage_writer(&data_dir.join("usage.db"))?;
-    usage_handle.writer.upsert_project(steve::usage::types::ProjectRecord {
-        project_id: project_info.id.clone(),
-        display_name: project_info.root.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| project_info.id.clone()),
-        root_path: project_info.root.display().to_string(),
-    });
+    usage_handle
+        .writer
+        .upsert_project(steve::usage::types::ProjectRecord {
+            project_id: project_info.id.clone(),
+            display_name: project_info
+                .root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| project_info.id.clone()),
+            root_path: project_info.root.display().to_string(),
+        });
 
-    let mut app = steve::app::App::new(project_info, cfg, store, agents_files, provider_registry, provider_error, config_warnings, usage_handle.writer.clone());
+    let mut app = steve::app::App::new(
+        project_info,
+        cfg,
+        store,
+        agents_files,
+        provider_registry,
+        provider_error,
+        config_warnings,
+        usage_handle.writer.clone(),
+    );
     app.run().await?;
 
     usage_handle.shutdown_and_wait();

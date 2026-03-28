@@ -119,7 +119,11 @@ impl App {
                 )),
                 primary_model: resolved.api_model_id().to_string(),
                 small_model: self.config.small_model.as_ref().and_then(|model_ref| {
-                    self.provider_registry.as_ref()?.resolve_model(model_ref).ok().map(|r| r.api_model_id().to_string())
+                    self.provider_registry
+                        .as_ref()?
+                        .resolve_model(model_ref)
+                        .ok()
+                        .map(|r| r.api_model_id().to_string())
                 }),
                 project_root: self.project.root.clone(),
                 tool_context: ToolContext {
@@ -198,7 +202,10 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tests::{make_test_app, make_test_app_with_storage, make_test_registry, has_error_message, has_system_message};
+    use crate::app::tests::{
+        has_error_message, has_system_message, make_test_app, make_test_app_with_storage,
+        make_test_registry,
+    };
 
     #[tokio::test]
     async fn handle_input_slash_delegates_to_command() {
@@ -236,7 +243,13 @@ mod tests {
 
         // User message should be saved
         assert_eq!(app.stored_messages.len(), stored_before + 1);
-        assert!(app.stored_messages.last().unwrap().text_content().contains("test message"));
+        assert!(
+            app.stored_messages
+                .last()
+                .unwrap()
+                .text_content()
+                .contains("test message")
+        );
     }
 
     #[tokio::test]
@@ -248,9 +261,10 @@ mod tests {
         app.handle_input("hello world".into()).await.unwrap();
 
         // Should have a User message block in display
-        let has_user = app.messages.iter().any(|m| {
-            matches!(m, MessageBlock::User { text } if text.contains("hello world"))
-        });
+        let has_user = app
+            .messages
+            .iter()
+            .any(|m| matches!(m, MessageBlock::User { text } if text.contains("hello world")));
         assert!(has_user, "should have User message block");
     }
 

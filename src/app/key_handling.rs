@@ -4,8 +4,10 @@ impl App {
     /// Copy text to the system clipboard.
     /// Tries pbcopy (macOS), xclip (Linux), then falls back to OSC 52.
     pub(super) fn copy_to_clipboard(&mut self, text: &str) {
-        use std::io::Write as _;
-        use std::process::{Command, Stdio};
+        use std::{
+            io::Write as _,
+            process::{Command, Stdio},
+        };
 
         // Try pbcopy (macOS)
         let ok = Command::new("pbcopy")
@@ -50,10 +52,8 @@ impl App {
         use base64::Engine;
         let encoded = base64::engine::general_purpose::STANDARD.encode(text);
         let mut stdout = std::io::stdout();
-        let write_result = std::io::Write::write_fmt(
-            &mut stdout,
-            format_args!("\x1b]52;c;{encoded}\x07"),
-        );
+        let write_result =
+            std::io::Write::write_fmt(&mut stdout, format_args!("\x1b]52;c;{encoded}\x07"));
         let result = write_result.and_then(|_| std::io::Write::flush(&mut stdout));
         if result.is_ok() {
             self.selection_state.copied_flash = Some(std::time::Instant::now());
@@ -99,7 +99,8 @@ impl App {
                     self.model_picker.next();
                 }
                 (KeyCode::Enter, _) => {
-                    if let Some(model_ref) = self.model_picker.selected_ref().map(|s| s.to_string()) {
+                    if let Some(model_ref) = self.model_picker.selected_ref().map(|s| s.to_string())
+                    {
                         self.model_picker.close();
                         self.handle_input(format!("/model {model_ref}")).await?;
                     }
@@ -334,7 +335,8 @@ impl App {
                 let current_text = self.input.textarea.lines().join("\n");
                 self.ensure_file_index();
                 let file_index = self.file_index.clone().unwrap_or_default();
-                self.autocomplete_state.update_with_files(&current_text, &file_index);
+                self.autocomplete_state
+                    .update_with_files(&current_text, &file_index);
             }
         }
         Ok(())
@@ -488,13 +490,18 @@ impl App {
                 let agents_path = self.project.root.join("AGENTS.md");
                 match std::fs::write(&agents_path, &content) {
                     Ok(_) => {
-                        if let Some(existing) = self.agents_files.iter_mut().find(|f| f.path == agents_path) {
+                        if let Some(existing) =
+                            self.agents_files.iter_mut().find(|f| f.path == agents_path)
+                        {
                             existing.content = content;
                         } else {
-                            self.agents_files.insert(0, crate::config::AgentsFile {
-                                path: agents_path.clone(),
-                                content,
-                            });
+                            self.agents_files.insert(
+                                0,
+                                crate::config::AgentsFile {
+                                    path: agents_path.clone(),
+                                    content,
+                                },
+                            );
                         }
                         self.messages.push(MessageBlock::System {
                             text: format!("AGENTS.md updated at {}", agents_path.display()),
@@ -523,7 +530,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tests::{make_test_app, has_system_message};
+    use crate::app::tests::{has_system_message, make_test_app};
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
     fn press(code: KeyCode) -> KeyEvent {
@@ -554,7 +561,10 @@ mod tests {
         rx
     }
 
-    fn make_pending_question(app: &mut App, options: Vec<String>) -> tokio::sync::oneshot::Receiver<String> {
+    fn make_pending_question(
+        app: &mut App,
+        options: Vec<String>,
+    ) -> tokio::sync::oneshot::Receiver<String> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let has_options = !options.is_empty();
         app.pending_question = Some(super::super::types::PendingQuestion {
@@ -602,7 +612,10 @@ mod tests {
         let mut rx = make_pending_permission(&mut app);
         app.handle_key(press(KeyCode::Char('a'))).await.unwrap();
         assert!(app.pending_permission.is_none());
-        assert!(matches!(rx.try_recv().unwrap(), PermissionReply::AllowAlways));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            PermissionReply::AllowAlways
+        ));
     }
 
     #[tokio::test]
@@ -646,7 +659,8 @@ mod tests {
     #[tokio::test]
     async fn question_number_selects_option() {
         let mut app = make_test_app();
-        let mut rx = make_pending_question(&mut app, vec!["red".into(), "blue".into(), "green".into()]);
+        let mut rx =
+            make_pending_question(&mut app, vec!["red".into(), "blue".into(), "green".into()]);
         // Press '2' to select "blue", then Enter
         app.handle_key(press(KeyCode::Char('2'))).await.unwrap();
         assert_eq!(app.pending_question.as_ref().unwrap().selected, Some(1));

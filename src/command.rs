@@ -99,7 +99,10 @@ impl Command {
                         return Ok(Command::Mcp);
                     }
                     let sub_parts: Vec<&str> = rest.splitn(2, ' ').collect();
-                    let sub_arg = sub_parts.get(1).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+                    let sub_arg = sub_parts
+                        .get(1)
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
                     match sub_parts[0] {
                         "tools" => Ok(Command::McpTools(sub_arg)),
                         "resources" => Ok(Command::McpResources(sub_arg)),
@@ -115,37 +118,111 @@ impl Command {
                 Some(title) if !title.is_empty() => Ok(Command::EpicNew(title)),
                 _ => Err("Usage: /epic-new <title>".to_string()),
             },
-            _ => Err(format!("Unknown command: {cmd}. Type /help for available commands.")),
+            _ => Err(format!(
+                "Unknown command: {cmd}. Type /help for available commands."
+            )),
         }
     }
 
     /// Returns metadata for all known commands, in display order.
     pub fn all_commands() -> Vec<CommandInfo> {
         vec![
-            CommandInfo { name: "/new", description: "Start a new session" },
-            CommandInfo { name: "/rename", description: "Rename current session" },
-            CommandInfo { name: "/model", description: "Switch model" },
-            CommandInfo { name: "/models", description: "List available models" },
-            CommandInfo { name: "/compact", description: "Compact conversation" },
-            CommandInfo { name: "/sessions", description: "Browse sessions" },
-            CommandInfo { name: "/tasks", description: "List all tasks" },
-            CommandInfo { name: "/task-new", description: "Create a task" },
-            CommandInfo { name: "/task-done", description: "Complete a task" },
-            CommandInfo { name: "/task-show", description: "Show task details" },
-            CommandInfo { name: "/task-edit", description: "Edit a task" },
-            CommandInfo { name: "/epics", description: "List epics" },
-            CommandInfo { name: "/epic-new", description: "Create an epic" },
-            CommandInfo { name: "/mcp", description: "MCP server overview" },
-            CommandInfo { name: "/mcp tools", description: "Browse MCP tools" },
-            CommandInfo { name: "/mcp resources", description: "Browse MCP resources" },
-            CommandInfo { name: "/mcp prompts", description: "Browse MCP prompts" },
-            CommandInfo { name: "/diagnostics", description: "Show health dashboard" },
-            CommandInfo { name: "/agents-update", description: "Update AGENTS.md" },
-            CommandInfo { name: "/init", description: "Create AGENTS.md" },
-            CommandInfo { name: "/export-debug", description: "Export session with logs" },
-            CommandInfo { name: "/help", description: "Show help" },
-            CommandInfo { name: "/quit", description: "Quit" },
-            CommandInfo { name: "/exit", description: "Quit" },
+            CommandInfo {
+                name: "/new",
+                description: "Start a new session",
+            },
+            CommandInfo {
+                name: "/rename",
+                description: "Rename current session",
+            },
+            CommandInfo {
+                name: "/model",
+                description: "Switch model",
+            },
+            CommandInfo {
+                name: "/models",
+                description: "List available models",
+            },
+            CommandInfo {
+                name: "/compact",
+                description: "Compact conversation",
+            },
+            CommandInfo {
+                name: "/sessions",
+                description: "Browse sessions",
+            },
+            CommandInfo {
+                name: "/tasks",
+                description: "List all tasks",
+            },
+            CommandInfo {
+                name: "/task-new",
+                description: "Create a task",
+            },
+            CommandInfo {
+                name: "/task-done",
+                description: "Complete a task",
+            },
+            CommandInfo {
+                name: "/task-show",
+                description: "Show task details",
+            },
+            CommandInfo {
+                name: "/task-edit",
+                description: "Edit a task",
+            },
+            CommandInfo {
+                name: "/epics",
+                description: "List epics",
+            },
+            CommandInfo {
+                name: "/epic-new",
+                description: "Create an epic",
+            },
+            CommandInfo {
+                name: "/mcp",
+                description: "MCP server overview",
+            },
+            CommandInfo {
+                name: "/mcp tools",
+                description: "Browse MCP tools",
+            },
+            CommandInfo {
+                name: "/mcp resources",
+                description: "Browse MCP resources",
+            },
+            CommandInfo {
+                name: "/mcp prompts",
+                description: "Browse MCP prompts",
+            },
+            CommandInfo {
+                name: "/diagnostics",
+                description: "Show health dashboard",
+            },
+            CommandInfo {
+                name: "/agents-update",
+                description: "Update AGENTS.md",
+            },
+            CommandInfo {
+                name: "/init",
+                description: "Create AGENTS.md",
+            },
+            CommandInfo {
+                name: "/export-debug",
+                description: "Export session with logs",
+            },
+            CommandInfo {
+                name: "/help",
+                description: "Show help",
+            },
+            CommandInfo {
+                name: "/quit",
+                description: "Quit",
+            },
+            CommandInfo {
+                name: "/exit",
+                description: "Quit",
+            },
         ]
     }
 
@@ -346,12 +423,18 @@ mod tests {
 
     #[test]
     fn parse_diagnostics_command() {
-        assert_eq!(Command::parse("/diagnostics").unwrap(), Command::Diagnostics);
+        assert_eq!(
+            Command::parse("/diagnostics").unwrap(),
+            Command::Diagnostics
+        );
     }
 
     #[test]
     fn parse_agents_update_command() {
-        assert_eq!(Command::parse("/agents-update").unwrap(), Command::AgentsUpdate);
+        assert_eq!(
+            Command::parse("/agents-update").unwrap(),
+            Command::AgentsUpdate
+        );
     }
 
     // -- MCP command tests --
@@ -363,7 +446,10 @@ mod tests {
 
     #[test]
     fn parse_mcp_tools() {
-        assert_eq!(Command::parse("/mcp tools").unwrap(), Command::McpTools(None));
+        assert_eq!(
+            Command::parse("/mcp tools").unwrap(),
+            Command::McpTools(None)
+        );
     }
 
     #[test]
@@ -376,7 +462,10 @@ mod tests {
 
     #[test]
     fn parse_mcp_resources() {
-        assert_eq!(Command::parse("/mcp resources").unwrap(), Command::McpResources(None));
+        assert_eq!(
+            Command::parse("/mcp resources").unwrap(),
+            Command::McpResources(None)
+        );
     }
 
     #[test]
@@ -389,7 +478,10 @@ mod tests {
 
     #[test]
     fn parse_mcp_prompts() {
-        assert_eq!(Command::parse("/mcp prompts").unwrap(), Command::McpPrompts(None));
+        assert_eq!(
+            Command::parse("/mcp prompts").unwrap(),
+            Command::McpPrompts(None)
+        );
     }
 
     #[test]

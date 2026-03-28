@@ -1,8 +1,10 @@
 use crossterm::event::Event;
 use serde_json::Value;
 
-use crate::permission::types::PermissionRequest;
-use crate::tool::{ToolName, ToolOutput};
+use crate::{
+    permission::types::PermissionRequest,
+    tool::{ToolName, ToolOutput},
+};
 
 pub struct QuestionRequest {
     pub call_id: String,
@@ -30,7 +32,6 @@ pub enum AppEvent {
     Tick,
 
     // -- LLM streaming events --
-
     /// A text delta from the LLM stream (token-by-token).
     LlmDelta { text: String },
     /// Reasoning/thinking tokens from the LLM.
@@ -59,7 +60,11 @@ pub enum AppEvent {
     /// Sent after each API response so the UI can show incremental token counts.
     LlmUsageUpdate { usage: StreamUsage },
     /// LLM connection is being retried after a transient error.
-    LlmRetry { attempt: u32, max_attempts: u32, error: String },
+    LlmRetry {
+        attempt: u32,
+        max_attempts: u32,
+        error: String,
+    },
     /// LLM error (stream failure or API error).
     LlmError { error: String },
     /// System-level notification from the stream task (e.g., tool loop warnings).
@@ -84,7 +89,6 @@ pub enum AppEvent {
     },
 
     // -- Permission events --
-
     /// A tool call needs user permission before executing.
     PermissionRequest(PermissionRequest),
 
@@ -92,26 +96,20 @@ pub enum AppEvent {
     QuestionRequest(QuestionRequest),
 
     // -- Compact events --
-
     /// Compaction completed successfully with a summary.
     CompactFinish { summary: String },
     /// Compaction failed.
     CompactError { error: String },
 
     // -- AGENTS.md update events --
-
     /// LLM has generated a proposed AGENTS.md update.
     AgentsUpdateFinish { proposed_content: String },
     /// AGENTS.md update generation failed.
     AgentsUpdateError { error: String },
 
     // -- Title generation events --
-
     /// Async LLM title generation completed.
-    TitleGenerated {
-        session_id: String,
-        title: String,
-    },
+    TitleGenerated { session_id: String, title: String },
     /// Async LLM title generation failed; carry pre-computed fallback title.
     TitleError {
         session_id: String,

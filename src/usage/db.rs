@@ -307,8 +307,8 @@ pub fn query_usage_stats(conn: &Connection, filter: &SessionFilter) -> Result<Us
     );
 
     let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-    let (session_count, call_count, total_tokens, total_cost): (i64, i64, i64, f64) =
-        conn.query_row(&sql, param_refs.as_slice(), |row| {
+    let (session_count, call_count, total_tokens, total_cost): (i64, i64, i64, f64) = conn
+        .query_row(&sql, param_refs.as_slice(), |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })?;
 
@@ -366,9 +366,8 @@ pub fn query_projects(conn: &Connection) -> Result<Vec<ProjectInfo>> {
 
 /// Distinct model_ref values for the filter UI.
 pub fn query_distinct_models(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT model_ref FROM api_calls ORDER BY model_ref ASC",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT DISTINCT model_ref FROM api_calls ORDER BY model_ref ASC")?;
 
     let rows = stmt.query_map([], |row| row.get(0))?;
 

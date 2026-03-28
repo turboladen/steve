@@ -244,10 +244,7 @@ pub fn render_session_picker(
 
     // Filter input line: "> filter▌"
     let filter_display = format!("> {}\u{258c}", state.filter_text());
-    let filter_line = Line::from(Span::styled(
-        filter_display,
-        Style::default().fg(theme.fg),
-    ));
+    let filter_line = Line::from(Span::styled(filter_display, Style::default().fg(theme.fg)));
     let filter_area = Rect {
         x: inner.x,
         y: inner.y,
@@ -350,8 +347,8 @@ pub fn render_session_picker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{TimeZone, Utc};
     use crate::session::types::TokenUsage;
+    use chrono::{TimeZone, Utc};
 
     fn sample_sessions() -> Vec<SessionInfo> {
         vec![
@@ -541,11 +538,15 @@ mod tests {
         state.open(&sample_sessions(), Some("s2"));
 
         let sessions = state.filtered_sessions();
-        let current = sessions.iter().find(|(_, title, _, _)| *title == "Add session picker");
+        let current = sessions
+            .iter()
+            .find(|(_, title, _, _)| *title == "Add session picker");
         assert!(current.is_some());
         assert!(current.unwrap().3); // is_current = true
 
-        let other = sessions.iter().find(|(_, title, _, _)| *title == "Fix login bug");
+        let other = sessions
+            .iter()
+            .find(|(_, title, _, _)| *title == "Fix login bug");
         assert!(other.is_some());
         assert!(!other.unwrap().3); // is_current = false
     }
@@ -753,7 +754,10 @@ mod tests {
             .map(|y| buf[(0u16, y)].symbol().to_string())
             .collect::<Vec<_>>()
             .join("");
-        let col0_trimmed: String = col0_content.chars().filter(|c| !c.is_whitespace()).collect();
+        let col0_trimmed: String = col0_content
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
         assert!(
             col0_trimmed.is_empty(),
             "column 0 should be empty (popup centered), got: '{col0_trimmed}'"

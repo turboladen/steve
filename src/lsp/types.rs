@@ -58,19 +58,15 @@ impl Language {
         let mut found_python = root.join("pyproject.toml").exists()
             || root.join("setup.py").exists()
             || root.join("requirements.txt").exists();
-        let mut found_ts = root.join("package.json").exists()
-            || root.join("tsconfig.json").exists();
+        let mut found_ts =
+            root.join("package.json").exists() || root.join("tsconfig.json").exists();
         let mut found_ruby = root.join("Gemfile").exists()
             || std::fs::read_dir(root)
                 .ok()
                 .map(|entries| {
                     entries
                         .filter_map(|e| e.ok())
-                        .any(|e| {
-                            e.path()
-                                .extension()
-                                .is_some_and(|ext| ext == "gemspec")
-                        })
+                        .any(|e| e.path().extension().is_some_and(|ext| ext == "gemspec"))
                 })
                 .unwrap_or(false);
 
@@ -274,10 +270,7 @@ mod tests {
     fn server_candidates_have_valid_binary_names() {
         for lang in Language::iter() {
             for candidate in lang.server_candidates() {
-                assert!(
-                    !candidate.binary.is_empty(),
-                    "{lang} has empty binary name"
-                );
+                assert!(!candidate.binary.is_empty(), "{lang} has empty binary name");
                 assert!(
                     !candidate.binary.contains('/'),
                     "{lang} binary should be a bare name, not a path"
@@ -302,7 +295,10 @@ mod tests {
         std::fs::create_dir_all(&subdir).unwrap();
         std::fs::write(subdir.join("pyproject.toml"), "").unwrap();
         let langs = Language::detect_from_project(dir.path());
-        assert!(langs.contains(&Language::Python), "Python not detected in subdir");
+        assert!(
+            langs.contains(&Language::Python),
+            "Python not detected in subdir"
+        );
         assert!(langs.contains(&Language::Json)); // always included
     }
 
@@ -322,8 +318,14 @@ mod tests {
 
         let langs = Language::detect_from_project(dir.path());
         assert!(langs.contains(&Language::Rust), "Rust not detected at root");
-        assert!(langs.contains(&Language::Python), "Python not detected in svc/api");
-        assert!(langs.contains(&Language::TypeScript), "TS not detected in pkg/ui");
+        assert!(
+            langs.contains(&Language::Python),
+            "Python not detected in svc/api"
+        );
+        assert!(
+            langs.contains(&Language::TypeScript),
+            "TS not detected in pkg/ui"
+        );
         assert!(langs.contains(&Language::Json), "JSON always included");
     }
 
@@ -361,7 +363,11 @@ mod tests {
             let id = lang.language_id();
             assert!(!id.is_empty(), "{lang} should have a non-empty language_id");
             // Language IDs should be lowercase per LSP convention
-            assert_eq!(id, id.to_lowercase(), "{lang} language_id should be lowercase");
+            assert_eq!(
+                id,
+                id.to_lowercase(),
+                "{lang} language_id should be lowercase"
+            );
         }
     }
 }

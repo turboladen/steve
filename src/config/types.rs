@@ -205,28 +205,21 @@ mod tests {
 
     #[test]
     fn default_context_window_is_128k() {
-        let model: ModelConfig = serde_json::from_str(
-            r#"{"id": "test", "name": "Test"}"#,
-        )
-        .unwrap();
+        let model: ModelConfig = serde_json::from_str(r#"{"id": "test", "name": "Test"}"#).unwrap();
         assert_eq!(model.context_window, 128_000);
     }
 
     #[test]
     fn custom_context_window() {
-        let model: ModelConfig = serde_json::from_str(
-            r#"{"id": "test", "name": "Test", "context_window": 32000}"#,
-        )
-        .unwrap();
+        let model: ModelConfig =
+            serde_json::from_str(r#"{"id": "test", "name": "Test", "context_window": 32000}"#)
+                .unwrap();
         assert_eq!(model.context_window, 32_000);
     }
 
     #[test]
     fn capabilities_default_to_false() {
-        let model: ModelConfig = serde_json::from_str(
-            r#"{"id": "test", "name": "Test"}"#,
-        )
-        .unwrap();
+        let model: ModelConfig = serde_json::from_str(r#"{"id": "test", "name": "Test"}"#).unwrap();
         assert!(!model.capabilities.tool_call);
         assert!(!model.capabilities.reasoning);
     }
@@ -364,8 +357,14 @@ mod tests {
         assert_eq!(openai.base_url, "https://custom.proxy/v1");
         assert_eq!(openai.api_key_env, "CUSTOM_KEY");
         // Both models present
-        assert!(openai.models.contains_key("gpt-4o"), "global model preserved");
-        assert!(openai.models.contains_key("gpt-4o-mini"), "project model added");
+        assert!(
+            openai.models.contains_key("gpt-4o"),
+            "global model preserved"
+        );
+        assert!(
+            openai.models.contains_key("gpt-4o-mini"),
+            "project model added"
+        );
     }
 
     #[test]
@@ -424,16 +423,25 @@ mod tests {
     #[test]
     fn default_theme_is_auto() {
         let config: Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(config.theme, crate::ui::terminal_detect::ThemePreference::Auto);
+        assert_eq!(
+            config.theme,
+            crate::ui::terminal_detect::ThemePreference::Auto
+        );
     }
 
     #[test]
     fn theme_dark_light_parse() {
         let config: Config = serde_json::from_str(r#"{"theme": "dark"}"#).unwrap();
-        assert_eq!(config.theme, crate::ui::terminal_detect::ThemePreference::Dark);
+        assert_eq!(
+            config.theme,
+            crate::ui::terminal_detect::ThemePreference::Dark
+        );
 
         let config: Config = serde_json::from_str(r#"{"theme": "light"}"#).unwrap();
-        assert_eq!(config.theme, crate::ui::terminal_detect::ThemePreference::Light);
+        assert_eq!(
+            config.theme,
+            crate::ui::terminal_detect::ThemePreference::Light
+        );
     }
 
     #[test]
@@ -443,7 +451,10 @@ mod tests {
         let project = Config::default();
         let merged = global.merge(project);
         // Project has Auto (default) theme, so global Dark should be preserved
-        assert_eq!(merged.theme, crate::ui::terminal_detect::ThemePreference::Dark);
+        assert_eq!(
+            merged.theme,
+            crate::ui::terminal_detect::ThemePreference::Dark
+        );
     }
 
     #[test]
@@ -457,7 +468,10 @@ mod tests {
         let mut project = Config::default();
         project.theme = crate::ui::terminal_detect::ThemePreference::Dark;
         let merged = global.merge(project);
-        assert_eq!(merged.theme, crate::ui::terminal_detect::ThemePreference::Dark);
+        assert_eq!(
+            merged.theme,
+            crate::ui::terminal_detect::ThemePreference::Dark
+        );
     }
 
     #[test]

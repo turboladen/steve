@@ -222,12 +222,16 @@ pub fn render_model_picker(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .title(Line::from(vec![
-            Span::styled(title_left, Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
-        ]))
-        .title_bottom(Line::from(vec![
-            Span::styled(hints_text, Style::default().fg(theme.dim)),
-        ]));
+        .title(Line::from(vec![Span::styled(
+            title_left,
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )]))
+        .title_bottom(Line::from(vec![Span::styled(
+            hints_text,
+            Style::default().fg(theme.dim),
+        )]));
 
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
@@ -238,10 +242,7 @@ pub fn render_model_picker(
 
     // Filter input line: "> filter▌"
     let filter_display = format!("> {}\u{258c}", state.filter_text());
-    let filter_line = Line::from(Span::styled(
-        filter_display,
-        Style::default().fg(theme.fg),
-    ));
+    let filter_line = Line::from(Span::styled(filter_display, Style::default().fg(theme.fg)));
     let filter_area = Rect {
         x: inner.x,
         y: inner.y,
@@ -491,7 +492,9 @@ mod tests {
         assert!(current_entry.is_some());
         assert!(current_entry.unwrap().2); // is_current = true
 
-        let non_current = models.iter().find(|(r, _, _)| *r == "anthropic/claude-3-opus");
+        let non_current = models
+            .iter()
+            .find(|(r, _, _)| *r == "anthropic/claude-3-opus");
         assert!(non_current.is_some());
         assert!(!non_current.unwrap().2); // is_current = false
     }
@@ -677,7 +680,10 @@ mod tests {
             .map(|y| buf[(0u16, y)].symbol().to_string())
             .collect::<Vec<_>>()
             .join("");
-        let col0_trimmed: String = col0_content.chars().filter(|c| !c.is_whitespace()).collect();
+        let col0_trimmed: String = col0_content
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
         assert!(
             col0_trimmed.is_empty(),
             "column 0 should be empty (popup centered), got: '{col0_trimmed}'"

@@ -36,7 +36,10 @@ pub fn run_diagnostics(input: &DiagnosticInput) -> Vec<DiagnosticCheck> {
 
     results.extend(checks::lsp_health_checks(input.lsp_servers));
 
-    results.extend(checks::mcp_health_checks(input.mcp_configured, input.mcp_connected));
+    results.extend(checks::mcp_health_checks(
+        input.mcp_configured,
+        input.mcp_connected,
+    ));
 
     results.extend(checks::session_efficiency_checks(
         input.total_tokens,

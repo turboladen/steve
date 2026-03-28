@@ -18,15 +18,16 @@ pub struct MarkdownLine<'a> {
 /// inline formatting (bold, italic, code, links). Code blocks are handled
 /// at a higher level in `render_text_with_code_blocks` — this function
 /// only sees prose lines.
-pub fn render_markdown_line(line: &str, theme: &Theme, available_width: usize) -> MarkdownLine<'static> {
+pub fn render_markdown_line(
+    line: &str,
+    theme: &Theme,
+    available_width: usize,
+) -> MarkdownLine<'static> {
     // Horizontal rule: 3+ of the same char (-, *, _) optionally with spaces
     if is_horizontal_rule(line) {
         let rule = "\u{2500}".repeat(available_width);
         return MarkdownLine {
-            styled: Line::from(Span::styled(
-                rule,
-                Style::default().fg(theme.dim),
-            )),
+            styled: Line::from(Span::styled(rule, Style::default().fg(theme.dim))),
             plain: String::new(),
         };
     }
@@ -116,7 +117,9 @@ fn parse_inline_spans(text: &str, theme: &Theme) -> Vec<InlineSpan<'static>> {
                 spans.push(InlineSpan {
                     span: Span::styled(
                         code_text.clone(),
-                        Style::default().fg(theme.assistant_msg).bg(theme.inline_code_bg),
+                        Style::default()
+                            .fg(theme.assistant_msg)
+                            .bg(theme.inline_code_bg),
                     ),
                     plain: code_text,
                 });
@@ -142,15 +145,14 @@ fn parse_inline_spans(text: &str, theme: &Theme) -> Vec<InlineSpan<'static>> {
                 spans.push(InlineSpan {
                     span: Span::styled(
                         link_text.clone(),
-                        Style::default().fg(theme.link).add_modifier(Modifier::UNDERLINED),
+                        Style::default()
+                            .fg(theme.link)
+                            .add_modifier(Modifier::UNDERLINED),
                     ),
                     plain: link_text,
                 });
                 spans.push(InlineSpan {
-                    span: Span::styled(
-                        format!(" ({url})"),
-                        Style::default().fg(theme.dim),
-                    ),
+                    span: Span::styled(format!(" ({url})"), Style::default().fg(theme.dim)),
                     plain: String::new(), // URL not in plain text
                 });
                 i = end;
@@ -226,7 +228,8 @@ fn scan_inline_code(chars: &[char], start: usize) -> Option<(String, usize)> {
         }
         if closing == ticks {
             // Trim single leading/trailing space per CommonMark spec
-            let trimmed = if content.starts_with(' ') && content.ends_with(' ') && content.len() > 1 {
+            let trimmed = if content.starts_with(' ') && content.ends_with(' ') && content.len() > 1
+            {
                 content[1..content.len() - 1].to_string()
             } else {
                 content
@@ -457,8 +460,7 @@ fn is_table_separator(line: &str) -> bool {
         return false;
     }
     // After removing pipes, colons, dashes, and spaces — nothing should remain
-    trimmed.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
-        && trimmed.contains('-')
+    trimmed.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ')) && trimmed.contains('-')
 }
 
 /// Parse a table row into cells (strips leading/trailing pipes and trims each cell).
@@ -467,14 +469,21 @@ fn parse_table_cells(line: &str) -> Vec<String> {
     // Strip leading/trailing pipe
     let inner = trimmed.strip_prefix('|').unwrap_or(trimmed);
     let inner = inner.strip_suffix('|').unwrap_or(inner);
-    inner.split('|').map(|cell| cell.trim().to_string()).collect()
+    inner
+        .split('|')
+        .map(|cell| cell.trim().to_string())
+        .collect()
 }
 
 /// Render buffered table rows into styled MarkdownLines.
 ///
 /// The first row is treated as the header (rendered bold). The separator row
 /// is replaced with box-drawing horizontal lines. Data rows use normal styling.
-pub fn render_table(rows: &[String], theme: &Theme, available_width: usize) -> Vec<MarkdownLine<'static>> {
+pub fn render_table(
+    rows: &[String],
+    theme: &Theme,
+    available_width: usize,
+) -> Vec<MarkdownLine<'static>> {
     if rows.is_empty() {
         return vec![];
     }
@@ -529,7 +538,9 @@ pub fn render_table(rows: &[String], theme: &Theme, available_width: usize) -> V
     }
 
     let border_style = Style::default().fg(theme.dim);
-    let header_style = Style::default().fg(theme.heading).add_modifier(Modifier::BOLD);
+    let header_style = Style::default()
+        .fg(theme.heading)
+        .add_modifier(Modifier::BOLD);
     let cell_style = Style::default().fg(theme.assistant_msg);
 
     let mut result: Vec<MarkdownLine<'static>> = Vec::new();
@@ -605,7 +616,10 @@ mod tests {
     fn inline_code_basic() {
         let result = render_markdown_line("use `foo` here", &dark(), 40);
         assert_eq!(result.plain, "use foo here");
-        assert!(result.styled.spans.len() >= 3, "expected at least 3 spans: text, code, text");
+        assert!(
+            result.styled.spans.len() >= 3,
+            "expected at least 3 spans: text, code, text"
+        );
         // The code span should have inline_code_bg
         let code_span = &result.styled.spans[1];
         assert_eq!(code_span.style.bg, Some(dark().inline_code_bg));
@@ -631,7 +645,12 @@ mod tests {
         let result = render_markdown_line("this is **bold** text", &dark(), 40);
         assert_eq!(result.plain, "this is bold text");
         // Find the bold span
-        let bold_span = result.styled.spans.iter().find(|s| s.content.as_ref() == "bold").unwrap();
+        let bold_span = result
+            .styled
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "bold")
+            .unwrap();
         assert!(bold_span.style.add_modifier.contains(Modifier::BOLD));
     }
 
@@ -647,7 +666,12 @@ mod tests {
     fn italic_basic() {
         let result = render_markdown_line("this is *italic* text", &dark(), 40);
         assert_eq!(result.plain, "this is italic text");
-        let italic_span = result.styled.spans.iter().find(|s| s.content.as_ref() == "italic").unwrap();
+        let italic_span = result
+            .styled
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "italic")
+            .unwrap();
         assert!(italic_span.style.add_modifier.contains(Modifier::ITALIC));
     }
 
@@ -657,7 +681,12 @@ mod tests {
     fn bold_italic() {
         let result = render_markdown_line("this is ***important*** text", &dark(), 40);
         assert_eq!(result.plain, "this is important text");
-        let span = result.styled.spans.iter().find(|s| s.content.as_ref() == "important").unwrap();
+        let span = result
+            .styled
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "important")
+            .unwrap();
         assert!(span.style.add_modifier.contains(Modifier::BOLD));
         assert!(span.style.add_modifier.contains(Modifier::ITALIC));
     }
@@ -682,7 +711,12 @@ mod tests {
     fn link_basic() {
         let result = render_markdown_line("see [docs](https://example.com) here", &dark(), 40);
         assert_eq!(result.plain, "see docs here");
-        let link_span = result.styled.spans.iter().find(|s| s.content.as_ref() == "docs").unwrap();
+        let link_span = result
+            .styled
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "docs")
+            .unwrap();
         assert_eq!(link_span.style.fg, Some(dark().link));
         assert!(link_span.style.add_modifier.contains(Modifier::UNDERLINED));
     }
@@ -768,7 +802,12 @@ mod tests {
     fn horizontal_rule_dashes() {
         let result = render_markdown_line("---", &dark(), 20);
         assert!(result.plain.is_empty());
-        let text: String = result.styled.spans.iter().map(|s| s.content.as_ref()).collect();
+        let text: String = result
+            .styled
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
         assert!(text.contains('\u{2500}'), "should contain ─ chars");
     }
 

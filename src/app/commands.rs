@@ -197,7 +197,8 @@ impl App {
                 });
                 self.message_area_state.scroll_to_bottom();
                 self.is_loading = true;
-                self.status_line_state.set_activity(Activity::UpdatingAgents);
+                self.status_line_state
+                    .set_activity(Activity::UpdatingAgents);
 
                 let api_model_id = resolved.api_model_id().to_string();
                 let event_tx = self.event_tx.clone();
@@ -215,7 +216,8 @@ impl App {
                         .await
                     {
                         Ok(proposed_content) => {
-                            let _ = event_tx.send(AppEvent::AgentsUpdateFinish { proposed_content });
+                            let _ =
+                                event_tx.send(AppEvent::AgentsUpdateFinish { proposed_content });
                         }
                         Err(e) => {
                             let _ = event_tx.send(AppEvent::AgentsUpdateError {
@@ -374,32 +376,64 @@ impl App {
                     let mut output = String::new();
                     // Group tasks by epic
                     for epic in &epics {
-                        let epic_tasks: Vec<_> = tasks.iter().filter(|t| t.epic_id.as_deref() == Some(&epic.id)).collect();
+                        let epic_tasks: Vec<_> = tasks
+                            .iter()
+                            .filter(|t| t.epic_id.as_deref() == Some(&epic.id))
+                            .collect();
                         if !epic_tasks.is_empty() {
                             output.push_str(&format!("## {} ({})\n", epic.title, epic.id));
                             for t in &epic_tasks {
-                                let marker = if t.status == crate::task::types::TaskStatus::Done { "x" } else { " " };
-                                let bug_label = if t.kind == TaskKind::Bug { " [bug]" } else { "" };
-                                output.push_str(&format!("  - [{marker}] {}: {}{bug_label} [{}]\n", t.id, t.title, t.priority));
+                                let marker = if t.status == crate::task::types::TaskStatus::Done {
+                                    "x"
+                                } else {
+                                    " "
+                                };
+                                let bug_label = if t.kind == TaskKind::Bug {
+                                    " [bug]"
+                                } else {
+                                    ""
+                                };
+                                output.push_str(&format!(
+                                    "  - [{marker}] {}: {}{bug_label} [{}]\n",
+                                    t.id, t.title, t.priority
+                                ));
                             }
                         }
                     }
                     // Standalone tasks (no epic)
                     let standalone: Vec<_> = tasks.iter().filter(|t| t.epic_id.is_none()).collect();
                     if !standalone.is_empty() {
-                        if !output.is_empty() { output.push('\n'); }
+                        if !output.is_empty() {
+                            output.push('\n');
+                        }
                         output.push_str("## Standalone Tasks\n");
                         for t in &standalone {
-                            let marker = if t.status == crate::task::types::TaskStatus::Done { "x" } else { " " };
-                            output.push_str(&format!("  - [{marker}] {}: {} [{}]\n", t.id, t.title, t.priority));
+                            let marker = if t.status == crate::task::types::TaskStatus::Done {
+                                "x"
+                            } else {
+                                " "
+                            };
+                            output.push_str(&format!(
+                                "  - [{marker}] {}: {} [{}]\n",
+                                t.id, t.title, t.priority
+                            ));
                         }
                     }
-                    self.messages.push(MessageBlock::System { text: output.trim_end().to_string() });
+                    self.messages.push(MessageBlock::System {
+                        text: output.trim_end().to_string(),
+                    });
                 }
                 self.update_sidebar();
             }
             Command::TaskNew(title) => {
-                match self.task_store.create_task(&title, None, None, None, Priority::default(), TaskKind::Task) {
+                match self.task_store.create_task(
+                    &title,
+                    None,
+                    None,
+                    None,
+                    Priority::default(),
+                    TaskKind::Task,
+                ) {
                     Ok(task) => {
                         self.messages.push(MessageBlock::System {
                             text: format!("Created task: {} \u{2014} {}", task.id, task.title),
@@ -413,44 +447,46 @@ impl App {
                     }
                 }
             }
-            Command::TaskDone(id) => {
-                match self.task_store.complete_task(&id) {
-                    Ok(task) => {
-                        self.messages.push(MessageBlock::System {
-                            text: format!("Completed: {} \u{2014} {}", task.id, task.title),
-                        });
-                        self.update_sidebar();
-                    }
-                    Err(e) => {
-                        self.messages.push(MessageBlock::Error {
-                            text: format!("Failed to complete task: {e}"),
-                        });
-                    }
+            Command::TaskDone(id) => match self.task_store.complete_task(&id) {
+                Ok(task) => {
+                    self.messages.push(MessageBlock::System {
+                        text: format!("Completed: {} \u{2014} {}", task.id, task.title),
+                    });
+                    self.update_sidebar();
                 }
-            }
-            Command::TaskShow(id) => {
-                match self.task_store.get_task(&id) {
-                    Ok(task) => {
-                        let epic_info = task.epic_id.as_ref()
-                            .and_then(|eid| self.task_store.get_epic(eid).ok())
-                            .map(|e| format!("{} ({})", e.title, e.id))
-                            .unwrap_or_else(|| "(none)".to_string());
-                        let text = format!(
-                            "ID: {}\nType: {}\nTitle: {}\nStatus: {}\nPriority: {}\nEpic: {}\nDescription: {}\nCreated: {}",
-                            task.id, task.kind, task.title, task.status, task.priority,
-                            epic_info,
-                            task.description.as_deref().unwrap_or("(none)"),
-                            task.created_at.format("%Y-%m-%d %H:%M"),
-                        );
-                        self.messages.push(MessageBlock::System { text });
-                    }
-                    Err(e) => {
-                        self.messages.push(MessageBlock::Error {
-                            text: format!("Task not found: {e}"),
-                        });
-                    }
+                Err(e) => {
+                    self.messages.push(MessageBlock::Error {
+                        text: format!("Failed to complete task: {e}"),
+                    });
                 }
-            }
+            },
+            Command::TaskShow(id) => match self.task_store.get_task(&id) {
+                Ok(task) => {
+                    let epic_info = task
+                        .epic_id
+                        .as_ref()
+                        .and_then(|eid| self.task_store.get_epic(eid).ok())
+                        .map(|e| format!("{} ({})", e.title, e.id))
+                        .unwrap_or_else(|| "(none)".to_string());
+                    let text = format!(
+                        "ID: {}\nType: {}\nTitle: {}\nStatus: {}\nPriority: {}\nEpic: {}\nDescription: {}\nCreated: {}",
+                        task.id,
+                        task.kind,
+                        task.title,
+                        task.status,
+                        task.priority,
+                        epic_info,
+                        task.description.as_deref().unwrap_or("(none)"),
+                        task.created_at.format("%Y-%m-%d %H:%M"),
+                    );
+                    self.messages.push(MessageBlock::System { text });
+                }
+                Err(e) => {
+                    self.messages.push(MessageBlock::Error {
+                        text: format!("Task not found: {e}"),
+                    });
+                }
+            },
             Command::TaskEdit(args_str) => {
                 // Parse: "<task-id> field=value field=value ..."
                 let parts: Vec<&str> = args_str.splitn(2, ' ').collect();
@@ -462,31 +498,50 @@ impl App {
                             for pair in kv_str.split_whitespace() {
                                 if let Some((key, val)) = pair.split_once('=') {
                                     match key {
-                                        "title" => { task.title = val.to_string(); changed.push("title"); }
-                                        "priority" => {
-                                            match val {
-                                                "high" => { task.priority = crate::task::types::Priority::High; changed.push("priority"); }
-                                                "medium" => { task.priority = crate::task::types::Priority::Medium; changed.push("priority"); }
-                                                "low" => { task.priority = crate::task::types::Priority::Low; changed.push("priority"); }
-                                                _ => {
-                                                    self.messages.push(MessageBlock::Error {
+                                        "title" => {
+                                            task.title = val.to_string();
+                                            changed.push("title");
+                                        }
+                                        "priority" => match val {
+                                            "high" => {
+                                                task.priority = crate::task::types::Priority::High;
+                                                changed.push("priority");
+                                            }
+                                            "medium" => {
+                                                task.priority =
+                                                    crate::task::types::Priority::Medium;
+                                                changed.push("priority");
+                                            }
+                                            "low" => {
+                                                task.priority = crate::task::types::Priority::Low;
+                                                changed.push("priority");
+                                            }
+                                            _ => {
+                                                self.messages.push(MessageBlock::Error {
                                                         text: format!("Invalid priority '{val}'. Use high, medium, or low."),
                                                     });
-                                                }
                                             }
-                                        }
-                                        "status" => {
-                                            match val {
-                                                "open" => { task.status = crate::task::types::TaskStatus::Open; changed.push("status"); }
-                                                "in_progress" | "inprogress" => { task.status = crate::task::types::TaskStatus::InProgress; changed.push("status"); }
-                                                "done" => { task.status = crate::task::types::TaskStatus::Done; changed.push("status"); }
-                                                _ => {
-                                                    self.messages.push(MessageBlock::Error {
+                                        },
+                                        "status" => match val {
+                                            "open" => {
+                                                task.status = crate::task::types::TaskStatus::Open;
+                                                changed.push("status");
+                                            }
+                                            "in_progress" | "inprogress" => {
+                                                task.status =
+                                                    crate::task::types::TaskStatus::InProgress;
+                                                changed.push("status");
+                                            }
+                                            "done" => {
+                                                task.status = crate::task::types::TaskStatus::Done;
+                                                changed.push("status");
+                                            }
+                                            _ => {
+                                                self.messages.push(MessageBlock::Error {
                                                         text: format!("Invalid status '{val}'. Use open, in_progress, or done."),
                                                     });
-                                                }
                                             }
-                                        }
+                                        },
                                         _ => {
                                             self.messages.push(MessageBlock::Error {
                                                 text: format!("Unknown field '{key}'. Use title, priority, or status."),
@@ -525,18 +580,30 @@ impl App {
                         text: "No epics. Use /epic-new <title> to create one.".to_string(),
                     });
                 } else {
-                    let lines: Vec<String> = epics.iter().map(|e| {
-                        let ref_str = e.external_ref.as_deref().unwrap_or("");
-                        let ref_part = if ref_str.is_empty() { String::new() } else { format!(" ({ref_str})") };
-                        format!("  {} \u{2014} {} [{}]{ref_part}", e.id, e.title, e.status)
-                    }).collect();
+                    let lines: Vec<String> = epics
+                        .iter()
+                        .map(|e| {
+                            let ref_str = e.external_ref.as_deref().unwrap_or("");
+                            let ref_part = if ref_str.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" ({ref_str})")
+                            };
+                            format!("  {} \u{2014} {} [{}]{ref_part}", e.id, e.title, e.status)
+                        })
+                        .collect();
                     self.messages.push(MessageBlock::System {
                         text: format!("## Epics\n{}", lines.join("\n")),
                     });
                 }
             }
             Command::EpicNew(title) => {
-                match self.task_store.create_epic(&title, "", None, crate::task::types::Priority::default()) {
+                match self.task_store.create_epic(
+                    &title,
+                    "",
+                    None,
+                    crate::task::types::Priority::default(),
+                ) {
                     Ok(epic) => {
                         self.messages.push(MessageBlock::System {
                             text: format!("Created epic: {} \u{2014} {}", epic.id, epic.title),
@@ -550,16 +617,20 @@ impl App {
                 }
             }
             Command::Mcp => {
-                self.open_mcp_overlay(crate::ui::mcp_overlay::McpTab::Servers, None).await;
+                self.open_mcp_overlay(crate::ui::mcp_overlay::McpTab::Servers, None)
+                    .await;
             }
             Command::McpTools(filter) => {
-                self.open_mcp_overlay(crate::ui::mcp_overlay::McpTab::Tools, filter).await;
+                self.open_mcp_overlay(crate::ui::mcp_overlay::McpTab::Tools, filter)
+                    .await;
             }
             Command::McpResources(filter) => {
-                self.open_mcp_overlay(crate::ui::mcp_overlay::McpTab::Resources, filter).await;
+                self.open_mcp_overlay(crate::ui::mcp_overlay::McpTab::Resources, filter)
+                    .await;
             }
             Command::McpPrompts(filter) => {
-                self.open_mcp_overlay(crate::ui::mcp_overlay::McpTab::Prompts, filter).await;
+                self.open_mcp_overlay(crate::ui::mcp_overlay::McpTab::Prompts, filter)
+                    .await;
             }
         }
 
@@ -585,7 +656,10 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tests::{make_test_app, make_test_app_with_storage, make_test_registry, has_error_message, has_system_message};
+    use crate::app::tests::{
+        has_error_message, has_system_message, make_test_app, make_test_app_with_storage,
+        make_test_registry,
+    };
 
     fn last_message_text(app: &App) -> String {
         match app.messages.last() {
@@ -617,7 +691,9 @@ mod tests {
         app.context_warned = true;
         app.last_prompt_tokens = 9999;
         app.exchange_count = 10;
-        app.messages.push(MessageBlock::User { text: "hello".into() });
+        app.messages.push(MessageBlock::User {
+            text: "hello".into(),
+        });
 
         app.handle_command("/new").await.unwrap();
 
@@ -717,7 +793,8 @@ mod tests {
             model_ref: "test/m".into(),
             token_usage: Default::default(),
         });
-        app.stored_messages.push(crate::session::message::Message::user("test", "hello"));
+        app.stored_messages
+            .push(crate::session::message::Message::user("test", "hello"));
         app.is_loading = true;
         app.handle_command("/compact").await.unwrap();
         assert!(has_error_message(&app, "Cannot compact while streaming"));
@@ -735,7 +812,8 @@ mod tests {
             model_ref: "test/m".into(),
             token_usage: Default::default(),
         });
-        app.stored_messages.push(crate::session::message::Message::user("test", "hello"));
+        app.stored_messages
+            .push(crate::session::message::Message::user("test", "hello"));
         app.streaming_active = true;
         app.handle_command("/compact").await.unwrap();
         assert!(has_error_message(&app, "Cannot compact while streaming"));
@@ -751,7 +829,9 @@ mod tests {
     #[tokio::test]
     async fn command_task_new_creates_task() {
         let (mut app, _dir) = make_test_app_with_storage();
-        app.handle_command("/task-new Fix the login bug").await.unwrap();
+        app.handle_command("/task-new Fix the login bug")
+            .await
+            .unwrap();
         assert!(has_system_message(&app, "Created task"));
         assert!(has_system_message(&app, "Fix the login bug"));
     }
@@ -769,18 +849,24 @@ mod tests {
         };
 
         // Show
-        app.handle_command(&format!("/task-show {task_id}")).await.unwrap();
+        app.handle_command(&format!("/task-show {task_id}"))
+            .await
+            .unwrap();
         assert!(has_system_message(&app, "Test task"));
 
         // Complete
-        app.handle_command(&format!("/task-done {task_id}")).await.unwrap();
+        app.handle_command(&format!("/task-done {task_id}"))
+            .await
+            .unwrap();
         assert!(has_system_message(&app, "Completed"));
     }
 
     #[tokio::test]
     async fn command_task_done_nonexistent_errors() {
         let mut app = make_test_app();
-        app.handle_command("/task-done nonexistent-id").await.unwrap();
+        app.handle_command("/task-done nonexistent-id")
+            .await
+            .unwrap();
         assert!(has_error_message(&app, "Failed to complete task"));
     }
 
@@ -804,7 +890,10 @@ mod tests {
         let mut app = make_test_app();
         app.is_loading = true;
         app.handle_command("/agents-update").await.unwrap();
-        assert!(has_error_message(&app, "Cannot update AGENTS.md while streaming"));
+        assert!(has_error_message(
+            &app,
+            "Cannot update AGENTS.md while streaming"
+        ));
     }
 
     #[tokio::test]
@@ -820,7 +909,10 @@ mod tests {
         let mut app = make_test_app();
         app.is_loading = true;
         app.handle_command("/sessions").await.unwrap();
-        assert!(has_error_message(&app, "Cannot browse sessions while streaming"));
+        assert!(has_error_message(
+            &app,
+            "Cannot browse sessions while streaming"
+        ));
     }
 
     #[tokio::test]

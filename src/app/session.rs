@@ -316,7 +316,7 @@ pub(super) fn sanitize_title(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tests::{make_test_app_with_storage, create_test_session};
+    use crate::app::tests::{create_test_session, make_test_app_with_storage};
 
     // -- title_fallback tests --
 
@@ -358,7 +358,10 @@ mod tests {
 
     #[test]
     fn sanitize_title_strips_double_quotes() {
-        assert_eq!(sanitize_title("\"Fix login redirect\""), "Fix login redirect");
+        assert_eq!(
+            sanitize_title("\"Fix login redirect\""),
+            "Fix login redirect"
+        );
     }
 
     #[test]
@@ -368,12 +371,18 @@ mod tests {
 
     #[test]
     fn sanitize_title_strips_title_prefix() {
-        assert_eq!(sanitize_title("Title: Fix login redirect"), "Fix login redirect");
+        assert_eq!(
+            sanitize_title("Title: Fix login redirect"),
+            "Fix login redirect"
+        );
     }
 
     #[test]
     fn sanitize_title_strips_title_prefix_case_insensitive() {
-        assert_eq!(sanitize_title("TITLE: Fix login redirect"), "Fix login redirect");
+        assert_eq!(
+            sanitize_title("TITLE: Fix login redirect"),
+            "Fix login redirect"
+        );
     }
 
     #[test]
@@ -402,7 +411,10 @@ mod tests {
 
     #[test]
     fn sanitize_title_trims_whitespace() {
-        assert_eq!(sanitize_title("  Fix login redirect  \n"), "Fix login redirect");
+        assert_eq!(
+            sanitize_title("  Fix login redirect  \n"),
+            "Fix login redirect"
+        );
     }
 
     #[test]
@@ -436,10 +448,7 @@ mod tests {
 
     #[test]
     fn title_fallback_strips_newlines() {
-        assert_eq!(
-            title_fallback("Fix bug\nin login.rs"),
-            "Fix bug"
-        );
+        assert_eq!(title_fallback("Fix bug\nin login.rs"), "Fix bug");
     }
 
     #[test]
@@ -482,7 +491,10 @@ mod tests {
 
         app.maybe_generate_title();
 
-        assert_eq!(app.current_session.as_ref().unwrap().title, "My Custom Title");
+        assert_eq!(
+            app.current_session.as_ref().unwrap().title,
+            "My Custom Title"
+        );
     }
 
     #[test]

@@ -1,7 +1,6 @@
 //! Move tool — rename or relocate files and directories.
 
-use std::fs;
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -14,7 +13,12 @@ pub fn tool() -> ToolEntry {
     ToolEntry {
         def: ToolDef {
             name: ToolName::Move,
-            description: func.get("description").unwrap().as_str().unwrap().to_string(),
+            description: func
+                .get("description")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string(),
             parameters: func.get("parameters").cloned().unwrap(),
         },
         handler: Box::new(execute),
@@ -115,7 +119,10 @@ mod tests {
         .unwrap();
         assert!(!result.is_error);
         assert!(!dir.path().join("a.txt").exists());
-        assert_eq!(fs::read_to_string(dir.path().join("b.txt")).unwrap(), "hello");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("b.txt")).unwrap(),
+            "hello"
+        );
     }
 
     #[test]

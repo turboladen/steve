@@ -1,5 +1,4 @@
-use std::fs;
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
@@ -41,8 +40,8 @@ impl Storage {
     /// Read a JSON value at the given key path.
     pub fn read<T: DeserializeOwned>(&self, key: &[&str]) -> Result<T> {
         let path = self.key_to_path(key);
-        let file = fs::File::open(&path)
-            .with_context(|| format!("failed to open: {}", path.display()))?;
+        let file =
+            fs::File::open(&path).with_context(|| format!("failed to open: {}", path.display()))?;
 
         // Shared (read) lock
         file.lock_shared()
@@ -81,8 +80,13 @@ impl Storage {
         drop(file);
 
         // Atomic rename
-        fs::rename(&tmp_path, &path)
-            .with_context(|| format!("failed to rename {} -> {}", tmp_path.display(), path.display()))?;
+        fs::rename(&tmp_path, &path).with_context(|| {
+            format!(
+                "failed to rename {} -> {}",
+                tmp_path.display(),
+                path.display()
+            )
+        })?;
 
         Ok(())
     }
@@ -146,8 +150,7 @@ impl Storage {
 
 /// Get the base data directory: `~/.local/share/steve/storage/`
 fn data_dir() -> Result<PathBuf> {
-    let dirs = ProjectDirs::from("", "", "steve")
-        .context("failed to determine data directory")?;
+    let dirs = ProjectDirs::from("", "", "steve").context("failed to determine data directory")?;
     let storage_dir = dirs.data_dir().join("storage");
     Ok(storage_dir)
 }
@@ -160,7 +163,8 @@ mod tests {
 
     fn test_storage() -> (Storage, tempfile::TempDir) {
         let dir = tempdir().expect("failed to create temp dir");
-        let storage = Storage::with_base(dir.path().to_path_buf()).expect("failed to create storage");
+        let storage =
+            Storage::with_base(dir.path().to_path_buf()).expect("failed to create storage");
         (storage, dir)
     }
 
@@ -177,7 +181,9 @@ mod tests {
     fn write_creates_parent_directories() {
         let (storage, _dir) = test_storage();
         let value = json!({"key": "value"});
-        storage.write(&["a", "b", "c"], &value).expect("write with nested key path failed");
+        storage
+            .write(&["a", "b", "c"], &value)
+            .expect("write with nested key path failed");
         let result: serde_json::Value = storage.read(&["a", "b", "c"]).expect("read failed");
         assert_eq!(result, value);
     }
@@ -200,9 +206,15 @@ mod tests {
     fn list_returns_file_stems() {
         let (storage, _dir) = test_storage();
         let value = json!({"key": "value"});
-        storage.write(&["items", "alpha"], &value).expect("write alpha failed");
-        storage.write(&["items", "beta"], &value).expect("write beta failed");
-        storage.write(&["items", "gamma"], &value).expect("write gamma failed");
+        storage
+            .write(&["items", "alpha"], &value)
+            .expect("write alpha failed");
+        storage
+            .write(&["items", "beta"], &value)
+            .expect("write beta failed");
+        storage
+            .write(&["items", "gamma"], &value)
+            .expect("write gamma failed");
 
         let mut items = storage.list(&["items"]).expect("list failed");
         items.sort();
@@ -254,7 +266,10 @@ mod tests {
                 }
             }
         }
-        assert!(tmp_files.is_empty(), "found residual tmp files: {tmp_files:?}");
+        assert!(
+            tmp_files.is_empty(),
+            "found residual tmp files: {tmp_files:?}"
+        );
     }
 
     #[test]
@@ -271,7 +286,9 @@ mod tests {
     fn key_to_path_multi_segment() {
         let (storage, _dir) = test_storage();
         let value = json!({"key": "value"});
-        storage.write(&["a", "b", "c"], &value).expect("write failed");
+        storage
+            .write(&["a", "b", "c"], &value)
+            .expect("write failed");
 
         let expected = storage.base_dir().join("a").join("b").join("c.json");
         assert!(expected.exists(), "expected {expected:?} to exist");
@@ -287,10 +304,14 @@ mod tests {
         let storage2 = storage.clone();
 
         let handle1 = std::thread::spawn(move || {
-            storage1.read::<serde_json::Value>(&["shared"]).expect("read 1 failed")
+            storage1
+                .read::<serde_json::Value>(&["shared"])
+                .expect("read 1 failed")
         });
         let handle2 = std::thread::spawn(move || {
-            storage2.read::<serde_json::Value>(&["shared"]).expect("read 2 failed")
+            storage2
+                .read::<serde_json::Value>(&["shared"])
+                .expect("read 2 failed")
         });
 
         let result1 = handle1.join().expect("thread 1 panicked");

@@ -168,11 +168,7 @@ fn render_session_table(frame: &mut Frame, area: Rect, state: &DataState, theme:
         .map(|col| {
             let label = col.label();
             let arrow = if *col == state.sort_column {
-                if state.sort_ascending {
-                    " ▲"
-                } else {
-                    " ▼"
-                }
+                if state.sort_ascending { " ▲" } else { " ▼" }
             } else {
                 ""
             };
@@ -250,18 +246,16 @@ fn render_session_table(frame: &mut Frame, area: Rect, state: &DataState, theme:
 
 fn render_stats_footer(frame: &mut Frame, area: Rect, state: &DataState, theme: &Theme) {
     let stats = &state.stats;
-    let line = Line::from(vec![
-        Span::styled(
-            format!(
-                " {} sessions · {} calls · {} tokens · {}",
-                stats.session_count,
-                stats.call_count,
-                format_tokens(stats.total_tokens),
-                format_cost(Some(stats.total_cost)),
-            ),
-            Style::default().fg(theme.dim),
+    let line = Line::from(vec![Span::styled(
+        format!(
+            " {} sessions · {} calls · {} tokens · {}",
+            stats.session_count,
+            stats.call_count,
+            format_tokens(stats.total_tokens),
+            format_cost(Some(stats.total_cost)),
         ),
-    ]);
+        Style::default().fg(theme.dim),
+    )]);
     frame.render_widget(Paragraph::new(line), area);
 }
 
@@ -287,12 +281,12 @@ fn render_session_detail(frame: &mut Frame, area: Rect, state: &DataState, theme
     .split(area);
 
     // Session header
-    let session_total_tokens: u64 = state.detail_calls.iter().map(|c| c.total_tokens as u64).sum();
-    let session_total_cost: f64 = state
+    let session_total_tokens: u64 = state
         .detail_calls
         .iter()
-        .filter_map(|c| c.cost)
+        .map(|c| c.total_tokens as u64)
         .sum();
+    let session_total_cost: f64 = state.detail_calls.iter().filter_map(|c| c.cost).sum();
     let cost_str = if state.detail_calls.iter().any(|c| c.cost.is_some()) {
         format_cost(Some(session_total_cost))
     } else {

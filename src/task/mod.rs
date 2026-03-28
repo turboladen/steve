@@ -24,7 +24,10 @@ impl TaskStore {
     /// `project_prefix` is the project name used in generated IDs (e.g., "steve"
     /// produces IDs like `steve-ta3f`).
     pub fn new(storage: Storage, project_prefix: String) -> Self {
-        Self { storage, project_prefix }
+        Self {
+            storage,
+            project_prefix,
+        }
     }
 
     // ── Task CRUD ──
@@ -58,8 +61,7 @@ impl TaskStore {
             created_at: now,
             updated_at: now,
         };
-        self.storage
-            .write(&["tasks", "items", &task.id], &task)?;
+        self.storage.write(&["tasks", "items", &task.id], &task)?;
         Ok(task)
     }
 
@@ -72,7 +74,14 @@ impl TaskStore {
         session_id: Option<&str>,
         priority: Priority,
     ) -> Result<Task> {
-        self.create_task(title, description, epic_id, session_id, priority, TaskKind::Bug)
+        self.create_task(
+            title,
+            description,
+            epic_id,
+            session_id,
+            priority,
+            TaskKind::Bug,
+        )
     }
 
     /// Read a task by ID.
@@ -83,8 +92,7 @@ impl TaskStore {
     /// Write an updated task back to storage, refreshing `updated_at`.
     pub fn update_task(&self, task: &mut Task) -> Result<()> {
         task.updated_at = Utc::now();
-        self.storage
-            .write(&["tasks", "items", &task.id], task)
+        self.storage.write(&["tasks", "items", &task.id], task)
     }
 
     /// List all tasks.
@@ -107,8 +115,7 @@ impl TaskStore {
         let mut task: Task = self.get_task(id)?;
         task.status = TaskStatus::Done;
         task.updated_at = Utc::now();
-        self.storage
-            .write(&["tasks", "items", &task.id], &task)?;
+        self.storage.write(&["tasks", "items", &task.id], &task)?;
         Ok(task)
     }
 
@@ -138,8 +145,7 @@ impl TaskStore {
             created_at: now,
             updated_at: now,
         };
-        self.storage
-            .write(&["tasks", "epics", &epic.id], &epic)?;
+        self.storage.write(&["tasks", "epics", &epic.id], &epic)?;
         Ok(epic)
     }
 
@@ -151,8 +157,7 @@ impl TaskStore {
     /// Write an updated epic back to storage, refreshing `updated_at`.
     pub fn update_epic(&self, epic: &mut Epic) -> Result<()> {
         epic.updated_at = Utc::now();
-        self.storage
-            .write(&["tasks", "epics", &epic.id], epic)
+        self.storage.write(&["tasks", "epics", &epic.id], epic)
     }
 
     /// List all epics.
@@ -175,8 +180,7 @@ impl TaskStore {
         let mut epic: Epic = self.get_epic(id)?;
         epic.status = EpicStatus::Done;
         epic.updated_at = Utc::now();
-        self.storage
-            .write(&["tasks", "epics", &epic.id], &epic)?;
+        self.storage.write(&["tasks", "epics", &epic.id], &epic)?;
         Ok(epic)
     }
 
@@ -361,8 +365,10 @@ fn truncate_summary(out: &mut String, max: usize) {
 /// paradox gives ~50% collision chance at ~256 IDs — sufficient for typical
 /// task counts but not guaranteed unique.
 fn generate_id(project_prefix: &str, kind_char: char) -> String {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        sync::atomic::{AtomicU32, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -393,7 +399,14 @@ mod tests {
     fn create_and_get_task_round_trip() {
         let (store, _dir) = test_store();
         let task = store
-            .create_task("Fix bug", Some("Segfault on exit"), None, None, Priority::High, TaskKind::Task)
+            .create_task(
+                "Fix bug",
+                Some("Segfault on exit"),
+                None,
+                None,
+                Priority::High,
+                TaskKind::Task,
+            )
             .expect("create_task");
         assert!(task.id.starts_with("test-t"), "got: {}", task.id);
         assert_eq!(task.title, "Fix bug");
@@ -410,7 +423,12 @@ mod tests {
     fn create_and_get_epic_round_trip() {
         let (store, _dir) = test_store();
         let epic = store
-            .create_epic("Big feature", "Implement everything", None, Priority::Medium)
+            .create_epic(
+                "Big feature",
+                "Implement everything",
+                None,
+                Priority::Medium,
+            )
             .expect("create_epic");
         assert!(epic.id.starts_with("test-e"), "got: {}", epic.id);
         assert_eq!(epic.title, "Big feature");
@@ -443,7 +461,14 @@ mod tests {
     fn complete_task_changes_status() {
         let (store, _dir) = test_store();
         let task = store
-            .create_task("Finish it", None, None, None, Priority::Medium, TaskKind::Task)
+            .create_task(
+                "Finish it",
+                None,
+                None,
+                None,
+                Priority::Medium,
+                TaskKind::Task,
+            )
             .unwrap();
         assert_eq!(task.status, TaskStatus::Open);
 
@@ -473,10 +498,24 @@ mod tests {
             .create_epic("My Epic", "desc", None, Priority::Medium)
             .unwrap();
         let t1 = store
-            .create_task("In epic", None, Some(&epic.id), None, Priority::Medium, TaskKind::Task)
+            .create_task(
+                "In epic",
+                None,
+                Some(&epic.id),
+                None,
+                Priority::Medium,
+                TaskKind::Task,
+            )
             .unwrap();
         let t2 = store
-            .create_task("No epic", None, None, None, Priority::Medium, TaskKind::Task)
+            .create_task(
+                "No epic",
+                None,
+                None,
+                None,
+                Priority::Medium,
+                TaskKind::Task,
+            )
             .unwrap();
 
         let filtered = store.tasks_by_epic(&epic.id).expect("tasks_by_epic");
@@ -489,10 +528,24 @@ mod tests {
     fn tasks_by_session_filters_correctly() {
         let (store, _dir) = test_store();
         let t1 = store
-            .create_task("Session A", None, None, Some("sess-a"), Priority::Medium, TaskKind::Task)
+            .create_task(
+                "Session A",
+                None,
+                None,
+                Some("sess-a"),
+                Priority::Medium,
+                TaskKind::Task,
+            )
             .unwrap();
         let t2 = store
-            .create_task("Session B", None, None, Some("sess-b"), Priority::Medium, TaskKind::Task)
+            .create_task(
+                "Session B",
+                None,
+                None,
+                Some("sess-b"),
+                Priority::Medium,
+                TaskKind::Task,
+            )
             .unwrap();
 
         let filtered = store.tasks_by_session("sess-a").expect("tasks_by_session");
@@ -505,10 +558,24 @@ mod tests {
     fn open_tasks_excludes_done() {
         let (store, _dir) = test_store();
         let t1 = store
-            .create_task("Open one", None, None, None, Priority::Medium, TaskKind::Task)
+            .create_task(
+                "Open one",
+                None,
+                None,
+                None,
+                Priority::Medium,
+                TaskKind::Task,
+            )
             .unwrap();
         let t2 = store
-            .create_task("Done one", None, None, None, Priority::Medium, TaskKind::Task)
+            .create_task(
+                "Done one",
+                None,
+                None,
+                None,
+                Priority::Medium,
+                TaskKind::Task,
+            )
             .unwrap();
         store.complete_task(&t2.id).unwrap();
 
@@ -522,10 +589,24 @@ mod tests {
     fn summary_for_prompt_produces_output() {
         let (store, _dir) = test_store();
         store
-            .create_task("Session task", None, None, Some("sess-1"), Priority::Medium, TaskKind::Task)
+            .create_task(
+                "Session task",
+                None,
+                None,
+                Some("sess-1"),
+                Priority::Medium,
+                TaskKind::Task,
+            )
             .unwrap();
         store
-            .create_task("Other task", None, None, None, Priority::High, TaskKind::Task)
+            .create_task(
+                "Other task",
+                None,
+                None,
+                None,
+                Priority::High,
+                TaskKind::Task,
+            )
             .unwrap();
 
         let summary = store.summary_for_prompt("sess-1");
@@ -589,7 +670,13 @@ mod tests {
     fn create_bug_uses_bug_prefix_and_kind() {
         let (store, _dir) = test_store();
         let bug = store
-            .create_bug("Crash on empty input", Some("Segfault"), None, None, Priority::High)
+            .create_bug(
+                "Crash on empty input",
+                Some("Segfault"),
+                None,
+                None,
+                Priority::High,
+            )
             .expect("create_bug");
         assert!(bug.id.starts_with("test-b"), "got: {}", bug.id);
         assert_eq!(bug.kind, TaskKind::Bug);
@@ -601,7 +688,14 @@ mod tests {
     fn list_bugs_filters_by_kind() {
         let (store, _dir) = test_store();
         store
-            .create_task("Regular task", None, None, None, Priority::Medium, TaskKind::Task)
+            .create_task(
+                "Regular task",
+                None,
+                None,
+                None,
+                Priority::Medium,
+                TaskKind::Task,
+            )
             .unwrap();
         store
             .create_bug("A bug", None, None, None, Priority::High)
@@ -643,7 +737,10 @@ mod tests {
             .unwrap();
 
         let summary = store.summary_for_prompt("sess-1");
-        assert!(summary.contains("[bug]"), "bug should be prefixed in summary, got:\n{summary}");
+        assert!(
+            summary.contains("[bug]"),
+            "bug should be prefixed in summary, got:\n{summary}"
+        );
         assert!(summary.contains("Crash on exit"));
     }
 }

@@ -251,23 +251,38 @@ mod tests {
 
     #[test]
     fn content_pos_before_same_line() {
-        let a = ContentPos { line: 0, char_offset: 2 };
-        let b = ContentPos { line: 0, char_offset: 5 };
+        let a = ContentPos {
+            line: 0,
+            char_offset: 2,
+        };
+        let b = ContentPos {
+            line: 0,
+            char_offset: 5,
+        };
         assert!(a.before(&b));
         assert!(!b.before(&a));
     }
 
     #[test]
     fn content_pos_before_different_lines() {
-        let a = ContentPos { line: 0, char_offset: 10 };
-        let b = ContentPos { line: 1, char_offset: 0 };
+        let a = ContentPos {
+            line: 0,
+            char_offset: 10,
+        };
+        let b = ContentPos {
+            line: 1,
+            char_offset: 0,
+        };
         assert!(a.before(&b));
         assert!(!b.before(&a));
     }
 
     #[test]
     fn content_pos_before_equal() {
-        let a = ContentPos { line: 2, char_offset: 3 };
+        let a = ContentPos {
+            line: 2,
+            char_offset: 3,
+        };
         assert!(!a.before(&a));
     }
 
@@ -282,7 +297,10 @@ mod tests {
     #[test]
     fn ordered_range_none_when_anchor_only() {
         let state = SelectionState {
-            anchor: Some(ContentPos { line: 0, char_offset: 0 }),
+            anchor: Some(ContentPos {
+                line: 0,
+                char_offset: 0,
+            }),
             cursor: None,
             dragging: false,
             copied_flash: None,
@@ -292,7 +310,10 @@ mod tests {
 
     #[test]
     fn ordered_range_none_when_same_position() {
-        let pos = ContentPos { line: 1, char_offset: 5 };
+        let pos = ContentPos {
+            line: 1,
+            char_offset: 5,
+        };
         let state = SelectionState {
             anchor: Some(pos),
             cursor: Some(pos),
@@ -304,8 +325,14 @@ mod tests {
 
     #[test]
     fn ordered_range_forward() {
-        let a = ContentPos { line: 0, char_offset: 0 };
-        let b = ContentPos { line: 1, char_offset: 5 };
+        let a = ContentPos {
+            line: 0,
+            char_offset: 0,
+        };
+        let b = ContentPos {
+            line: 1,
+            char_offset: 5,
+        };
         let state = SelectionState {
             anchor: Some(a),
             cursor: Some(b),
@@ -319,8 +346,14 @@ mod tests {
 
     #[test]
     fn ordered_range_reversed() {
-        let a = ContentPos { line: 2, char_offset: 10 };
-        let b = ContentPos { line: 0, char_offset: 3 };
+        let a = ContentPos {
+            line: 2,
+            char_offset: 10,
+        };
+        let b = ContentPos {
+            line: 0,
+            char_offset: 3,
+        };
         let state = SelectionState {
             anchor: Some(a),
             cursor: Some(b),
@@ -335,8 +368,14 @@ mod tests {
     #[test]
     fn clear_resets_all() {
         let mut state = SelectionState {
-            anchor: Some(ContentPos { line: 0, char_offset: 0 }),
-            cursor: Some(ContentPos { line: 1, char_offset: 5 }),
+            anchor: Some(ContentPos {
+                line: 0,
+                char_offset: 0,
+            }),
+            cursor: Some(ContentPos {
+                line: 1,
+                char_offset: 5,
+            }),
             dragging: true,
             copied_flash: Some(Instant::now()),
         };
@@ -392,10 +431,10 @@ mod tests {
 
     #[test]
     fn screen_to_content_basic() {
-        let map = ContentMap::build(vec![
-            "Hello, world!".to_string(),
-            "Second line".to_string(),
-        ], 80);
+        let map = ContentMap::build(
+            vec!["Hello, world!".to_string(), "Second line".to_string()],
+            80,
+        );
 
         // First line, after gutter (col = 0 + 3 gutter = 3)
         let pos = map.screen_to_content(0, 3, 0, 0, 0).unwrap();
@@ -410,10 +449,7 @@ mod tests {
 
     #[test]
     fn screen_to_content_second_line() {
-        let map = ContentMap::build(vec![
-            "Hello".to_string(),
-            "World".to_string(),
-        ], 80);
+        let map = ContentMap::build(vec!["Hello".to_string(), "World".to_string()], 80);
 
         let pos = map.screen_to_content(1, 3, 0, 0, 0).unwrap();
         assert_eq!(pos.line, 1);
@@ -422,11 +458,14 @@ mod tests {
 
     #[test]
     fn screen_to_content_with_scroll_offset() {
-        let map = ContentMap::build(vec![
-            "Line 0".to_string(),
-            "Line 1".to_string(),
-            "Line 2".to_string(),
-        ], 80);
+        let map = ContentMap::build(
+            vec![
+                "Line 0".to_string(),
+                "Line 1".to_string(),
+                "Line 2".to_string(),
+            ],
+            80,
+        );
 
         // Scrolled down 1 row, screen row 0 shows line 1
         let pos = map.screen_to_content(0, 3, 1, 0, 0).unwrap();
@@ -435,9 +474,7 @@ mod tests {
 
     #[test]
     fn screen_to_content_with_area_offset() {
-        let map = ContentMap::build(vec![
-            "Hello".to_string(),
-        ], 80);
+        let map = ContentMap::build(vec!["Hello".to_string()], 80);
 
         // Area starts at (5, 10)
         let pos = map.screen_to_content(10, 8, 0, 10, 5).unwrap();
@@ -447,9 +484,12 @@ mod tests {
 
     #[test]
     fn screen_to_content_clamps_past_line_end() {
-        let map = ContentMap::build(vec![
-            "Hi".to_string(), // 2 chars
-        ], 80);
+        let map = ContentMap::build(
+            vec![
+                "Hi".to_string(), // 2 chars
+            ],
+            80,
+        );
 
         // Column way past end of "Hi"
         let pos = map.screen_to_content(0, 50, 0, 0, 0).unwrap();
@@ -459,9 +499,7 @@ mod tests {
 
     #[test]
     fn screen_to_content_gutter_click() {
-        let map = ContentMap::build(vec![
-            "Hello".to_string(),
-        ], 80);
+        let map = ContentMap::build(vec!["Hello".to_string()], 80);
 
         // Click in gutter area (col < GUTTER_WIDTH)
         let pos = map.screen_to_content(0, 0, 0, 0, 0).unwrap();
@@ -471,9 +509,7 @@ mod tests {
 
     #[test]
     fn screen_to_content_beyond_content() {
-        let map = ContentMap::build(vec![
-            "Only line".to_string(),
-        ], 80);
+        let map = ContentMap::build(vec!["Only line".to_string()], 80);
 
         // Row 5 is way beyond our single line
         let result = map.screen_to_content(5, 3, 0, 0, 0);
@@ -490,81 +526,115 @@ mod tests {
 
     #[test]
     fn extract_text_single_line() {
-        let map = ContentMap::build(vec![
-            "Hello, world!".to_string(),
-        ], 80);
+        let map = ContentMap::build(vec!["Hello, world!".to_string()], 80);
 
-        let start = ContentPos { line: 0, char_offset: 0 };
-        let end = ContentPos { line: 0, char_offset: 5 };
+        let start = ContentPos {
+            line: 0,
+            char_offset: 0,
+        };
+        let end = ContentPos {
+            line: 0,
+            char_offset: 5,
+        };
         assert_eq!(map.extract_text(&start, &end), "Hello");
     }
 
     #[test]
     fn extract_text_partial_line() {
-        let map = ContentMap::build(vec![
-            "Hello, world!".to_string(),
-        ], 80);
+        let map = ContentMap::build(vec!["Hello, world!".to_string()], 80);
 
-        let start = ContentPos { line: 0, char_offset: 7 };
-        let end = ContentPos { line: 0, char_offset: 12 };
+        let start = ContentPos {
+            line: 0,
+            char_offset: 7,
+        };
+        let end = ContentPos {
+            line: 0,
+            char_offset: 12,
+        };
         assert_eq!(map.extract_text(&start, &end), "world");
     }
 
     #[test]
     fn extract_text_multi_line() {
-        let map = ContentMap::build(vec![
-            "First line".to_string(),
-            "Second line".to_string(),
-            "Third line".to_string(),
-        ], 80);
+        let map = ContentMap::build(
+            vec![
+                "First line".to_string(),
+                "Second line".to_string(),
+                "Third line".to_string(),
+            ],
+            80,
+        );
 
-        let start = ContentPos { line: 0, char_offset: 6 };
-        let end = ContentPos { line: 2, char_offset: 5 };
+        let start = ContentPos {
+            line: 0,
+            char_offset: 6,
+        };
+        let end = ContentPos {
+            line: 2,
+            char_offset: 5,
+        };
         assert_eq!(map.extract_text(&start, &end), "line\nSecond line\nThird");
     }
 
     #[test]
     fn extract_text_reversed_range() {
-        let map = ContentMap::build(vec![
-            "Hello, world!".to_string(),
-        ], 80);
+        let map = ContentMap::build(vec!["Hello, world!".to_string()], 80);
 
         // Pass end before start — should still work
-        let start = ContentPos { line: 0, char_offset: 7 };
-        let end = ContentPos { line: 0, char_offset: 0 };
+        let start = ContentPos {
+            line: 0,
+            char_offset: 7,
+        };
+        let end = ContentPos {
+            line: 0,
+            char_offset: 0,
+        };
         assert_eq!(map.extract_text(&start, &end), "Hello, ");
     }
 
     #[test]
     fn extract_text_empty_selection() {
-        let map = ContentMap::build(vec![
-            "Hello".to_string(),
-        ], 80);
+        let map = ContentMap::build(vec!["Hello".to_string()], 80);
 
-        let pos = ContentPos { line: 0, char_offset: 2 };
+        let pos = ContentPos {
+            line: 0,
+            char_offset: 2,
+        };
         assert_eq!(map.extract_text(&pos, &pos), "");
     }
 
     #[test]
     fn extract_text_clamps_offsets() {
-        let map = ContentMap::build(vec![
-            "Hi".to_string(), // 2 chars
-        ], 80);
+        let map = ContentMap::build(
+            vec![
+                "Hi".to_string(), // 2 chars
+            ],
+            80,
+        );
 
-        let start = ContentPos { line: 0, char_offset: 0 };
-        let end = ContentPos { line: 0, char_offset: 100 }; // way past end
+        let start = ContentPos {
+            line: 0,
+            char_offset: 0,
+        };
+        let end = ContentPos {
+            line: 0,
+            char_offset: 100,
+        }; // way past end
         assert_eq!(map.extract_text(&start, &end), "Hi");
     }
 
     #[test]
     fn extract_text_adjacent_lines() {
-        let map = ContentMap::build(vec![
-            "AAAA".to_string(),
-            "BBBB".to_string(),
-        ], 80);
+        let map = ContentMap::build(vec!["AAAA".to_string(), "BBBB".to_string()], 80);
 
-        let start = ContentPos { line: 0, char_offset: 2 };
-        let end = ContentPos { line: 1, char_offset: 2 };
+        let start = ContentPos {
+            line: 0,
+            char_offset: 2,
+        };
+        let end = ContentPos {
+            line: 1,
+            char_offset: 2,
+        };
         assert_eq!(map.extract_text(&start, &end), "AA\nBB");
     }
 }

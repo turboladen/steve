@@ -13,11 +13,7 @@ const SIDEBAR_MIN_TERMINAL_WIDTH: u16 = 120;
 
 /// Responsive sidebar width: wider at large terminals.
 pub(super) fn sidebar_width(terminal_width: u16) -> u16 {
-    if terminal_width >= 160 {
-        44
-    } else {
-        36
-    }
+    if terminal_width >= 160 { 44 } else { 36 }
 }
 
 /// Compute the layout given the full terminal area and dynamic input height.
@@ -38,7 +34,7 @@ pub fn compute_layout(area: Rect, show_sidebar: bool, input_height: u16) -> AppL
             .direction(Direction::Horizontal)
             .constraints([
                 Constraint::Min(40),
-                Constraint::Length(1),          // visual separator (empty column)
+                Constraint::Length(1), // visual separator (empty column)
                 Constraint::Length(sb_width),
             ])
             .split(area);
@@ -50,10 +46,7 @@ pub fn compute_layout(area: Rect, show_sidebar: bool, input_height: u16) -> AppL
         // Split content vertically: messages | input
         let vertical = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(1),
-                Constraint::Length(input_height),
-            ])
+            .constraints([Constraint::Min(1), Constraint::Length(input_height)])
             .split(content_area);
 
         AppLayout {
@@ -66,10 +59,7 @@ pub fn compute_layout(area: Rect, show_sidebar: bool, input_height: u16) -> AppL
         // No sidebar: just messages | input
         let vertical = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(1),
-                Constraint::Length(input_height),
-            ])
+            .constraints([Constraint::Min(1), Constraint::Length(input_height)])
             .split(area);
 
         AppLayout {

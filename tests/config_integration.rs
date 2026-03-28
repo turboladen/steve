@@ -3,11 +3,15 @@
 //! Tests config loading, merging, and persistent permission grants
 //! working end-to-end with the filesystem.
 
-use steve::config;
-use steve::config::types::Config;
-use steve::permission::PermissionProfile;
-use steve::permission::types::{PermissionActionSerde, PermissionRule, ToolMatcher};
-use steve::tool::ToolName;
+use steve::{
+    config,
+    config::types::Config,
+    permission::{
+        PermissionProfile,
+        types::{PermissionActionSerde, PermissionRule, ToolMatcher},
+    },
+    tool::ToolName,
+};
 use tempfile::tempdir;
 
 /// Config with path-based permission rules round-trips through load/save.
@@ -37,7 +41,8 @@ fn persist_and_reload_tool_grant() {
     std::fs::write(
         dir.path().join(".steve.jsonc"),
         r#"{"model": "openai/gpt-4o", "providers": {}}"#,
-    ).unwrap();
+    )
+    .unwrap();
 
     // Persist a grant
     config::persist_allow_tool(dir.path(), "edit").unwrap();
@@ -45,7 +50,11 @@ fn persist_and_reload_tool_grant() {
     // Reload and verify
     let (config, _warnings) = config::load(dir.path()).unwrap();
     assert!(config.allow_tools.contains(&"edit".to_string()));
-    assert_eq!(config.model, Some("openai/gpt-4o".into()), "model preserved");
+    assert_eq!(
+        config.model,
+        Some("openai/gpt-4o".into()),
+        "model preserved"
+    );
 }
 
 /// Persisting multiple grants accumulates in the array.
@@ -104,7 +113,8 @@ fn missing_permission_rules_defaults_to_empty() {
     std::fs::write(
         dir.path().join(".steve.jsonc"),
         r#"{"model": "openai/gpt-4o"}"#,
-    ).unwrap();
+    )
+    .unwrap();
 
     let (config, _warnings) = config::load(dir.path()).unwrap();
     assert!(config.permission_rules.is_empty());
@@ -120,7 +130,11 @@ fn duplicate_persist_is_idempotent() {
     config::persist_allow_tool(dir.path(), "edit").unwrap();
 
     let (config, _warnings) = config::load(dir.path()).unwrap();
-    assert_eq!(config.allow_tools.len(), 1, "duplicate persist should be idempotent");
+    assert_eq!(
+        config.allow_tools.len(),
+        1,
+        "duplicate persist should be idempotent"
+    );
 }
 
 /// Project permission_profile overrides global; None preserves global.

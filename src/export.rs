@@ -1,14 +1,18 @@
 //! Debug export — writes the current session as a structured markdown file
 //! for external debugging (e.g., pasting into another AI for analysis).
 
-use std::fmt::Write as FmtWrite;
-use std::path::{Path, PathBuf};
+use std::{
+    fmt::Write as FmtWrite,
+    path::{Path, PathBuf},
+};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 
-use crate::session::message::{Message, MessagePart, Role, ToolCallState};
-use crate::tool::ToolName;
+use crate::{
+    session::message::{Message, MessagePart, Role, ToolCallState},
+    tool::ToolName,
+};
 
 /// Parameters for a debug export.
 pub struct ExportParams<'a> {
@@ -173,8 +177,14 @@ fn extract_tool_summary(tool_name: ToolName, input: &serde_json::Value) -> Strin
             if let Some(paths) = input.get("paths").and_then(|v| v.as_array()) {
                 format!("{} files", paths.len())
             } else {
-                let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("(no path)");
-                let is_count = input.get("count").and_then(|v| v.as_bool()).unwrap_or(false);
+                let path = input
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(no path)");
+                let is_count = input
+                    .get("count")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let tail_n = input.get("tail").and_then(|v| v.as_u64());
                 if is_count {
                     format!("{path} (count)")
@@ -191,8 +201,14 @@ fn extract_tool_summary(tool_name: ToolName, input: &serde_json::Value) -> Strin
             .unwrap_or("(no path)")
             .to_string(),
         ToolName::Symbols => {
-            let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("(no path)");
-            let op = input.get("operation").and_then(|v| v.as_str()).unwrap_or("list_symbols");
+            let path = input
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no path)");
+            let op = input
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .unwrap_or("list_symbols");
             match op {
                 "find_scope" => {
                     let line = input.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -216,8 +232,14 @@ fn extract_tool_summary(tool_name: ToolName, input: &serde_json::Value) -> Strin
             .unwrap_or("(no path)")
             .to_string(),
         ToolName::Move | ToolName::Copy => {
-            let from = input.get("from_path").and_then(|v| v.as_str()).unwrap_or("(no path)");
-            let to = input.get("to_path").and_then(|v| v.as_str()).unwrap_or("(no path)");
+            let from = input
+                .get("from_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no path)");
+            let to = input
+                .get("to_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no path)");
             format!("{from} \u{2192} {to}")
         }
         ToolName::Delete | ToolName::Mkdir => input
@@ -265,8 +287,14 @@ fn extract_tool_summary(tool_name: ToolName, input: &serde_json::Value) -> Strin
             .unwrap_or("")
             .to_string(),
         ToolName::Lsp => {
-            let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("(no path)");
-            let op = input.get("operation").and_then(|v| v.as_str()).unwrap_or("diagnostics");
+            let path = input
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no path)");
+            let op = input
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .unwrap_or("diagnostics");
             match op {
                 "diagnostics" => format!("{path} diagnostics"),
                 _ => {
@@ -276,8 +304,14 @@ fn extract_tool_summary(tool_name: ToolName, input: &serde_json::Value) -> Strin
             }
         }
         ToolName::Agent => {
-            let agent_type = input.get("agent_type").and_then(|v| v.as_str()).unwrap_or("explore");
-            let task = input.get("task").and_then(|v| v.as_str()).unwrap_or("(no task)");
+            let agent_type = input
+                .get("agent_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("explore");
+            let task = input
+                .get("task")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no task)");
             format!("{agent_type}: {task}")
         }
     }
@@ -382,7 +416,6 @@ fn write_logs(out: &mut String, session_start: DateTime<Utc>) {
     if count == 0 {
         let _ = writeln!(out, "*No log entries matched the session timespan.*\n");
     }
-
 }
 
 /// Parse an RFC 3339 timestamp from the start of a log line.
@@ -681,7 +714,12 @@ mod tests {
     #[test]
     fn format_message_part_empty_text_skipped() {
         let mut out = String::new();
-        write_message_part(&mut out, &MessagePart::Text { text: String::new() });
+        write_message_part(
+            &mut out,
+            &MessagePart::Text {
+                text: String::new(),
+            },
+        );
         assert!(out.is_empty());
     }
 
@@ -696,7 +734,10 @@ mod tests {
     #[test]
     fn extract_tool_summary_read_count() {
         assert_eq!(
-            extract_tool_summary(ToolName::Read, &json!({"path": "src/main.rs", "count": true})),
+            extract_tool_summary(
+                ToolName::Read,
+                &json!({"path": "src/main.rs", "count": true})
+            ),
             "src/main.rs (count)"
         );
     }
@@ -711,10 +752,8 @@ mod tests {
 
     #[test]
     fn extract_tool_summary_read_multi_file() {
-        let result = extract_tool_summary(
-            ToolName::Read,
-            &json!({"paths": ["a.rs", "b.rs", "c.rs"]}),
-        );
+        let result =
+            extract_tool_summary(ToolName::Read, &json!({"paths": ["a.rs", "b.rs", "c.rs"]}));
         assert_eq!(result, "3 files");
     }
 

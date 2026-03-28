@@ -15,7 +15,10 @@ impl App {
     pub(super) fn resolve_client(
         &mut self,
         model_ref: &str,
-    ) -> Option<(crate::provider::ResolvedModel, crate::provider::client::LlmClient)> {
+    ) -> Option<(
+        crate::provider::ResolvedModel,
+        crate::provider::client::LlmClient,
+    )> {
         let registry = match &self.provider_registry {
             Some(r) => r,
             None => {
@@ -107,8 +110,18 @@ impl App {
     /// Update the last Question block to reflect current PendingQuestion state.
     pub(super) fn sync_question_block(&mut self) {
         if let Some(q) = &self.pending_question {
-            if let Some(block) = self.messages.iter_mut().rev().find(|m| matches!(m, MessageBlock::Question { answered: None, .. })) {
-                if let MessageBlock::Question { selected, free_text, .. } = block {
+            if let Some(block) = self
+                .messages
+                .iter_mut()
+                .rev()
+                .find(|m| matches!(m, MessageBlock::Question { answered: None, .. }))
+            {
+                if let MessageBlock::Question {
+                    selected,
+                    free_text,
+                    ..
+                } = block
+                {
                     *selected = q.selected;
                     *free_text = q.free_text.clone();
                 }
@@ -118,7 +131,12 @@ impl App {
 
     /// Mark the last unanswered Question block as answered.
     pub(super) fn mark_question_answered(&mut self, answer: &str) {
-        if let Some(block) = self.messages.iter_mut().rev().find(|m| matches!(m, MessageBlock::Question { answered: None, .. })) {
+        if let Some(block) = self
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|m| matches!(m, MessageBlock::Question { answered: None, .. }))
+        {
             if let MessageBlock::Question { answered, .. } = block {
                 *answered = Some(answer.to_string());
             }
@@ -273,8 +291,10 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tests::{make_test_app, make_test_registry, has_error_message, has_system_message};
-    use crate::ui::message_block::{ToolGroup, ToolGroupStatus};
+    use crate::{
+        app::tests::{has_error_message, has_system_message, make_test_app, make_test_registry},
+        ui::message_block::{ToolGroup, ToolGroupStatus},
+    };
     use tokio::sync::mpsc;
 
     // -- should_show_sidebar tests --
@@ -404,7 +424,8 @@ mod tests {
         app.model_picker.open(&models, None);
         app.diagnostics_overlay.open(vec![]);
         let snapshot = crate::ui::mcp_overlay::McpSnapshot::default();
-        app.mcp_overlay.open(crate::ui::mcp_overlay::McpTab::Servers, snapshot, None);
+        app.mcp_overlay
+            .open(crate::ui::mcp_overlay::McpTab::Servers, snapshot, None);
         // session_picker needs SessionInfo, so set visible directly
         app.session_picker.visible = true;
         assert!(app.model_picker.visible);
@@ -488,7 +509,9 @@ mod tests {
             parts: vec![AssistantPart::Text("hello".into())],
         });
         // Interleave a system message (like a permission response)
-        app.messages.push(MessageBlock::System { text: "granted".into() });
+        app.messages.push(MessageBlock::System {
+            text: "granted".into(),
+        });
 
         let found = app.last_assistant_mut();
         assert!(found.is_some());
@@ -509,20 +532,27 @@ mod tests {
     fn remove_last_permission_block_removes_it() {
         let mut app = make_test_app();
         app.messages.clear();
-        app.messages.push(MessageBlock::User { text: "run it".into() });
+        app.messages.push(MessageBlock::User {
+            text: "run it".into(),
+        });
         app.messages.push(MessageBlock::Permission {
             tool_name: "bash".into(),
             args_summary: "ls".into(),
             diff_content: None,
         });
-        app.messages.push(MessageBlock::System { text: "ok".into() });
+        app.messages
+            .push(MessageBlock::System { text: "ok".into() });
         assert_eq!(app.messages.len(), 3);
 
         app.remove_last_permission_block();
 
         assert_eq!(app.messages.len(), 2);
         // Permission block should be gone
-        assert!(!app.messages.iter().any(|m| matches!(m, MessageBlock::Permission { .. })));
+        assert!(
+            !app.messages
+                .iter()
+                .any(|m| matches!(m, MessageBlock::Permission { .. }))
+        );
     }
 
     #[test]
@@ -583,7 +613,9 @@ mod tests {
 
         // Should answer the second (unanswered) one
         match &app.messages[app.messages.len() - 1] {
-            MessageBlock::Question { answered, question, .. } => {
+            MessageBlock::Question {
+                answered, question, ..
+            } => {
                 assert_eq!(question, "New");
                 assert_eq!(answered.as_deref(), Some("new answer"));
             }
@@ -741,7 +773,9 @@ mod tests {
                     expanded: false,
                     agent_progress: None,
                 }],
-                status: ToolGroupStatus::Running { current_tool: ToolName::Read },
+                status: ToolGroupStatus::Running {
+                    current_tool: ToolName::Read,
+                },
             })],
         });
 

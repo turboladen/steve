@@ -86,10 +86,7 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
             }
         }
         "append" => {
-            let content = args
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
             if content.is_empty() {
                 return Ok(ToolOutput {
                     title: "memory append".to_string(),
@@ -126,10 +123,7 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
             })
         }
         "replace" => {
-            let content = args
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
             if content.is_empty() {
                 return Ok(ToolOutput {
                     title: "memory replace".to_string(),
@@ -160,7 +154,9 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
         }
         _ => Ok(ToolOutput {
             title: "memory".to_string(),
-            output: format!("Error: unknown action '{action}'. Use 'read', 'append', or 'replace'."),
+            output: format!(
+                "Error: unknown action '{action}'. Use 'read', 'append', or 'replace'."
+            ),
             is_error: true,
         }),
     }
@@ -206,8 +202,7 @@ mod tests {
     #[test]
     fn read_empty_memory() {
         let dir = tempfile::tempdir().unwrap();
-        let result =
-            execute(serde_json::json!({"action": "read"}), test_ctx(dir.path())).unwrap();
+        let result = execute(serde_json::json!({"action": "read"}), test_ctx(dir.path())).unwrap();
         assert!(!result.is_error);
         assert!(result.output.contains("empty"));
     }
@@ -240,8 +235,11 @@ mod tests {
     #[test]
     fn unknown_action_errors() {
         let dir = tempfile::tempdir().unwrap();
-        let result =
-            execute(serde_json::json!({"action": "badaction"}), test_ctx(dir.path())).unwrap();
+        let result = execute(
+            serde_json::json!({"action": "badaction"}),
+            test_ctx(dir.path()),
+        )
+        .unwrap();
         assert!(result.is_error);
         assert!(result.output.contains("unknown action"));
     }
@@ -261,7 +259,10 @@ mod tests {
         )
         .unwrap();
         let result = execute(serde_json::json!({"action": "read"}), ctx).unwrap();
-        assert!(!result.output.contains("old stuff"), "old content should be gone");
+        assert!(
+            !result.output.contains("old stuff"),
+            "old content should be gone"
+        );
         assert!(result.output.contains("New content only"));
     }
 

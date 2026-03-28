@@ -1,9 +1,9 @@
 pub mod autocomplete;
 pub mod diagnostics_overlay;
 pub mod input;
-pub mod mcp_overlay;
 pub mod layout;
 pub mod markdown;
+pub mod mcp_overlay;
 pub mod message_area;
 pub mod message_block;
 pub mod model_picker;
@@ -20,27 +20,30 @@ use std::io::{self, Stdout};
 
 use anyhow::Result;
 use crossterm::{
+    event::{
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-    event::{
-        EnableMouseCapture, DisableMouseCapture, EnableBracketedPaste, DisableBracketedPaste,
-        PushKeyboardEnhancementFlags, PopKeyboardEnhancementFlags, KeyboardEnhancementFlags,
-    },
 };
 use ratatui::{Frame, Terminal, backend::CrosstermBackend, style::Style, widgets::Block};
 
 use crate::app::App;
-use layout::compute_layout;
-use message_area::render_message_blocks;
 use autocomplete::render_autocomplete;
-use input::{render_input, render_paste_preview, abbreviate_path, InputContext, MIN_INPUT_HEIGHT, MAX_INPUT_PCT, CHEVRON_WIDTH};
 use diagnostics_overlay::render_diagnostics_overlay;
+use input::{
+    CHEVRON_WIDTH, InputContext, MAX_INPUT_PCT, MIN_INPUT_HEIGHT, abbreviate_path, render_input,
+    render_paste_preview,
+};
+use layout::compute_layout;
 use mcp_overlay::render_mcp_overlay;
+use message_area::render_message_blocks;
 use model_picker::render_model_picker;
 use session_picker::render_session_picker;
 use sidebar::render_sidebar;
-use std::time::Duration;
 use status_line::Activity;
+use std::time::Duration;
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
@@ -110,7 +113,8 @@ pub(crate) fn render_to_buffer(
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let show_sidebar = app.should_show_sidebar(area.width);
-    let max_input = ((area.height as u32 * MAX_INPUT_PCT as u32 / 100) as u16).max(MIN_INPUT_HEIGHT);
+    let max_input =
+        ((area.height as u32 * MAX_INPUT_PCT as u32 / 100) as u16).max(MIN_INPUT_HEIGHT);
     // Compute textarea width accounting for sidebar and chevron
     let content_width = if show_sidebar && area.width >= 120 {
         let sb_width = layout::sidebar_width(area.width);
@@ -131,7 +135,14 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         let state = &app.status_line_state;
         if *state.activity() != Activity::Idle {
             let activity_elapsed = state.activity_start.map(|t| t.elapsed());
-            state.spinner_char().map(|ch| (ch, state.activity_text(), has_pending_input, activity_elapsed))
+            state.spinner_char().map(|ch| {
+                (
+                    ch,
+                    state.activity_text(),
+                    has_pending_input,
+                    activity_elapsed,
+                )
+            })
         } else {
             None
         }
@@ -160,13 +171,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 
     if let Some(sidebar_area) = layout.sidebar {
-        render_sidebar(
-            frame,
-            sidebar_area,
-            &app.sidebar_state,
-            &app.theme,
-            pct,
-        );
+        render_sidebar(frame, sidebar_area, &app.sidebar_state, &app.theme, pct);
     }
 
     let context = InputContext {
@@ -174,7 +179,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         last_prompt_tokens: app.status_line_state.last_prompt_tokens,
         context_window: app.status_line_state.context_window,
         context_usage_pct: pct,
-        elapsed: app.frozen_elapsed.or_else(|| app.stream_start_time.map(|t| t.elapsed())),
+        elapsed: app
+            .frozen_elapsed
+            .or_else(|| app.stream_start_time.map(|t| t.elapsed())),
     };
 
     render_input(
@@ -225,13 +232,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         pct,
     );
 
-    render_paste_preview(
-        frame,
-        layout.message_area,
-        &app.input,
-        &app.theme,
-        pct,
-    );
+    render_paste_preview(frame, layout.message_area, &app.input, &app.theme, pct);
 }
 
 #[cfg(test)]
@@ -259,7 +260,10 @@ mod tests {
     fn layout_80x24_no_sidebar() {
         let (_buf, text) = render_app_to_parts(80, 24);
         // At 80 columns, sidebar should NOT be visible
-        assert!(!text.contains("Session"), "sidebar should not be visible at 80 cols");
+        assert!(
+            !text.contains("Session"),
+            "sidebar should not be visible at 80 cols"
+        );
         // Input area should be present (the chevron ">")
         assert!(text.contains(">"), "input chevron should be visible");
     }
@@ -279,7 +283,10 @@ mod tests {
             }
             text.push('\n');
         }
-        assert!(text.contains("Session"), "sidebar 'Session' header should be visible at 120 cols");
+        assert!(
+            text.contains("Session"),
+            "sidebar 'Session' header should be visible at 120 cols"
+        );
         assert!(text.contains("gpt-4o"), "sidebar should show model name");
     }
 
@@ -293,7 +300,8 @@ mod tests {
         let sep_x = 83;
         let cell = &buf[(sep_x, 0)];
         assert_eq!(
-            cell.bg, app.theme.border_color(0),
+            cell.bg,
+            app.theme.border_color(0),
             "separator column should have theme.border_color background"
         );
     }

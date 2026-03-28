@@ -1,7 +1,6 @@
 //! Patch tool — applies unified diffs to files.
 
-use std::fs;
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use mpatch::ApplyOptions;
@@ -15,7 +14,12 @@ pub fn tool() -> ToolEntry {
     ToolEntry {
         def: ToolDef {
             name: ToolName::Patch,
-            description: func.get("description").unwrap().as_str().unwrap().to_string(),
+            description: func
+                .get("description")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string(),
             parameters: func.get("parameters").cloned().unwrap(),
         },
         handler: Box::new(execute),
@@ -133,8 +137,7 @@ mod tests {
     #[test]
     fn apply_multi_line_replacement() {
         let original = "aaa\nbbb\nccc\nddd\n";
-        let patch =
-            "--- a/f\n+++ b/f\n@@ -1,4 +1,5 @@\n aaa\n-bbb\n-ccc\n+xxx\n+yyy\n+zzz\n ddd\n";
+        let patch = "--- a/f\n+++ b/f\n@@ -1,4 +1,5 @@\n aaa\n-bbb\n-ccc\n+xxx\n+yyy\n+zzz\n ddd\n";
         let result = apply_unified_diff(original, patch).unwrap();
         assert_eq!(result, "aaa\nxxx\nyyy\nzzz\nddd\n");
     }
@@ -199,7 +202,12 @@ mod tests {
             "file_path": file.to_str().unwrap(),
             "patch": "--- a/test.txt\n+++ b/test.txt\n@@ -1,2 +1,2 @@\n-hello\n+goodbye\n world\n"
         });
-        let ctx = ToolContext { project_root: dir.path().to_path_buf(), storage_dir: None, task_store: None, lsp_manager: None };
+        let ctx = ToolContext {
+            project_root: dir.path().to_path_buf(),
+            storage_dir: None,
+            task_store: None,
+            lsp_manager: None,
+        };
         let result = execute(args, ctx).unwrap();
         assert!(!result.is_error);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "goodbye\nworld\n");

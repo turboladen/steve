@@ -1,5 +1,7 @@
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use anyhow::{Context, Result, bail};
 
@@ -28,14 +30,15 @@ pub fn detect(start_dir: &Path) -> Result<ProjectInfo> {
         if git_dir.exists() {
             let root = dir.to_path_buf();
             let id = root_commit_hash(&root)?;
-            return Ok(ProjectInfo { root, id, cwd: start.to_path_buf() });
+            return Ok(ProjectInfo {
+                root,
+                id,
+                cwd: start.to_path_buf(),
+            });
         }
         match dir.parent() {
             Some(parent) => dir = parent,
-            None => bail!(
-                "no git repository found from {}",
-                start_dir.display()
-            ),
+            None => bail!("no git repository found from {}", start_dir.display()),
         }
     }
 }
@@ -52,7 +55,11 @@ pub fn detect_or_cwd() -> ProjectInfo {
         Err(_) => {
             // Fallback: use CWD as root, hash of path as ID
             let id = format!("{:x}", hash_path(&canonical_cwd));
-            ProjectInfo { root: canonical_cwd.clone(), id, cwd: canonical_cwd }
+            ProjectInfo {
+                root: canonical_cwd.clone(),
+                id,
+                cwd: canonical_cwd,
+            }
         }
     }
 }
@@ -125,8 +132,7 @@ pub fn git_repo_name(repo_root: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::process::Command;
+    use std::{fs, process::Command};
 
     /// Helper: initialize a git repo with one empty commit in the given directory.
     fn init_git_repo(dir: &Path) {
@@ -150,7 +156,14 @@ mod tests {
             );
         };
         run(&["init"]);
-        run(&["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "init"]);
+        run(&[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]);
     }
 
     #[test]
@@ -176,7 +189,11 @@ mod tests {
         let info = detect(&sub).expect("detect should find git root from subdirectory");
 
         assert_eq!(info.root, tmp.path().canonicalize().unwrap());
-        assert_eq!(info.cwd, sub.canonicalize().unwrap(), "cwd should be the start directory, not root");
+        assert_eq!(
+            info.cwd,
+            sub.canonicalize().unwrap(),
+            "cwd should be the start directory, not root"
+        );
         assert!(!info.id.is_empty());
     }
 
@@ -188,7 +205,10 @@ mod tests {
         let info = detect(tmp.path()).expect("detect should succeed");
         let canonical = tmp.path().canonicalize().unwrap();
         assert_eq!(info.root, canonical);
-        assert_eq!(info.cwd, canonical, "cwd should equal root when started from root");
+        assert_eq!(
+            info.cwd, canonical,
+            "cwd should equal root when started from root"
+        );
     }
 
     #[test]
@@ -214,7 +234,10 @@ mod tests {
         let path = Path::new("/some/test/path");
         let h1 = hash_path(path);
         let h2 = hash_path(path);
-        assert_eq!(h1, h2, "hash_path should return the same value for the same input");
+        assert_eq!(
+            h1, h2,
+            "hash_path should return the same value for the same input"
+        );
         // Different paths produce different hashes
         let h3 = hash_path(Path::new("/other/path"));
         assert_ne!(h1, h3, "different paths should produce different hashes");

@@ -2,9 +2,11 @@
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
-use std::time::Duration;
+use std::{
+    path::Path,
+    process::{Command, ExitStatus, Stdio},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -18,7 +20,12 @@ pub fn tool() -> ToolEntry {
     ToolEntry {
         def: ToolDef {
             name: ToolName::Bash,
-            description: func.get("description").unwrap().as_str().unwrap().to_string(),
+            description: func
+                .get("description")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string(),
             parameters: func.get("parameters").cloned().unwrap(),
         },
         handler: Box::new(execute),
@@ -125,10 +132,7 @@ pub fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
         });
     }
 
-    let timeout_secs = args
-        .get("timeout")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(30);
+    let timeout_secs = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(30);
 
     let result = run_command(command, &ctx.project_root, timeout_secs)?;
 
@@ -191,17 +195,25 @@ fn run_command(command: &str, cwd: &Path, timeout_secs: u64) -> Result<CommandRe
         }
     };
 
-    let stdout = child.stdout.take().map(|mut s| {
-        let mut buf = Vec::new();
-        std::io::Read::read_to_end(&mut s, &mut buf).unwrap_or(0);
-        String::from_utf8_lossy(&buf).into_owned()
-    }).unwrap_or_default();
+    let stdout = child
+        .stdout
+        .take()
+        .map(|mut s| {
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut s, &mut buf).unwrap_or(0);
+            String::from_utf8_lossy(&buf).into_owned()
+        })
+        .unwrap_or_default();
 
-    let stderr = child.stderr.take().map(|mut s| {
-        let mut buf = Vec::new();
-        std::io::Read::read_to_end(&mut s, &mut buf).unwrap_or(0);
-        String::from_utf8_lossy(&buf).into_owned()
-    }).unwrap_or_default();
+    let stderr = child
+        .stderr
+        .take()
+        .map(|mut s| {
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut s, &mut buf).unwrap_or(0);
+            String::from_utf8_lossy(&buf).into_owned()
+        })
+        .unwrap_or_default();
 
     let mut result = String::new();
 
@@ -317,7 +329,12 @@ mod tests {
             "command": "sleep 60",
             "timeout": 1
         });
-        let ctx = ToolContext { project_root: Path::new("/tmp").to_path_buf(), storage_dir: None, task_store: None, lsp_manager: None };
+        let ctx = ToolContext {
+            project_root: Path::new("/tmp").to_path_buf(),
+            storage_dir: None,
+            task_store: None,
+            lsp_manager: None,
+        };
         let err = execute(args, ctx).unwrap_err();
         assert!(err.to_string().contains("timed out"));
     }
@@ -442,7 +459,12 @@ mod tests {
     #[test]
     fn execute_rejects_simple_cat() {
         let args = serde_json::json!({ "command": "cat src/main.rs" });
-        let ctx = ToolContext { project_root: Path::new("/tmp").to_path_buf(), storage_dir: None, task_store: None, lsp_manager: None };
+        let ctx = ToolContext {
+            project_root: Path::new("/tmp").to_path_buf(),
+            storage_dir: None,
+            task_store: None,
+            lsp_manager: None,
+        };
         let output = execute(args, ctx).unwrap();
         assert!(output.is_error);
         assert!(output.output.contains("`read`"));

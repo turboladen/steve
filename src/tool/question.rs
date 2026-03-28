@@ -18,7 +18,12 @@ pub fn tool() -> ToolEntry {
     ToolEntry {
         def: ToolDef {
             name: ToolName::Question,
-            description: func.get("description").unwrap().as_str().unwrap().to_string(),
+            description: func
+                .get("description")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string(),
             parameters: func.get("parameters").cloned().unwrap(),
         },
         handler: Box::new(execute),
@@ -63,7 +68,9 @@ fn execute(args: Value, _ctx: ToolContext) -> anyhow::Result<ToolOutput> {
     // tool calls specially before reaching execute().
     Ok(ToolOutput {
         title: "Question".to_string(),
-        output: format!("Question for user: {question}\n(Question tool not yet fully implemented — user interaction pending)"),
+        output: format!(
+            "Question for user: {question}\n(Question tool not yet fully implemented — user interaction pending)"
+        ),
         is_error: false,
     })
 }
@@ -83,11 +90,7 @@ mod tests {
 
     #[test]
     fn stub_handler_returns_not_error() {
-        let result = execute(
-            serde_json::json!({"question": "Pick a color?"}),
-            make_ctx(),
-        )
-        .unwrap();
+        let result = execute(serde_json::json!({"question": "Pick a color?"}), make_ctx()).unwrap();
         assert!(!result.is_error, "question stub should not be an error");
     }
 

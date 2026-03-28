@@ -3,9 +3,11 @@
 //! Caches results of read-only tools (read, grep, glob, list) and automatically
 //! invalidates entries when write operations (edit, write, patch) modify files.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
 use serde_json::Value;
 
@@ -168,12 +170,7 @@ impl ToolResultCache {
     }
 
     /// Store a tool result in the cache.
-    pub fn put(
-        &mut self,
-        tool_name: ToolName,
-        args: &Value,
-        output: &ToolOutput,
-    ) {
+    pub fn put(&mut self, tool_name: ToolName, args: &Value, output: &ToolOutput) {
         // Don't cache errors
         if output.is_error {
             return;
@@ -188,17 +185,15 @@ impl ToolResultCache {
 
         // Track which file paths this cache entry references (for invalidation)
         // and capture the file's mtime for external-change detection.
-        let mtime = self
-            .extract_path(tool_name, args)
-            .and_then(|path| {
-                self.path_index
-                    .entry(path.clone())
-                    .or_default()
-                    .push(key.clone());
-                std::fs::metadata(&path)
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-            });
+        let mtime = self.extract_path(tool_name, args).and_then(|path| {
+            self.path_index
+                .entry(path.clone())
+                .or_default()
+                .push(key.clone());
+            std::fs::metadata(&path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+        });
 
         self.entries.insert(
             key,
@@ -290,10 +285,7 @@ impl ToolResultCache {
                         max_lines
                     ))
                 } else {
-                    let offset = args
-                        .get("offset")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(1);
+                    let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(1);
                     let limit = args
                         .get("limit")
                         .and_then(|v| v.as_u64())
@@ -314,51 +306,60 @@ impl ToolResultCache {
             }
             ToolName::Grep => {
                 let pattern = args.get("pattern")?.as_str()?;
-                let path = args
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(".");
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
                 let normalized = self.normalize_path(path);
-                let include = args
-                    .get("include")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                Some(format!("grep:{}:{}:{}", pattern, normalized.display(), include))
+                let include = args.get("include").and_then(|v| v.as_str()).unwrap_or("");
+                Some(format!(
+                    "grep:{}:{}:{}",
+                    pattern,
+                    normalized.display(),
+                    include
+                ))
             }
             ToolName::Glob => {
                 let pattern = args.get("pattern")?.as_str()?;
-                let path = args
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(".");
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
                 let normalized = self.normalize_path(path);
                 Some(format!("glob:{}:{}", pattern, normalized.display()))
             }
             ToolName::List => {
-                let path = args
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(".");
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
                 let normalized = self.normalize_path(path);
-                let depth = args
-                    .get("depth")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(1);
+                let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(1);
                 Some(format!("list:{}:{}", normalized.display(), depth))
             }
             ToolName::Symbols => {
                 let path = args.get("path")?.as_str()?;
                 let normalized = self.normalize_path(path);
-                let op = args.get("operation").and_then(|v| v.as_str()).unwrap_or("list_symbols");
+                let op = args
+                    .get("operation")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("list_symbols");
                 let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
-                Some(format!("symbols:{}:{}:{}:{}", normalized.display(), op, name, line))
+                Some(format!(
+                    "symbols:{}:{}:{}:{}",
+                    normalized.display(),
+                    op,
+                    name,
+                    line
+                ))
             }
             // Don't cache tools with side effects or dynamic content
-            ToolName::Bash | ToolName::Edit | ToolName::Write | ToolName::Patch
-            | ToolName::Move | ToolName::Copy | ToolName::Delete | ToolName::Mkdir
-            | ToolName::Question | ToolName::Task | ToolName::Webfetch | ToolName::Memory
-            | ToolName::Lsp | ToolName::Agent => None,
+            ToolName::Bash
+            | ToolName::Edit
+            | ToolName::Write
+            | ToolName::Patch
+            | ToolName::Move
+            | ToolName::Copy
+            | ToolName::Delete
+            | ToolName::Mkdir
+            | ToolName::Question
+            | ToolName::Task
+            | ToolName::Webfetch
+            | ToolName::Memory
+            | ToolName::Lsp
+            | ToolName::Agent => None,
         }
     }
 
@@ -377,10 +378,21 @@ impl ToolResultCache {
                 let path = args.get("path")?.as_str()?;
                 Some(self.normalize_path(path))
             }
-            ToolName::Grep | ToolName::Glob | ToolName::Edit | ToolName::Write
-            | ToolName::Patch | ToolName::Move | ToolName::Copy | ToolName::Delete
-            | ToolName::Mkdir | ToolName::Bash | ToolName::Question | ToolName::Task
-            | ToolName::Webfetch | ToolName::Memory | ToolName::Lsp
+            ToolName::Grep
+            | ToolName::Glob
+            | ToolName::Edit
+            | ToolName::Write
+            | ToolName::Patch
+            | ToolName::Move
+            | ToolName::Copy
+            | ToolName::Delete
+            | ToolName::Mkdir
+            | ToolName::Bash
+            | ToolName::Question
+            | ToolName::Task
+            | ToolName::Webfetch
+            | ToolName::Memory
+            | ToolName::Lsp
             | ToolName::Agent => None,
         }
     }
@@ -486,12 +498,20 @@ mod tests {
 
         // Cache a grep result
         let grep_args = json!({"pattern": "fn main", "path": "src/"});
-        cache.put(ToolName::Grep, &grep_args, &test_output("src/main.rs:1: fn main()"));
+        cache.put(
+            ToolName::Grep,
+            &grep_args,
+            &test_output("src/main.rs:1: fn main()"),
+        );
         assert!(cache.get(ToolName::Grep, &grep_args).is_some());
 
         // Cache a glob result
         let glob_args = json!({"pattern": "**/*.rs"});
-        cache.put(ToolName::Glob, &glob_args, &test_output("src/main.rs\nsrc/lib.rs"));
+        cache.put(
+            ToolName::Glob,
+            &glob_args,
+            &test_output("src/main.rs\nsrc/lib.rs"),
+        );
         assert!(cache.get(ToolName::Glob, &glob_args).is_some());
 
         // Editing any file should invalidate grep and glob entries
@@ -510,7 +530,12 @@ mod tests {
         // Hits below the threshold should return the original content
         for i in 0..ToolResultCache::REPEAT_THRESHOLD - 1 {
             let r = cache.get(ToolName::Read, &args).unwrap();
-            assert_eq!(r.output, "full file content", "hit {} should return full content", i + 1);
+            assert_eq!(
+                r.output,
+                "full file content",
+                "hit {} should return full content",
+                i + 1
+            );
         }
     }
 
@@ -563,7 +588,12 @@ mod tests {
         // Counter should be reset — hits below threshold return full content
         for i in 0..ToolResultCache::REPEAT_THRESHOLD - 1 {
             let r = cache.get(ToolName::Read, &args).unwrap();
-            assert_eq!(r.output, "updated content", "post-invalidation hit {} should return full content", i + 1);
+            assert_eq!(
+                r.output,
+                "updated content",
+                "post-invalidation hit {} should return full content",
+                i + 1
+            );
         }
     }
 
@@ -624,7 +654,10 @@ mod tests {
 
         // Next hit — file mtime changed, should be a cache miss
         let r = cache.get(ToolName::Read, &args);
-        assert!(r.is_none(), "should miss cache when file modified externally");
+        assert!(
+            r.is_none(),
+            "should miss cache when file modified externally"
+        );
     }
 
     #[test]
@@ -686,10 +719,7 @@ mod tests {
         // Paths should be sorted
         let a_pos = key.find("a.rs").unwrap();
         let b_pos = key.find("b.rs").unwrap();
-        assert!(
-            a_pos < b_pos,
-            "paths should be sorted in key: {key}"
-        );
+        assert!(a_pos < b_pos, "paths should be sorted in key: {key}");
     }
 
     #[test]
@@ -776,7 +806,10 @@ mod tests {
 
         // No generation bump — same turn
         let r = cache.get(ToolName::Glob, &glob_args);
-        assert!(r.is_some(), "no-mtime entries should hit within same generation");
+        assert!(
+            r.is_some(),
+            "no-mtime entries should hit within same generation"
+        );
         assert_eq!(r.unwrap().output, "file list");
     }
 

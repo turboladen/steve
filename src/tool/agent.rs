@@ -12,8 +12,20 @@ use strum::{Display, EnumIter, EnumString, IntoStaticStr};
 use super::{ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput};
 
 /// Types of child agents with different tool access and model selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize,
-         EnumString, Display, EnumIter, IntoStaticStr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    EnumString,
+    Display,
+    EnumIter,
+    IntoStaticStr,
+)]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum AgentType {
@@ -77,7 +89,12 @@ pub fn tool() -> ToolEntry {
     ToolEntry {
         def: ToolDef {
             name: ToolName::Agent,
-            description: func.get("description").unwrap().as_str().unwrap().to_string(),
+            description: func
+                .get("description")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string(),
             parameters: func.get("parameters").cloned().unwrap(),
         },
         handler: Box::new(execute),
@@ -192,14 +209,10 @@ mod tests {
     fn general_has_most_tools() {
         let tools = AgentType::General.allowed_tools();
         // General should have all tools except Agent
-        let all_except_agent: Vec<ToolName> = ToolName::iter()
-            .filter(|t| *t != ToolName::Agent)
-            .collect();
+        let all_except_agent: Vec<ToolName> =
+            ToolName::iter().filter(|t| *t != ToolName::Agent).collect();
         for t in &all_except_agent {
-            assert!(
-                tools.contains(t),
-                "General agent should include {t}"
-            );
+            assert!(tools.contains(t), "General agent should include {t}");
         }
     }
 

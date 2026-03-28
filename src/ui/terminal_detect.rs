@@ -1,6 +1,8 @@
-use std::io::{Read, Write};
-use std::sync::mpsc;
-use std::time::Duration;
+use std::{
+    io::{Read, Write},
+    sync::mpsc,
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 

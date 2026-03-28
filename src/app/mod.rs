@@ -1,27 +1,29 @@
+mod commands;
 mod constants;
 mod context;
 mod event_loop;
 mod helpers;
 mod input;
+mod key_handling;
 mod prompt;
 mod session;
-mod types;
-mod commands;
-mod key_handling;
 mod tool_display;
+mod types;
 
 use constants::*;
-use types::*;
-pub use tool_display::{extract_args_summary, extract_result_summary};
 use tool_display::extract_diff_content;
+pub use tool_display::{extract_args_summary, extract_result_summary};
+use types::*;
 
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
-use tokio_stream::StreamExt;
 use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use async_openai::types::chat::{
@@ -30,36 +32,38 @@ use async_openai::types::chat::{
     ChatCompletionRequestUserMessageContent,
 };
 
-use crate::config::types::Config;
-use crate::context::cache::ToolResultCache;
-use crate::event::AppEvent;
-use crate::file_ref;
-use crate::permission::PermissionEngine;
-use crate::permission::types::PermissionReply;
-use crate::project::ProjectInfo;
-use crate::provider::ProviderRegistry;
-use crate::session::SessionManager;
-use crate::session::message::{Message, Role};
-use crate::session::types::SessionInfo;
-use crate::storage::Storage;
-use crate::stream::{self, StreamRequest};
-use crate::tool::{ToolContext, ToolName, ToolRegistry};
-use crate::usage::UsageWriter;
-use crate::usage::types::SessionRecord;
-use crate::ui;
-use crate::ui::autocomplete::{AutocompleteMode, AutocompleteState, apply_file_completion};
-use crate::ui::input::InputState;
-use crate::ui::message_area::MessageAreaState;
-use crate::ui::model_picker::ModelPickerState;
-use crate::ui::session_picker::SessionPickerState;
-use crate::ui::message_block::{
-    AssistantPart, MessageBlock, ToolCall,
+use crate::{
+    config::types::Config,
+    context::cache::ToolResultCache,
+    event::AppEvent,
+    file_ref,
+    permission::{PermissionEngine, types::PermissionReply},
+    project::ProjectInfo,
+    provider::ProviderRegistry,
+    session::{
+        SessionManager,
+        message::{Message, Role},
+        types::SessionInfo,
+    },
+    storage::Storage,
+    stream::{self, StreamRequest},
+    task::types::{Priority, TaskKind, TaskStatus},
+    tool::{ToolContext, ToolName, ToolRegistry},
+    ui,
+    ui::{
+        autocomplete::{AutocompleteMode, AutocompleteState, apply_file_completion},
+        input::InputState,
+        message_area::MessageAreaState,
+        message_block::{AssistantPart, MessageBlock, ToolCall},
+        model_picker::ModelPickerState,
+        selection::SelectionState,
+        session_picker::SessionPickerState,
+        sidebar::{MAX_SIDEBAR_TASKS, SidebarLsp, SidebarState, SidebarTask, count_diff_lines},
+        status_line::{Activity, StatusLineState},
+        theme::Theme,
+    },
+    usage::{UsageWriter, types::SessionRecord},
 };
-use crate::ui::selection::SelectionState;
-use crate::task::types::{Priority, TaskKind, TaskStatus};
-use crate::ui::sidebar::{SidebarLsp, SidebarState, SidebarTask, count_diff_lines, MAX_SIDEBAR_TASKS};
-use crate::ui::status_line::{Activity, StatusLineState};
-use crate::ui::theme::Theme;
 
 pub struct App {
     // Core state
@@ -205,12 +209,20 @@ impl App {
 
         // Build permission engine with Build mode rules (default start mode)
         // Profile-aware rules will be set on first sync_permission_mode call
-        let profile = config.permission_profile.unwrap_or(crate::permission::PermissionProfile::Standard);
-        let allow_overrides: Vec<ToolName> = config.allow_tools.iter()
+        let profile = config
+            .permission_profile
+            .unwrap_or(crate::permission::PermissionProfile::Standard);
+        let allow_overrides: Vec<ToolName> = config
+            .allow_tools
+            .iter()
             .filter_map(|s| s.parse::<ToolName>().ok())
             .collect();
         let permission_engine = Arc::new(tokio::sync::Mutex::new(PermissionEngine::new(
-            crate::permission::profile_build_rules(profile, &allow_overrides, &config.permission_rules),
+            crate::permission::profile_build_rules(
+                profile,
+                &allow_overrides,
+                &config.permission_rules,
+            ),
         )));
 
         // Build tool result cache (session-scoped, shared across stream tasks)
@@ -219,19 +231,17 @@ impl App {
         )));
 
         // Build task store (persistent across sessions)
-        let repo_name = crate::project::git_repo_name(&project.root)
-            .unwrap_or_else(|| "proj".to_string());
+        let repo_name =
+            crate::project::git_repo_name(&project.root).unwrap_or_else(|| "proj".to_string());
         let task_store = crate::task::TaskStore::new(storage.clone(), repo_name);
 
         // Build LSP manager (servers started in background after app init)
-        let lsp_manager = Arc::new(std::sync::Mutex::new(
-            crate::lsp::LspManager::new(project.root.clone()),
-        ));
+        let lsp_manager = Arc::new(std::sync::Mutex::new(crate::lsp::LspManager::new(
+            project.root.clone(),
+        )));
 
         // Build MCP manager (servers started in background after app init)
-        let mcp_manager = Arc::new(tokio::sync::Mutex::new(
-            crate::mcp::McpManager::new(),
-        ));
+        let mcp_manager = Arc::new(tokio::sync::Mutex::new(crate::mcp::McpManager::new()));
 
         // Configure MCP-related permission state on the engine
         {
@@ -239,7 +249,9 @@ impl App {
             if let Ok(mut engine) = permission_engine.try_lock() {
                 engine.set_profile(profile);
 
-                let mcp_overrides: std::collections::HashSet<String> = config.allow_tools.iter()
+                let mcp_overrides: std::collections::HashSet<String> = config
+                    .allow_tools
+                    .iter()
                     .filter(|s| crate::mcp::types::parse_prefixed_tool_name(s).is_some())
                     .cloned()
                     .collect();
@@ -324,7 +336,6 @@ impl App {
         app.sync_context_window();
         app
     }
-
 }
 
 #[cfg(test)]
@@ -421,7 +432,8 @@ mod overlay_tests {
     fn mcp_overlay_close_on_new() {
         let mut app = make_test_app();
         let snapshot = crate::ui::mcp_overlay::McpSnapshot::default();
-        app.mcp_overlay.open(crate::ui::mcp_overlay::McpTab::Servers, snapshot, None);
+        app.mcp_overlay
+            .open(crate::ui::mcp_overlay::McpTab::Servers, snapshot, None);
         assert!(app.mcp_overlay.visible);
 
         // Simulate the relevant part of Command::New handler
@@ -441,7 +453,8 @@ mod overlay_tests {
         app.session_picker.close();
         app.diagnostics_overlay.close();
         let snapshot = crate::ui::mcp_overlay::McpSnapshot::default();
-        app.mcp_overlay.open(crate::ui::mcp_overlay::McpTab::Tools, snapshot, None);
+        app.mcp_overlay
+            .open(crate::ui::mcp_overlay::McpTab::Tools, snapshot, None);
         assert!(app.mcp_overlay.visible);
         assert!(!app.model_picker.visible);
     }
@@ -450,7 +463,8 @@ mod overlay_tests {
     fn mcp_overlay_closed_by_diagnostics() {
         let mut app = make_test_app();
         let snapshot = crate::ui::mcp_overlay::McpSnapshot::default();
-        app.mcp_overlay.open(crate::ui::mcp_overlay::McpTab::Servers, snapshot, None);
+        app.mcp_overlay
+            .open(crate::ui::mcp_overlay::McpTab::Servers, snapshot, None);
         assert!(app.mcp_overlay.visible);
 
         // Simulate what handle_command(Diagnostics) does — close others then open.

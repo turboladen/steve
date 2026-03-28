@@ -1,7 +1,6 @@
 pub mod client;
 
-use std::collections::HashMap;
-use std::env;
+use std::{collections::HashMap, env};
 
 use anyhow::{Context, Result};
 
@@ -81,20 +80,17 @@ impl ProviderRegistry {
 
     /// Resolve a model reference like "provider/model" to a ResolvedModel.
     pub fn resolve_model(&self, model_ref: &str) -> Result<ResolvedModel> {
-        let (provider_id, model_id) = model_ref
-            .split_once('/')
-            .with_context(|| format!("invalid model ref '{model_ref}', expected 'provider/model'"))?;
+        let (provider_id, model_id) = model_ref.split_once('/').with_context(|| {
+            format!("invalid model ref '{model_ref}', expected 'provider/model'")
+        })?;
 
         let entry = self
             .providers
             .get(provider_id)
             .with_context(|| format!("provider '{provider_id}' not configured"))?;
 
-        let model_config = entry
-            .config
-            .models
-            .get(model_id)
-            .with_context(|| {
+        let model_config =
+            entry.config.models.get(model_id).with_context(|| {
                 format!("model '{model_id}' not found in provider '{provider_id}'")
             })?;
 
@@ -137,9 +133,7 @@ impl ProviderRegistry {
 
     /// Build a registry from pre-constructed entries (no env var lookups).
     #[cfg(test)]
-    pub fn from_entries(
-        entries: Vec<(String, ProviderConfig, client::LlmClient)>,
-    ) -> Self {
+    pub fn from_entries(entries: Vec<(String, ProviderConfig, client::LlmClient)>) -> Self {
         let mut providers = HashMap::new();
         for (id, config, client) in entries {
             providers.insert(id, ProviderEntry { config, client });
@@ -151,7 +145,7 @@ impl ProviderRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::{ModelCapabilities, ModelCost, ModelConfig, ProviderConfig};
+    use crate::config::types::{ModelCapabilities, ModelConfig, ModelCost, ProviderConfig};
 
     fn make_test_resolved_model() -> ResolvedModel {
         ResolvedModel {

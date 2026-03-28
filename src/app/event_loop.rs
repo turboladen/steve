@@ -26,10 +26,7 @@ impl App {
                             .collect();
                         if !running.is_empty() {
                             let _ = tx.send(AppEvent::StreamNotice {
-                                text: format!(
-                                    "LSP servers started: {}",
-                                    running.join(", ")
-                                ),
+                                text: format!("LSP servers started: {}", running.join(", ")),
                             });
                         }
                         let _ = tx.send(AppEvent::LspStatus { servers: status });
@@ -57,7 +54,8 @@ impl App {
                 });
 
                 let mut mgr = mcp.lock().await;
-                mgr.start_servers(&configs, data_dir.as_deref(), Some(oauth_tx)).await;
+                mgr.start_servers(&configs, data_dir.as_deref(), Some(oauth_tx))
+                    .await;
                 let summary = mgr.server_summary();
                 if !summary.is_empty() {
                     let _ = tx.send(AppEvent::StreamNotice {
@@ -106,14 +104,18 @@ impl App {
         Ok(())
     }
 
-
     pub(super) async fn handle_event(&mut self, event: AppEvent) -> Result<()> {
         match event {
             AppEvent::Input(Event::Key(key)) => self.handle_key(key).await?,
             AppEvent::Input(Event::Mouse(mouse)) => {
                 use crossterm::event::MouseButton;
                 // Block mouse events in the message area when an overlay is active
-                if self.model_picker.visible || self.session_picker.visible || self.diagnostics_overlay.visible || self.mcp_overlay.visible || self.pending_question.is_some() {
+                if self.model_picker.visible
+                    || self.session_picker.visible
+                    || self.diagnostics_overlay.visible
+                    || self.mcp_overlay.visible
+                    || self.pending_question.is_some()
+                {
                     return Ok(());
                 }
                 match mouse.kind {
@@ -300,8 +302,7 @@ impl App {
                             // Safe to split on ':' — task IDs are hex-only (task-XXXXXXXX)
                             if let Some(rest) = output.output.strip_prefix("Completed task ") {
                                 if let Some(id) = rest.split(':').next() {
-                                    self.sidebar_state
-                                        .record_task_closed(id.trim().to_string());
+                                    self.sidebar_state.record_task_closed(id.trim().to_string());
                                 }
                             }
                         }
@@ -401,7 +402,12 @@ impl App {
                 self.messages.push(MessageBlock::System { text });
                 self.message_area_state.scroll_to_bottom();
             }
-            AppEvent::AgentProgress { call_id: _, tool_name, args_summary, result_summary } => {
+            AppEvent::AgentProgress {
+                call_id: _,
+                tool_name,
+                args_summary,
+                result_summary,
+            } => {
                 // Update the agent tool call's inline progress — no new MessageBlock,
                 // so the assistant block stays at the bottom and follow-up text is visible.
                 if let Some(last) = self.last_assistant_mut() {
@@ -431,7 +437,8 @@ impl App {
                     args_summary: req.arguments_summary.clone(),
                     diff_content,
                 });
-                self.status_line_state.set_activity(Activity::WaitingForPermission);
+                self.status_line_state
+                    .set_activity(Activity::WaitingForPermission);
                 self.message_area_state.scroll_to_bottom();
                 self.pending_permission = Some(PendingPermission {
                     tool_name: req.tool_name,
@@ -448,7 +455,8 @@ impl App {
                     free_text: String::new(),
                     answered: None,
                 });
-                self.status_line_state.set_activity(Activity::WaitingForQuestion);
+                self.status_line_state
+                    .set_activity(Activity::WaitingForQuestion);
                 self.message_area_state.scroll_to_bottom();
                 self.pending_question = Some(PendingQuestion {
                     call_id: req.call_id,
@@ -518,7 +526,9 @@ impl App {
             AppEvent::AgentsUpdateFinish { proposed_content } => {
                 // Guard: if cancelled (is_loading already cleared), discard the late result
                 if !self.is_loading {
-                    tracing::info!("AGENTS.md update result arrived after cancellation, discarding");
+                    tracing::info!(
+                        "AGENTS.md update result arrived after cancellation, discarding"
+                    );
                 } else {
                     self.is_loading = false;
                     self.status_line_state.set_activity(Activity::Idle);
@@ -563,8 +573,10 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tests::{make_test_app, has_error_message, has_system_message};
-    use crate::event::{AppEvent, StreamUsage};
+    use crate::{
+        app::tests::{has_error_message, has_system_message, make_test_app},
+        event::{AppEvent, StreamUsage},
+    };
 
     /// Put app into streaming state with an empty assistant message block.
     fn start_streaming(app: &mut App) {
@@ -582,14 +594,29 @@ mod tests {
         let mut app = make_test_app();
         start_streaming(&mut app);
 
-        app.handle_event(AppEvent::LlmDelta { text: "Hello".into() }).await.unwrap();
-        app.handle_event(AppEvent::LlmDelta { text: " world".into() }).await.unwrap();
+        app.handle_event(AppEvent::LlmDelta {
+            text: "Hello".into(),
+        })
+        .await
+        .unwrap();
+        app.handle_event(AppEvent::LlmDelta {
+            text: " world".into(),
+        })
+        .await
+        .unwrap();
 
         match app.messages.last().unwrap() {
             MessageBlock::Assistant { parts, .. } => {
-                let text: String = parts.iter().filter_map(|p| {
-                    if let AssistantPart::Text(t) = p { Some(t.as_str()) } else { None }
-                }).collect();
+                let text: String = parts
+                    .iter()
+                    .filter_map(|p| {
+                        if let AssistantPart::Text(t) = p {
+                            Some(t.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
                 assert_eq!(text, "Hello world");
             }
             other => panic!("expected Assistant, got {other:?}"),
@@ -601,7 +628,11 @@ mod tests {
         let mut app = make_test_app();
         let msg_count = app.messages.len();
 
-        app.handle_event(AppEvent::LlmDelta { text: "ignored".into() }).await.unwrap();
+        app.handle_event(AppEvent::LlmDelta {
+            text: "ignored".into(),
+        })
+        .await
+        .unwrap();
 
         // No new messages, no panic
         assert_eq!(app.messages.len(), msg_count);
@@ -618,7 +649,9 @@ mod tests {
                 completion_tokens: 1_000,
                 total_tokens: 51_000,
             },
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         assert_eq!(app.last_prompt_tokens, 50_000);
         assert_eq!(app.status_line_state.last_prompt_tokens, 50_000);
@@ -633,7 +666,11 @@ mod tests {
         assert!(app.is_loading);
         assert!(app.streaming_active);
 
-        app.handle_event(AppEvent::LlmError { error: "connection failed".into() }).await.unwrap();
+        app.handle_event(AppEvent::LlmError {
+            error: "connection failed".into(),
+        })
+        .await
+        .unwrap();
 
         assert!(!app.is_loading);
         assert!(!app.streaming_active);
@@ -647,7 +684,9 @@ mod tests {
         let mut app = make_test_app();
         start_streaming(&mut app);
 
-        app.handle_event(AppEvent::LlmFinish { usage: None }).await.unwrap();
+        app.handle_event(AppEvent::LlmFinish { usage: None })
+            .await
+            .unwrap();
 
         assert!(!app.is_loading);
         assert!(!app.streaming_active);
@@ -658,7 +697,11 @@ mod tests {
     async fn event_stream_notice_pushes_system_message() {
         let mut app = make_test_app();
 
-        app.handle_event(AppEvent::StreamNotice { text: "LSP started".into() }).await.unwrap();
+        app.handle_event(AppEvent::StreamNotice {
+            text: "LSP started".into(),
+        })
+        .await
+        .unwrap();
 
         assert!(has_system_message(&app, "LSP started"));
     }
@@ -669,7 +712,11 @@ mod tests {
         app.is_loading = true;
         assert!(!app.auto_compact_failed);
 
-        app.handle_event(AppEvent::CompactError { error: "boom".into() }).await.unwrap();
+        app.handle_event(AppEvent::CompactError {
+            error: "boom".into(),
+        })
+        .await
+        .unwrap();
 
         assert!(app.auto_compact_failed);
         assert!(!app.is_loading);
@@ -684,7 +731,9 @@ mod tests {
             attempt: 2,
             max_attempts: 3,
             error: "timeout".into(),
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         assert!(has_system_message(&app, "timeout"));
         assert!(has_system_message(&app, "2/3"));
@@ -733,10 +782,16 @@ mod tests {
         assert!(state.auto_scroll);
         state.scroll_up(1);
         assert_eq!(state.scroll_offset, 399);
-        assert!(!state.auto_scroll, "scrolling up should disable auto_scroll");
+        assert!(
+            !state.auto_scroll,
+            "scrolling up should disable auto_scroll"
+        );
         state.scroll_down(1);
         assert_eq!(state.scroll_offset, 400);
-        assert!(state.auto_scroll, "returning to bottom should re-enable auto_scroll");
+        assert!(
+            state.auto_scroll,
+            "returning to bottom should re-enable auto_scroll"
+        );
     }
 
     #[test]
@@ -751,7 +806,10 @@ mod tests {
         assert!(!state.auto_scroll, "page up should disable auto_scroll");
         state.scroll_down(page);
         assert_eq!(state.scroll_offset, 400);
-        assert!(state.auto_scroll, "page down to bottom should re-enable auto_scroll");
+        assert!(
+            state.auto_scroll,
+            "page down to bottom should re-enable auto_scroll"
+        );
     }
 
     #[tokio::test]

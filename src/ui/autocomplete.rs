@@ -8,8 +8,8 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem},
 };
 
-use crate::command::Command;
 use super::theme::Theme;
+use crate::command::Command;
 
 /// Which kind of autocomplete is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,8 +242,12 @@ pub fn render_autocomplete(
     }
 
     match state.mode {
-        AutocompleteMode::Command => render_command_popup(frame, input_area, state, theme, context_pct),
-        AutocompleteMode::FileRef => render_file_popup(frame, input_area, state, theme, context_pct),
+        AutocompleteMode::Command => {
+            render_command_popup(frame, input_area, state, theme, context_pct)
+        }
+        AutocompleteMode::FileRef => {
+            render_file_popup(frame, input_area, state, theme, context_pct)
+        }
     }
 }
 
@@ -274,23 +278,30 @@ fn render_command_popup(
     // Clear the area behind the popup
     frame.render_widget(Clear, popup_area);
 
-    let items: Vec<ListItem> = state.matches.iter().enumerate().map(|(i, (name, desc))| {
-        let style = if i == state.selected {
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.fg)
-        };
-        ListItem::new(Line::from(vec![
-            Span::styled(format!("{:<12}", name), style),
-            Span::styled(*desc, Style::default().fg(theme.dim)),
-        ]))
-    }).collect();
+    let items: Vec<ListItem> = state
+        .matches
+        .iter()
+        .enumerate()
+        .map(|(i, (name, desc))| {
+            let style = if i == state.selected {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.fg)
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{:<12}", name), style),
+                Span::styled(*desc, Style::default().fg(theme.dim)),
+            ]))
+        })
+        .collect();
 
-    let list = List::new(items)
-        .block(Block::default()
+    let list = List::new(items).block(
+        Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.border_color(context_pct)))
-        );
+            .border_style(Style::default().fg(theme.border_color(context_pct))),
+    );
 
     frame.render_widget(list, popup_area);
 }
@@ -309,7 +320,9 @@ fn render_file_popup(
     let item_count = state.file_matches.len().min(10) as u16;
     let popup_height = item_count + 2; // +2 for borders
     // Dynamic width: sized to longest visible match, min 40, capped by available terminal width.
-    let longest_match = state.file_matches.iter()
+    let longest_match = state
+        .file_matches
+        .iter()
         .take(10) // only visible items
         .map(|p| p.len())
         .max()
@@ -327,20 +340,27 @@ fn render_file_popup(
 
     frame.render_widget(Clear, popup_area);
 
-    let items: Vec<ListItem> = state.file_matches.iter().enumerate().map(|(i, path)| {
-        let style = if i == state.selected {
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.fg)
-        };
-        ListItem::new(Line::from(Span::styled(path.as_str(), style)))
-    }).collect();
+    let items: Vec<ListItem> = state
+        .file_matches
+        .iter()
+        .enumerate()
+        .map(|(i, path)| {
+            let style = if i == state.selected {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.fg)
+            };
+            ListItem::new(Line::from(Span::styled(path.as_str(), style)))
+        })
+        .collect();
 
-    let list = List::new(items)
-        .block(Block::default()
+    let list = List::new(items).block(
+        Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme.border_color(context_pct)))
-        );
+            .border_style(Style::default().fg(theme.border_color(context_pct))),
+    );
 
     frame.render_widget(list, popup_area);
 }
@@ -379,8 +399,18 @@ mod tests {
         state.update("/mcp ");
         assert!(state.visible);
         assert!(state.matches.iter().any(|(name, _)| *name == "/mcp tools"));
-        assert!(state.matches.iter().any(|(name, _)| *name == "/mcp resources"));
-        assert!(state.matches.iter().any(|(name, _)| *name == "/mcp prompts"));
+        assert!(
+            state
+                .matches
+                .iter()
+                .any(|(name, _)| *name == "/mcp resources")
+        );
+        assert!(
+            state
+                .matches
+                .iter()
+                .any(|(name, _)| *name == "/mcp prompts")
+        );
     }
 
     #[test]
@@ -489,10 +519,7 @@ mod tests {
 
     #[test]
     fn file_ref_basename_match() {
-        let files = vec![
-            "src/tool/read.rs".into(),
-            "src/tool/write.rs".into(),
-        ];
+        let files = vec!["src/tool/read.rs".into(), "src/tool/write.rs".into()];
         let mut state = AutocompleteState::default();
         state.update_with_files("look at @read", &files);
         assert!(state.visible);
@@ -518,7 +545,10 @@ mod tests {
 
     #[test]
     fn find_active_ref_basic() {
-        assert_eq!(find_active_file_ref("look at @src/ma"), Some("src/ma".into()));
+        assert_eq!(
+            find_active_file_ref("look at @src/ma"),
+            Some("src/ma".into())
+        );
     }
 
     #[test]
@@ -599,7 +629,10 @@ mod tests {
         let text = render_autocomplete_to_string(80, 25, &state, input_area);
         // All cells should be spaces (default empty buffer)
         let non_space: String = text.chars().filter(|c| !c.is_whitespace()).collect();
-        assert!(non_space.is_empty(), "hidden autocomplete should render nothing, got: '{non_space}'");
+        assert!(
+            non_space.is_empty(),
+            "hidden autocomplete should render nothing, got: '{non_space}'"
+        );
     }
 
     #[test]
@@ -608,7 +641,10 @@ mod tests {
         state.update("/e"); // Should match "/exit"
         let input_area = Rect::new(0, 20, 80, 5);
         let text = render_autocomplete_to_string(80, 25, &state, input_area);
-        assert!(text.contains("/exit"), "should show /exit match, got:\n{text}");
+        assert!(
+            text.contains("/exit"),
+            "should show /exit match, got:\n{text}"
+        );
     }
 
     #[test]
@@ -632,9 +668,15 @@ mod tests {
                     break;
                 }
             }
-            if found_accent { break; }
+            if found_accent {
+                break;
+            }
         }
-        assert!(found_accent, "selected item '{}' should be rendered with accent color", selected);
+        assert!(
+            found_accent,
+            "selected item '{}' should be rendered with accent color",
+            selected
+        );
     }
 
     #[test]
@@ -659,22 +701,27 @@ mod tests {
                     break;
                 }
             }
-            if found_content_above { break; }
+            if found_content_above {
+                break;
+            }
         }
-        assert!(found_content_above, "autocomplete popup should be positioned above the input area");
+        assert!(
+            found_content_above,
+            "autocomplete popup should be positioned above the input area"
+        );
     }
 
     #[test]
     fn buffer_file_ref_popup_shows_paths() {
-        let files = vec![
-            "src/main.rs".into(),
-            "src/lib.rs".into(),
-        ];
+        let files = vec!["src/main.rs".into(), "src/lib.rs".into()];
         let mut state = AutocompleteState::default();
         state.update_with_files("@src/", &files);
         assert!(state.visible);
         let input_area = Rect::new(0, 20, 80, 5);
         let text = render_autocomplete_to_string(80, 25, &state, input_area);
-        assert!(text.contains("src/main.rs"), "file popup should show paths, got:\n{text}");
+        assert!(
+            text.contains("src/main.rs"),
+            "file popup should show paths, got:\n{text}"
+        );
     }
 }

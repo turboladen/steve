@@ -36,7 +36,8 @@ impl App {
             }
         }
         // Sync task list for sidebar: open/in_progress tasks + session-closed tasks
-        self.sidebar_state.tasks = self.task_store
+        self.sidebar_state.tasks = self
+            .task_store
             .list_tasks()
             .unwrap_or_default()
             .into_iter()
@@ -96,14 +97,15 @@ impl App {
     /// and when the /diagnostics overlay is opened — not per-frame.
     pub(super) fn collect_diagnostics(&self) -> Vec<crate::diagnostics::DiagnosticCheck> {
         let (cache_hits, cache_misses) = self.tool_cache.lock().unwrap().cache_stats();
-        let lsp_servers: Vec<(&str, bool)> =
-            self.sidebar_state.lsp_servers.iter()
-                .map(|s| (s.binary.as_str(), s.running))
-                .collect();
-        let system_prompt_len = self.build_system_prompt()
-            .map(|s| s.len())
-            .unwrap_or(0);
-        let total_tokens = self.current_session
+        let lsp_servers: Vec<(&str, bool)> = self
+            .sidebar_state
+            .lsp_servers
+            .iter()
+            .map(|s| (s.binary.as_str(), s.running))
+            .collect();
+        let system_prompt_len = self.build_system_prompt().map(|s| s.len()).unwrap_or(0);
+        let total_tokens = self
+            .current_session
             .as_ref()
             .map(|s| s.token_usage.total_tokens)
             .unwrap_or(0);
@@ -117,7 +119,14 @@ impl App {
             .mcp_servers
             .iter()
             .filter(|s| s.connected)
-            .map(|s| (s.server_id.as_str(), s.tool_count, s.resource_count, s.prompt_count))
+            .map(|s| {
+                (
+                    s.server_id.as_str(),
+                    s.tool_count,
+                    s.resource_count,
+                    s.prompt_count,
+                )
+            })
             .collect();
 
         let input = crate::diagnostics::DiagnosticInput {
@@ -153,11 +162,19 @@ impl App {
 
     /// Sync the permission engine rules with the current agent mode.
     pub(super) fn sync_permission_mode(&self) {
-        use crate::ui::input::AgentMode;
-        use crate::permission::{PermissionProfile, profile_build_rules, profile_plan_rules};
+        use crate::{
+            permission::{PermissionProfile, profile_build_rules, profile_plan_rules},
+            ui::input::AgentMode,
+        };
 
-        let profile = self.config.permission_profile.unwrap_or(PermissionProfile::Standard);
-        let allow_overrides: Vec<ToolName> = self.config.allow_tools.iter()
+        let profile = self
+            .config
+            .permission_profile
+            .unwrap_or(PermissionProfile::Standard);
+        let allow_overrides: Vec<ToolName> = self
+            .config
+            .allow_tools
+            .iter()
             .filter_map(|s| s.parse::<ToolName>().ok())
             .collect();
 
@@ -383,9 +400,11 @@ mod tests {
             models,
         };
         let client = crate::provider::client::LlmClient::new("https://api.test.com/v1", "fake");
-        app.provider_registry = Some(crate::provider::ProviderRegistry::from_entries(vec![
-            ("test".to_string(), provider_config, client),
-        ]));
+        app.provider_registry = Some(crate::provider::ProviderRegistry::from_entries(vec![(
+            "test".to_string(),
+            provider_config,
+            client,
+        )]));
 
         app.current_model = Some("test/small".to_string());
         app.sync_context_window();
