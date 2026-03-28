@@ -216,6 +216,410 @@ fn extract_plain_text(line: &Line<'_>) -> String {
     text
 }
 
+/// Render a thinking block (collapsed or expanded).
+fn render_thinking_block(
+    glines: &mut GutteredLines<'_>,
+    thinking: &super::message_block::ThinkingBlock,
+    theme: &Theme,
+) {
+    if thinking.expanded {
+        glines.push(
+            Line::from(Span::styled(
+                format!("\u{25bc} Thinking ({} tokens)", thinking.token_count),
+                Style::default()
+                    .fg(theme.reasoning)
+                    .add_modifier(Modifier::ITALIC),
+            )),
+            GutterMark::Empty,
+        );
+        for content_line in thinking.content.lines() {
+            glines.push(
+                Line::from(Span::styled(
+                    format!("  {content_line}"),
+                    Style::default().fg(theme.reasoning),
+                )),
+                GutterMark::Empty,
+            );
+        }
+    } else {
+        glines.push(
+            Line::from(Span::styled(
+                format!("\u{25b6} Thinking ({} tokens)", thinking.token_count),
+                Style::default()
+                    .fg(theme.reasoning)
+                    .add_modifier(Modifier::ITALIC),
+            )),
+            GutterMark::Empty,
+        );
+    }
+}
+
+/// Render a tool group (intent line + tool calls with status/output).
+fn render_tool_group<'a>(
+    glines: &mut GutteredLines<'a>,
+    group: &ToolGroup,
+    last_intent: &mut Option<IntentCategory>,
+    theme: &Theme,
+    content_width: usize,
+    context_pct: u8,
+) {
+    // Intent indicator — suppressed if same as previous group
+    if let Some(category) = infer_group_intent(group) {
+        if *last_intent != Some(category) {
+            glines.push(
+                render_intent_line(category, content_width, theme),
+                GutterMark::Intent,
+            );
+        }
+        *last_intent = Some(category);
+    } else {
+        // Asking-only groups have no label — reset tracking so the
+        // next labeled group isn't incorrectly suppressed.
+        *last_intent = None;
+    }
+    for call in &group.calls {
+        let status_indicator = match (&group.status, &call.result_summary) {
+            (_, Some(_)) if call.expanded => "\u{25bc}",
+            (_, Some(_)) => "\u{25b6}",
+            _ => "\u{2819}",
+        };
+
+        let result_part = match &call.result_summary {
+            Some(summary) => format!(" \u{2192} {summary}"),
+            None => match &group.status {
+                ToolGroupStatus::Preparing => " preparing...".to_string(),
+                ToolGroupStatus::Running { .. } => " running...".to_string(),
+                ToolGroupStatus::Complete => String::new(),
+            },
+        };
+
+        let color = if call.is_error {
+            theme.error
+        } else {
+            tool_color(call.tool_name, theme)
+        };
+
+        glines.push(
+            Line::from(vec![
+                Span::styled(format!("{status_indicator} "), Style::default().fg(color)),
+                Span::styled(
+                    call.tool_name.to_string(),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" {}{}", call.args_summary, result_part),
+                    Style::default().fg(color),
+                ),
+            ]),
+            GutterMark::ToolMarker(call.tool_name),
+        );
+
+        // Sub-agent live progress — show what tool the agent is calling
+        if let Some(progress) = &call.agent_progress {
+            let progress_text = if let Some(ref result) = progress.result_summary {
+                format!(
+                    "    {} {} \u{2192} {result}",
+                    progress.tool_name, progress.args_summary
+                )
+            } else {
+                format!("    {} {} ...", progress.tool_name, progress.args_summary)
+            };
+            glines.push(
+                Line::from(Span::styled(progress_text, Style::default().fg(theme.dim))),
+                GutterMark::Continuation(call.tool_name),
+            );
+        }
+
+        // Expanded output — diff content or raw output fallback
+        if call.expanded {
+            if let Some(diff) = &call.diff_content {
+                let mut diff_output: Vec<Line> = Vec::new();
+                render_diff_lines(
+                    &mut diff_output,
+                    diff,
+                    call.result_summary.as_deref(),
+                    theme,
+                    context_pct,
+                    content_width,
+                );
+                glines.extend(diff_output, GutterMark::Continuation(call.tool_name));
+            } else if let Some(output) = &call.full_output {
+                for output_line in output.lines() {
+                    glines.push(
+                        Line::from(Span::styled(
+                            format!("  {output_line}"),
+                            Style::default().fg(theme.dim),
+                        )),
+                        GutterMark::Continuation(call.tool_name),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Render an assistant message block (thinking + parts).
+fn render_assistant_block<'a>(
+    glines: &mut GutteredLines<'a>,
+    thinking: &Option<super::message_block::ThinkingBlock>,
+    parts: &[AssistantPart],
+    theme: &Theme,
+    content_width: usize,
+    context_pct: u8,
+) {
+    // Thinking block (collapsed by default)
+    if let Some(t) = thinking {
+        render_thinking_block(glines, t, theme);
+    }
+
+    // Parts in chronological order.
+    // Track last-emitted intent to suppress repeated labels for
+    // consecutive same-category tool groups (e.g. 3 reads in a row).
+    // Text between groups resets tracking so the label reappears.
+    let mut last_intent: Option<IntentCategory> = None;
+    for part in parts.iter() {
+        match part {
+            AssistantPart::Text(text) => {
+                let md_lines = render_text_with_code_blocks(text, theme, content_width);
+                for ml in md_lines {
+                    glines.push_with_text(ml.styled, GutterMark::Empty, ml.plain);
+                }
+                last_intent = None;
+            }
+            AssistantPart::ToolGroup(group) => {
+                render_tool_group(
+                    glines,
+                    group,
+                    &mut last_intent,
+                    theme,
+                    content_width,
+                    context_pct,
+                );
+            }
+        }
+    }
+}
+
+/// Render a permission prompt block.
+fn render_permission_block<'a>(
+    glines: &mut GutteredLines<'a>,
+    tool_name: &str,
+    args_summary: &str,
+    diff_content: &Option<DiffContent>,
+    theme: &Theme,
+    content_width: usize,
+    context_pct: u8,
+) {
+    // Top rule
+    glines.push(
+        primitives::horizontal_rule(content_width, theme.permission),
+        GutterMark::Empty,
+    );
+    // Prompt line
+    glines.push(
+        Line::from(vec![
+            Span::styled(
+                "\u{26a0} Allow ",
+                Style::default()
+                    .fg(theme.permission)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                tool_name.to_string(),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(": {args_summary}?"),
+                Style::default()
+                    .fg(theme.permission)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        GutterMark::Empty,
+    );
+    // Inline diff preview if available
+    if let Some(diff) = diff_content {
+        let mut diff_output: Vec<Line> = Vec::new();
+        render_diff_lines(
+            &mut diff_output,
+            diff,
+            None,
+            theme,
+            context_pct,
+            content_width,
+        );
+        glines.extend(diff_output, GutterMark::Empty);
+    }
+    // Options line with highlighted key letters
+    glines.push(
+        Line::from(vec![
+            Span::raw("  ["),
+            Span::styled(
+                "y",
+                Style::default()
+                    .fg(theme.success)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("]es / ["),
+            Span::styled(
+                "n",
+                Style::default()
+                    .fg(theme.error)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("]o / ["),
+            Span::styled(
+                "a",
+                Style::default()
+                    .fg(theme.permission)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("]lways"),
+        ]),
+        GutterMark::Empty,
+    );
+    // Bottom rule
+    glines.push(
+        primitives::horizontal_rule(content_width, theme.permission),
+        GutterMark::Empty,
+    );
+}
+
+/// Render a question prompt block.
+#[allow(clippy::too_many_arguments)]
+fn render_question_block(
+    glines: &mut GutteredLines<'_>,
+    question: &str,
+    options: &[String],
+    selected: Option<usize>,
+    free_text: &str,
+    answered: &Option<String>,
+    theme: &Theme,
+    content_width: usize,
+) {
+    // Top rule
+    glines.push(
+        primitives::horizontal_rule(content_width, theme.question),
+        GutterMark::Empty,
+    );
+    // Question line with mode badge
+    let mode_badge = if answered.is_some() {
+        "" // No badge for answered questions
+    } else if selected.is_none() {
+        " [typing]"
+    } else {
+        " [selecting]"
+    };
+    glines.push(
+        Line::from(vec![
+            Span::styled(
+                "? ",
+                Style::default()
+                    .fg(theme.question)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                question.to_string(),
+                Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(mode_badge.to_string(), Style::default().fg(theme.question)),
+        ]),
+        GutterMark::Empty,
+    );
+
+    if let Some(answer) = answered {
+        // Answered state — show the answer
+        glines.push(
+            Line::from(Span::styled(
+                format!("  \u{2192} {answer}"),
+                Style::default().fg(theme.success),
+            )),
+            GutterMark::Empty,
+        );
+    } else {
+        // Active state — show options or free-text input
+        let in_free_text_mode = selected.is_none();
+        for (i, option) in options.iter().enumerate() {
+            let is_selected = selected == Some(i);
+            let prefix = if is_selected { "  \u{25b8} " } else { "    " };
+            let label = format!("{prefix}{}. {option}", i + 1);
+            let style = if is_selected {
+                Style::default()
+                    .fg(theme.question)
+                    .add_modifier(Modifier::BOLD)
+            } else if in_free_text_mode {
+                // Dim options when in free-text mode
+                Style::default().fg(theme.dim)
+            } else {
+                Style::default().fg(theme.fg)
+            };
+            glines.push(Line::from(Span::styled(label, style)), GutterMark::Empty);
+        }
+
+        // Free-text input (when no options or Tab toggled to free-text)
+        if selected.is_none() {
+            glines.push(
+                Line::from(Span::styled(
+                    format!("  > {free_text}\u{258f}"),
+                    Style::default().fg(theme.fg),
+                )),
+                GutterMark::Empty,
+            );
+        }
+
+        // Help line
+        let mut help_spans = Vec::new();
+        if !options.is_empty() {
+            help_spans.push(Span::raw("  ["));
+            help_spans.push(Span::styled(
+                "1-9",
+                Style::default()
+                    .fg(theme.question)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            help_spans.push(Span::raw("] select  ["));
+            help_spans.push(Span::styled(
+                "Tab",
+                Style::default()
+                    .fg(theme.question)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            let tab_label = if selected.is_some() {
+                "] free text  "
+            } else {
+                "] options  "
+            };
+            help_spans.push(Span::raw(tab_label));
+        } else {
+            help_spans.push(Span::raw("  "));
+        }
+        help_spans.push(Span::raw("["));
+        help_spans.push(Span::styled(
+            "Enter",
+            Style::default()
+                .fg(theme.success)
+                .add_modifier(Modifier::BOLD),
+        ));
+        help_spans.push(Span::raw("] confirm  ["));
+        help_spans.push(Span::styled(
+            "Esc",
+            Style::default()
+                .fg(theme.error)
+                .add_modifier(Modifier::BOLD),
+        ));
+        help_spans.push(Span::raw("] skip"));
+        glines.push(Line::from(help_spans), GutterMark::Empty);
+    }
+
+    // Bottom rule
+    glines.push(
+        primitives::horizontal_rule(content_width, theme.question),
+        GutterMark::Empty,
+    );
+}
+
 /// Render structured message blocks into the given area.
 // Structural — these args are all needed
 #[allow(clippy::too_many_arguments)]
@@ -311,166 +715,14 @@ pub fn render_message_blocks(
             }
 
             MessageBlock::Assistant { thinking, parts } => {
-                // Thinking block (collapsed by default)
-                if let Some(t) = thinking {
-                    if t.expanded {
-                        glines.push(
-                            Line::from(Span::styled(
-                                format!("\u{25bc} Thinking ({} tokens)", t.token_count),
-                                Style::default()
-                                    .fg(theme.reasoning)
-                                    .add_modifier(Modifier::ITALIC),
-                            )),
-                            GutterMark::Empty,
-                        );
-                        for content_line in t.content.lines() {
-                            glines.push(
-                                Line::from(Span::styled(
-                                    format!("  {content_line}"),
-                                    Style::default().fg(theme.reasoning),
-                                )),
-                                GutterMark::Empty,
-                            );
-                        }
-                    } else {
-                        glines.push(
-                            Line::from(Span::styled(
-                                format!("\u{25b6} Thinking ({} tokens)", t.token_count),
-                                Style::default()
-                                    .fg(theme.reasoning)
-                                    .add_modifier(Modifier::ITALIC),
-                            )),
-                            GutterMark::Empty,
-                        );
-                    }
-                }
-
-                // Parts in chronological order.
-                // Track last-emitted intent to suppress repeated labels for
-                // consecutive same-category tool groups (e.g. 3 reads in a row).
-                // Text between groups resets tracking so the label reappears.
-                let mut last_intent: Option<IntentCategory> = None;
-                for part in parts.iter() {
-                    match part {
-                        AssistantPart::Text(text) => {
-                            let md_lines = render_text_with_code_blocks(text, theme, content_width);
-                            for ml in md_lines {
-                                glines.push_with_text(ml.styled, GutterMark::Empty, ml.plain);
-                            }
-                            last_intent = None;
-                        }
-                        AssistantPart::ToolGroup(group) => {
-                            // Intent indicator — suppressed if same as previous group
-                            if let Some(category) = infer_group_intent(group) {
-                                if last_intent != Some(category) {
-                                    glines.push(
-                                        render_intent_line(category, content_width, theme),
-                                        GutterMark::Intent,
-                                    );
-                                }
-                                last_intent = Some(category);
-                            } else {
-                                // Asking-only groups have no label — reset tracking so the
-                                // next labeled group isn't incorrectly suppressed.
-                                last_intent = None;
-                            }
-                            for call in &group.calls {
-                                let status_indicator = match (&group.status, &call.result_summary) {
-                                    (_, Some(_)) if call.expanded => "\u{25bc}",
-                                    (_, Some(_)) => "\u{25b6}",
-                                    _ => "\u{2819}",
-                                };
-
-                                let result_part = match &call.result_summary {
-                                    Some(summary) => format!(" \u{2192} {summary}"),
-                                    None => match &group.status {
-                                        ToolGroupStatus::Preparing => " preparing...".to_string(),
-                                        ToolGroupStatus::Running { .. } => {
-                                            " running...".to_string()
-                                        }
-                                        ToolGroupStatus::Complete => String::new(),
-                                    },
-                                };
-
-                                let color = if call.is_error {
-                                    theme.error
-                                } else {
-                                    tool_color(call.tool_name, theme)
-                                };
-
-                                glines.push(
-                                    Line::from(vec![
-                                        Span::styled(
-                                            format!("{status_indicator} "),
-                                            Style::default().fg(color),
-                                        ),
-                                        Span::styled(
-                                            call.tool_name.to_string(),
-                                            Style::default().fg(color).add_modifier(Modifier::BOLD),
-                                        ),
-                                        Span::styled(
-                                            format!(" {}{}", call.args_summary, result_part),
-                                            Style::default().fg(color),
-                                        ),
-                                    ]),
-                                    GutterMark::ToolMarker(call.tool_name),
-                                );
-
-                                // Sub-agent live progress — show what tool the agent is calling
-                                if let Some(progress) = &call.agent_progress {
-                                    let progress_text =
-                                        if let Some(ref result) = progress.result_summary {
-                                            format!(
-                                                "    {} {} \u{2192} {result}",
-                                                progress.tool_name, progress.args_summary
-                                            )
-                                        } else {
-                                            format!(
-                                                "    {} {} ...",
-                                                progress.tool_name, progress.args_summary
-                                            )
-                                        };
-                                    glines.push(
-                                        Line::from(Span::styled(
-                                            progress_text,
-                                            Style::default().fg(theme.dim),
-                                        )),
-                                        GutterMark::Continuation(call.tool_name),
-                                    );
-                                }
-
-                                // Expanded output — diff content or raw output fallback
-                                if call.expanded {
-                                    if let Some(diff) = &call.diff_content {
-                                        let mut diff_output: Vec<Line> = Vec::new();
-                                        render_diff_lines(
-                                            &mut diff_output,
-                                            diff,
-                                            call.result_summary.as_deref(),
-                                            theme,
-                                            context_pct,
-                                            content_width,
-                                        );
-                                        glines.extend(
-                                            diff_output,
-                                            GutterMark::Continuation(call.tool_name),
-                                        );
-                                    } else if let Some(output) = &call.full_output {
-                                        for output_line in output.lines() {
-                                            glines.push(
-                                                Line::from(Span::styled(
-                                                    format!("  {output_line}"),
-                                                    Style::default().fg(theme.dim),
-                                                )),
-                                                GutterMark::Continuation(call.tool_name),
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                render_assistant_block(
+                    &mut glines,
+                    thinking,
+                    parts,
+                    theme,
+                    content_width,
+                    context_pct,
+                );
             }
 
             MessageBlock::System { text } => {
@@ -519,80 +771,14 @@ pub fn render_message_blocks(
                 args_summary,
                 diff_content,
             } => {
-                // Top rule
-                glines.push(
-                    primitives::horizontal_rule(content_width, theme.permission),
-                    GutterMark::Empty,
-                );
-                // Prompt line
-                glines.push(
-                    Line::from(vec![
-                        Span::styled(
-                            "\u{26a0} Allow ",
-                            Style::default()
-                                .fg(theme.permission)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            tool_name.to_string(),
-                            Style::default()
-                                .fg(theme.accent)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!(": {args_summary}?"),
-                            Style::default()
-                                .fg(theme.permission)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]),
-                    GutterMark::Empty,
-                );
-                // Inline diff preview if available
-                if let Some(diff) = diff_content {
-                    let mut diff_output: Vec<Line> = Vec::new();
-                    render_diff_lines(
-                        &mut diff_output,
-                        diff,
-                        None,
-                        theme,
-                        context_pct,
-                        content_width,
-                    );
-                    glines.extend(diff_output, GutterMark::Empty);
-                }
-                // Options line with highlighted key letters
-                glines.push(
-                    Line::from(vec![
-                        Span::raw("  ["),
-                        Span::styled(
-                            "y",
-                            Style::default()
-                                .fg(theme.success)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw("]es / ["),
-                        Span::styled(
-                            "n",
-                            Style::default()
-                                .fg(theme.error)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw("]o / ["),
-                        Span::styled(
-                            "a",
-                            Style::default()
-                                .fg(theme.permission)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw("]lways"),
-                    ]),
-                    GutterMark::Empty,
-                );
-                // Bottom rule
-                glines.push(
-                    primitives::horizontal_rule(content_width, theme.permission),
-                    GutterMark::Empty,
+                render_permission_block(
+                    &mut glines,
+                    tool_name,
+                    args_summary,
+                    diff_content,
+                    theme,
+                    content_width,
+                    context_pct,
                 );
             }
 
@@ -603,124 +789,15 @@ pub fn render_message_blocks(
                 free_text,
                 answered,
             } => {
-                // Top rule
-                glines.push(
-                    primitives::horizontal_rule(content_width, theme.question),
-                    GutterMark::Empty,
-                );
-                // Question line with mode badge
-                let mode_badge = if answered.is_some() {
-                    "" // No badge for answered questions
-                } else if selected.is_none() {
-                    " [typing]"
-                } else {
-                    " [selecting]"
-                };
-                glines.push(
-                    Line::from(vec![
-                        Span::styled(
-                            "? ",
-                            Style::default()
-                                .fg(theme.question)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            question.to_string(),
-                            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(mode_badge.to_string(), Style::default().fg(theme.question)),
-                    ]),
-                    GutterMark::Empty,
-                );
-
-                if let Some(answer) = answered {
-                    // Answered state — show the answer
-                    glines.push(
-                        Line::from(Span::styled(
-                            format!("  \u{2192} {answer}"),
-                            Style::default().fg(theme.success),
-                        )),
-                        GutterMark::Empty,
-                    );
-                } else {
-                    // Active state — show options or free-text input
-                    let in_free_text_mode = selected.is_none();
-                    for (i, option) in options.iter().enumerate() {
-                        let is_selected = *selected == Some(i);
-                        let prefix = if is_selected { "  \u{25b8} " } else { "    " };
-                        let label = format!("{prefix}{}. {option}", i + 1);
-                        let style = if is_selected {
-                            Style::default()
-                                .fg(theme.question)
-                                .add_modifier(Modifier::BOLD)
-                        } else if in_free_text_mode {
-                            // Dim options when in free-text mode
-                            Style::default().fg(theme.dim)
-                        } else {
-                            Style::default().fg(theme.fg)
-                        };
-                        glines.push(Line::from(Span::styled(label, style)), GutterMark::Empty);
-                    }
-
-                    // Free-text input (when no options or Tab toggled to free-text)
-                    if selected.is_none() {
-                        glines.push(
-                            Line::from(Span::styled(
-                                format!("  > {free_text}\u{258f}"),
-                                Style::default().fg(theme.fg),
-                            )),
-                            GutterMark::Empty,
-                        );
-                    }
-
-                    // Help line
-                    let mut help_spans = Vec::new();
-                    if !options.is_empty() {
-                        help_spans.push(Span::raw("  ["));
-                        help_spans.push(Span::styled(
-                            "1-9",
-                            Style::default()
-                                .fg(theme.question)
-                                .add_modifier(Modifier::BOLD),
-                        ));
-                        help_spans.push(Span::raw("] select  ["));
-                        help_spans.push(Span::styled(
-                            "Tab",
-                            Style::default()
-                                .fg(theme.question)
-                                .add_modifier(Modifier::BOLD),
-                        ));
-                        let tab_label = if selected.is_some() {
-                            "] free text  "
-                        } else {
-                            "] options  "
-                        };
-                        help_spans.push(Span::raw(tab_label));
-                    } else {
-                        help_spans.push(Span::raw("  "));
-                    }
-                    help_spans.push(Span::raw("["));
-                    help_spans.push(Span::styled(
-                        "Enter",
-                        Style::default()
-                            .fg(theme.success)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                    help_spans.push(Span::raw("] confirm  ["));
-                    help_spans.push(Span::styled(
-                        "Esc",
-                        Style::default()
-                            .fg(theme.error)
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                    help_spans.push(Span::raw("] skip"));
-                    glines.push(Line::from(help_spans), GutterMark::Empty);
-                }
-
-                // Bottom rule
-                glines.push(
-                    primitives::horizontal_rule(content_width, theme.question),
-                    GutterMark::Empty,
+                render_question_block(
+                    &mut glines,
+                    question,
+                    options,
+                    *selected,
+                    free_text,
+                    answered,
+                    theme,
+                    content_width,
                 );
             }
         }
