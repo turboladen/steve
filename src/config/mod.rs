@@ -14,10 +14,6 @@ pub use persist::persist_allow_tool;
 
 use crate::ui::terminal_detect::ThemePreference;
 
-// ---------------------------------------------------------------------------
-// Types (inlined from former types.rs)
-// ---------------------------------------------------------------------------
-
 /// Top-level configuration for steve.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -310,7 +306,6 @@ pub fn global_config_dir() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    // -- Type tests (from former types.rs) --
 
     #[test]
     fn default_config_has_auto_compact_true() {
