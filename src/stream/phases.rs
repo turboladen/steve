@@ -932,3 +932,223 @@ pub(super) async fn execute_mcp_tools(
 
     PhaseOutcome::Continue
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_pending(idx: u32, function_name: &str, args: &str) -> (u32, PendingToolCall) {
+        (
+            idx,
+            PendingToolCall {
+                id: format!("call_{idx}"),
+                function_name: function_name.to_string(),
+                arguments: args.to_string(),
+                ..Default::default()
+            },
+        )
+    }
+
+    fn make_counters() -> IterationCounters {
+        IterationCounters {
+            tool_count: 0,
+            cache_repeats: 0,
+            user_interacted: false,
+            total_usage: StreamUsage::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn partition_read_tools_are_auto_allowed() {
+        let calls: HashMap<u32, PendingToolCall> =
+            [make_pending(0, "read", r#"{"path":"src/main.rs"}"#)].into();
+        let indices = vec![0];
+        let mut messages = Vec::new();
+        let mut counters = make_counters();
+
+        let result = partition_tool_calls(
+            &calls,
+            &indices,
+            &None,
+            &None,
+            &None,
+            &mut messages,
+            &mut counters,
+        )
+        .await;
+
+        assert_eq!(result.auto_allowed.len(), 1);
+        assert!(result.needs_interaction.is_empty());
+        assert!(result.mcp_calls.is_empty());
+        assert_eq!(result.auto_allowed[0].tool_name, ToolName::Read);
+    }
+
+    #[tokio::test]
+    async fn partition_write_tools_need_interaction() {
+        let calls: HashMap<u32, PendingToolCall> = [
+            make_pending(0, "edit", r#"{"file_path":"f.rs"}"#),
+            make_pending(1, "write", r#"{"file_path":"f.rs"}"#),
+            make_pending(2, "patch", r#"{"file_path":"f.rs"}"#),
+        ]
+        .into();
+        let indices = vec![0, 1, 2];
+        let mut messages = Vec::new();
+        let mut counters = make_counters();
+
+        let result = partition_tool_calls(
+            &calls,
+            &indices,
+            &None,
+            &None,
+            &None,
+            &mut messages,
+            &mut counters,
+        )
+        .await;
+
+        assert!(result.auto_allowed.is_empty());
+        assert_eq!(result.needs_interaction.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn partition_sequential_tools_need_interaction() {
+        let calls: HashMap<u32, PendingToolCall> = [
+            make_pending(0, "question", r#"{"question":"?"}"#),
+            make_pending(1, "lsp", r#"{"path":"f.rs"}"#),
+            make_pending(2, "agent", r#"{"task":"explore"}"#),
+        ]
+        .into();
+        let indices = vec![0, 1, 2];
+        let mut messages = Vec::new();
+        let mut counters = make_counters();
+
+        let result = partition_tool_calls(
+            &calls,
+            &indices,
+            &None,
+            &None,
+            &None,
+            &mut messages,
+            &mut counters,
+        )
+        .await;
+
+        assert!(result.auto_allowed.is_empty());
+        assert_eq!(result.needs_interaction.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn partition_unknown_tool_pushes_error_message() {
+        let calls: HashMap<u32, PendingToolCall> =
+            [make_pending(0, "nonexistent_tool", "{}")].into();
+        let indices = vec![0];
+        let mut messages = Vec::new();
+        let mut counters = make_counters();
+
+        let result = partition_tool_calls(
+            &calls,
+            &indices,
+            &None,
+            &None,
+            &None,
+            &mut messages,
+            &mut counters,
+        )
+        .await;
+
+        assert!(result.auto_allowed.is_empty());
+        assert!(result.needs_interaction.is_empty());
+        assert_eq!(messages.len(), 1, "should push error tool result");
+        assert_eq!(counters.tool_count, 1);
+    }
+
+    #[tokio::test]
+    async fn partition_mixed_tools() {
+        let calls: HashMap<u32, PendingToolCall> = [
+            make_pending(0, "read", r#"{"path":"a.rs"}"#),
+            make_pending(1, "grep", r#"{"pattern":"foo"}"#),
+            make_pending(2, "edit", r#"{"file_path":"b.rs"}"#),
+            make_pending(3, "glob", r#"{"pattern":"*.rs"}"#),
+        ]
+        .into();
+        let indices = vec![0, 1, 2, 3];
+        let mut messages = Vec::new();
+        let mut counters = make_counters();
+
+        let result = partition_tool_calls(
+            &calls,
+            &indices,
+            &None,
+            &None,
+            &None,
+            &mut messages,
+            &mut counters,
+        )
+        .await;
+
+        assert_eq!(result.auto_allowed.len(), 3);
+        assert_eq!(result.needs_interaction.len(), 1);
+        assert_eq!(result.needs_interaction[0].tool_name, ToolName::Edit);
+    }
+
+    #[tokio::test]
+    async fn partition_memory_and_task_need_interaction() {
+        let calls: HashMap<u32, PendingToolCall> = [
+            make_pending(0, "memory", r#"{"action":"append","content":"x"}"#),
+            make_pending(1, "task", r#"{"action":"create","title":"t"}"#),
+        ]
+        .into();
+        let indices = vec![0, 1];
+        let mut messages = Vec::new();
+        let mut counters = make_counters();
+
+        let result = partition_tool_calls(
+            &calls,
+            &indices,
+            &None,
+            &None,
+            &None,
+            &mut messages,
+            &mut counters,
+        )
+        .await;
+
+        assert!(result.auto_allowed.is_empty());
+        assert_eq!(result.needs_interaction.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn partition_with_permission_engine() {
+        let rules = crate::permission::profile_build_rules(
+            crate::permission::PermissionProfile::Standard,
+            &[],
+            &[],
+        );
+        let engine = Arc::new(tokio::sync::Mutex::new(PermissionEngine::new(rules)));
+
+        let calls: HashMap<u32, PendingToolCall> = [
+            make_pending(0, "read", r#"{"path":"f.rs"}"#),
+            make_pending(1, "bash", r#"{"command":"ls"}"#),
+        ]
+        .into();
+        let indices = vec![0, 1];
+        let mut messages = Vec::new();
+        let mut counters = make_counters();
+
+        let result = partition_tool_calls(
+            &calls,
+            &indices,
+            &None,
+            &Some(engine),
+            &None,
+            &mut messages,
+            &mut counters,
+        )
+        .await;
+
+        assert_eq!(result.auto_allowed.len(), 1);
+        assert_eq!(result.auto_allowed[0].tool_name, ToolName::Read);
+        assert_eq!(result.needs_interaction.len(), 1);
+        assert_eq!(result.needs_interaction[0].tool_name, ToolName::Bash);
+    }
+}
