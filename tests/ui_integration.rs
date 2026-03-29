@@ -7,27 +7,22 @@
 
 use std::path::PathBuf;
 
-use ratatui::{
-    Terminal,
-    backend::TestBackend,
-    buffer::Buffer,
-    layout::Rect,
-    style::Color,
-    Frame,
-};
+use ratatui::{Frame, Terminal, backend::TestBackend, buffer::Buffer, layout::Rect, style::Color};
 
-use steve::config::types::Config;
-use steve::project::ProjectInfo;
-use steve::storage::Storage;
-use steve::app::App;
-use steve::ui::autocomplete::AutocompleteState;
-use steve::ui::input::{InputState, InputContext, MIN_INPUT_HEIGHT, MAX_INPUT_PCT};
-use steve::ui::message_area::{MessageAreaState, render_message_blocks};
-use steve::ui::message_block::{AssistantPart, MessageBlock};
-use steve::ui::selection::{ContentMap, ContentPos, SelectionState};
-use steve::ui::theme::Theme;
-use steve::ui::input::render_input;
-use steve::ui::autocomplete::render_autocomplete;
+use steve::{
+    app::App,
+    config::Config,
+    project::ProjectInfo,
+    storage::Storage,
+    ui::{
+        autocomplete::{AutocompleteState, render_autocomplete},
+        input::{InputContext, InputState, MAX_INPUT_PCT, MIN_INPUT_HEIGHT, render_input},
+        message_area::{MessageAreaState, render_message_blocks},
+        message_block::{AssistantPart, MessageBlock},
+        selection::{ContentMap, ContentPos, SelectionState},
+        theme::Theme,
+    },
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -44,7 +39,16 @@ fn make_test_app() -> App {
     let config = Config::default();
     let storage = Storage::new("test-ui-integration").expect("test storage");
     let usage_writer = steve::usage::test_usage_writer();
-    App::new(project, config, storage, Vec::new(), None, None, Vec::new(), usage_writer)
+    App::new(
+        project,
+        config,
+        storage,
+        Vec::new(),
+        None,
+        None,
+        Vec::new(),
+        usage_writer,
+    )
 }
 
 /// Render a draw closure into a headless test buffer.
@@ -111,7 +115,8 @@ fn desired_height_capped_at_max() {
     input.textarea.insert_str(&many_lines);
 
     let terminal_height = 40u16;
-    let max_h = ((terminal_height as u32 * MAX_INPUT_PCT as u32 / 100) as u16).max(MIN_INPUT_HEIGHT);
+    let max_h =
+        ((terminal_height as u32 * MAX_INPUT_PCT as u32 / 100) as u16).max(MIN_INPUT_HEIGHT);
     let height = input.desired_height(max_h, 80);
 
     assert!(
@@ -124,7 +129,10 @@ fn desired_height_capped_at_max() {
 fn desired_height_minimum_for_empty_input() {
     let input = InputState::default();
     let height = input.desired_height(20, 80);
-    assert_eq!(height, MIN_INPUT_HEIGHT, "empty input should use minimum height");
+    assert_eq!(
+        height, MIN_INPUT_HEIGHT,
+        "empty input should use minimum height"
+    );
 }
 
 #[test]
@@ -156,8 +164,14 @@ fn input_renders_long_text_wrapped() {
 
     let text = full_buffer_text(&buf);
     // The text should appear somewhere in the rendered output
-    assert!(text.contains("quick"), "rendered input should contain the typed text, got:\n{text}");
-    assert!(text.contains("brown"), "wrapped text should also appear, got:\n{text}");
+    assert!(
+        text.contains("quick"),
+        "rendered input should contain the typed text, got:\n{text}"
+    );
+    assert!(
+        text.contains("brown"),
+        "wrapped text should also appear, got:\n{text}"
+    );
 }
 
 // ===========================================================================
@@ -195,7 +209,10 @@ fn collapse_paste_preserves_full_text() {
     input.collapse_paste(pasted);
 
     let collapsed = input.collapsed_paste.as_ref().unwrap();
-    assert_eq!(collapsed.full_text, pasted, "full_text should preserve original pasted content");
+    assert_eq!(
+        collapsed.full_text, pasted,
+        "full_text should preserve original pasted content"
+    );
 }
 
 #[test]
@@ -213,7 +230,10 @@ fn expand_paste_restores_content() {
 
     // The textarea should now contain the original text
     let content: String = input.textarea.lines().join("\n");
-    assert_eq!(content, pasted, "textarea should contain original pasted text after expand");
+    assert_eq!(
+        content, pasted,
+        "textarea should contain original pasted text after expand"
+    );
 }
 
 #[test]
@@ -283,13 +303,16 @@ fn collapsed_paste_renders_summary_in_input() {
 fn content_map_build_computes_wrapped_rows() {
     // display_width = GUTTER_WIDTH(3) + text.width(), wrapped at available_width(20)
     let lines = vec![
-        "Hello world".to_string(),      // display_width = 3+11 = 14, ceil(14/20) = 1 row
-        "Short".to_string(),             // display_width = 3+5 = 8, ceil(8/20) = 1 row
-        "".to_string(),                  // empty → 1 row
+        "Hello world".to_string(), // display_width = 3+11 = 14, ceil(14/20) = 1 row
+        "Short".to_string(),       // display_width = 3+5 = 8, ceil(8/20) = 1 row
+        "".to_string(),            // empty → 1 row
     ];
     let map = ContentMap::build(lines, 20);
 
-    assert_eq!(map.total_wrapped_rows, 3, "3 short lines should produce 3 wrapped rows");
+    assert_eq!(
+        map.total_wrapped_rows, 3,
+        "3 short lines should produce 3 wrapped rows"
+    );
     assert_eq!(map.wrapped_row_start.len(), 3);
     assert_eq!(map.wrapped_row_start[0], 0);
     assert_eq!(map.wrapped_row_start[1], 1);
@@ -308,29 +331,50 @@ fn content_map_long_line_wraps() {
     ];
     let map = ContentMap::build(lines, 20);
 
-    assert_eq!(map.total_wrapped_rows, 3, "long line (2 rows) + short line (1 row) = 3 total");
-    assert_eq!(map.wrapped_row_start[1], 2, "second line starts after first line's 2 wrapped rows");
+    assert_eq!(
+        map.total_wrapped_rows, 3,
+        "long line (2 rows) + short line (1 row) = 3 total"
+    );
+    assert_eq!(
+        map.wrapped_row_start[1], 2,
+        "second line starts after first line's 2 wrapped rows"
+    );
 }
 
 #[test]
 fn screen_to_content_basic_mapping() {
-    let lines = vec![
-        "Hello".to_string(),
-        "World".to_string(),
-    ];
+    let lines = vec!["Hello".to_string(), "World".to_string()];
     let map = ContentMap::build(lines, 40);
 
     // Row 0, col 3 (gutter) → line 0, char 0
     let pos = map.screen_to_content(0, 3, 0, 0, 0);
-    assert_eq!(pos, Some(ContentPos { line: 0, char_offset: 0 }));
+    assert_eq!(
+        pos,
+        Some(ContentPos {
+            line: 0,
+            char_offset: 0
+        })
+    );
 
     // Row 0, col 5 → line 0, char 2 (col 5 - gutter 3 = content col 2)
     let pos = map.screen_to_content(0, 5, 0, 0, 0);
-    assert_eq!(pos, Some(ContentPos { line: 0, char_offset: 2 }));
+    assert_eq!(
+        pos,
+        Some(ContentPos {
+            line: 0,
+            char_offset: 2
+        })
+    );
 
     // Row 1, col 3 → line 1, char 0
     let pos = map.screen_to_content(1, 3, 0, 0, 0);
-    assert_eq!(pos, Some(ContentPos { line: 1, char_offset: 0 }));
+    assert_eq!(
+        pos,
+        Some(ContentPos {
+            line: 1,
+            char_offset: 0
+        })
+    );
 }
 
 #[test]
@@ -344,7 +388,13 @@ fn screen_to_content_with_scroll_offset() {
 
     // With scroll_offset=1, screen row 0 maps to content row 1 → line 1
     let pos = map.screen_to_content(0, 3, 1, 0, 0);
-    assert_eq!(pos, Some(ContentPos { line: 1, char_offset: 0 }));
+    assert_eq!(
+        pos,
+        Some(ContentPos {
+            line: 1,
+            char_offset: 0
+        })
+    );
 }
 
 #[test]
@@ -354,7 +404,13 @@ fn screen_to_content_in_gutter_gives_offset_zero() {
 
     // Column 0 (in gutter) → char_offset should be 0 (not None)
     let pos = map.screen_to_content(0, 0, 0, 0, 0);
-    assert_eq!(pos, Some(ContentPos { line: 0, char_offset: 0 }));
+    assert_eq!(
+        pos,
+        Some(ContentPos {
+            line: 0,
+            char_offset: 0
+        })
+    );
 }
 
 #[test]
@@ -362,8 +418,14 @@ fn extract_text_single_line() {
     let lines = vec!["Hello World".to_string()];
     let map = ContentMap::build(lines, 80);
 
-    let start = ContentPos { line: 0, char_offset: 0 };
-    let end = ContentPos { line: 0, char_offset: 5 };
+    let start = ContentPos {
+        line: 0,
+        char_offset: 0,
+    };
+    let end = ContentPos {
+        line: 0,
+        char_offset: 5,
+    };
     assert_eq!(map.extract_text(&start, &end), "Hello");
 }
 
@@ -376,8 +438,14 @@ fn extract_text_multi_line() {
     ];
     let map = ContentMap::build(lines, 80);
 
-    let start = ContentPos { line: 0, char_offset: 6 };
-    let end = ContentPos { line: 2, char_offset: 5 };
+    let start = ContentPos {
+        line: 0,
+        char_offset: 6,
+    };
+    let end = ContentPos {
+        line: 2,
+        char_offset: 5,
+    };
     let text = map.extract_text(&start, &end);
     assert_eq!(text, "line\nSecond line\nThird");
 }
@@ -388,8 +456,14 @@ fn extract_text_reversed_range_is_normalized() {
     let map = ContentMap::build(lines, 80);
 
     // Pass end before start — should still extract "Hello"
-    let start = ContentPos { line: 0, char_offset: 5 };
-    let end = ContentPos { line: 0, char_offset: 0 };
+    let start = ContentPos {
+        line: 0,
+        char_offset: 5,
+    };
+    let end = ContentPos {
+        line: 0,
+        char_offset: 0,
+    };
     assert_eq!(map.extract_text(&start, &end), "Hello");
 }
 
@@ -398,8 +472,14 @@ fn extract_text_clamps_offset_to_line_length() {
     let lines = vec!["Hi".to_string()];
     let map = ContentMap::build(lines, 80);
 
-    let start = ContentPos { line: 0, char_offset: 0 };
-    let end = ContentPos { line: 0, char_offset: 100 }; // way past end
+    let start = ContentPos {
+        line: 0,
+        char_offset: 0,
+    };
+    let end = ContentPos {
+        line: 0,
+        char_offset: 100,
+    }; // way past end
     assert_eq!(map.extract_text(&start, &end), "Hi");
 }
 
@@ -435,9 +515,15 @@ fn question_renders_with_options_and_pointer() {
     });
 
     let text = full_buffer_text(&buf);
-    assert!(text.contains("Pick a color"), "question text should appear, got:\n{text}");
+    assert!(
+        text.contains("Pick a color"),
+        "question text should appear, got:\n{text}"
+    );
     // The selected pointer (▸) should appear on option 1
-    assert!(text.contains("\u{25b8}"), "selected pointer (▸) should appear, got:\n{text}");
+    assert!(
+        text.contains("\u{25b8}"),
+        "selected pointer (▸) should appear, got:\n{text}"
+    );
     assert!(text.contains("Red"), "option 'Red' should appear");
     assert!(text.contains("Blue"), "option 'Blue' should appear");
     assert!(text.contains("Green"), "option 'Green' should appear");
@@ -600,9 +686,18 @@ fn code_block_renders_language_header() {
     });
 
     let text = full_buffer_text(&buf);
-    assert!(text.contains("rust"), "language header 'rust' should appear, got:\n{text}");
-    assert!(text.contains("fn main"), "code content should appear, got:\n{text}");
-    assert!(text.contains("Done"), "text after code block should appear, got:\n{text}");
+    assert!(
+        text.contains("rust"),
+        "language header 'rust' should appear, got:\n{text}"
+    );
+    assert!(
+        text.contains("fn main"),
+        "code content should appear, got:\n{text}"
+    );
+    assert!(
+        text.contains("Done"),
+        "text after code block should appear, got:\n{text}"
+    );
 }
 
 #[test]
@@ -677,7 +772,10 @@ fn unknown_language_still_renders_with_code_bg() {
     });
 
     let text = full_buffer_text(&buf);
-    assert!(text.contains("some code"), "code content should render even with unknown language");
+    assert!(
+        text.contains("some code"),
+        "code content should render even with unknown language"
+    );
 
     // Verify code_bg is still applied
     let expected_bg = Color::Rgb(28, 26, 23);
@@ -725,12 +823,14 @@ fn bare_fence_no_header() {
 
     // Count non-empty content lines. Bare fence now emits:
     // header rule + code + closing rule = 3 content lines.
-    let content_lines: Vec<&str> = text.lines()
+    let content_lines: Vec<&str> = text
+        .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
         .collect();
     assert_eq!(
-        content_lines.len(), 3,
+        content_lines.len(),
+        3,
         "bare fence should produce 3 content lines (header rule + code + closing rule), got: {content_lines:?}"
     );
 }
@@ -753,7 +853,7 @@ fn autocomplete_update_matches_commands() {
 #[test]
 fn autocomplete_next_prev_wraps() {
     let mut ac = AutocompleteState::default();
-    ac.update("/");  // match all commands
+    ac.update("/"); // match all commands
 
     assert!(ac.visible, "autocomplete should be visible for '/'");
     let initial = ac.selected;
@@ -776,7 +876,10 @@ fn autocomplete_selected_command_returns_name() {
     let mut ac = AutocompleteState::default();
     ac.update("/he");
 
-    assert!(ac.visible, "autocomplete should be visible for '/he' (matches /help)");
+    assert!(
+        ac.visible,
+        "autocomplete should be visible for '/he' (matches /help)"
+    );
     let cmd = ac.selected_command().unwrap();
     assert_eq!(cmd, "/help", "selected command should be '/help'");
 }
@@ -788,14 +891,20 @@ fn autocomplete_hides_on_non_command_input() {
     assert!(ac.visible);
 
     ac.update("hello world");
-    assert!(!ac.visible, "autocomplete should hide for non-command input");
+    assert!(
+        !ac.visible,
+        "autocomplete should hide for non-command input"
+    );
 }
 
 #[test]
 fn autocomplete_hides_on_command_with_space() {
     let mut ac = AutocompleteState::default();
     ac.update("/model openai");
-    assert!(!ac.visible, "autocomplete should hide when command has arguments");
+    assert!(
+        !ac.visible,
+        "autocomplete should hide when command has arguments"
+    );
 }
 
 #[test]
@@ -829,7 +938,10 @@ fn autocomplete_renders_selected_with_accent() {
             break;
         }
     }
-    assert!(found_accent, "selected autocomplete item should use accent color ({accent:?})");
+    assert!(
+        found_accent,
+        "selected autocomplete item should use accent color ({accent:?})"
+    );
 }
 
 #[test]
@@ -870,7 +982,10 @@ fn full_app_renders_without_panic() {
 
     let text = full_buffer_text(&buf);
     assert!(text.contains("Hello, Steve!"), "user message should render");
-    assert!(text.contains("Hi there!"), "assistant message should render");
+    assert!(
+        text.contains("Hi there!"),
+        "assistant message should render"
+    );
 }
 
 #[test]

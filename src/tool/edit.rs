@@ -7,8 +7,7 @@
 //! - `replace_range`: Replace a range of lines with new content
 //! - `multi_find_replace`: Apply multiple find-replace pairs atomically
 
-use std::fs;
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use ropey::Rope;
@@ -22,7 +21,12 @@ pub fn tool() -> ToolEntry {
     ToolEntry {
         def: ToolDef {
             name: ToolName::Edit,
-            description: func.get("description").unwrap().as_str().unwrap().to_string(),
+            description: func
+                .get("description")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string(),
             parameters: func.get("parameters").cloned().unwrap(),
         },
         handler: Box::new(execute),
@@ -107,23 +111,35 @@ pub fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
         .and_then(|v| v.as_str())
         .context("missing 'file_path' parameter")?;
 
-    let operation = args
+    let operation: super::EditOperation = args
         .get("operation")
         .and_then(|v| v.as_str())
-        .unwrap_or("find_replace");
+        .unwrap_or("find_replace")
+        .parse()
+        .map_err(|_| {
+            let raw = args.get("operation").and_then(|v| v.as_str()).unwrap_or("?");
+            anyhow::anyhow!(
+                "unknown edit operation: '{raw}'. Expected one of: find_replace, insert_lines, delete_lines, replace_range, multi_find_replace"
+            )
+        })?;
 
     match operation {
-        "find_replace" => execute_find_replace(&args, file_path_str, &ctx),
-        "insert_lines" => execute_insert_lines(&args, file_path_str, &ctx),
-        "delete_lines" => execute_delete_lines(&args, file_path_str, &ctx),
-        "replace_range" => execute_replace_range(&args, file_path_str, &ctx),
-        "multi_find_replace" => execute_multi_find_replace(&args, file_path_str, &ctx),
-        other => bail!("unknown edit operation: '{other}'. Expected one of: find_replace, insert_lines, delete_lines, replace_range, multi_find_replace"),
+        super::EditOperation::FindReplace => execute_find_replace(&args, file_path_str, &ctx),
+        super::EditOperation::InsertLines => execute_insert_lines(&args, file_path_str, &ctx),
+        super::EditOperation::DeleteLines => execute_delete_lines(&args, file_path_str, &ctx),
+        super::EditOperation::ReplaceRange => execute_replace_range(&args, file_path_str, &ctx),
+        super::EditOperation::MultiFindReplace => {
+            execute_multi_find_replace(&args, file_path_str, &ctx)
+        }
     }
 }
 
 /// Original find-and-replace logic — String-based, not ropey.
-fn execute_find_replace(args: &Value, file_path_str: &str, ctx: &ToolContext) -> Result<ToolOutput> {
+fn execute_find_replace(
+    args: &Value,
+    file_path_str: &str,
+    ctx: &ToolContext,
+) -> Result<ToolOutput> {
     let old_string = args
         .get("old_string")
         .and_then(|v| v.as_str())
@@ -172,7 +188,11 @@ fn execute_find_replace(args: &Value, file_path_str: &str, ctx: &ToolContext) ->
 }
 
 /// Insert content before a specific line number (1-indexed).
-fn execute_insert_lines(args: &Value, file_path_str: &str, ctx: &ToolContext) -> Result<ToolOutput> {
+fn execute_insert_lines(
+    args: &Value,
+    file_path_str: &str,
+    ctx: &ToolContext,
+) -> Result<ToolOutput> {
     let line = args
         .get("line")
         .and_then(|v| v.as_u64())
@@ -248,7 +268,11 @@ fn execute_insert_lines(args: &Value, file_path_str: &str, ctx: &ToolContext) ->
 }
 
 /// Delete a range of lines (1-indexed, inclusive).
-fn execute_delete_lines(args: &Value, file_path_str: &str, ctx: &ToolContext) -> Result<ToolOutput> {
+fn execute_delete_lines(
+    args: &Value,
+    file_path_str: &str,
+    ctx: &ToolContext,
+) -> Result<ToolOutput> {
     let start_line = args
         .get("start_line")
         .and_then(|v| v.as_u64())
@@ -319,7 +343,11 @@ fn execute_delete_lines(args: &Value, file_path_str: &str, ctx: &ToolContext) ->
 }
 
 /// Replace a range of lines (1-indexed, inclusive) with new content.
-fn execute_replace_range(args: &Value, file_path_str: &str, ctx: &ToolContext) -> Result<ToolOutput> {
+fn execute_replace_range(
+    args: &Value,
+    file_path_str: &str,
+    ctx: &ToolContext,
+) -> Result<ToolOutput> {
     let start_line = args
         .get("start_line")
         .and_then(|v| v.as_u64())
@@ -464,7 +492,7 @@ fn execute_multi_find_replace(
                 file_path.display()
             );
         }
-        let start = content.find(old).unwrap(); // safe: count == 1
+        let start = content.find(old).expect("verified count == 1 above");
         matches.push((start, old.len(), new));
     }
 
@@ -472,8 +500,7 @@ fn execute_multi_find_replace(
     for i in 0..matches.len() {
         let (start_a, len_a, _) = matches[i];
         let end_a = start_a + len_a;
-        for j in (i + 1)..matches.len() {
-            let (start_b, len_b, _) = matches[j];
+        for (j, &(start_b, len_b, _)) in matches.iter().enumerate().skip(i + 1) {
             let end_b = start_b + len_b;
             // Overlap: ranges [start_a, end_a) and [start_b, end_b) intersect
             if start_a < end_b && start_b < end_a {
@@ -675,7 +702,10 @@ mod tests {
         });
         let result = execute(args, test_ctx(&dir)).unwrap();
         assert!(!result.is_error);
-        assert_eq!(fs::read_to_string(&file).unwrap(), "inserted\nline1\nline2\nline3\n");
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "inserted\nline1\nline2\nline3\n"
+        );
     }
 
     #[test]
@@ -692,7 +722,10 @@ mod tests {
         });
         let result = execute(args, test_ctx(&dir)).unwrap();
         assert!(!result.is_error);
-        assert_eq!(fs::read_to_string(&file).unwrap(), "line1\ninserted\nline2\nline3\n");
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "line1\ninserted\nline2\nline3\n"
+        );
     }
 
     #[test]
@@ -726,7 +759,10 @@ mod tests {
         });
         let result = execute(args, test_ctx(&dir)).unwrap();
         assert!(!result.is_error);
-        assert_eq!(fs::read_to_string(&file).unwrap(), "line1\nline2\nline3\nline4\n");
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "line1\nline2\nline3\nline4\n"
+        );
     }
 
     #[test]
@@ -953,7 +989,10 @@ mod tests {
         });
         let result = execute(args, test_ctx(&dir)).unwrap();
         assert!(!result.is_error);
-        assert_eq!(fs::read_to_string(&file).unwrap(), "before\nnew1\nnew2\nnew3\nafter\n");
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "before\nnew1\nnew2\nnew3\nafter\n"
+        );
     }
 
     #[test]
@@ -1043,7 +1082,12 @@ mod tests {
         });
         let result = execute(args, test_ctx(&dir));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("unknown edit operation"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unknown edit operation")
+        );
     }
 
     #[test]
@@ -1189,7 +1233,10 @@ mod tests {
         });
         let result = execute(args, test_ctx(&dir)).unwrap();
         assert!(!result.is_error);
-        assert_eq!(fs::read_to_string(&file).unwrap(), "fn baz() {}\nfn qux() {}\n");
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "fn baz() {}\nfn qux() {}\n"
+        );
     }
 
     #[test]
@@ -1292,7 +1339,12 @@ mod tests {
         });
         let result = execute(args, test_ctx(&dir));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must not be empty"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must not be empty")
+        );
     }
 
     #[test]
@@ -1331,7 +1383,10 @@ mod tests {
         let result = execute(args, test_ctx(&dir));
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("same old_string"), "expected 'same old_string' error, got: {err}");
+        assert!(
+            err.contains("same old_string"),
+            "expected 'same old_string' error, got: {err}"
+        );
         // File unchanged
         assert_eq!(fs::read_to_string(&file).unwrap(), "hello world");
     }
@@ -1352,7 +1407,10 @@ mod tests {
         });
         let result = execute(args, test_ctx(&dir)).unwrap();
         assert!(!result.is_error);
-        assert_eq!(fs::read_to_string(&file).unwrap(), "prefix 111 middle 222 suffix\n");
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "prefix 111 middle 222 suffix\n"
+        );
     }
 
     #[test]

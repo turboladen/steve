@@ -40,7 +40,9 @@ Every change that introduces new types, trait impls, or behavior must include un
   dedicated tests
 - **Assertions**: Never use trivially-true assertions — verify the specific behavior under test
 
-Run `cargo test` after every change.
+Run `cargo test` after every change. Run `cargo clippy` and fix all warnings — only use
+`#[allow(clippy::...)]` in rare cases with a justifying comment. The crate enables
+`#![warn(clippy::cargo)]` in both `lib.rs` and `main.rs`.
 
 ## Configuration
 
@@ -64,6 +66,18 @@ use `"provider_id/model_id"` format throughout. MCP servers merge by server ID (
 `lib.rs` (public modules) + `main.rs` (binary). Integration tests in `tests/` access modules via
 `use steve::*`. No workspace — single crate.
 
+### App Module (`app/`)
+
+The `App` struct (coordination point) lives in `app/mod.rs`. Submodules split by concern:
+`event_loop.rs` (run/handle_event), `key_handling.rs`, `input.rs`, `commands.rs`,
+`session.rs`, `prompt.rs`, `context.rs` (diagnostics/sidebar/tokens), `helpers.rs`,
+`tool_display.rs`, `constants.rs`, `types.rs`, `tests.rs`. Each submodule defines its own
+`impl App {}` block — Rust allows multiple impl blocks across child modules. Submodules use
+`use super::*;` to inherit mod.rs imports. Use `pub(super)` for cross-submodule methods,
+`pub` only for external API (`extract_args_summary`, `extract_result_summary`,
+`should_show_sidebar`). Use `close_all_overlays()` and `resolve_client()` helpers to avoid
+duplication. Use `r#""#` raw strings for multi-line system prompts in `constants.rs`.
+
 ### Critical Invariants
 
 - **Tool call detection**: Check for valid data (non-empty `id` + `function_name`), NOT
@@ -75,14 +89,15 @@ use `"provider_id/model_id"` format throughout. MCP servers merge by server ID (
   interleave
 - **Token metrics**: `last_prompt_tokens` (per-call, context pressure) vs `total_tokens`
   (cumulative, cost display) — do not confuse. `LlmFinish` must NOT overwrite `last_prompt_tokens`
-- **`/new` resets ALL session state** — when adding session-scoped state, add its reset there
+- **`/new` resets ALL session state** — when adding session-scoped state, add its reset in
+  `commands.rs` Command::New. When adding overlays, update `close_all_overlays()` in `helpers.rs`
 - **Scroll**: Map `ScrollDown`→`scroll_down()` directly — do NOT invert (macOS natural scrolling)
 
 ### Exhaustive `ToolName` Match Locations
 
 All must update when adding a `ToolName` variant:
 
-`extract_args_summary()` and `extract_diff_content()` in `app.rs`, `extract_tool_summary()` in
+`extract_args_summary()` and `extract_diff_content()` in `app/tool_display.rs`, `extract_tool_summary()` in
 `export.rs`, `cache_key()` and `extract_path()` in `context/cache.rs`, `compress_tool_output()` in
 `context/compressor.rs`, `build_permission_summary()` and `extract_tool_path()` in `stream.rs`,
 `is_write_tool()`/`intent_category()`/`tool_marker()`/`visual_category()`/`gutter_char()`/`path_arg_keys()` in
@@ -90,7 +105,7 @@ All must update when adding a `ToolName` variant:
 
 `path_arg_keys()` in `tool/mod.rs` is the single source of truth for tool→path-arg-key mapping.
 
-When adding edit operations: update `extract_diff_content()` in `app.rs` and
+When adding edit operations: update `extract_diff_content()` in `app/tool_display.rs` and
 `build_permission_summary()` in `stream.rs`.
 
 ### MCP Client Integration (`mcp/`)

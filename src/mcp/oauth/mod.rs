@@ -53,14 +53,21 @@ pub async fn authorize(
     client_secret: Option<&str>,
     status_tx: Option<OAuthStatusTx>,
 ) -> Result<AuthClient<reqwest::Client>> {
-    send_status(&status_tx, format!("MCP '{server_id}': starting OAuth authorization..."));
+    send_status(
+        &status_tx,
+        format!("MCP '{server_id}': starting OAuth authorization..."),
+    );
 
-    let mut auth_mgr = init_auth_manager(server_id, base_url, credential_path.clone(), &status_tx).await?;
+    let mut auth_mgr =
+        init_auth_manager(server_id, base_url, credential_path.clone(), &status_tx).await?;
 
     // Try stored credentials first — avoids browser flow if a valid token exists.
     if auth_mgr.initialize_from_store().await.unwrap_or(false) {
         tracing::info!(server = %server_id, "reusing stored OAuth credentials");
-        send_status(&status_tx, format!("MCP '{server_id}': reusing stored OAuth credentials"));
+        send_status(
+            &status_tx,
+            format!("MCP '{server_id}': reusing stored OAuth credentials"),
+        );
         return Ok(wrap_client(auth_mgr));
     }
 
@@ -69,30 +76,57 @@ pub async fn authorize(
         Ok(m) => m,
         Err(e) => {
             let log_hint = log_path_hint();
-            send_status(&status_tx, format!("\u{26a0} MCP '{server_id}': OAuth discovery failed \u{2014} {e:#}"));
-            send_status(&status_tx, format!("\u{26a0} MCP '{server_id}': {log_hint}"));
-            return Err(e).context(format!("OAuth metadata discovery failed for MCP '{server_id}'"));
+            send_status(
+                &status_tx,
+                format!("\u{26a0} MCP '{server_id}': OAuth discovery failed \u{2014} {e:#}"),
+            );
+            send_status(
+                &status_tx,
+                format!("\u{26a0} MCP '{server_id}': {log_hint}"),
+            );
+            return Err(e).context(format!(
+                "OAuth metadata discovery failed for MCP '{server_id}'"
+            ));
         }
     };
     auth_mgr.set_metadata(metadata.clone());
 
     // Run the interactive browser flow
     if let Err(e) = browser_auth_flow(
-        server_id, base_url, &mut auth_mgr, &metadata, &credential_path,
-        client_id, client_secret, &status_tx,
-    ).await {
+        server_id,
+        base_url,
+        &mut auth_mgr,
+        &metadata,
+        &credential_path,
+        client_id,
+        client_secret,
+        &status_tx,
+    )
+    .await
+    {
         let log_hint = log_path_hint();
-        send_status(&status_tx, format!("\u{26a0} MCP '{server_id}': authorization failed \u{2014} {e:#}"));
-        send_status(&status_tx, format!("\u{26a0} MCP '{server_id}': {log_hint}"));
+        send_status(
+            &status_tx,
+            format!("\u{26a0} MCP '{server_id}': authorization failed \u{2014} {e:#}"),
+        );
+        send_status(
+            &status_tx,
+            format!("\u{26a0} MCP '{server_id}': {log_hint}"),
+        );
         return Err(e).context(format!("OAuth authorization failed for MCP '{server_id}'"));
     }
 
     // Reload credentials from store so AuthClient has the token
     if auth_mgr.initialize_from_store().await.unwrap_or(false) {
-        send_status(&status_tx, format!("MCP '{server_id}': authorized successfully"));
+        send_status(
+            &status_tx,
+            format!("MCP '{server_id}': authorized successfully"),
+        );
         Ok(wrap_client(auth_mgr))
     } else {
-        Err(anyhow::anyhow!("OAuth token was saved but could not be reloaded"))
+        Err(anyhow::anyhow!(
+            "OAuth token was saved but could not be reloaded"
+        ))
     }
 }
 
@@ -120,7 +154,10 @@ async fn discover_metadata(
     status_tx: &Option<OAuthStatusTx>,
 ) -> Result<AuthorizationMetadata> {
     tracing::info!(server = %server_id, "discovering OAuth metadata");
-    send_status(status_tx, format!("MCP '{server_id}': discovering OAuth metadata..."));
+    send_status(
+        status_tx,
+        format!("MCP '{server_id}': discovering OAuth metadata..."),
+    );
 
     auth_mgr
         .discover_metadata()
@@ -132,6 +169,8 @@ async fn discover_metadata(
 ///
 /// Manages PKCE and token exchange directly (without rmcp's exchange_code_for_token)
 /// to avoid the unsupported RFC 8707 `resource` parameter.
+// Structural — these args are all needed
+#[allow(clippy::too_many_arguments)]
 async fn browser_auth_flow(
     server_id: &str,
     base_url: &str,
@@ -241,7 +280,10 @@ async fn resolve_client_id(
 
     // Attempt 1: dynamic client registration (RFC 7591)
     tracing::info!(server = %server_id, "attempting dynamic OAuth client registration");
-    match auth_mgr.register_client("steve", callback_url, &scope_refs).await {
+    match auth_mgr
+        .register_client("steve", callback_url, &scope_refs)
+        .await
+    {
         Ok(resp) => {
             tracing::info!(server = %server_id, "dynamic client registration succeeded");
             return Ok(ResolvedClient {
@@ -317,17 +359,24 @@ async fn exchange_code(
         .context("token exchange HTTP request failed")?;
 
     let status = resp.status();
-    let body = resp.text().await.context("failed to read token response body")?;
+    let body = resp
+        .text()
+        .await
+        .context("failed to read token response body")?;
 
     if !status.is_success() {
-        return Err(anyhow::anyhow!("token exchange failed (HTTP {status}): {body}"));
+        return Err(anyhow::anyhow!(
+            "token exchange failed (HTTP {status}): {body}"
+        ));
     }
 
     let token: serde_json::Value = serde_json::from_str(&body)
         .with_context(|| format!("failed to parse token response: {body}"))?;
 
     if token.get("access_token").and_then(|v| v.as_str()).is_none() {
-        return Err(anyhow::anyhow!("token response missing access_token: {body}"));
+        return Err(anyhow::anyhow!(
+            "token response missing access_token: {body}"
+        ));
     }
 
     Ok(token)
@@ -342,7 +391,12 @@ async fn save_credentials(
     // Build a minimal StoredCredentials that rmcp can reload
     let granted_scopes: Vec<String> = token["scope"]
         .as_str()
-        .map(|s| s.split(&[',', ' '][..]).filter(|s| !s.is_empty()).map(|s| s.to_string()).collect())
+        .map(|s| {
+            s.split(&[',', ' '][..])
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect()
+        })
         .unwrap_or_default();
 
     // Deserialize into rmcp's OAuthTokenResponse type for credential store compatibility.
@@ -374,7 +428,10 @@ async fn save_credentials(
     .context("failed to build StoredCredentials")?;
 
     let store = FileCredentialStore::new(credential_path.to_path_buf());
-    store.save(stored).await.context("failed to save OAuth credentials")?;
+    store
+        .save(stored)
+        .await
+        .context("failed to save OAuth credentials")?;
 
     Ok(())
 }
@@ -473,7 +530,10 @@ mod tests {
     fn log_path_hint_returns_non_empty_string() {
         let hint = log_path_hint();
         assert!(!hint.is_empty());
-        assert!(hint.contains("logs") || hint.contains("log"), "hint should mention logs: {hint}");
+        assert!(
+            hint.contains("logs") || hint.contains("log"),
+            "hint should mention logs: {hint}"
+        );
     }
 
     #[test]
@@ -523,8 +583,13 @@ mod tests {
 
     #[tokio::test]
     async fn init_auth_manager_accepts_valid_url() {
-        let result =
-            init_auth_manager("test", "https://example.com", "/tmp/fake.json".into(), &None).await;
+        let result = init_auth_manager(
+            "test",
+            "https://example.com",
+            "/tmp/fake.json".into(),
+            &None,
+        )
+        .await;
         assert!(result.is_ok());
     }
 
@@ -532,8 +597,15 @@ mod tests {
     async fn authorize_fails_for_unreachable_server() {
         let dir = tempfile::tempdir().unwrap();
         let cred_path = dir.path().join("creds.json");
-        let result =
-            authorize("test", "https://127.0.0.1:1/nonexistent", cred_path, None, None, None).await;
+        let result = authorize(
+            "test",
+            "https://127.0.0.1:1/nonexistent",
+            cred_path,
+            None,
+            None,
+            None,
+        )
+        .await;
         assert!(result.is_err());
     }
 }

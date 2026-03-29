@@ -1,7 +1,9 @@
 //! Copy tool — duplicate files or directories.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -14,7 +16,12 @@ pub fn tool() -> ToolEntry {
     ToolEntry {
         def: ToolDef {
             name: ToolName::Copy,
-            description: func.get("description").unwrap().as_str().unwrap().to_string(),
+            description: func
+                .get("description")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string(),
             parameters: func.get("parameters").cloned().unwrap(),
         },
         handler: Box::new(execute),
@@ -70,8 +77,13 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
     }
 
     if from.is_dir() {
-        copy_dir_recursive(&from, &to)
-            .with_context(|| format!("failed to copy directory {} → {}", from.display(), to.display()))?;
+        copy_dir_recursive(&from, &to).with_context(|| {
+            format!(
+                "failed to copy directory {} → {}",
+                from.display(),
+                to.display()
+            )
+        })?;
         Ok(ToolOutput {
             title: format!("Copy {from_str} → {to_str}"),
             output: format!("Copied directory {} → {}", from.display(), to.display()),
@@ -140,7 +152,10 @@ mod tests {
         assert!(!result.is_error);
         // Source still exists
         assert!(dir.path().join("a.txt").exists());
-        assert_eq!(fs::read_to_string(dir.path().join("b.txt")).unwrap(), "hello");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("b.txt")).unwrap(),
+            "hello"
+        );
     }
 
     #[test]
@@ -156,8 +171,14 @@ mod tests {
         )
         .unwrap();
         assert!(!result.is_error);
-        assert_eq!(fs::read_to_string(dir.path().join("dst/a.txt")).unwrap(), "a");
-        assert_eq!(fs::read_to_string(dir.path().join("dst/sub/b.txt")).unwrap(), "b");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("dst/a.txt")).unwrap(),
+            "a"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("dst/sub/b.txt")).unwrap(),
+            "b"
+        );
     }
 
     #[test]

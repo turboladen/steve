@@ -3,6 +3,11 @@ name = "steve"
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.89"
+description = "A TUI AI coding agent powered by any OpenAI-compatible LLM API"
+license = "MIT"
+repository = "https://github.com/turboladen/steve"
+keywords = ["ai", "coding-agent", "tui", "llm", "openai"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 # Async runtime
@@ -80,18 +85,25 @@ lsp-types = "0.97"
 
 # Tree-sitter parsing for structural code queries (symbols tool)
 tree-sitter = "0.26"
+tree-sitter-bash = "0.25"
 tree-sitter-c = "0.24"
 tree-sitter-cpp = "0.23"
+tree-sitter-css = "0.25"
+tree-sitter-fish = "3.6"
 tree-sitter-go = "0.25"
+tree-sitter-hcl = "1.1"
 tree-sitter-java = "0.23"
 tree-sitter-javascript = "0.25"
 tree-sitter-json = "0.24"
 tree-sitter-language = "0.1"
+tree-sitter-lua = "0.5"
 tree-sitter-python = "0.25"
 tree-sitter-ruby = "0.23"
 tree-sitter-rust = "0.24"
 tree-sitter-toml-ng = "0.7"
 tree-sitter-typescript = "0.23"
+tree-sitter-yaml = "0.7"
+which = "8.0"
 libc = "0.2.183"
 
 # MCP client (Model Context Protocol)

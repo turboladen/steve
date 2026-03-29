@@ -2,9 +2,10 @@
 
 use serde_json::Value;
 
-use grep::regex::RegexMatcher;
-use grep::searcher::sinks::UTF8;
-use grep::searcher::Searcher;
+use grep::{
+    regex::RegexMatcher,
+    searcher::{Searcher, sinks::UTF8},
+};
 use ignore::WalkBuilder;
 
 use super::{ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput};
@@ -37,7 +38,7 @@ pub fn tool() -> ToolEntry {
                 "required": ["pattern"]
             }),
         },
-        handler: Box::new(|args, ctx| execute(args, ctx)),
+        handler: Box::new(execute),
     }
 }
 
@@ -127,11 +128,7 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
 
                 let trimmed = line.trim_end();
                 let display_line = if trimmed.len() > 200 {
-                    // Truncate at char boundary before 197 to leave room for "..."
-                    let mut end = 197;
-                    while end > 0 && !trimmed.is_char_boundary(end) {
-                        end -= 1;
-                    }
+                    let end = crate::floor_char_boundary(trimmed, 197);
                     format!("{}...", &trimmed[..end])
                 } else {
                     trimmed.to_string()
@@ -147,7 +144,7 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
         );
 
         // Silently skip files that can't be searched (binary files, etc.)
-        if let Err(_) = result {
+        if result.is_err() {
             continue;
         }
     }

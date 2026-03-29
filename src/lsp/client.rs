@@ -5,9 +5,11 @@
 //! Content-Length: {len}\r\n\r\n{json_body}
 //! ```
 
-use std::io::{BufRead, BufReader, BufWriter, Read as IoRead, Write as IoWrite};
-use std::process::{ChildStdin, ChildStdout};
-use std::time::{Duration, Instant};
+use std::{
+    io::{BufRead, BufReader, BufWriter, Read as IoRead, Write as IoWrite},
+    process::{ChildStdin, ChildStdout},
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -120,11 +122,7 @@ impl JsonRpcTransport {
     }
 
     /// Send a JSON-RPC notification (no response expected).
-    pub fn send_notification<P: Serialize>(
-        &mut self,
-        method: &str,
-        params: P,
-    ) -> Result<()> {
+    pub fn send_notification<P: Serialize>(&mut self, method: &str, params: P) -> Result<()> {
         let notification = serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,
@@ -136,7 +134,12 @@ impl JsonRpcTransport {
     /// Write a Content-Length-framed JSON-RPC message.
     fn write_message(&mut self, msg: &Value) -> Result<()> {
         let body = serde_json::to_string(msg)?;
-        write!(self.writer, "Content-Length: {}\r\n\r\n{}", body.len(), body)?;
+        write!(
+            self.writer,
+            "Content-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        )?;
         self.writer.flush()?;
         Ok(())
     }
@@ -212,7 +215,8 @@ mod tests {
 
     #[test]
     fn json_rpc_error_response_deserialize() {
-        let json = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}"#;
+        let json =
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}"#;
         let msg: JsonRpcMessage = serde_json::from_str(json).unwrap();
         match msg {
             JsonRpcMessage::Response(resp) => {

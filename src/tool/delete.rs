@@ -1,7 +1,6 @@
 //! Delete tool — remove files or directories with safety checks.
 
-use std::fs;
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -14,7 +13,12 @@ pub fn tool() -> ToolEntry {
     ToolEntry {
         def: ToolDef {
             name: ToolName::Delete,
-            description: func.get("description").unwrap().as_str().unwrap().to_string(),
+            description: func
+                .get("description")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string(),
             parameters: func.get("parameters").cloned().unwrap(),
         },
         handler: Box::new(execute),
@@ -54,9 +58,12 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
     }
 
     // Safety: refuse to delete the project root
-    let canonical = path.canonicalize()
+    let canonical = path
+        .canonicalize()
         .with_context(|| format!("failed to resolve: {}", path.display()))?;
-    let root_canonical = ctx.project_root.canonicalize()
+    let root_canonical = ctx
+        .project_root
+        .canonicalize()
         .unwrap_or_else(|_| ctx.project_root.clone());
     if canonical == root_canonical {
         bail!("refusing to delete the project root: {}", path.display());

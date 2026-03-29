@@ -1,10 +1,14 @@
 use std::sync::LazyLock;
 
-use ratatui::style::{Color, Style};
-use ratatui::text::Span;
-use syntect::easy::HighlightLines;
-use syntect::highlighting::{self, Theme, ThemeSet};
-use syntect::parsing::SyntaxSet;
+use ratatui::{
+    style::{Color, Style},
+    text::Span,
+};
+use syntect::{
+    easy::HighlightLines,
+    highlighting::{self, Theme, ThemeSet},
+    parsing::SyntaxSet,
+};
 
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
 
@@ -65,7 +69,10 @@ mod tests {
 
     #[test]
     fn try_highlighter_unknown_lang() {
-        assert!(try_highlighter("").is_none(), "empty string should return None");
+        assert!(
+            try_highlighter("").is_none(),
+            "empty string should return None"
+        );
         assert!(
             try_highlighter("nonexistent_gibberish_lang_42").is_none(),
             "unknown language should return None"

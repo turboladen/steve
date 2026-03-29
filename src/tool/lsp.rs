@@ -6,13 +6,15 @@
 //! - `references`: Find all references to a symbol
 //! - `rename`: Get a rename plan (read-only, LLM applies edits separately)
 
-use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::{
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::lsp::{uri_to_path, LspManager};
+use crate::lsp::{LspManager, uri_to_path};
 
 use super::{ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput};
 
@@ -53,7 +55,7 @@ pub fn tool() -> ToolEntry {
                 "required": ["path"]
             }),
         },
-        handler: Box::new(|args, ctx| execute(args, ctx)),
+        handler: Box::new(execute),
     }
 }
 
@@ -63,10 +65,17 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing 'path' argument"))?;
 
-    let operation = args
+    let operation: super::LspOperation = args
         .get("operation")
         .and_then(|v| v.as_str())
-        .unwrap_or("diagnostics");
+        .unwrap_or("diagnostics")
+        .parse()
+        .map_err(|_| {
+            let raw = args.get("operation").and_then(|v| v.as_str()).unwrap_or("?");
+            anyhow::anyhow!(
+                "unknown lsp operation: '{raw}'. Expected one of: diagnostics, definition, references, rename"
+            )
+        })?;
 
     // Resolve path relative to project root
     let path = if Path::new(path_str).is_absolute() {
@@ -89,16 +98,16 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
         .ok_or_else(|| anyhow::anyhow!("LSP not available"))?;
 
     match operation {
-        "diagnostics" => execute_diagnostics(lsp_manager, &path, path_str),
-        "definition" => {
+        super::LspOperation::Diagnostics => execute_diagnostics(lsp_manager, &path, path_str),
+        super::LspOperation::Definition => {
             let (line, character) = extract_position(&args)?;
             execute_definition(lsp_manager, &path, path_str, line, character)
         }
-        "references" => {
+        super::LspOperation::References => {
             let (line, character) = extract_position(&args)?;
             execute_references(lsp_manager, &path, path_str, line, character)
         }
-        "rename" => {
+        super::LspOperation::Rename => {
             let (line, character) = extract_position(&args)?;
             let new_name = args
                 .get("new_name")
@@ -106,13 +115,6 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
                 .ok_or_else(|| anyhow::anyhow!("rename requires 'new_name' argument"))?;
             execute_rename(lsp_manager, &path, path_str, line, character, new_name)
         }
-        other => Ok(ToolOutput {
-            title: format!("lsp {path_str}"),
-            output: format!(
-                "Unknown operation: '{other}'. Use 'diagnostics', 'definition', 'references', or 'rename'."
-            ),
-            is_error: true,
-        }),
     }
 }
 
@@ -131,7 +133,9 @@ fn extract_position(args: &Value) -> Result<(u32, u32)> {
     let character = args
         .get("character")
         .and_then(|v| v.as_u64())
-        .ok_or_else(|| anyhow::anyhow!("this operation requires 'character' argument (0-indexed)"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("this operation requires 'character' argument (0-indexed)")
+        })?;
 
     // Convert 1-indexed line to 0-indexed for LSP
     Ok((line as u32 - 1, character as u32))
@@ -198,12 +202,18 @@ fn execute_definition(
     if locations.is_empty() {
         return Ok(ToolOutput {
             title: format!("lsp {path_str} definition@{}", line + 1),
-            output: format!("No definition found at {path_str}:{}:{character}.", line + 1),
+            output: format!(
+                "No definition found at {path_str}:{}:{character}.",
+                line + 1
+            ),
             is_error: false,
         });
     }
 
-    let mut output = format!("Definition(s) for symbol at {path_str}:{}:{character}:\n\n", line + 1);
+    let mut output = format!(
+        "Definition(s) for symbol at {path_str}:{}:{character}:\n\n",
+        line + 1
+    );
     for loc in &locations {
         let file = uri_to_display(loc.uri.as_str());
         let def_line = loc.range.start.line + 1;
@@ -245,13 +255,17 @@ fn execute_references(
     if locations.is_empty() {
         return Ok(ToolOutput {
             title: format!("lsp {path_str} references@{}", line + 1),
-            output: format!("No references found at {path_str}:{}:{character}.", line + 1),
+            output: format!(
+                "No references found at {path_str}:{}:{character}.",
+                line + 1
+            ),
             is_error: false,
         });
     }
 
     // Group by file
-    let mut by_file: std::collections::BTreeMap<String, Vec<u32>> = std::collections::BTreeMap::new();
+    let mut by_file: std::collections::BTreeMap<String, Vec<u32>> =
+        std::collections::BTreeMap::new();
     for loc in &locations {
         let file = uri_to_display(loc.uri.as_str());
         by_file
@@ -295,54 +309,56 @@ fn execute_rename(
     // Format the workspace edit as a readable plan.
     // Servers may return changes in `changes` (simple) or `document_changes` (rich).
     // Normalize to a common (uri, edits) list.
-    let file_edits: Vec<(String, Vec<lsp_types::TextEdit>)> =
-        if let Some(changes) = edit.changes {
-            changes
+    let file_edits: Vec<(String, Vec<lsp_types::TextEdit>)> = if let Some(changes) = edit.changes {
+        changes
+            .into_iter()
+            .map(|(uri, edits)| (uri.as_str().to_string(), edits))
+            .collect()
+    } else if let Some(doc_changes) = edit.document_changes {
+        match doc_changes {
+            lsp_types::DocumentChanges::Edits(edits) => edits
                 .into_iter()
-                .map(|(uri, edits)| (uri.as_str().to_string(), edits))
-                .collect()
-        } else if let Some(doc_changes) = edit.document_changes {
-            match doc_changes {
-                lsp_types::DocumentChanges::Edits(edits) => edits
-                    .into_iter()
-                    .map(|e| {
-                        (
-                            e.text_document.uri.as_str().to_string(),
-                            e.edits
-                                .into_iter()
-                                .map(|edit| match edit {
-                                    lsp_types::OneOf::Left(te) => te,
-                                    lsp_types::OneOf::Right(ate) => ate.text_edit,
-                                })
-                                .collect(),
-                        )
-                    })
-                    .collect(),
-                lsp_types::DocumentChanges::Operations(ops) => ops
-                    .into_iter()
-                    .filter_map(|op| match op {
-                        lsp_types::DocumentChangeOperation::Edit(e) => Some((
-                            e.text_document.uri.as_str().to_string(),
-                            e.edits
-                                .into_iter()
-                                .map(|edit| match edit {
-                                    lsp_types::OneOf::Left(te) => te,
-                                    lsp_types::OneOf::Right(ate) => ate.text_edit,
-                                })
-                                .collect(),
-                        )),
-                        lsp_types::DocumentChangeOperation::Op(_) => None, // file create/rename/delete
-                    })
-                    .collect(),
-            }
-        } else {
-            Vec::new()
-        };
+                .map(|e| {
+                    (
+                        e.text_document.uri.as_str().to_string(),
+                        e.edits
+                            .into_iter()
+                            .map(|edit| match edit {
+                                lsp_types::OneOf::Left(te) => te,
+                                lsp_types::OneOf::Right(ate) => ate.text_edit,
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
+            lsp_types::DocumentChanges::Operations(ops) => ops
+                .into_iter()
+                .filter_map(|op| match op {
+                    lsp_types::DocumentChangeOperation::Edit(e) => Some((
+                        e.text_document.uri.as_str().to_string(),
+                        e.edits
+                            .into_iter()
+                            .map(|edit| match edit {
+                                lsp_types::OneOf::Left(te) => te,
+                                lsp_types::OneOf::Right(ate) => ate.text_edit,
+                            })
+                            .collect(),
+                    )),
+                    lsp_types::DocumentChangeOperation::Op(_) => None, // file create/rename/delete
+                })
+                .collect(),
+        }
+    } else {
+        Vec::new()
+    };
 
     if file_edits.is_empty() {
         return Ok(ToolOutput {
             title: format!("lsp {path_str} rename@{}", line + 1),
-            output: format!("No changes needed for rename at {path_str}:{}:{character}.", line + 1),
+            output: format!(
+                "No changes needed for rename at {path_str}:{}:{character}.",
+                line + 1
+            ),
             is_error: false,
         });
     }
@@ -362,9 +378,7 @@ fn execute_rename(
         }
     }
 
-    output.push_str(
-        "\nThis is a read-only plan. Use the edit tool to apply changes.",
-    );
+    output.push_str("\nThis is a read-only plan. Use the edit tool to apply changes.");
 
     Ok(ToolOutput {
         title: format!("lsp {path_str} rename@{}", line + 1),
@@ -449,7 +463,12 @@ mod tests {
         let args = serde_json::json!({"path": file.to_str().unwrap()});
         let result = execute(args, test_ctx(dir.path()));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("LSP not available"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("LSP not available")
+        );
     }
 
     #[test]
@@ -461,9 +480,11 @@ mod tests {
             "path": file.to_str().unwrap(),
             "operation": "unknown_op"
         });
-        let result = execute(args, test_ctx_with_lsp(dir.path())).unwrap();
-        assert!(result.is_error);
-        assert!(result.output.contains("Unknown operation"));
+        let err = execute(args, test_ctx_with_lsp(dir.path())).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown lsp operation"),
+            "expected parse error, got: {err}"
+        );
     }
 
     #[test]
@@ -508,7 +529,12 @@ mod tests {
         });
         let result = execute(args, test_ctx_with_lsp(dir.path()));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("line must be >= 1"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("line must be >= 1")
+        );
     }
 
     #[test]
@@ -548,8 +574,14 @@ mod tests {
 
     #[test]
     fn uri_to_display_strips_file_prefix() {
-        assert_eq!(uri_to_display("file:///home/user/test.rs"), "/home/user/test.rs");
-        assert_eq!(uri_to_display("file:///path%20with%20spaces/test.rs"), "/path with spaces/test.rs");
+        assert_eq!(
+            uri_to_display("file:///home/user/test.rs"),
+            "/home/user/test.rs"
+        );
+        assert_eq!(
+            uri_to_display("file:///path%20with%20spaces/test.rs"),
+            "/path with spaces/test.rs"
+        );
         assert_eq!(uri_to_display("https://example.com"), "https://example.com");
     }
 
@@ -573,7 +605,7 @@ mod tests {
     fn extract_position_valid() {
         let args = serde_json::json!({"line": 10, "character": 5});
         let (line, char) = extract_position(&args).unwrap();
-        assert_eq!(line, 9);  // 1-indexed → 0-indexed
-        assert_eq!(char, 5);  // 0-indexed stays
+        assert_eq!(line, 9); // 1-indexed → 0-indexed
+        assert_eq!(char, 5); // 0-indexed stays
     }
 }

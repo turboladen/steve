@@ -70,11 +70,13 @@ impl CredentialStore for FileCredentialStore {
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o600);
-            tokio::fs::set_permissions(&self.path, perms).await.map_err(|e| {
-                AuthError::InternalError(format!(
-                    "failed to set credential file permissions: {e}"
-                ))
-            })?;
+            tokio::fs::set_permissions(&self.path, perms)
+                .await
+                .map_err(|e| {
+                    AuthError::InternalError(format!(
+                        "failed to set credential file permissions: {e}"
+                    ))
+                })?;
         }
 
         Ok(())
@@ -123,7 +125,11 @@ mod tests {
         let creds = test_credentials();
         store.save(creds.clone()).await.unwrap();
 
-        let loaded = store.load().await.unwrap().expect("should load saved credentials");
+        let loaded = store
+            .load()
+            .await
+            .unwrap()
+            .expect("should load saved credentials");
         assert_eq!(loaded.client_id, "test-client-id");
         assert_eq!(loaded.granted_scopes, vec!["read", "write"]);
         assert_eq!(loaded.token_received_at, Some(1700000000));
@@ -156,7 +162,11 @@ mod tests {
         let store = FileCredentialStore::new(dir.path().join("nested/deep/creds.json"));
 
         store.save(test_credentials()).await.unwrap();
-        let loaded = store.load().await.unwrap().expect("should load from nested path");
+        let loaded = store
+            .load()
+            .await
+            .unwrap()
+            .expect("should load from nested path");
         assert_eq!(loaded.client_id, "test-client-id");
     }
 
@@ -172,7 +182,10 @@ mod tests {
 
         let metadata = std::fs::metadata(dir.path().join("creds.json")).unwrap();
         let mode = metadata.permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "credential file should be owner-read/write only");
+        assert_eq!(
+            mode, 0o600,
+            "credential file should be owner-read/write only"
+        );
     }
 
     #[tokio::test]

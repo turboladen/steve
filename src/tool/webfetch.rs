@@ -11,7 +11,12 @@ pub fn tool() -> ToolEntry {
     ToolEntry {
         def: ToolDef {
             name: ToolName::Webfetch,
-            description: func.get("description").unwrap().as_str().unwrap().to_string(),
+            description: func
+                .get("description")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string(),
             parameters: func.get("parameters").cloned().unwrap(),
         },
         handler: Box::new(execute),
@@ -45,11 +50,12 @@ fn execute(args: Value, _ctx: ToolContext) -> Result<ToolOutput> {
         .context("missing 'url' parameter")?;
 
     // Reject non-HTTP(S) schemes to prevent SSRF via file://, data:, etc.
-    let parsed = reqwest::Url::parse(url)
-        .with_context(|| format!("invalid URL: {url}"))?;
+    let parsed = reqwest::Url::parse(url).with_context(|| format!("invalid URL: {url}"))?;
     match parsed.scheme() {
         "http" | "https" => {}
-        scheme => anyhow::bail!("disallowed URL scheme '{scheme}': only http and https are permitted"),
+        scheme => {
+            anyhow::bail!("disallowed URL scheme '{scheme}': only http and https are permitted")
+        }
     }
 
     // Use a blocking HTTP request since our tool handlers are synchronous.
@@ -80,11 +86,10 @@ fn execute(args: Value, _ctx: ToolContext) -> Result<ToolOutput> {
 
     let output = if content_type.contains("text/html") {
         // Convert HTML to plain text
-        let text = html2text::from_read(body.as_bytes(), 100)
-            .unwrap_or_else(|_| body.clone());
+        let text = html2text::from_read(body.as_bytes(), 100).unwrap_or_else(|_| body.clone());
         // Truncate very long content (use floor_char_boundary for UTF-8 safety)
         if text.len() > 50_000 {
-            let boundary = floor_char_boundary(&text, 50_000);
+            let boundary = crate::floor_char_boundary(&text, 50_000);
             format!("{}\n\n... (content truncated at 50KB)", &text[..boundary])
         } else {
             text
@@ -92,7 +97,7 @@ fn execute(args: Value, _ctx: ToolContext) -> Result<ToolOutput> {
     } else {
         // Return raw text (JSON, plain text, etc.)
         if body.len() > 50_000 {
-            let boundary = floor_char_boundary(&body, 50_000);
+            let boundary = crate::floor_char_boundary(&body, 50_000);
             format!("{}\n\n... (content truncated at 50KB)", &body[..boundary])
         } else {
             body
@@ -107,19 +112,6 @@ fn execute(args: Value, _ctx: ToolContext) -> Result<ToolOutput> {
     })
 }
 
-/// Find the largest valid UTF-8 char boundary at or before `index`.
-/// This is a polyfill for the unstable `str::floor_char_boundary`.
-fn floor_char_boundary(s: &str, index: usize) -> usize {
-    if index >= s.len() {
-        return s.len();
-    }
-    let mut i = index;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,7 +119,7 @@ mod tests {
     #[test]
     fn floor_char_boundary_ascii_exact() {
         let s = "hello world";
-        assert_eq!(floor_char_boundary(s, 5), 5);
+        assert_eq!(crate::floor_char_boundary(s, 5), 5);
     }
 
     #[test]
@@ -136,21 +128,21 @@ mod tests {
         let s = "a日b";
         // s = [0x61, 0xE6, 0x97, 0xA5, 0x62]
         // index 2 is mid-character (inside '日'), should snap back to 1
-        assert_eq!(floor_char_boundary(s, 2), 1);
-        assert_eq!(floor_char_boundary(s, 3), 1);
+        assert_eq!(crate::floor_char_boundary(s, 2), 1);
+        assert_eq!(crate::floor_char_boundary(s, 3), 1);
         // index 4 is exactly at 'b'
-        assert_eq!(floor_char_boundary(s, 4), 4);
+        assert_eq!(crate::floor_char_boundary(s, 4), 4);
     }
 
     #[test]
     fn floor_char_boundary_beyond_length() {
         let s = "abc";
-        assert_eq!(floor_char_boundary(s, 100), 3);
+        assert_eq!(crate::floor_char_boundary(s, 100), 3);
     }
 
     #[test]
     fn floor_char_boundary_empty_string() {
-        assert_eq!(floor_char_boundary("", 0), 0);
+        assert_eq!(crate::floor_char_boundary("", 0), 0);
     }
 
     #[test]
@@ -159,11 +151,11 @@ mod tests {
         let s = "a🦀b";
         // s = [0x61, 0xF0, 0x9F, 0xA6, 0x80, 0x62]
         // Indices 2, 3, 4 are mid-emoji, should snap back to 1
-        assert_eq!(floor_char_boundary(s, 2), 1);
-        assert_eq!(floor_char_boundary(s, 3), 1);
-        assert_eq!(floor_char_boundary(s, 4), 1);
+        assert_eq!(crate::floor_char_boundary(s, 2), 1);
+        assert_eq!(crate::floor_char_boundary(s, 3), 1);
+        assert_eq!(crate::floor_char_boundary(s, 4), 1);
         // index 5 is exactly 'b'
-        assert_eq!(floor_char_boundary(s, 5), 5);
+        assert_eq!(crate::floor_char_boundary(s, 5), 5);
     }
 
     #[test]
@@ -177,7 +169,10 @@ mod tests {
         let result = execute(serde_json::json!({}), ctx);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("url"), "error should mention missing url param: {err}");
+        assert!(
+            err.contains("url"),
+            "error should mention missing url param: {err}"
+        );
     }
 
     #[test]
@@ -198,7 +193,10 @@ mod tests {
         let result = execute(serde_json::json!({"url": "file:///etc/passwd"}), ctx);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("disallowed"), "should reject file:// scheme: {err}");
+        assert!(
+            err.contains("disallowed"),
+            "should reject file:// scheme: {err}"
+        );
     }
 
     #[test]
@@ -212,6 +210,9 @@ mod tests {
         let result = execute(serde_json::json!({"url": "data:text/plain,hello"}), ctx);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("disallowed"), "should reject data: scheme: {err}");
+        assert!(
+            err.contains("disallowed"),
+            "should reject data: scheme: {err}"
+        );
     }
 }

@@ -1,7 +1,6 @@
 //! Write tool — creates or overwrites files.
 
-use std::fs;
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -14,7 +13,12 @@ pub fn tool() -> ToolEntry {
     ToolEntry {
         def: ToolDef {
             name: ToolName::Write,
-            description: func.get("description").unwrap().as_str().unwrap().to_string(),
+            description: func
+                .get("description")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string(),
             parameters: func.get("parameters").cloned().unwrap(),
         },
         handler: Box::new(execute),
@@ -60,8 +64,9 @@ pub fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
 
     // Create parent directories if needed
     if let Some(parent) = file_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create directories for: {}", file_path.display()))?;
+        fs::create_dir_all(parent).with_context(|| {
+            format!("failed to create directories for: {}", file_path.display())
+        })?;
     }
 
     let existed = file_path.exists();
@@ -119,7 +124,10 @@ mod tests {
         assert!(!result.is_error);
         assert!(result.output.contains("Created"));
         assert!(dir.path().join("hello.txt").exists());
-        assert_eq!(fs::read_to_string(dir.path().join("hello.txt")).unwrap(), "hello world");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
+            "hello world"
+        );
     }
 
     #[test]
@@ -134,7 +142,10 @@ mod tests {
         let result = execute(args, make_ctx(dir.path())).unwrap();
         assert!(!result.is_error);
         assert!(result.output.contains("Overwrote"));
-        assert_eq!(fs::read_to_string(dir.path().join("existing.txt")).unwrap(), "new content");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("existing.txt")).unwrap(),
+            "new content"
+        );
     }
 
     #[test]
@@ -147,7 +158,10 @@ mod tests {
         let result = execute(args, make_ctx(dir.path())).unwrap();
         assert!(!result.is_error);
         assert!(dir.path().join("sub/dir/file.txt").exists());
-        assert_eq!(fs::read_to_string(dir.path().join("sub/dir/file.txt")).unwrap(), "nested");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("sub/dir/file.txt")).unwrap(),
+            "nested"
+        );
     }
 
     #[test]
@@ -159,7 +173,10 @@ mod tests {
         let result = execute(args, make_ctx(dir.path()));
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("file_path"), "expected error about file_path, got: {err_msg}");
+        assert!(
+            err_msg.contains("file_path"),
+            "expected error about file_path, got: {err_msg}"
+        );
     }
 
     #[test]
@@ -171,7 +188,10 @@ mod tests {
         let result = execute(args, make_ctx(dir.path()));
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("content"), "expected error about content, got: {err_msg}");
+        assert!(
+            err_msg.contains("content"),
+            "expected error about content, got: {err_msg}"
+        );
     }
 
     #[test]
@@ -184,7 +204,10 @@ mod tests {
         let result = execute(args, make_ctx(dir.path())).unwrap();
         assert!(!result.is_error);
         let expected = dir.path().join("relative/path.txt");
-        assert!(expected.exists(), "file should be created under project_root");
+        assert!(
+            expected.exists(),
+            "file should be created under project_root"
+        );
         assert_eq!(fs::read_to_string(expected).unwrap(), "resolved");
     }
 }

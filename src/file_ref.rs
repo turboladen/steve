@@ -3,8 +3,10 @@
 //! - `@path` (hint): injects a compact metadata note so the LLM can decide whether to read it
 //! - `@!path` (inject): injects the full file contents into context immediately
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use ignore::WalkBuilder;
 
@@ -121,10 +123,10 @@ pub fn resolve_ref(file_ref: &FileRef, project_root: &Path) -> Option<ResolvedFi
     }
 
     // If no '/' in path, try basename match
-    if !file_ref.path.contains('/') {
-        if let Some(found) = find_unique_basename(&file_ref.path, project_root) {
-            return build_resolved(file_ref, &found, project_root);
-        }
+    if !file_ref.path.contains('/')
+        && let Some(found) = find_unique_basename(&file_ref.path, project_root)
+    {
+        return build_resolved(file_ref, &found, project_root);
     }
 
     None
@@ -201,14 +203,13 @@ fn find_unique_basename(basename: &str, project_root: &Path) -> Option<PathBuf> 
 
     let mut matches: Vec<PathBuf> = Vec::new();
     for entry in walker.flatten() {
-        if entry.file_type().is_some_and(|ft| ft.is_file()) {
-            if let Some(name) = entry.path().file_name() {
-                if name == basename {
-                    matches.push(entry.path().to_path_buf());
-                    if matches.len() > 1 {
-                        return None; // ambiguous
-                    }
-                }
+        if entry.file_type().is_some_and(|ft| ft.is_file())
+            && let Some(name) = entry.path().file_name()
+            && name == basename
+        {
+            matches.push(entry.path().to_path_buf());
+            if matches.len() > 1 {
+                return None; // ambiguous
             }
         }
     }
@@ -317,10 +318,10 @@ pub fn build_file_index(project_root: &Path) -> Vec<String> {
 
     let mut files = Vec::new();
     for entry in walker.flatten() {
-        if entry.file_type().is_some_and(|ft| ft.is_file()) {
-            if let Ok(rel) = entry.path().strip_prefix(project_root) {
-                files.push(rel.to_string_lossy().to_string());
-            }
+        if entry.file_type().is_some_and(|ft| ft.is_file())
+            && let Ok(rel) = entry.path().strip_prefix(project_root)
+        {
+            files.push(rel.to_string_lossy().to_string());
         }
     }
     files.sort();
@@ -448,7 +449,11 @@ mod tests {
         let root = dir.path();
 
         fs::create_dir_all(root.join("src")).unwrap();
-        fs::write(root.join("src/main.rs"), "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
+        fs::write(
+            root.join("src/main.rs"),
+            "fn main() {\n    println!(\"hello\");\n}\n",
+        )
+        .unwrap();
         fs::write(root.join("src/lib.rs"), "pub mod app;\n").unwrap();
         fs::write(root.join("Cargo.toml"), "[package]\nname = \"test\"\n").unwrap();
         // Binary file

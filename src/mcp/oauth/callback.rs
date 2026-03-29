@@ -1,13 +1,9 @@
 //! Ephemeral localhost HTTP server to receive OAuth authorization callbacks.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use axum::extract::Query;
-use axum::response::Html;
-use axum::routing::get;
-use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use axum::{extract::Query, response::Html, routing::get};
+use tokio::{net::TcpListener, sync::oneshot};
 
 /// The authorization code and state received from the OAuth callback.
 #[derive(Debug, Clone)]
@@ -21,9 +17,11 @@ pub struct CallbackResult {
 /// Returns `(callback_url, receiver)` where `callback_url` is the full URL to use as
 /// the OAuth `redirect_uri`, and `receiver` yields the authorization code + state once
 /// the user completes the browser flow.
-pub async fn start_callback_server()
-    -> anyhow::Result<(String, oneshot::Receiver<CallbackResult>, tokio::task::JoinHandle<()>)>
-{
+pub async fn start_callback_server() -> anyhow::Result<(
+    String,
+    oneshot::Receiver<CallbackResult>,
+    tokio::task::JoinHandle<()>,
+)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     let callback_url = format!("http://127.0.0.1:{port}/callback");

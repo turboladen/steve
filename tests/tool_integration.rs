@@ -3,12 +3,14 @@
 //! Tests tools against real filesystem fixtures in temp directories,
 //! verifying end-to-end behavior including path resolution and output.
 
-use std::path::PathBuf;
 use serde_json::json;
+use std::path::PathBuf;
 use tempfile::tempdir;
 
-use steve::tool::{ToolName, ToolContext, ToolRegistry};
-use steve::context::cache::ToolResultCache;
+use steve::{
+    context::cache::ToolResultCache,
+    tool::{ToolContext, ToolName, ToolRegistry},
+};
 
 /// Helper to create a ToolContext with a temp directory as project root.
 fn tool_context(project_root: PathBuf) -> ToolContext {
@@ -30,9 +32,21 @@ fn create_test_project() -> (tempfile::TempDir, PathBuf) {
     std::fs::create_dir_all(root.join("tests")).unwrap();
 
     // Create files
-    std::fs::write(root.join("src/main.rs"), "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
-    std::fs::write(root.join("src/lib.rs"), "pub fn greet() -> &'static str {\n    \"hello\"\n}\n").unwrap();
-    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"test\"\nversion = \"0.1.0\"\n").unwrap();
+    std::fs::write(
+        root.join("src/main.rs"),
+        "fn main() {\n    println!(\"hello\");\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub fn greet() -> &'static str {\n    \"hello\"\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"test\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
 
     (dir, root)
 }
@@ -43,11 +57,13 @@ fn read_tool_returns_file_content() {
     let registry = ToolRegistry::new(root.clone());
     let ctx = tool_context(root.clone());
 
-    let output = registry.execute(
-        ToolName::Read,
-        json!({ "path": root.join("src/main.rs").to_string_lossy().to_string() }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Read,
+            json!({ "path": root.join("src/main.rs").to_string_lossy().to_string() }),
+            ctx,
+        )
+        .unwrap();
 
     assert!(!output.is_error);
     assert!(output.output.contains("fn main()"));
@@ -60,11 +76,13 @@ fn read_tool_nonexistent_file_returns_error() {
     let registry = ToolRegistry::new(root.clone());
     let ctx = tool_context(root.clone());
 
-    let output = registry.execute(
-        ToolName::Read,
-        json!({ "path": root.join("nonexistent.rs").to_string_lossy().to_string() }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Read,
+            json!({ "path": root.join("nonexistent.rs").to_string_lossy().to_string() }),
+            ctx,
+        )
+        .unwrap();
 
     assert!(output.is_error);
 }
@@ -75,11 +93,13 @@ fn glob_tool_finds_rust_files() {
     let registry = ToolRegistry::new(root.clone());
     let ctx = tool_context(root.clone());
 
-    let output = registry.execute(
-        ToolName::Glob,
-        json!({ "pattern": "**/*.rs", "path": root.to_string_lossy().to_string() }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Glob,
+            json!({ "pattern": "**/*.rs", "path": root.to_string_lossy().to_string() }),
+            ctx,
+        )
+        .unwrap();
 
     assert!(!output.is_error);
     assert!(output.output.contains("main.rs"));
@@ -93,15 +113,17 @@ fn edit_tool_replaces_content() {
     let ctx = tool_context(root.clone());
     let file_path = root.join("src/main.rs").to_string_lossy().to_string();
 
-    let output = registry.execute(
-        ToolName::Edit,
-        json!({
-            "file_path": &file_path,
-            "old_string": "println!(\"hello\")",
-            "new_string": "println!(\"world\")"
-        }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Edit,
+            json!({
+                "file_path": &file_path,
+                "old_string": "println!(\"hello\")",
+                "new_string": "println!(\"world\")"
+            }),
+            ctx,
+        )
+        .unwrap();
 
     assert!(!output.is_error, "edit should succeed: {}", output.output);
 
@@ -118,14 +140,16 @@ fn write_tool_creates_new_file() {
     let ctx = tool_context(root.clone());
     let file_path = root.join("src/new_file.rs").to_string_lossy().to_string();
 
-    let output = registry.execute(
-        ToolName::Write,
-        json!({
-            "file_path": &file_path,
-            "content": "pub fn new_fn() {}\n"
-        }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Write,
+            json!({
+                "file_path": &file_path,
+                "content": "pub fn new_fn() {}\n"
+            }),
+            ctx,
+        )
+        .unwrap();
 
     assert!(!output.is_error, "write should succeed: {}", output.output);
     let content = std::fs::read_to_string(root.join("src/new_file.rs")).unwrap();
@@ -138,11 +162,13 @@ fn list_tool_shows_directory_contents() {
     let registry = ToolRegistry::new(root.clone());
     let ctx = tool_context(root.clone());
 
-    let output = registry.execute(
-        ToolName::List,
-        json!({ "path": root.join("src").to_string_lossy().to_string() }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::List,
+            json!({ "path": root.join("src").to_string_lossy().to_string() }),
+            ctx,
+        )
+        .unwrap();
 
     assert!(!output.is_error);
     assert!(output.output.contains("main.rs"));
@@ -155,17 +181,22 @@ fn grep_tool_finds_matches() {
     let registry = ToolRegistry::new(root.clone());
     let ctx = tool_context(root.clone());
 
-    let output = registry.execute(
-        ToolName::Grep,
-        json!({
-            "pattern": "fn main",
-            "path": root.to_string_lossy().to_string()
-        }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Grep,
+            json!({
+                "pattern": "fn main",
+                "path": root.to_string_lossy().to_string()
+            }),
+            ctx,
+        )
+        .unwrap();
 
     assert!(!output.is_error);
-    assert!(output.output.contains("main.rs"), "should find fn main in main.rs");
+    assert!(
+        output.output.contains("main.rs"),
+        "should find fn main in main.rs"
+    );
 }
 
 #[test]
@@ -177,11 +208,9 @@ fn delete_tool_removes_file() {
 
     assert!(root.join("src/lib.rs").exists());
 
-    let output = registry.execute(
-        ToolName::Delete,
-        json!({ "path": &file_path }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(ToolName::Delete, json!({ "path": &file_path }), ctx)
+        .unwrap();
 
     assert!(!output.is_error);
     assert!(!root.join("src/lib.rs").exists());
@@ -194,11 +223,9 @@ fn mkdir_tool_creates_directory() {
     let ctx = tool_context(root.clone());
     let dir_path = root.join("src/new_module").to_string_lossy().to_string();
 
-    let output = registry.execute(
-        ToolName::Mkdir,
-        json!({ "path": &dir_path }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(ToolName::Mkdir, json!({ "path": &dir_path }), ctx)
+        .unwrap();
 
     assert!(!output.is_error);
     assert!(root.join("src/new_module").is_dir());
@@ -212,11 +239,13 @@ fn move_tool_renames_file() {
     let from = root.join("src/lib.rs").to_string_lossy().to_string();
     let to = root.join("src/library.rs").to_string_lossy().to_string();
 
-    let output = registry.execute(
-        ToolName::Move,
-        json!({ "from_path": &from, "to_path": &to }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Move,
+            json!({ "from_path": &from, "to_path": &to }),
+            ctx,
+        )
+        .unwrap();
 
     assert!(!output.is_error);
     assert!(!root.join("src/lib.rs").exists());
@@ -229,17 +258,28 @@ fn copy_tool_duplicates_file() {
     let registry = ToolRegistry::new(root.clone());
     let ctx = tool_context(root.clone());
     let from = root.join("src/main.rs").to_string_lossy().to_string();
-    let to = root.join("src/main_backup.rs").to_string_lossy().to_string();
+    let to = root
+        .join("src/main_backup.rs")
+        .to_string_lossy()
+        .to_string();
 
-    let output = registry.execute(
-        ToolName::Copy,
-        json!({ "from_path": &from, "to_path": &to }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Copy,
+            json!({ "from_path": &from, "to_path": &to }),
+            ctx,
+        )
+        .unwrap();
 
     assert!(!output.is_error);
-    assert!(root.join("src/main.rs").exists(), "original should still exist");
-    assert!(root.join("src/main_backup.rs").exists(), "copy should exist");
+    assert!(
+        root.join("src/main.rs").exists(),
+        "original should still exist"
+    );
+    assert!(
+        root.join("src/main_backup.rs").exists(),
+        "copy should exist"
+    );
 
     let original = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
     let copy = std::fs::read_to_string(root.join("src/main_backup.rs")).unwrap();
@@ -255,18 +295,24 @@ fn edit_insert_lines_through_registry() {
     let ctx = tool_context(root.clone());
     let file_path = root.join("src/main.rs").to_string_lossy().to_string();
 
-    let output = registry.execute(
-        ToolName::Edit,
-        json!({
-            "file_path": &file_path,
-            "operation": "insert_lines",
-            "line": 2,
-            "content": "    // inserted comment"
-        }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Edit,
+            json!({
+                "file_path": &file_path,
+                "operation": "insert_lines",
+                "line": 2,
+                "content": "    // inserted comment"
+            }),
+            ctx,
+        )
+        .unwrap();
 
-    assert!(!output.is_error, "insert_lines should succeed: {}", output.output);
+    assert!(
+        !output.is_error,
+        "insert_lines should succeed: {}",
+        output.output
+    );
     let content = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
     assert!(content.contains("// inserted comment"));
     assert!(content.contains("fn main()"));
@@ -280,18 +326,24 @@ fn edit_delete_lines_through_registry() {
     let file_path = root.join("src/main.rs").to_string_lossy().to_string();
 
     // main.rs is: "fn main() {\n    println!(\"hello\");\n}\n" (3 lines)
-    let output = registry.execute(
-        ToolName::Edit,
-        json!({
-            "file_path": &file_path,
-            "operation": "delete_lines",
-            "start_line": 2,
-            "end_line": 2
-        }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Edit,
+            json!({
+                "file_path": &file_path,
+                "operation": "delete_lines",
+                "start_line": 2,
+                "end_line": 2
+            }),
+            ctx,
+        )
+        .unwrap();
 
-    assert!(!output.is_error, "delete_lines should succeed: {}", output.output);
+    assert!(
+        !output.is_error,
+        "delete_lines should succeed: {}",
+        output.output
+    );
     let content = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
     assert!(!content.contains("println!"));
     assert_eq!(content, "fn main() {\n}\n");
@@ -304,19 +356,25 @@ fn edit_replace_range_through_registry() {
     let ctx = tool_context(root.clone());
     let file_path = root.join("src/main.rs").to_string_lossy().to_string();
 
-    let output = registry.execute(
-        ToolName::Edit,
-        json!({
-            "file_path": &file_path,
-            "operation": "replace_range",
-            "start_line": 2,
-            "end_line": 2,
-            "content": "    eprintln!(\"debug\");\n    println!(\"world\");"
-        }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Edit,
+            json!({
+                "file_path": &file_path,
+                "operation": "replace_range",
+                "start_line": 2,
+                "end_line": 2,
+                "content": "    eprintln!(\"debug\");\n    println!(\"world\");"
+            }),
+            ctx,
+        )
+        .unwrap();
 
-    assert!(!output.is_error, "replace_range should succeed: {}", output.output);
+    assert!(
+        !output.is_error,
+        "replace_range should succeed: {}",
+        output.output
+    );
     let content = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
     assert!(content.contains("eprintln!"));
     assert!(content.contains("println!(\"world\")"));
@@ -369,16 +427,21 @@ fn lsp_tool_no_manager_returns_error() {
 
     // Should fail because lsp_manager is None
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("LSP not available"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("LSP not available")
+    );
 }
 
 #[test]
 fn lsp_tool_file_not_found() {
     let (_dir, root) = create_test_project();
     let registry = ToolRegistry::new(root.clone());
-    let lsp_mgr = std::sync::Arc::new(std::sync::Mutex::new(
-        steve::lsp::LspManager::new(root.clone()),
-    ));
+    let lsp_mgr = std::sync::Arc::new(std::sync::Mutex::new(steve::lsp::LspManager::new(
+        root.clone(),
+    )));
     let ctx = ToolContext {
         project_root: root.clone(),
         storage_dir: None,
@@ -386,11 +449,13 @@ fn lsp_tool_file_not_found() {
         lsp_manager: Some(lsp_mgr),
     };
 
-    let output = registry.execute(
-        ToolName::Lsp,
-        json!({ "path": root.join("nonexistent.rs").to_string_lossy().to_string() }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Lsp,
+            json!({ "path": root.join("nonexistent.rs").to_string_lossy().to_string() }),
+            ctx,
+        )
+        .unwrap();
 
     assert!(output.is_error);
     assert!(output.output.contains("not found"));
@@ -400,9 +465,9 @@ fn lsp_tool_file_not_found() {
 fn lsp_tool_unknown_operation() {
     let (_dir, root) = create_test_project();
     let registry = ToolRegistry::new(root.clone());
-    let lsp_mgr = std::sync::Arc::new(std::sync::Mutex::new(
-        steve::lsp::LspManager::new(root.clone()),
-    ));
+    let lsp_mgr = std::sync::Arc::new(std::sync::Mutex::new(steve::lsp::LspManager::new(
+        root.clone(),
+    )));
     let ctx = ToolContext {
         project_root: root.clone(),
         storage_dir: None,
@@ -410,14 +475,16 @@ fn lsp_tool_unknown_operation() {
         lsp_manager: Some(lsp_mgr),
     };
 
-    let output = registry.execute(
-        ToolName::Lsp,
-        json!({
-            "path": root.join("src/main.rs").to_string_lossy().to_string(),
-            "operation": "bogus"
-        }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Lsp,
+            json!({
+                "path": root.join("src/main.rs").to_string_lossy().to_string(),
+                "operation": "bogus"
+            }),
+            ctx,
+        )
+        .unwrap();
 
     assert!(output.is_error);
     assert!(output.output.contains("Unknown operation"));
@@ -427,9 +494,9 @@ fn lsp_tool_unknown_operation() {
 fn lsp_tool_definition_missing_position() {
     let (_dir, root) = create_test_project();
     let registry = ToolRegistry::new(root.clone());
-    let lsp_mgr = std::sync::Arc::new(std::sync::Mutex::new(
-        steve::lsp::LspManager::new(root.clone()),
-    ));
+    let lsp_mgr = std::sync::Arc::new(std::sync::Mutex::new(steve::lsp::LspManager::new(
+        root.clone(),
+    )));
     let ctx = ToolContext {
         project_root: root.clone(),
         storage_dir: None,
@@ -464,12 +531,13 @@ fn lsp_diagnostics_with_rust_analyzer() {
     std::fs::write(
         root.join("src/main.rs"),
         "fn main() {\n    let x: i32 = \"not a number\";\n    println!(\"{}\", x);\n}\n",
-    ).unwrap();
+    )
+    .unwrap();
 
     let registry = ToolRegistry::new(root.clone());
-    let lsp_mgr = std::sync::Arc::new(std::sync::Mutex::new(
-        steve::lsp::LspManager::new(root.clone()),
-    ));
+    let lsp_mgr = std::sync::Arc::new(std::sync::Mutex::new(steve::lsp::LspManager::new(
+        root.clone(),
+    )));
     let ctx = ToolContext {
         project_root: root.clone(),
         storage_dir: None,
@@ -477,16 +545,22 @@ fn lsp_diagnostics_with_rust_analyzer() {
         lsp_manager: Some(lsp_mgr),
     };
 
-    let output = registry.execute(
-        ToolName::Lsp,
-        json!({
-            "path": root.join("src/main.rs").to_string_lossy().to_string(),
-            "operation": "diagnostics"
-        }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Lsp,
+            json!({
+                "path": root.join("src/main.rs").to_string_lossy().to_string(),
+                "operation": "diagnostics"
+            }),
+            ctx,
+        )
+        .unwrap();
 
-    assert!(!output.is_error, "diagnostics call should succeed: {}", output.output);
+    assert!(
+        !output.is_error,
+        "diagnostics call should succeed: {}",
+        output.output
+    );
     // rust-analyzer should report a type mismatch error
     assert!(
         output.output.contains("error") || output.output.contains("mismatched"),
@@ -506,9 +580,9 @@ fn lsp_definition_with_rust_analyzer() {
 
     let (_dir, root) = create_cargo_project();
     let registry = ToolRegistry::new(root.clone());
-    let lsp_mgr = std::sync::Arc::new(std::sync::Mutex::new(
-        steve::lsp::LspManager::new(root.clone()),
-    ));
+    let lsp_mgr = std::sync::Arc::new(std::sync::Mutex::new(steve::lsp::LspManager::new(
+        root.clone(),
+    )));
     let ctx = ToolContext {
         project_root: root.clone(),
         storage_dir: None,
@@ -518,18 +592,24 @@ fn lsp_definition_with_rust_analyzer() {
 
     // Query definition of `greet` on line 6, column 14 (the call site)
     // "    let msg = greet();" — greet starts at column 14
-    let output = registry.execute(
-        ToolName::Lsp,
-        json!({
-            "path": root.join("src/main.rs").to_string_lossy().to_string(),
-            "operation": "definition",
-            "line": 6,
-            "character": 14
-        }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Lsp,
+            json!({
+                "path": root.join("src/main.rs").to_string_lossy().to_string(),
+                "operation": "definition",
+                "line": 6,
+                "character": 14
+            }),
+            ctx,
+        )
+        .unwrap();
 
-    assert!(!output.is_error, "definition call should succeed: {}", output.output);
+    assert!(
+        !output.is_error,
+        "definition call should succeed: {}",
+        output.output
+    );
     // Should find the definition at line 1 of main.rs
     assert!(
         output.output.contains("main.rs") || output.output.contains("Definition"),
@@ -546,13 +626,19 @@ fn symbols_tool_lists_rust_symbols() {
     let registry = ToolRegistry::new(root.clone());
     let ctx = tool_context(root.clone());
 
-    let output = registry.execute(
-        ToolName::Symbols,
-        json!({ "path": root.join("src/main.rs").to_string_lossy().to_string() }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Symbols,
+            json!({ "path": root.join("src/main.rs").to_string_lossy().to_string() }),
+            ctx,
+        )
+        .unwrap();
 
-    assert!(!output.is_error, "symbols should succeed: {}", output.output);
+    assert!(
+        !output.is_error,
+        "symbols should succeed: {}",
+        output.output
+    );
     assert!(output.output.contains("fn main"), "should find fn main");
     assert!(output.output.contains("Symbols in"), "should have header");
 }
@@ -563,11 +649,13 @@ fn symbols_tool_unsupported_file_type() {
     let registry = ToolRegistry::new(root.clone());
     let ctx = tool_context(root.clone());
 
-    let output = registry.execute(
-        ToolName::Symbols,
-        json!({ "path": root.join("Cargo.toml").to_string_lossy().to_string() }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Symbols,
+            json!({ "path": root.join("Cargo.toml").to_string_lossy().to_string() }),
+            ctx,
+        )
+        .unwrap();
 
     // TOML is supported, so it should parse
     assert!(!output.is_error);
@@ -580,18 +668,27 @@ fn symbols_tool_find_definition() {
     let ctx = tool_context(root.clone());
 
     // lib.rs has `pub fn greet()`
-    let output = registry.execute(
-        ToolName::Symbols,
-        json!({
-            "path": root.join("src/lib.rs").to_string_lossy().to_string(),
-            "operation": "find_definition",
-            "name": "greet"
-        }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Symbols,
+            json!({
+                "path": root.join("src/lib.rs").to_string_lossy().to_string(),
+                "operation": "find_definition",
+                "name": "greet"
+            }),
+            ctx,
+        )
+        .unwrap();
 
-    assert!(!output.is_error, "find_definition should succeed: {}", output.output);
-    assert!(output.output.contains("greet"), "should find greet function");
+    assert!(
+        !output.is_error,
+        "find_definition should succeed: {}",
+        output.output
+    );
+    assert!(
+        output.output.contains("greet"),
+        "should find greet function"
+    );
 }
 
 #[test]
@@ -601,17 +698,23 @@ fn symbols_tool_find_scope() {
     let ctx = tool_context(root.clone());
 
     // main.rs line 2 is inside fn main
-    let output = registry.execute(
-        ToolName::Symbols,
-        json!({
-            "path": root.join("src/main.rs").to_string_lossy().to_string(),
-            "operation": "find_scope",
-            "line": 2
-        }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Symbols,
+            json!({
+                "path": root.join("src/main.rs").to_string_lossy().to_string(),
+                "operation": "find_scope",
+                "line": 2
+            }),
+            ctx,
+        )
+        .unwrap();
 
-    assert!(!output.is_error, "find_scope should succeed: {}", output.output);
+    assert!(
+        !output.is_error,
+        "find_scope should succeed: {}",
+        output.output
+    );
     assert!(output.output.contains("main"), "should find main scope");
 }
 
@@ -629,16 +732,25 @@ fn move_to_existing_file_overwrites() {
     let from = root.join("src/main.rs").to_string_lossy().to_string();
     let to = root.join("src/target.rs").to_string_lossy().to_string();
 
-    let output = registry.execute(
-        ToolName::Move,
-        json!({ "from_path": &from, "to_path": &to }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Move,
+            json!({ "from_path": &from, "to_path": &to }),
+            ctx,
+        )
+        .unwrap();
 
-    assert!(!output.is_error, "move should overwrite existing target: {}", output.output);
+    assert!(
+        !output.is_error,
+        "move should overwrite existing target: {}",
+        output.output
+    );
     assert!(!root.join("src/main.rs").exists(), "source should be gone");
     let content = std::fs::read_to_string(root.join("src/target.rs")).unwrap();
-    assert!(content.contains("fn main()"), "target should have source's content");
+    assert!(
+        content.contains("fn main()"),
+        "target should have source's content"
+    );
 }
 
 #[test]
@@ -652,16 +764,28 @@ fn copy_to_existing_file_overwrites() {
     let from = root.join("src/main.rs").to_string_lossy().to_string();
     let to = root.join("src/target.rs").to_string_lossy().to_string();
 
-    let output = registry.execute(
-        ToolName::Copy,
-        json!({ "from_path": &from, "to_path": &to }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Copy,
+            json!({ "from_path": &from, "to_path": &to }),
+            ctx,
+        )
+        .unwrap();
 
-    assert!(!output.is_error, "copy should overwrite existing target: {}", output.output);
-    assert!(root.join("src/main.rs").exists(), "source should still exist");
+    assert!(
+        !output.is_error,
+        "copy should overwrite existing target: {}",
+        output.output
+    );
+    assert!(
+        root.join("src/main.rs").exists(),
+        "source should still exist"
+    );
     let content = std::fs::read_to_string(root.join("src/target.rs")).unwrap();
-    assert!(content.contains("fn main()"), "target should have source's content");
+    assert!(
+        content.contains("fn main()"),
+        "target should have source's content"
+    );
 }
 
 #[test]
@@ -672,11 +796,7 @@ fn delete_project_root_refused() {
 
     let root_path = root.canonicalize().unwrap().to_string_lossy().to_string();
 
-    let result = registry.execute(
-        ToolName::Delete,
-        json!({ "path": &root_path }),
-        ctx,
-    );
+    let result = registry.execute(ToolName::Delete, json!({ "path": &root_path }), ctx);
 
     assert!(result.is_err(), "deleting project root should fail");
     let err_msg = result.unwrap_err().to_string();
@@ -696,16 +816,28 @@ fn move_directory_via_registry() {
     let from = root.join("src").to_string_lossy().to_string();
     let to = root.join("source").to_string_lossy().to_string();
 
-    let output = registry.execute(
-        ToolName::Move,
-        json!({ "from_path": &from, "to_path": &to }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Move,
+            json!({ "from_path": &from, "to_path": &to }),
+            ctx,
+        )
+        .unwrap();
 
-    assert!(!output.is_error, "move directory should succeed: {}", output.output);
+    assert!(
+        !output.is_error,
+        "move directory should succeed: {}",
+        output.output
+    );
     assert!(!root.join("src").exists(), "old directory should be gone");
-    assert!(root.join("source/main.rs").exists(), "files should be in new dir");
-    assert!(root.join("source/lib.rs").exists(), "all files should be moved");
+    assert!(
+        root.join("source/main.rs").exists(),
+        "files should be in new dir"
+    );
+    assert!(
+        root.join("source/lib.rs").exists(),
+        "all files should be moved"
+    );
 }
 
 #[test]
@@ -717,16 +849,31 @@ fn copy_directory_recursive_via_registry() {
     let from = root.join("src").to_string_lossy().to_string();
     let to = root.join("src_copy").to_string_lossy().to_string();
 
-    let output = registry.execute(
-        ToolName::Copy,
-        json!({ "from_path": &from, "to_path": &to }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Copy,
+            json!({ "from_path": &from, "to_path": &to }),
+            ctx,
+        )
+        .unwrap();
 
-    assert!(!output.is_error, "copy directory should succeed: {}", output.output);
-    assert!(root.join("src/main.rs").exists(), "original should still exist");
-    assert!(root.join("src_copy/main.rs").exists(), "copy should have main.rs");
-    assert!(root.join("src_copy/lib.rs").exists(), "copy should have lib.rs");
+    assert!(
+        !output.is_error,
+        "copy directory should succeed: {}",
+        output.output
+    );
+    assert!(
+        root.join("src/main.rs").exists(),
+        "original should still exist"
+    );
+    assert!(
+        root.join("src_copy/main.rs").exists(),
+        "copy should have main.rs"
+    );
+    assert!(
+        root.join("src_copy/lib.rs").exists(),
+        "copy should have lib.rs"
+    );
 
     let original = std::fs::read_to_string(root.join("src/main.rs")).unwrap();
     let copied = std::fs::read_to_string(root.join("src_copy/main.rs")).unwrap();
@@ -745,21 +892,27 @@ fn edit_multi_find_replace_via_registry() {
     let file_path = root.join("src/multi.rs");
     std::fs::write(&file_path, "fn alpha() {}\nfn beta() {}\nfn gamma() {}\n").unwrap();
 
-    let output = registry.execute(
-        ToolName::Edit,
-        json!({
-            "file_path": file_path.to_string_lossy().to_string(),
-            "operation": "multi_find_replace",
-            "edits": [
-                { "old_string": "fn alpha()", "new_string": "fn one()" },
-                { "old_string": "fn beta()", "new_string": "fn two()" },
-                { "old_string": "fn gamma()", "new_string": "fn three()" }
-            ]
-        }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Edit,
+            json!({
+                "file_path": file_path.to_string_lossy().to_string(),
+                "operation": "multi_find_replace",
+                "edits": [
+                    { "old_string": "fn alpha()", "new_string": "fn one()" },
+                    { "old_string": "fn beta()", "new_string": "fn two()" },
+                    { "old_string": "fn gamma()", "new_string": "fn three()" }
+                ]
+            }),
+            ctx,
+        )
+        .unwrap();
 
-    assert!(!output.is_error, "multi_find_replace should succeed: {}", output.output);
+    assert!(
+        !output.is_error,
+        "multi_find_replace should succeed: {}",
+        output.output
+    );
     let content = std::fs::read_to_string(&file_path).unwrap();
     assert!(content.contains("fn one()"));
     assert!(content.contains("fn two()"));
@@ -784,7 +937,10 @@ fn edit_find_replace_no_match_returns_error() {
         ctx,
     );
 
-    assert!(result.is_err(), "find_replace with no match should return error");
+    assert!(
+        result.is_err(),
+        "find_replace with no match should return error"
+    );
     assert!(
         result.unwrap_err().to_string().contains("not found"),
         "error should mention old_string not found"
@@ -807,46 +963,64 @@ fn edit_large_file_line_operations() {
 
     // Insert at line 5000
     let ctx = tool_context(root.clone());
-    let output = registry.execute(
-        ToolName::Edit,
-        json!({
-            "file_path": &fp,
-            "operation": "insert_lines",
-            "line": 5000,
-            "content": "// INSERTED LINE"
-        }),
-        ctx,
-    ).unwrap();
-    assert!(!output.is_error, "insert at line 5000 should succeed: {}", output.output);
+    let output = registry
+        .execute(
+            ToolName::Edit,
+            json!({
+                "file_path": &fp,
+                "operation": "insert_lines",
+                "line": 5000,
+                "content": "// INSERTED LINE"
+            }),
+            ctx,
+        )
+        .unwrap();
+    assert!(
+        !output.is_error,
+        "insert at line 5000 should succeed: {}",
+        output.output
+    );
 
     // Delete lines 7000-7010
     let ctx = tool_context(root.clone());
-    let output = registry.execute(
-        ToolName::Edit,
-        json!({
-            "file_path": &fp,
-            "operation": "delete_lines",
-            "start_line": 7000,
-            "end_line": 7010
-        }),
-        ctx,
-    ).unwrap();
-    assert!(!output.is_error, "delete lines 7000-7010 should succeed: {}", output.output);
+    let output = registry
+        .execute(
+            ToolName::Edit,
+            json!({
+                "file_path": &fp,
+                "operation": "delete_lines",
+                "start_line": 7000,
+                "end_line": 7010
+            }),
+            ctx,
+        )
+        .unwrap();
+    assert!(
+        !output.is_error,
+        "delete lines 7000-7010 should succeed: {}",
+        output.output
+    );
 
     // Replace range 9000-9005
     let ctx = tool_context(root.clone());
-    let output = registry.execute(
-        ToolName::Edit,
-        json!({
-            "file_path": &fp,
-            "operation": "replace_range",
-            "start_line": 9000,
-            "end_line": 9005,
-            "content": "// REPLACED BLOCK"
-        }),
-        ctx,
-    ).unwrap();
-    assert!(!output.is_error, "replace_range 9000-9005 should succeed: {}", output.output);
+    let output = registry
+        .execute(
+            ToolName::Edit,
+            json!({
+                "file_path": &fp,
+                "operation": "replace_range",
+                "start_line": 9000,
+                "end_line": 9005,
+                "content": "// REPLACED BLOCK"
+            }),
+            ctx,
+        )
+        .unwrap();
+    assert!(
+        !output.is_error,
+        "replace_range 9000-9005 should succeed: {}",
+        output.output
+    );
 
     // Verify the file is roughly the right size
     let final_content = std::fs::read_to_string(&file_path).unwrap();
@@ -867,23 +1041,42 @@ fn symbols_go_file() {
     let dir = tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let file = root.join("main.go");
-    std::fs::write(&file, "package main\n\nfunc main() {\n}\n\ntype Config struct {\n\tName string\n}\n").unwrap();
+    std::fs::write(
+        &file,
+        "package main\n\nfunc main() {\n}\n\ntype Config struct {\n\tName string\n}\n",
+    )
+    .unwrap();
 
     let registry = ToolRegistry::new(root.clone());
     let ctx = tool_context(root);
 
-    let output = registry.execute(
-        ToolName::Symbols,
-        json!({ "path": file.to_string_lossy().to_string() }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Symbols,
+            json!({ "path": file.to_string_lossy().to_string() }),
+            ctx,
+        )
+        .unwrap();
 
-    assert!(!output.is_error, "Go symbols should succeed: {}", output.output);
-    assert!(output.output.contains("function main"), "should find main function");
+    assert!(
+        !output.is_error,
+        "Go symbols should succeed: {}",
+        output.output
+    );
+    assert!(
+        output.output.contains("function main"),
+        "should find main function"
+    );
     // Go type_declaration wraps struct — extract_name finds it as type node
-    assert!(output.output.contains("type"), "should find type declaration");
+    assert!(
+        output.output.contains("type"),
+        "should find type declaration"
+    );
     // Verify we get 2 symbols total (function + type)
-    assert!(output.output.contains("line"), "should have line info for symbols");
+    assert!(
+        output.output.contains("line"),
+        "should have line info for symbols"
+    );
 }
 
 #[test]
@@ -891,22 +1084,38 @@ fn symbols_c_file() {
     let dir = tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let file = root.join("main.c");
-    std::fs::write(&file, "struct Point {\n    int x;\n    int y;\n};\n\nvoid greet() {\n}\n").unwrap();
+    std::fs::write(
+        &file,
+        "struct Point {\n    int x;\n    int y;\n};\n\nvoid greet() {\n}\n",
+    )
+    .unwrap();
 
     let registry = ToolRegistry::new(root.clone());
     let ctx = tool_context(root);
 
-    let output = registry.execute(
-        ToolName::Symbols,
-        json!({ "path": file.to_string_lossy().to_string() }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Symbols,
+            json!({ "path": file.to_string_lossy().to_string() }),
+            ctx,
+        )
+        .unwrap();
 
-    assert!(!output.is_error, "C symbols should succeed: {}", output.output);
-    assert!(output.output.contains("struct Point"), "should find Point struct");
+    assert!(
+        !output.is_error,
+        "C symbols should succeed: {}",
+        output.output
+    );
+    assert!(
+        output.output.contains("struct Point"),
+        "should find Point struct"
+    );
     // C function_definition: name inside declarator child — extract_name reports (anonymous)
     // Verify we get 2 symbols (struct + function_definition)
-    assert!(output.output.contains("def"), "should find function definition");
+    assert!(
+        output.output.contains("def"),
+        "should find function definition"
+    );
     assert!(output.output.contains("(c,"), "should detect C language");
 }
 
@@ -916,22 +1125,41 @@ fn symbols_cpp_file() {
     let root = dir.path().to_path_buf();
     let file = root.join("main.cpp");
     // Use a named class — tree-sitter C++ has `name` field on class_specifier
-    std::fs::write(&file, "class Greeter {\npublic:\n    void greet() {}\n};\n\nvoid standalone() {}\n").unwrap();
+    std::fs::write(
+        &file,
+        "class Greeter {\npublic:\n    void greet() {}\n};\n\nvoid standalone() {}\n",
+    )
+    .unwrap();
 
     let registry = ToolRegistry::new(root.clone());
     let ctx = tool_context(root);
 
-    let output = registry.execute(
-        ToolName::Symbols,
-        json!({ "path": file.to_string_lossy().to_string() }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Symbols,
+            json!({ "path": file.to_string_lossy().to_string() }),
+            ctx,
+        )
+        .unwrap();
 
-    assert!(!output.is_error, "C++ symbols should succeed: {}", output.output);
-    assert!(output.output.contains("Greeter"), "should find Greeter class");
-    assert!(output.output.contains("(cpp,"), "should detect C++ language");
+    assert!(
+        !output.is_error,
+        "C++ symbols should succeed: {}",
+        output.output
+    );
+    assert!(
+        output.output.contains("Greeter"),
+        "should find Greeter class"
+    );
+    assert!(
+        output.output.contains("(cpp,"),
+        "should detect C++ language"
+    );
     // Nested methods in class_specifier containers
-    assert!(output.output.contains("class"), "should have class kind label");
+    assert!(
+        output.output.contains("class"),
+        "should have class kind label"
+    );
 }
 
 #[test]
@@ -939,18 +1167,28 @@ fn symbols_java_file() {
     let dir = tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let file = root.join("Foo.java");
-    std::fs::write(&file, "public class Foo {\n    public void bar() {\n    }\n}\n").unwrap();
+    std::fs::write(
+        &file,
+        "public class Foo {\n    public void bar() {\n    }\n}\n",
+    )
+    .unwrap();
 
     let registry = ToolRegistry::new(root.clone());
     let ctx = tool_context(root);
 
-    let output = registry.execute(
-        ToolName::Symbols,
-        json!({ "path": file.to_string_lossy().to_string() }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Symbols,
+            json!({ "path": file.to_string_lossy().to_string() }),
+            ctx,
+        )
+        .unwrap();
 
-    assert!(!output.is_error, "Java symbols should succeed: {}", output.output);
+    assert!(
+        !output.is_error,
+        "Java symbols should succeed: {}",
+        output.output
+    );
     assert!(output.output.contains("Foo"), "should find Foo class");
     assert!(output.output.contains("bar"), "should find bar method");
 }
@@ -960,19 +1198,32 @@ fn symbols_ruby_file() {
     let dir = tempdir().unwrap();
     let root = dir.path().to_path_buf();
     let file = root.join("greeter.rb");
-    std::fs::write(&file, "class Greeter\n  def greet\n    puts 'hello'\n  end\nend\n").unwrap();
+    std::fs::write(
+        &file,
+        "class Greeter\n  def greet\n    puts 'hello'\n  end\nend\n",
+    )
+    .unwrap();
 
     let registry = ToolRegistry::new(root.clone());
     let ctx = tool_context(root);
 
-    let output = registry.execute(
-        ToolName::Symbols,
-        json!({ "path": file.to_string_lossy().to_string() }),
-        ctx,
-    ).unwrap();
+    let output = registry
+        .execute(
+            ToolName::Symbols,
+            json!({ "path": file.to_string_lossy().to_string() }),
+            ctx,
+        )
+        .unwrap();
 
-    assert!(!output.is_error, "Ruby symbols should succeed: {}", output.output);
-    assert!(output.output.contains("Greeter"), "should find Greeter class");
+    assert!(
+        !output.is_error,
+        "Ruby symbols should succeed: {}",
+        output.output
+    );
+    assert!(
+        output.output.contains("Greeter"),
+        "should find Greeter class"
+    );
     assert!(output.output.contains("greet"), "should find greet method");
 }
 
@@ -994,35 +1245,41 @@ fn cache_read_then_edit_invalidates() {
 
     // Read the file and cache the result
     let ctx = tool_context(root.clone());
-    let read_output = registry.execute(
-        ToolName::Read,
-        json!({ "path": &fp }),
-        ctx,
-    ).unwrap();
+    let read_output = registry
+        .execute(ToolName::Read, json!({ "path": &fp }), ctx)
+        .unwrap();
     let read_args = json!({ "path": &fp });
     cache.put(ToolName::Read, &read_args, &read_output);
 
     // Verify cache hit
-    assert!(cache.get(ToolName::Read, &read_args).is_some(), "should hit cache before edit");
+    assert!(
+        cache.get(ToolName::Read, &read_args).is_some(),
+        "should hit cache before edit"
+    );
 
     // Edit the file
     let ctx = tool_context(root.clone());
-    let edit_output = registry.execute(
-        ToolName::Edit,
-        json!({
-            "file_path": &fp,
-            "old_string": "println!(\"hello\")",
-            "new_string": "println!(\"world\")"
-        }),
-        ctx,
-    ).unwrap();
+    let edit_output = registry
+        .execute(
+            ToolName::Edit,
+            json!({
+                "file_path": &fp,
+                "old_string": "println!(\"hello\")",
+                "new_string": "println!(\"world\")"
+            }),
+            ctx,
+        )
+        .unwrap();
     assert!(!edit_output.is_error);
 
     // Invalidate the cache (as stream.rs would do after a write)
     cache.invalidate_path(&fp);
 
     // Cache should miss now
-    assert!(cache.get(ToolName::Read, &read_args).is_none(), "should miss cache after edit + invalidation");
+    assert!(
+        cache.get(ToolName::Read, &read_args).is_none(),
+        "should miss cache after edit + invalidation"
+    );
 }
 
 #[test]
@@ -1034,44 +1291,50 @@ fn cache_read_then_write_invalidates() {
 
     // Write a file first so we can read it
     let ctx = tool_context(root.clone());
-    registry.execute(
-        ToolName::Write,
-        json!({ "file_path": &fp, "content": "original content\n" }),
-        ctx,
-    ).unwrap();
+    registry
+        .execute(
+            ToolName::Write,
+            json!({ "file_path": &fp, "content": "original content\n" }),
+            ctx,
+        )
+        .unwrap();
 
     // Read and cache
     let mut cache = ToolResultCache::new(root.clone());
     let ctx = tool_context(root.clone());
-    let read_output = registry.execute(
-        ToolName::Read,
-        json!({ "path": &fp }),
-        ctx,
-    ).unwrap();
+    let read_output = registry
+        .execute(ToolName::Read, json!({ "path": &fp }), ctx)
+        .unwrap();
     let read_args = json!({ "path": &fp });
     cache.put(ToolName::Read, &read_args, &read_output);
     assert!(cache.get(ToolName::Read, &read_args).is_some());
 
     // Overwrite via write tool
     let ctx = tool_context(root.clone());
-    registry.execute(
-        ToolName::Write,
-        json!({ "file_path": &fp, "content": "new content\n" }),
-        ctx,
-    ).unwrap();
+    registry
+        .execute(
+            ToolName::Write,
+            json!({ "file_path": &fp, "content": "new content\n" }),
+            ctx,
+        )
+        .unwrap();
 
     // Invalidate
     cache.invalidate_path(&fp);
-    assert!(cache.get(ToolName::Read, &read_args).is_none(), "cache miss after write + invalidation");
+    assert!(
+        cache.get(ToolName::Read, &read_args).is_none(),
+        "cache miss after write + invalidation"
+    );
 
     // Re-read gets new content
     let ctx = tool_context(root.clone());
-    let new_output = registry.execute(
-        ToolName::Read,
-        json!({ "path": &fp }),
-        ctx,
-    ).unwrap();
-    assert!(new_output.output.contains("new content"), "re-read should show new content");
+    let new_output = registry
+        .execute(ToolName::Read, json!({ "path": &fp }), ctx)
+        .unwrap();
+    assert!(
+        new_output.output.contains("new content"),
+        "re-read should show new content"
+    );
 }
 
 #[test]
@@ -1084,11 +1347,9 @@ fn cache_read_then_move_invalidates_source() {
     // Read lib.rs and cache
     let mut cache = ToolResultCache::new(root.clone());
     let ctx = tool_context(root.clone());
-    let read_output = registry.execute(
-        ToolName::Read,
-        json!({ "path": &a_fp }),
-        ctx,
-    ).unwrap();
+    let read_output = registry
+        .execute(ToolName::Read, json!({ "path": &a_fp }), ctx)
+        .unwrap();
     let read_args = json!({ "path": &a_fp });
     cache.put(ToolName::Read, &read_args, &read_output);
     assert!(cache.get(ToolName::Read, &read_args).is_some());
@@ -1096,15 +1357,20 @@ fn cache_read_then_move_invalidates_source() {
     // Move a to b
     let b_fp = root.join("src/moved.rs").to_string_lossy().to_string();
     let ctx = tool_context(root.clone());
-    registry.execute(
-        ToolName::Move,
-        json!({ "from_path": &a_fp, "to_path": &b_fp }),
-        ctx,
-    ).unwrap();
+    registry
+        .execute(
+            ToolName::Move,
+            json!({ "from_path": &a_fp, "to_path": &b_fp }),
+            ctx,
+        )
+        .unwrap();
 
     // Invalidate old path
     cache.invalidate_path(&a_fp);
-    assert!(cache.get(ToolName::Read, &read_args).is_none(), "cache miss after move + invalidation");
+    assert!(
+        cache.get(ToolName::Read, &read_args).is_none(),
+        "cache miss after move + invalidation"
+    );
 }
 
 #[test]
@@ -1117,26 +1383,33 @@ fn cache_grep_invalidated_by_any_edit() {
     // Cache a grep result
     let ctx = tool_context(root.clone());
     let grep_args = json!({ "pattern": "fn main", "path": root.to_string_lossy().to_string() });
-    let grep_output = registry.execute(ToolName::Grep, grep_args.clone(), ctx).unwrap();
+    let grep_output = registry
+        .execute(ToolName::Grep, grep_args.clone(), ctx)
+        .unwrap();
     cache.put(ToolName::Grep, &grep_args, &grep_output);
     assert!(cache.get(ToolName::Grep, &grep_args).is_some());
 
     // Edit an unrelated file
     let lib_path = root.join("src/lib.rs").to_string_lossy().to_string();
     let ctx = tool_context(root.clone());
-    registry.execute(
-        ToolName::Edit,
-        json!({
-            "file_path": &lib_path,
-            "old_string": "\"hello\"",
-            "new_string": "\"goodbye\""
-        }),
-        ctx,
-    ).unwrap();
+    registry
+        .execute(
+            ToolName::Edit,
+            json!({
+                "file_path": &lib_path,
+                "old_string": "\"hello\"",
+                "new_string": "\"goodbye\""
+            }),
+            ctx,
+        )
+        .unwrap();
 
     // Invalidate the edited path — should also kill grep cache
     cache.invalidate_path(&lib_path);
-    assert!(cache.get(ToolName::Grep, &grep_args).is_none(), "grep cache should be invalidated by any file edit");
+    assert!(
+        cache.get(ToolName::Grep, &grep_args).is_none(),
+        "grep cache should be invalidated by any file edit"
+    );
 }
 
 // ── Step 5b: Sub-Agent Tool Restrictions ──
@@ -1161,7 +1434,10 @@ fn explore_agent_has_only_read_tools() {
         if tools.contains(&t) {
             assert!(filtered.has_tool(t), "Explore registry should have {t}");
         } else {
-            assert!(!filtered.has_tool(t), "Explore registry should not have {t}");
+            assert!(
+                !filtered.has_tool(t),
+                "Explore registry should not have {t}"
+            );
         }
     }
 }
@@ -1206,7 +1482,8 @@ fn general_agent_excludes_only_agent() {
     // Should have all tools except Agent
     let expected_count = ToolName::iter().count() - 1; // minus Agent
     assert_eq!(
-        tools.len(), expected_count,
+        tools.len(),
+        expected_count,
         "General should have all tools minus Agent ({expected_count}), got {}",
         tools.len()
     );

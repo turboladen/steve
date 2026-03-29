@@ -1,6 +1,6 @@
 //! Pure diagnostic check functions — each takes typed inputs and returns findings.
 
-use crate::config::types::Config;
+use crate::config::Config;
 
 use super::types::{Category, DiagnosticCheck, Severity};
 
@@ -49,9 +49,10 @@ pub fn ai_environment_checks(
     }
 
     // No model costs configured
-    let has_costs = config.providers.values().any(|p| {
-        p.models.values().any(|m| m.cost.is_some())
-    });
+    let has_costs = config
+        .providers
+        .values()
+        .any(|p| p.models.values().any(|m| m.cost.is_some()));
     if !has_costs {
         checks.push(DiagnosticCheck {
             severity: Severity::Info,
@@ -170,17 +171,17 @@ pub fn session_efficiency_checks(
     }
 
     // Cost per exchange (informational)
-    if let Some(cost) = session_cost {
-        if cost > 0.0 {
-            let cost_per = cost / exchange_count as f64;
-            checks.push(DiagnosticCheck {
-                severity: Severity::Info,
-                category: Category::SessionEfficiency,
-                label: format!("${cost_per:.4}/exchange ({exchange_count} exchanges)"),
-                detail: format!("Session total: ${cost:.4}"),
-                recommendation: None,
-            });
-        }
+    if let Some(cost) = session_cost
+        && cost > 0.0
+    {
+        let cost_per = cost / exchange_count as f64;
+        checks.push(DiagnosticCheck {
+            severity: Severity::Info,
+            category: Category::SessionEfficiency,
+            label: format!("${cost_per:.4}/exchange ({exchange_count} exchanges)"),
+            detail: format!("Session total: ${cost:.4}"),
+            recommendation: None,
+        });
     }
 
     checks
@@ -241,7 +242,7 @@ fn log_path_recommendation(base_msg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::Config;
+    use crate::config::Config;
 
     // -- ai_environment_checks tests --
 
@@ -273,36 +274,32 @@ mod tests {
     fn large_system_prompt_info() {
         let config = Config::default();
         let checks = ai_environment_checks(Some("short"), 10000, &config);
-        assert!(checks
-            .iter()
-            .any(|c| c.label.contains("System prompt large")));
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.label.contains("System prompt large"))
+        );
     }
 
     #[test]
     fn small_system_prompt_no_check() {
         let config = Config::default();
         let checks = ai_environment_checks(Some("short"), 5000, &config);
-        assert!(!checks
-            .iter()
-            .any(|c| c.label.contains("System prompt")));
+        assert!(!checks.iter().any(|c| c.label.contains("System prompt")));
     }
 
     #[test]
     fn no_costs_configured_info() {
         let config = Config::default();
         let checks = ai_environment_checks(Some("ok"), 1000, &config);
-        assert!(checks
-            .iter()
-            .any(|c| c.label.contains("No model costs")));
+        assert!(checks.iter().any(|c| c.label.contains("No model costs")));
     }
 
     #[test]
     fn no_small_model_info() {
         let config = Config::default();
         let checks = ai_environment_checks(Some("ok"), 1000, &config);
-        assert!(checks
-            .iter()
-            .any(|c| c.label.contains("No small_model")));
+        assert!(checks.iter().any(|c| c.label.contains("No small_model")));
     }
 
     #[test]
@@ -310,29 +307,21 @@ mod tests {
         let mut config = Config::default();
         config.small_model = Some("openai/gpt-4o-mini".into());
         let checks = ai_environment_checks(Some("ok"), 1000, &config);
-        assert!(!checks
-            .iter()
-            .any(|c| c.label.contains("No small_model")));
+        assert!(!checks.iter().any(|c| c.label.contains("No small_model")));
     }
 
     // -- lsp_health_checks tests --
 
     #[test]
     fn lsp_all_running_no_warnings() {
-        let servers = vec![
-            ("rust-analyzer", true),
-            ("ty", true),
-        ];
+        let servers = vec![("rust-analyzer", true), ("ty", true)];
         let checks = lsp_health_checks(&servers);
         assert!(checks.is_empty());
     }
 
     #[test]
     fn lsp_detected_not_running_warns() {
-        let servers = vec![
-            ("rust-analyzer", true),
-            ("ty", false),
-        ];
+        let servers = vec![("rust-analyzer", true), ("ty", false)];
         let checks = lsp_health_checks(&servers);
         assert_eq!(checks.len(), 1);
         assert!(checks[0].label.contains("ty"));
@@ -341,16 +330,15 @@ mod tests {
 
     #[test]
     fn lsp_zero_running_error() {
-        let servers = vec![
-            ("rust-analyzer", false),
-            ("ty", false),
-        ];
+        let servers = vec![("rust-analyzer", false), ("ty", false)];
         let checks = lsp_health_checks(&servers);
         // Should have 1 error (no servers) + 2 warnings (per-server)
         assert!(checks.iter().any(|c| c.severity == Severity::Error));
-        assert!(checks
-            .iter()
-            .any(|c| c.label.contains("No LSP servers running")));
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.label.contains("No LSP servers running"))
+        );
     }
 
     #[test]

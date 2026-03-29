@@ -41,9 +41,7 @@ pub fn diff_border_bottom(width: usize, color: ratatui::style::Color) -> Line<'s
 pub fn section_header(title: &str, color: ratatui::style::Color) -> Line<'static> {
     Line::from(Span::styled(
         title.to_string(),
-        Style::default()
-            .fg(color)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
     ))
 }
 
@@ -80,7 +78,10 @@ mod tests {
         let theme = Theme::dark();
         let line = diff_border_top(30, theme.border);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.starts_with("  \u{250c}"), "should start with '  ┌', got: {text}");
+        assert!(
+            text.starts_with("  \u{250c}"),
+            "should start with '  ┌', got: {text}"
+        );
         // Total: 2 spaces + 1 corner + 30 dashes = 33
         assert_eq!(text.chars().count(), 33);
     }
@@ -90,7 +91,10 @@ mod tests {
         let theme = Theme::dark();
         let line = diff_border_bottom(30, theme.border);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.starts_with("  \u{2514}"), "should start with '  └', got: {text}");
+        assert!(
+            text.starts_with("  \u{2514}"),
+            "should start with '  └', got: {text}"
+        );
         // Total: 2 spaces + 1 corner + 30 dashes = 33
         assert_eq!(text.chars().count(), 33);
     }
@@ -104,8 +108,11 @@ mod tests {
         let bottom_text: String = bottom.spans.iter().map(|s| s.content.as_ref()).collect();
         // Same length: 2 spaces + 1 corner + 40 dashes = 43
         assert_eq!(top_text.chars().count(), 43);
-        assert_eq!(top_text.chars().count(), bottom_text.chars().count(),
-            "top and bottom borders should have same char count");
+        assert_eq!(
+            top_text.chars().count(),
+            bottom_text.chars().count(),
+            "top and bottom borders should have same char count"
+        );
     }
 
     #[test]

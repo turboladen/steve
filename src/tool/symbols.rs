@@ -14,95 +14,253 @@ use super::{ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput};
 
 // ── Language detection ───────────────────────────────────────────────────
 
+/// Tree-sitter supported language identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TreeSitterLang {
+    Rust,
+    Python,
+    JavaScript,
+    TypeScript,
+    Tsx,
+    Go,
+    C,
+    Cpp,
+    Java,
+    Ruby,
+    Toml,
+    Json,
+    Bash,
+    Fish,
+    Yaml,
+    Hcl,
+    Lua,
+    Css,
+}
+
+impl TreeSitterLang {
+    /// Return the lowercase string label for this language.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::Python => "python",
+            Self::JavaScript => "javascript",
+            Self::TypeScript => "typescript",
+            Self::Tsx => "tsx",
+            Self::Go => "go",
+            Self::C => "c",
+            Self::Cpp => "cpp",
+            Self::Java => "java",
+            Self::Ruby => "ruby",
+            Self::Toml => "toml",
+            Self::Json => "json",
+            Self::Bash => "bash",
+            Self::Fish => "fish",
+            Self::Yaml => "yaml",
+            Self::Hcl => "hcl",
+            Self::Lua => "lua",
+            Self::Css => "css",
+        }
+    }
+}
+
+impl std::fmt::Display for TreeSitterLang {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Supported language info for tree-sitter parsing.
-struct LangInfo {
-    language: Language,
-    name: &'static str,
+pub(crate) struct LangInfo {
+    pub(crate) language: Language,
+    pub(crate) lang: TreeSitterLang,
 }
 
 /// Detect the programming language from a file extension and return its grammar.
-fn detect_language(path: &Path) -> Option<LangInfo> {
-    let ext = path.extension()?.to_str()?;
-    let (lang_fn, name): (tree_sitter_language::LanguageFn, &str) = match ext {
-        "rs" => (tree_sitter_rust::LANGUAGE, "rust"),
-        "py" | "pyi" => (tree_sitter_python::LANGUAGE, "python"),
-        "js" | "mjs" | "cjs" => (tree_sitter_javascript::LANGUAGE, "javascript"),
-        "ts" => (tree_sitter_typescript::LANGUAGE_TYPESCRIPT, "typescript"),
-        "tsx" => (tree_sitter_typescript::LANGUAGE_TSX, "tsx"),
-        "go" => (tree_sitter_go::LANGUAGE, "go"),
-        "c" | "h" => (tree_sitter_c::LANGUAGE, "c"),
-        "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" => (tree_sitter_cpp::LANGUAGE, "cpp"),
-        "java" => (tree_sitter_java::LANGUAGE, "java"),
-        "rb" => (tree_sitter_ruby::LANGUAGE, "ruby"),
-        "toml" => (tree_sitter_toml_ng::LANGUAGE, "toml"),
-        "json" => (tree_sitter_json::LANGUAGE, "json"),
+pub(crate) fn detect_language(path: &Path) -> Option<LangInfo> {
+    // Try extension first, then fall back to filename (for extensionless files)
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .or_else(|| path.file_name().and_then(|f| f.to_str()))?;
+
+    // Most crates export a LanguageFn constant; some older ones export a language() function.
+    let (language, lang): (Language, TreeSitterLang) = match ext {
+        "rs" => (
+            Language::from(tree_sitter_rust::LANGUAGE),
+            TreeSitterLang::Rust,
+        ),
+        "py" | "pyi" => (
+            Language::from(tree_sitter_python::LANGUAGE),
+            TreeSitterLang::Python,
+        ),
+        "js" | "mjs" | "cjs" => (
+            Language::from(tree_sitter_javascript::LANGUAGE),
+            TreeSitterLang::JavaScript,
+        ),
+        "ts" => (
+            Language::from(tree_sitter_typescript::LANGUAGE_TYPESCRIPT),
+            TreeSitterLang::TypeScript,
+        ),
+        "tsx" => (
+            Language::from(tree_sitter_typescript::LANGUAGE_TSX),
+            TreeSitterLang::Tsx,
+        ),
+        "go" => (Language::from(tree_sitter_go::LANGUAGE), TreeSitterLang::Go),
+        "c" | "h" => (Language::from(tree_sitter_c::LANGUAGE), TreeSitterLang::C),
+        "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" => (
+            Language::from(tree_sitter_cpp::LANGUAGE),
+            TreeSitterLang::Cpp,
+        ),
+        "java" => (
+            Language::from(tree_sitter_java::LANGUAGE),
+            TreeSitterLang::Java,
+        ),
+        "rb" => (
+            Language::from(tree_sitter_ruby::LANGUAGE),
+            TreeSitterLang::Ruby,
+        ),
+        "toml" => (
+            Language::from(tree_sitter_toml_ng::LANGUAGE),
+            TreeSitterLang::Toml,
+        ),
+        "json" => (
+            Language::from(tree_sitter_json::LANGUAGE),
+            TreeSitterLang::Json,
+        ),
+        "sh" | "bash" | "zsh" => (
+            Language::from(tree_sitter_bash::LANGUAGE),
+            TreeSitterLang::Bash,
+        ),
+        "fish" => (tree_sitter_fish::language(), TreeSitterLang::Fish),
+        "yml" | "yaml" => (
+            Language::from(tree_sitter_yaml::LANGUAGE),
+            TreeSitterLang::Yaml,
+        ),
+        "tf" | "hcl" => (
+            Language::from(tree_sitter_hcl::LANGUAGE),
+            TreeSitterLang::Hcl,
+        ),
+        "lua" => (
+            Language::from(tree_sitter_lua::LANGUAGE),
+            TreeSitterLang::Lua,
+        ),
+        "css" | "scss" => (
+            Language::from(tree_sitter_css::LANGUAGE),
+            TreeSitterLang::Css,
+        ),
         _ => return None,
     };
-    Some(LangInfo {
-        language: Language::from(lang_fn),
-        name,
-    })
+    Some(LangInfo { language, lang })
 }
 
 // ── AST node type lists per language ─────────────────────────────────────
 
 /// Return the set of AST node types that represent "symbols" for a given language.
-fn symbol_node_types(lang_name: &str) -> &'static [&'static str] {
-    match lang_name {
-        "rust" => &[
-            "function_item", "struct_item", "enum_item", "impl_item", "trait_item",
-            "mod_item", "use_declaration", "type_item", "const_item", "static_item",
+fn symbol_node_types(lang: TreeSitterLang) -> &'static [&'static str] {
+    match lang {
+        TreeSitterLang::Rust => &[
+            "function_item",
+            "struct_item",
+            "enum_item",
+            "impl_item",
+            "trait_item",
+            "mod_item",
+            "use_declaration",
+            "type_item",
+            "const_item",
+            "static_item",
             "macro_definition",
         ],
-        "python" => &[
-            "function_definition", "class_definition",
-            "import_statement", "import_from_statement",
+        TreeSitterLang::Python => &[
+            "function_definition",
+            "class_definition",
+            "import_statement",
+            "import_from_statement",
         ],
-        "javascript" => &[
-            "function_declaration", "class_declaration", "variable_declaration",
-            "import_statement", "export_statement",
+        TreeSitterLang::JavaScript => &[
+            "function_declaration",
+            "class_declaration",
+            "variable_declaration",
+            "import_statement",
+            "export_statement",
         ],
-        "typescript" | "tsx" => &[
-            "function_declaration", "class_declaration", "variable_declaration",
-            "import_statement", "export_statement",
-            "interface_declaration", "type_alias_declaration", "enum_declaration",
+        TreeSitterLang::TypeScript | TreeSitterLang::Tsx => &[
+            "function_declaration",
+            "class_declaration",
+            "variable_declaration",
+            "import_statement",
+            "export_statement",
+            "interface_declaration",
+            "type_alias_declaration",
+            "enum_declaration",
         ],
-        "go" => &[
-            "function_declaration", "method_declaration",
-            "type_declaration", "import_declaration",
+        TreeSitterLang::Go => &[
+            "function_declaration",
+            "method_declaration",
+            "type_declaration",
+            "import_declaration",
         ],
-        "c" => &[
-            "function_definition", "struct_specifier", "enum_specifier",
-            "type_definition", "preproc_include",
+        TreeSitterLang::C => &[
+            "function_definition",
+            "struct_specifier",
+            "enum_specifier",
+            "type_definition",
+            "preproc_include",
         ],
-        "cpp" => &[
-            "function_definition", "struct_specifier", "enum_specifier",
-            "type_definition", "preproc_include",
-            "class_specifier", "namespace_definition", "template_declaration",
+        TreeSitterLang::Cpp => &[
+            "function_definition",
+            "struct_specifier",
+            "enum_specifier",
+            "type_definition",
+            "preproc_include",
+            "class_specifier",
+            "namespace_definition",
+            "template_declaration",
         ],
-        "java" => &[
-            "class_declaration", "interface_declaration", "method_declaration",
-            "enum_declaration", "import_declaration",
+        TreeSitterLang::Java => &[
+            "class_declaration",
+            "interface_declaration",
+            "method_declaration",
+            "enum_declaration",
+            "import_declaration",
         ],
-        "ruby" => &["method", "class", "module", "singleton_method"],
-        "toml" => &["table", "table_array_element"],
-        "json" => &["pair"],
-        _ => &[],
+        TreeSitterLang::Ruby => &["method", "class", "module", "singleton_method"],
+        TreeSitterLang::Toml => &["table", "table_array_element"],
+        TreeSitterLang::Json => &["pair"],
+        TreeSitterLang::Bash => &["function_definition", "variable_assignment"],
+        TreeSitterLang::Fish => &["function_definition"],
+        TreeSitterLang::Yaml => &["block_mapping_pair"],
+        TreeSitterLang::Hcl => &["block"],
+        TreeSitterLang::Lua => &[
+            "function_declaration",
+            "local_function",
+            "variable_declaration",
+        ],
+        TreeSitterLang::Css => &["rule_set", "media_statement", "import_statement"],
     }
 }
 
 /// Node types that can contain nested symbols (classes, impls, modules, etc.).
-fn container_node_types(lang_name: &str) -> &'static [&'static str] {
-    match lang_name {
-        "rust" => &["impl_item", "trait_item", "mod_item"],
-        "python" => &["class_definition"],
-        "javascript" | "typescript" | "tsx" => &["class_declaration", "class_body"],
-        "go" => &[],
-        "c" => &[],
-        "cpp" => &["class_specifier", "namespace_definition"],
-        "java" => &["class_declaration", "interface_declaration", "class_body"],
-        "ruby" => &["class", "module"],
-        _ => &[],
+fn container_node_types(lang: TreeSitterLang) -> &'static [&'static str] {
+    match lang {
+        TreeSitterLang::Rust => &["impl_item", "trait_item", "mod_item"],
+        TreeSitterLang::Python => &["class_definition"],
+        TreeSitterLang::JavaScript | TreeSitterLang::TypeScript | TreeSitterLang::Tsx => {
+            &["class_declaration", "class_body"]
+        }
+        TreeSitterLang::Go => &[],
+        TreeSitterLang::C => &[],
+        TreeSitterLang::Cpp => &["class_specifier", "namespace_definition"],
+        TreeSitterLang::Java => &["class_declaration", "interface_declaration", "class_body"],
+        TreeSitterLang::Ruby => &["class", "module"],
+        TreeSitterLang::Toml
+        | TreeSitterLang::Json
+        | TreeSitterLang::Bash
+        | TreeSitterLang::Fish
+        | TreeSitterLang::Yaml
+        | TreeSitterLang::Hcl
+        | TreeSitterLang::Lua
+        | TreeSitterLang::Css => &[],
     }
 }
 
@@ -110,12 +268,12 @@ fn container_node_types(lang_name: &str) -> &'static [&'static str] {
 
 /// A discovered symbol in the AST.
 #[derive(Debug, Clone)]
-struct Symbol {
-    kind: String,
-    name: String,
-    start_line: usize, // 1-indexed
-    end_line: usize,   // 1-indexed
-    children: Vec<Symbol>,
+pub(crate) struct Symbol {
+    pub(crate) kind: String,
+    pub(crate) name: String,
+    pub(crate) start_line: usize, // 1-indexed
+    pub(crate) end_line: usize,   // 1-indexed
+    pub(crate) children: Vec<Symbol>,
 }
 
 /// Extract the human-readable name from an AST node.
@@ -188,7 +346,7 @@ fn node_text(node: Node, source: &[u8]) -> String {
 }
 
 /// Simplify an AST node type name into a human-readable kind label.
-fn kind_label(node_type: &str) -> &str {
+pub(crate) fn kind_label(node_type: &str) -> &str {
     match node_type {
         // Rust
         "function_item" => "fn",
@@ -232,15 +390,32 @@ fn kind_label(node_type: &str) -> &str {
         "table" | "table_array_element" => "section",
         // JSON
         "pair" => "key",
+        // Bash
+        "variable_assignment" => "var",
+        // Fish (function_definition already covered by Python)
+        // YAML
+        "block_mapping_pair" => "key",
+        // HCL/Terraform
+        "block" => "block",
+        // Lua
+        "local_function" => "local fn",
+        // CSS
+        "rule_set" => "rule",
+        "media_statement" => "media",
         // Fallback
         _ => node_type,
     }
 }
 
 /// Walk the AST and collect symbols up to `max_depth` levels deep.
-fn walk_symbols(node: Node, source: &[u8], lang_name: &str, depth: usize) -> Vec<Symbol> {
-    let symbol_types = symbol_node_types(lang_name);
-    let container_types = container_node_types(lang_name);
+pub(crate) fn walk_symbols(
+    node: Node,
+    source: &[u8],
+    lang: TreeSitterLang,
+    depth: usize,
+) -> Vec<Symbol> {
+    let symbol_types = symbol_node_types(lang);
+    let container_types = container_node_types(lang);
     let mut symbols = Vec::new();
 
     let mut cursor = node.walk();
@@ -252,7 +427,7 @@ fn walk_symbols(node: Node, source: &[u8], lang_name: &str, depth: usize) -> Vec
 
             // Collect nested symbols if this is a container (impl, class, etc.)
             let children = if depth < 1 && container_types.contains(&child.kind()) {
-                walk_inner_symbols(child, source, lang_name)
+                walk_inner_symbols(child, source, lang)
             } else {
                 Vec::new()
             };
@@ -271,8 +446,8 @@ fn walk_symbols(node: Node, source: &[u8], lang_name: &str, depth: usize) -> Vec
 }
 
 /// Walk inside a container node to find nested symbols (methods, associated fns, etc.).
-fn walk_inner_symbols(container: Node, source: &[u8], lang_name: &str) -> Vec<Symbol> {
-    let symbol_types = symbol_node_types(lang_name);
+fn walk_inner_symbols(container: Node, source: &[u8], lang: TreeSitterLang) -> Vec<Symbol> {
+    let symbol_types = symbol_node_types(lang);
     let mut symbols = Vec::new();
 
     // For some languages, nested symbols are inside a `body`/`declaration_list` child
@@ -328,15 +503,22 @@ fn find_enclosing_scope(
     node: Node,
     source: &[u8],
     target_line: usize,
-    lang_name: &str,
+    lang: TreeSitterLang,
 ) -> Option<ScopeInfo> {
-    let symbol_types = symbol_node_types(lang_name);
+    let symbol_types = symbol_node_types(lang);
     let target_row = target_line - 1; // Convert to 0-indexed
 
     let mut best: Option<ScopeInfo> = None;
     let mut parent: Option<ScopeInfo> = None;
 
-    find_scope_recursive(node, source, target_row, symbol_types, &mut best, &mut parent);
+    find_scope_recursive(
+        node,
+        source,
+        target_row,
+        symbol_types,
+        &mut best,
+        &mut parent,
+    );
 
     // Attach parent info if we found a nested scope
     if let Some(ref mut scope) = best {
@@ -402,9 +584,9 @@ fn find_symbol_by_name(
     node: Node,
     source: &[u8],
     target_name: &str,
-    lang_name: &str,
+    lang: TreeSitterLang,
 ) -> Option<DefinitionInfo> {
-    let symbol_types = symbol_node_types(lang_name);
+    let symbol_types = symbol_node_types(lang);
     find_def_recursive(node, source, target_name, symbol_types)
 }
 
@@ -416,37 +598,39 @@ fn find_def_recursive(
 ) -> Option<DefinitionInfo> {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if symbol_types.contains(&child.kind()) {
-            if let Some(name) = extract_name(child, source) {
-                if name == target_name {
-                    let start_line = child.start_position().row + 1;
-                    let end_line = child.end_position().row + 1;
+        if symbol_types.contains(&child.kind())
+            && let Some(name) = extract_name(child, source)
+            && name == target_name
+        {
+            let start_line = child.start_position().row + 1;
+            let end_line = child.end_position().row + 1;
 
-                    // Extract source preview (first ~20 lines)
-                    let source_str = std::str::from_utf8(source).unwrap_or("");
-                    let lines: Vec<&str> = source_str.lines().collect();
-                    let preview_end = std::cmp::min(start_line - 1 + 20, end_line);
-                    let preview_end = std::cmp::min(preview_end, lines.len());
-                    let preview_start = start_line - 1;
+            // Extract source preview (first ~20 lines)
+            let source_str = std::str::from_utf8(source).unwrap_or("");
+            let lines: Vec<&str> = source_str.lines().collect();
+            let preview_end = std::cmp::min(start_line - 1 + 20, end_line);
+            let preview_end = std::cmp::min(preview_end, lines.len());
+            let preview_start = start_line - 1;
 
-                    let mut preview = String::new();
-                    for (i, line) in lines[preview_start..preview_end].iter().enumerate() {
-                        let line_num = preview_start + i + 1;
-                        preview.push_str(&format!("{line_num:>4} | {line}\n"));
-                    }
-                    if preview_end < end_line {
-                        preview.push_str(&format!("     ... ({} more lines)\n", end_line - preview_end));
-                    }
-
-                    return Some(DefinitionInfo {
-                        kind: kind_label(child.kind()).to_string(),
-                        name,
-                        start_line,
-                        end_line,
-                        source_preview: preview,
-                    });
-                }
+            let mut preview = String::new();
+            for (i, line) in lines[preview_start..preview_end].iter().enumerate() {
+                let line_num = preview_start + i + 1;
+                preview.push_str(&format!("{line_num:>4} | {line}\n"));
             }
+            if preview_end < end_line {
+                preview.push_str(&format!(
+                    "     ... ({} more lines)\n",
+                    end_line - preview_end
+                ));
+            }
+
+            return Some(DefinitionInfo {
+                kind: kind_label(child.kind()).to_string(),
+                name,
+                start_line,
+                end_line,
+                source_preview: preview,
+            });
         }
 
         // Recurse
@@ -499,7 +683,7 @@ pub fn tool() -> ToolEntry {
                 "required": ["path"]
             }),
         },
-        handler: Box::new(|args, ctx| execute(args, ctx)),
+        handler: Box::new(execute),
     }
 }
 
@@ -509,10 +693,17 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing 'path' argument"))?;
 
-    let operation = args
+    let operation: super::SymbolsOperation = args
         .get("operation")
         .and_then(|v| v.as_str())
-        .unwrap_or("list_symbols");
+        .unwrap_or("list_symbols")
+        .parse()
+        .map_err(|_| {
+            let raw = args.get("operation").and_then(|v| v.as_str()).unwrap_or("?");
+            anyhow::anyhow!(
+                "unknown symbols operation: '{raw}'. Expected one of: list_symbols, find_scope, find_definition"
+            )
+        })?;
 
     // Resolve path relative to project root
     let path = if Path::new(path_str).is_absolute() {
@@ -539,7 +730,9 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
                 .unwrap_or("(none)");
             return Ok(ToolOutput {
                 title: format!("symbols {path_str}"),
-                output: format!("Unsupported file type: .{ext}. Supported: rs, py, js, ts, tsx, go, c, cpp, java, rb, toml, json"),
+                output: format!(
+                    "Unsupported file type: .{ext}. Supported: rs, py, js, ts, tsx, go, c, cpp, java, rb, toml, json"
+                ),
                 is_error: true,
             });
         }
@@ -580,15 +773,15 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
     let root = tree.root_node();
 
     match operation {
-        "list_symbols" => {
-            let symbols = walk_symbols(root, &source, lang_info.name, 0);
+        super::SymbolsOperation::ListSymbols => {
+            let symbols = walk_symbols(root, &source, lang_info.lang, 0);
             let total_lines = std::str::from_utf8(&source)
                 .map(|s| s.lines().count())
                 .unwrap_or(0);
 
             let mut output = format!(
                 "Symbols in {path_str} ({}, {total_lines} lines):\n\n",
-                lang_info.name
+                lang_info.lang
             );
 
             if symbols.is_empty() {
@@ -615,7 +808,7 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
             })
         }
 
-        "find_scope" => {
+        super::SymbolsOperation::FindScope => {
             let line = args
                 .get("line")
                 .and_then(|v| v.as_u64())
@@ -630,7 +823,7 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
                 });
             }
 
-            match find_enclosing_scope(root, &source, line, lang_info.name) {
+            match find_enclosing_scope(root, &source, line, lang_info.lang) {
                 Some(scope) => {
                     let mut output = format!("Line {line} is inside:\n\n");
                     output.push_str(&format!(
@@ -659,13 +852,13 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
             }
         }
 
-        "find_definition" => {
+        super::SymbolsOperation::FindDefinition => {
             let name = args
                 .get("name")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("find_definition requires 'name' argument"))?;
 
-            match find_symbol_by_name(root, &source, name, lang_info.name) {
+            match find_symbol_by_name(root, &source, name, lang_info.lang) {
                 Some(def) => {
                     let mut output = format!("Definition of '{}':\n\n", def.name);
                     output.push_str(&format!(
@@ -687,14 +880,6 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
                 }),
             }
         }
-
-        other => Ok(ToolOutput {
-            title: format!("symbols {path_str}"),
-            output: format!(
-                "Unknown operation: '{other}'. Use 'list_symbols', 'find_scope', or 'find_definition'."
-            ),
-            is_error: true,
-        }),
     }
 }
 
@@ -717,36 +902,45 @@ mod tests {
     #[test]
     fn detect_language_all_supported_extensions() {
         let cases = [
-            ("test.rs", "rust"),
-            ("test.py", "python"),
-            ("test.pyi", "python"),
-            ("test.js", "javascript"),
-            ("test.mjs", "javascript"),
-            ("test.cjs", "javascript"),
-            ("test.ts", "typescript"),
-            ("test.tsx", "tsx"),
-            ("test.go", "go"),
-            ("test.c", "c"),
-            ("test.h", "c"),
-            ("test.cpp", "cpp"),
-            ("test.cc", "cpp"),
-            ("test.cxx", "cpp"),
-            ("test.hpp", "cpp"),
-            ("test.hxx", "cpp"),
-            ("test.hh", "cpp"),
-            ("test.java", "java"),
-            ("test.rb", "ruby"),
-            ("test.toml", "toml"),
-            ("test.json", "json"),
+            ("test.rs", TreeSitterLang::Rust),
+            ("test.py", TreeSitterLang::Python),
+            ("test.pyi", TreeSitterLang::Python),
+            ("test.js", TreeSitterLang::JavaScript),
+            ("test.mjs", TreeSitterLang::JavaScript),
+            ("test.cjs", TreeSitterLang::JavaScript),
+            ("test.ts", TreeSitterLang::TypeScript),
+            ("test.tsx", TreeSitterLang::Tsx),
+            ("test.go", TreeSitterLang::Go),
+            ("test.c", TreeSitterLang::C),
+            ("test.h", TreeSitterLang::C),
+            ("test.cpp", TreeSitterLang::Cpp),
+            ("test.cc", TreeSitterLang::Cpp),
+            ("test.cxx", TreeSitterLang::Cpp),
+            ("test.hpp", TreeSitterLang::Cpp),
+            ("test.hxx", TreeSitterLang::Cpp),
+            ("test.hh", TreeSitterLang::Cpp),
+            ("test.java", TreeSitterLang::Java),
+            ("test.rb", TreeSitterLang::Ruby),
+            ("test.toml", TreeSitterLang::Toml),
+            ("test.json", TreeSitterLang::Json),
+            ("test.sh", TreeSitterLang::Bash),
+            ("test.bash", TreeSitterLang::Bash),
+            ("test.zsh", TreeSitterLang::Bash),
+            ("test.fish", TreeSitterLang::Fish),
+            ("test.yml", TreeSitterLang::Yaml),
+            ("test.yaml", TreeSitterLang::Yaml),
+            ("test.tf", TreeSitterLang::Hcl),
+            ("test.hcl", TreeSitterLang::Hcl),
+            ("test.lua", TreeSitterLang::Lua),
+            ("test.css", TreeSitterLang::Css),
+            ("test.scss", TreeSitterLang::Css),
         ];
         for (filename, expected_lang) in cases {
             let info = detect_language(Path::new(filename));
-            assert!(
-                info.is_some(),
-                "should detect language for {filename}"
-            );
+            assert!(info.is_some(), "should detect language for {filename}");
             assert_eq!(
-                info.unwrap().name, expected_lang,
+                info.unwrap().lang,
+                expected_lang,
                 "wrong language for {filename}"
             );
         }
@@ -766,7 +960,9 @@ mod tests {
     fn list_symbols_rust_file() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("test.rs");
-        std::fs::write(&file, r#"
+        std::fs::write(
+            &file,
+            r#"
 use std::io;
 
 pub struct Foo {
@@ -791,7 +987,9 @@ enum Color {
     Red,
     Blue,
 }
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let args = serde_json::json!({"path": file.to_str().unwrap()});
         let result = execute(args, test_ctx(dir.path())).unwrap();
@@ -810,7 +1008,9 @@ enum Color {
     fn list_symbols_python_file() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("test.py");
-        std::fs::write(&file, r#"
+        std::fs::write(
+            &file,
+            r#"
 import os
 from pathlib import Path
 
@@ -823,7 +1023,9 @@ class MyClass:
 
 def standalone_func():
     pass
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let args = serde_json::json!({"path": file.to_str().unwrap()});
         let result = execute(args, test_ctx(dir.path())).unwrap();
@@ -840,7 +1042,9 @@ def standalone_func():
     fn list_symbols_javascript_file() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("test.js");
-        std::fs::write(&file, r#"
+        std::fs::write(
+            &file,
+            r#"
 import { foo } from './bar';
 
 function greet(name) {
@@ -852,7 +1056,9 @@ class Greeter {
         this.name = name;
     }
 }
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let args = serde_json::json!({"path": file.to_str().unwrap()});
         let result = execute(args, test_ctx(dir.path())).unwrap();
@@ -866,7 +1072,9 @@ class Greeter {
     fn list_symbols_typescript_file() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("test.ts");
-        std::fs::write(&file, r#"
+        std::fs::write(
+            &file,
+            r#"
 interface Config {
     host: string;
     port: number;
@@ -884,7 +1092,9 @@ function process(config: Config): void {}
 class Processor {
     run(): void {}
 }
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let args = serde_json::json!({"path": file.to_str().unwrap()});
         let result = execute(args, test_ctx(dir.path())).unwrap();
@@ -903,7 +1113,11 @@ class Processor {
     fn find_scope_inside_function() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("test.rs");
-        std::fs::write(&file, "fn main() {\n    let x = 5;\n    println!(\"{x}\");\n}\n").unwrap();
+        std::fs::write(
+            &file,
+            "fn main() {\n    let x = 5;\n    println!(\"{x}\");\n}\n",
+        )
+        .unwrap();
 
         let args = serde_json::json!({
             "path": file.to_str().unwrap(),
@@ -921,13 +1135,17 @@ class Processor {
     fn find_scope_nested_method() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("test.rs");
-        std::fs::write(&file, r#"
+        std::fs::write(
+            &file,
+            r#"
 impl Foo {
     fn bar(&self) -> i32 {
         42
     }
 }
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let args = serde_json::json!({
             "path": file.to_str().unwrap(),
@@ -965,7 +1183,9 @@ impl Foo {
     fn find_definition_found() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("test.rs");
-        std::fs::write(&file, r#"
+        std::fs::write(
+            &file,
+            r#"
 struct Foo {
     x: i32,
     y: String,
@@ -974,7 +1194,9 @@ struct Foo {
 fn bar() -> bool {
     true
 }
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let args = serde_json::json!({
             "path": file.to_str().unwrap(),
@@ -1151,10 +1373,12 @@ fn bar() -> bool {
             "path": file.to_str().unwrap(),
             "operation": "unknown_op"
         });
-        let result = execute(args, test_ctx(dir.path())).unwrap();
+        let err = execute(args, test_ctx(dir.path())).unwrap_err();
 
-        assert!(result.is_error);
-        assert!(result.output.contains("Unknown operation"));
+        assert!(
+            err.to_string().contains("unknown symbols operation"),
+            "expected parse error, got: {err}"
+        );
     }
 
     #[test]

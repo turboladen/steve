@@ -16,7 +16,7 @@ use crate::diagnostics::{Category, DiagnosticCheck, Severity};
 use super::theme::Theme;
 
 /// State for the diagnostics overlay.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct DiagnosticsOverlayState {
     /// Whether the overlay is currently visible.
     pub visible: bool,
@@ -24,16 +24,6 @@ pub struct DiagnosticsOverlayState {
     checks: Vec<DiagnosticCheck>,
     /// Current scroll offset.
     scroll_offset: usize,
-}
-
-impl Default for DiagnosticsOverlayState {
-    fn default() -> Self {
-        Self {
-            visible: false,
-            checks: Vec::new(),
-            scroll_offset: 0,
-        }
-    }
 }
 
 impl DiagnosticsOverlayState {
@@ -221,7 +211,7 @@ pub fn render_diagnostics_overlay(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diagnostics::{DiagnosticCheck, Severity, Category};
+    use crate::diagnostics::{Category, DiagnosticCheck, Severity};
     use ratatui::layout::Rect;
 
     fn sample_checks() -> Vec<DiagnosticCheck> {
@@ -359,9 +349,15 @@ mod tests {
         state.open(sample_checks());
         let area = Rect::new(0, 0, 80, 30);
         let text = render_overlay_to_string(80, 30, &state, area);
-        assert!(text.contains("AI Environment"), "should show AI Environment header");
+        assert!(
+            text.contains("AI Environment"),
+            "should show AI Environment header"
+        );
         assert!(text.contains("LSP Health"), "should show LSP Health header");
-        assert!(text.contains("Session Efficiency"), "should show Session Efficiency header");
+        assert!(
+            text.contains("Session Efficiency"),
+            "should show Session Efficiency header"
+        );
     }
 
     #[test]
@@ -371,7 +367,10 @@ mod tests {
         let area = Rect::new(0, 0, 80, 30);
         let text = render_overlay_to_string(80, 30, &state, area);
         assert!(text.contains("No AGENTS.md"), "should show check label");
-        assert!(text.contains("No LSP servers running"), "should show LSP check");
+        assert!(
+            text.contains("No LSP servers running"),
+            "should show LSP check"
+        );
     }
 
     #[test]

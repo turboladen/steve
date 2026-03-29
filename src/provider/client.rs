@@ -4,9 +4,9 @@ use async_openai::{
     config::OpenAIConfig,
     types::chat::{
         ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
-        ChatCompletionRequestSystemMessageContent,
-        ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
-        CreateChatCompletionRequest, CreateChatCompletionResponse,
+        ChatCompletionRequestSystemMessageContent, ChatCompletionRequestUserMessage,
+        ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
+        CreateChatCompletionResponse,
     },
 };
 
@@ -57,9 +57,7 @@ impl LlmClient {
         if let Some(system) = system_prompt {
             messages.push(ChatCompletionRequestMessage::System(
                 ChatCompletionRequestSystemMessage {
-                    content: ChatCompletionRequestSystemMessageContent::Text(
-                        system.to_string(),
-                    ),
+                    content: ChatCompletionRequestSystemMessageContent::Text(system.to_string()),
                     name: None,
                 },
             ));
@@ -67,9 +65,7 @@ impl LlmClient {
 
         messages.push(ChatCompletionRequestMessage::User(
             ChatCompletionRequestUserMessage {
-                content: ChatCompletionRequestUserMessageContent::Text(
-                    user_message.to_string(),
-                ),
+                content: ChatCompletionRequestUserMessageContent::Text(user_message.to_string()),
                 name: None,
             },
         ));

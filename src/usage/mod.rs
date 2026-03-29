@@ -1,9 +1,7 @@
 pub mod db;
 pub mod types;
 
-use std::path::Path;
-use std::sync::mpsc;
-use std::thread::JoinHandle;
+use std::{path::Path, sync::mpsc, thread::JoinHandle};
 
 use anyhow::Result;
 

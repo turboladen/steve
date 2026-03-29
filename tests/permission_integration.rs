@@ -8,11 +8,13 @@ use std::str::FromStr;
 use strum::IntoEnumIterator;
 use tempfile::tempdir;
 
-use steve::permission::types::{
-    PermissionAction, PermissionActionSerde, PermissionRule, ToolMatcher,
+use steve::{
+    permission::{
+        PermissionEngine, PermissionProfile, profile_build_rules, profile_plan_rules,
+        types::{PermissionAction, PermissionActionSerde, PermissionRule, ToolMatcher},
+    },
+    tool::ToolName,
 };
-use steve::permission::{PermissionEngine, PermissionProfile, profile_build_rules, profile_plan_rules};
-use steve::tool::ToolName;
 
 /// Verify that path-based rules, allow_tools overrides, and profile defaults
 /// compose correctly in priority order.
@@ -158,11 +160,7 @@ fn plan_mode_path_rule_filtering() {
 /// Verify that tool name exhaustive coverage works with all variants.
 #[test]
 fn all_tool_names_have_defined_permission_behavior() {
-    let engine = PermissionEngine::new(profile_build_rules(
-        PermissionProfile::Standard,
-        &[],
-        &[],
-    ));
+    let engine = PermissionEngine::new(profile_build_rules(PermissionProfile::Standard, &[], &[]));
 
     for tool in ToolName::iter() {
         let action = engine.check(tool, None, None);
@@ -299,7 +297,12 @@ fn plan_mode_denies_writes_regardless_of_profile() {
 fn allow_overrides_stripped_for_write_tools_in_plan_mode() {
     let engine = PermissionEngine::new(profile_plan_rules(
         PermissionProfile::Standard,
-        &[ToolName::Edit, ToolName::Write, ToolName::Bash, ToolName::Agent],
+        &[
+            ToolName::Edit,
+            ToolName::Write,
+            ToolName::Bash,
+            ToolName::Agent,
+        ],
         &[],
     ));
 

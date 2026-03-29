@@ -1,6 +1,4 @@
-use crate::usage::types::{
-    ApiCallDetail, ProjectInfo, SessionFilter, SessionSummary, UsageStats,
-};
+use crate::usage::types::{ApiCallDetail, ProjectInfo, SessionFilter, SessionSummary, UsageStats};
 
 /// Which view is currently active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +78,12 @@ pub struct DataState {
     // Scroll offset for session list (for large lists)
     pub list_offset: usize,
     pub detail_offset: usize,
+}
+
+impl Default for DataState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DataState {

@@ -1,10 +1,205 @@
-pub mod types;
+pub mod agents;
+pub mod persist;
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
-use types::Config;
+pub use agents::{AgentsFile, load_agents_md, load_agents_md_chain};
+pub use persist::persist_allow_tool;
+
+use crate::ui::terminal_detect::ThemePreference;
+
+/// Top-level configuration for steve.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Config {
+    /// Default model in "provider/model" format.
+    #[serde(default)]
+    pub model: Option<String>,
+
+    /// Small/fast model for title generation, in "provider/model" format.
+    #[serde(default)]
+    pub small_model: Option<String>,
+
+    /// Whether to automatically compact when approaching context window limit.
+    #[serde(default = "default_auto_compact")]
+    pub auto_compact: bool,
+
+    /// Permission profile: "trust", "standard" (default), or "cautious".
+    #[serde(default)]
+    pub permission_profile: Option<crate::permission::PermissionProfile>,
+
+    /// Tools to auto-allow regardless of permission profile.
+    /// e.g., `["edit", "bash"]` to skip permission prompts for those tools.
+    #[serde(default)]
+    pub allow_tools: Vec<String>,
+
+    /// Path-based permission rules.
+    /// e.g., `[{"tool": "edit", "pattern": "src/**", "action": "allow"}]`
+    /// More specific path rules should come before general rules (first-match wins).
+    #[serde(default)]
+    pub permission_rules: Vec<crate::permission::types::PermissionRule>,
+
+    /// Theme preference: "auto" (default), "dark", or "light".
+    #[serde(default)]
+    pub theme: ThemePreference,
+
+    /// Provider definitions keyed by provider ID.
+    #[serde(default)]
+    pub providers: HashMap<String, ProviderConfig>,
+
+    /// MCP server definitions keyed by server ID.
+    #[serde(default)]
+    pub mcp_servers: HashMap<String, crate::mcp::McpServerConfig>,
+}
+
+/// Configuration for a single LLM provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    /// Base URL for the OpenAI-compatible API (e.g., "https://api.openai.com/v1").
+    pub base_url: String,
+
+    /// Name of the environment variable containing the API key.
+    pub api_key_env: String,
+
+    /// Models available from this provider, keyed by model ID.
+    #[serde(default)]
+    pub models: HashMap<String, ModelConfig>,
+}
+
+/// Configuration for a single model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelConfig {
+    /// The model ID sent to the API.
+    pub id: String,
+
+    /// Human-readable display name.
+    pub name: String,
+
+    /// Maximum context window in tokens.
+    #[serde(default = "default_context_window")]
+    pub context_window: u32,
+
+    /// Maximum output tokens (if limited).
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
+
+    /// Pricing information.
+    #[serde(default)]
+    pub cost: Option<ModelCost>,
+
+    /// Model capabilities.
+    #[serde(default)]
+    pub capabilities: ModelCapabilities,
+}
+
+/// Pricing per million tokens.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelCost {
+    #[serde(alias = "input")]
+    pub input_per_million: f64,
+    #[serde(alias = "output")]
+    pub output_per_million: f64,
+}
+
+/// Feature capabilities of a model.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelCapabilities {
+    /// Whether the model supports tool/function calling.
+    #[serde(default)]
+    pub tool_call: bool,
+
+    /// Whether the model supports reasoning/thinking tokens.
+    #[serde(default)]
+    pub reasoning: bool,
+}
+
+impl Config {
+    /// Merge a project config on top of this (global) config.
+    /// Project values take precedence over global values.
+    /// Providers merge by ID; models merge within providers.
+    pub fn merge(mut self, project: Config) -> Config {
+        // Detect whether the project config had meaningful content before moving fields.
+        // This prevents a default project Config from clobbering global auto_compact.
+        let project_has_content = !project.providers.is_empty()
+            || !project.mcp_servers.is_empty()
+            || project.model.is_some()
+            || project.small_model.is_some();
+
+        // Scalar fields: project overrides global
+        if project.model.is_some() {
+            self.model = project.model;
+        }
+        if project.small_model.is_some() {
+            self.small_model = project.small_model;
+        }
+        if project.permission_profile.is_some() {
+            self.permission_profile = project.permission_profile;
+        }
+        if !project.allow_tools.is_empty() {
+            self.allow_tools = project.allow_tools;
+        }
+        if !project.permission_rules.is_empty() {
+            self.permission_rules = project.permission_rules;
+        }
+        if project_has_content {
+            self.auto_compact = project.auto_compact;
+        }
+        if project.theme != ThemePreference::Auto {
+            self.theme = project.theme;
+        }
+
+        // MCP servers: project overrides global by server ID
+        for (server_id, project_server) in project.mcp_servers {
+            self.mcp_servers.insert(server_id, project_server);
+        }
+
+        // Providers: deep merge by provider ID, then by model ID
+        for (provider_id, project_provider) in project.providers {
+            match self.providers.get_mut(&provider_id) {
+                Some(global_provider) => {
+                    global_provider.merge(project_provider);
+                }
+                None => {
+                    self.providers.insert(provider_id, project_provider);
+                }
+            }
+        }
+
+        self
+    }
+}
+
+impl ProviderConfig {
+    /// Merge a project provider on top of this (global) provider.
+    /// Project values override; models merge by model ID.
+    fn merge(&mut self, project: ProviderConfig) {
+        // Provider-level fields: project overrides
+        self.base_url = project.base_url;
+        self.api_key_env = project.api_key_env;
+
+        // Models: project overrides per model ID
+        for (model_id, project_model) in project.models {
+            self.models.insert(model_id, project_model);
+        }
+    }
+}
+
+fn default_context_window() -> u32 {
+    128_000
+}
+
+fn default_auto_compact() -> bool {
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Config loading
+// ---------------------------------------------------------------------------
 
 /// Load configuration with global + project merge.
 /// Global config at `~/.config/steve/config.jsonc` (XDG-style on all platforms) provides defaults;
@@ -97,11 +292,7 @@ fn find_global_config_in(dir_override: Option<&Path>) -> Option<PathBuf> {
         None => global_config_dir()?,
     };
     let path = config_dir.join("config.jsonc");
-    if path.exists() {
-        Some(path)
-    } else {
-        None
-    }
+    if path.exists() { Some(path) } else { None }
 }
 
 /// Returns `~/.config/steve/` — the global config directory.
@@ -111,100 +302,321 @@ pub fn global_config_dir() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".config").join("steve"))
 }
 
-/// Persist a tool name to the project's `.steve.jsonc` `allow_tools` list.
-///
-/// Reads the existing config (or creates a minimal one), adds the tool
-/// to `allow_tools` if not already present, and writes back. Uses JSONC parser
-/// for reading but writes clean JSON (comments are not preserved).
-pub fn persist_allow_tool(project_root: &Path, tool_name: &str) -> Result<()> {
-    let config_path = project_root.join(".steve.jsonc");
-
-    // Load existing config as a serde_json::Value to preserve all fields
-    let mut value: serde_json::Value = if config_path.exists() {
-        let content = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("failed to read {}", config_path.display()))?;
-        let parsed = jsonc_parser::parse_to_serde_value(&content, &Default::default())
-            .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", config_path.display()))?;
-        parsed.unwrap_or(serde_json::Value::Object(serde_json::Map::new()))
-    } else {
-        serde_json::Value::Object(serde_json::Map::new())
-    };
-
-    // Ensure allow_tools array exists and add the tool if not present
-    let obj = value.as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("config root is not an object"))?;
-
-    let allow_tools = obj.entry("allow_tools")
-        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-
-    if let serde_json::Value::Array(arr) = allow_tools {
-        let tool_val = serde_json::Value::String(tool_name.to_string());
-        if !arr.contains(&tool_val) {
-            arr.push(tool_val);
-        }
-    }
-
-    let json_str = serde_json::to_string_pretty(&value)
-        .context("failed to serialize config")?;
-
-    // Atomic write: write to uniquely-named tmp file then rename to avoid
-    // partial writes on crash and races between concurrent persist calls.
-    let tmp_path = config_path.with_extension(format!(
-        "jsonc.{}-{:?}.tmp",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    std::fs::write(&tmp_path, json_str.as_bytes())
-        .with_context(|| format!("failed to write {}", tmp_path.display()))?;
-    std::fs::rename(&tmp_path, &config_path)
-        .with_context(|| format!("failed to rename {} → {}", tmp_path.display(), config_path.display()))?;
-
-    tracing::info!(tool = tool_name, path = %config_path.display(), "persisted tool to allow_tools");
-    Ok(())
-}
-
-/// Load the AGENTS.md file from the project root, if it exists.
-pub fn load_agents_md(project_root: &Path) -> Option<String> {
-    let path = project_root.join("AGENTS.md");
-    std::fs::read_to_string(path).ok()
-}
-
-/// An AGENTS.md file discovered during walk-up discovery.
-#[derive(Debug, Clone)]
-pub struct AgentsFile {
-    /// Absolute path to the AGENTS.md file.
-    pub path: PathBuf,
-    /// File content.
-    pub content: String,
-}
-
-/// Walk from `cwd` up to `project_root` (inclusive), collecting AGENTS.md files.
-/// Returns them root-first (outermost to innermost / highest to lowest priority).
-pub fn load_agents_md_chain(project_root: &Path, cwd: &Path) -> Vec<AgentsFile> {
-    let mut files = Vec::new();
-    // Guard: if cwd is not under project_root, fall back to project_root
-    let effective_cwd = if cwd.starts_with(project_root) { cwd } else { project_root };
-    let mut dir = effective_cwd.to_path_buf();
-    loop {
-        let agents_path = dir.join("AGENTS.md");
-        if let Ok(content) = std::fs::read_to_string(&agents_path) {
-            files.push(AgentsFile { path: agents_path, content });
-        }
-        if dir == project_root {
-            break;
-        }
-        match dir.parent() {
-            Some(parent) => dir = parent.to_path_buf(),
-            None => break,
-        }
-    }
-    files.reverse(); // root-first order
-    files
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_config_has_auto_compact_true() {
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert!(config.auto_compact);
+    }
+
+    #[test]
+    fn auto_compact_can_be_disabled() {
+        let config: Config = serde_json::from_str(r#"{"auto_compact": false}"#).unwrap();
+        assert!(!config.auto_compact);
+    }
+
+    #[test]
+    fn default_context_window_is_128k() {
+        let model: ModelConfig = serde_json::from_str(r#"{"id": "test", "name": "Test"}"#).unwrap();
+        assert_eq!(model.context_window, 128_000);
+    }
+
+    #[test]
+    fn custom_context_window() {
+        let model: ModelConfig =
+            serde_json::from_str(r#"{"id": "test", "name": "Test", "context_window": 32000}"#)
+                .unwrap();
+        assert_eq!(model.context_window, 32_000);
+    }
+
+    #[test]
+    fn capabilities_default_to_false() {
+        let model: ModelConfig = serde_json::from_str(r#"{"id": "test", "name": "Test"}"#).unwrap();
+        assert!(!model.capabilities.tool_call);
+        assert!(!model.capabilities.reasoning);
+    }
+
+    #[test]
+    fn full_config_parses() {
+        let json = r#"{
+            "model": "openai/gpt-4o",
+            "small_model": "openai/gpt-4o-mini",
+            "auto_compact": true,
+            "providers": {
+                "openai": {
+                    "base_url": "https://api.openai.com/v1",
+                    "api_key_env": "OPENAI_API_KEY",
+                    "models": {
+                        "gpt-4o": {
+                            "id": "gpt-4o",
+                            "name": "GPT-4o",
+                            "context_window": 128000,
+                            "capabilities": { "tool_call": true, "reasoning": false }
+                        }
+                    }
+                }
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.model, Some("openai/gpt-4o".into()));
+        assert_eq!(config.small_model, Some("openai/gpt-4o-mini".into()));
+        assert!(config.providers.contains_key("openai"));
+        let openai = &config.providers["openai"];
+        assert_eq!(openai.models["gpt-4o"].context_window, 128_000);
+        assert!(openai.models["gpt-4o"].capabilities.tool_call);
+    }
+
+    #[test]
+    fn empty_providers_is_valid() {
+        let config: Config = serde_json::from_str(r#"{"model": "test/m"}"#).unwrap();
+        assert!(config.providers.is_empty());
+    }
+
+    // -- Config::merge tests --
+
+    #[test]
+    fn merge_project_model_overrides_global() {
+        let global = Config {
+            model: Some("global/model".into()),
+            ..Default::default()
+        };
+        let project = Config {
+            model: Some("project/model".into()),
+            ..Default::default()
+        };
+        let merged = global.merge(project);
+        assert_eq!(merged.model, Some("project/model".into()));
+    }
+
+    #[test]
+    fn merge_project_none_keeps_global() {
+        let global = Config {
+            model: Some("global/model".into()),
+            small_model: Some("global/small".into()),
+            ..Default::default()
+        };
+        let project = Config::default();
+        let merged = global.merge(project);
+        assert_eq!(merged.model, Some("global/model".into()));
+        assert_eq!(merged.small_model, Some("global/small".into()));
+    }
+
+    #[test]
+    fn merge_providers_new_provider_added() {
+        let global = Config::default();
+        let mut project = Config::default();
+        project.providers.insert(
+            "openai".into(),
+            ProviderConfig {
+                base_url: "https://api.openai.com/v1".into(),
+                api_key_env: "OPENAI_API_KEY".into(),
+                models: HashMap::new(),
+            },
+        );
+        let merged = global.merge(project);
+        assert!(merged.providers.contains_key("openai"));
+    }
+
+    #[test]
+    fn merge_providers_deep_merge_models() {
+        let mut global = Config::default();
+        let mut global_models = HashMap::new();
+        global_models.insert(
+            "gpt-4o".into(),
+            ModelConfig {
+                id: "gpt-4o".into(),
+                name: "GPT-4o".into(),
+                context_window: 128_000,
+                max_output_tokens: None,
+                cost: None,
+                capabilities: ModelCapabilities::default(),
+            },
+        );
+        global.providers.insert(
+            "openai".into(),
+            ProviderConfig {
+                base_url: "https://api.openai.com/v1".into(),
+                api_key_env: "OPENAI_API_KEY".into(),
+                models: global_models,
+            },
+        );
+
+        let mut project = Config::default();
+        let mut project_models = HashMap::new();
+        project_models.insert(
+            "gpt-4o-mini".into(),
+            ModelConfig {
+                id: "gpt-4o-mini".into(),
+                name: "GPT-4o Mini".into(),
+                context_window: 128_000,
+                max_output_tokens: None,
+                cost: None,
+                capabilities: ModelCapabilities::default(),
+            },
+        );
+        project.providers.insert(
+            "openai".into(),
+            ProviderConfig {
+                base_url: "https://custom.proxy/v1".into(),
+                api_key_env: "CUSTOM_KEY".into(),
+                models: project_models,
+            },
+        );
+
+        let merged = global.merge(project);
+        let openai = &merged.providers["openai"];
+        // Provider-level fields come from project
+        assert_eq!(openai.base_url, "https://custom.proxy/v1");
+        assert_eq!(openai.api_key_env, "CUSTOM_KEY");
+        // Both models present
+        assert!(
+            openai.models.contains_key("gpt-4o"),
+            "global model preserved"
+        );
+        assert!(
+            openai.models.contains_key("gpt-4o-mini"),
+            "project model added"
+        );
+    }
+
+    #[test]
+    fn merge_project_model_overrides_global_model_same_id() {
+        let mut global = Config::default();
+        let mut global_models = HashMap::new();
+        global_models.insert(
+            "gpt-4o".into(),
+            ModelConfig {
+                id: "gpt-4o".into(),
+                name: "Global Name".into(),
+                context_window: 128_000,
+                max_output_tokens: None,
+                cost: None,
+                capabilities: ModelCapabilities::default(),
+            },
+        );
+        global.providers.insert(
+            "openai".into(),
+            ProviderConfig {
+                base_url: "https://api.openai.com/v1".into(),
+                api_key_env: "OPENAI_API_KEY".into(),
+                models: global_models,
+            },
+        );
+
+        let mut project = Config::default();
+        let mut project_models = HashMap::new();
+        project_models.insert(
+            "gpt-4o".into(),
+            ModelConfig {
+                id: "gpt-4o".into(),
+                name: "Project Override".into(),
+                context_window: 64_000,
+                max_output_tokens: Some(4096),
+                cost: None,
+                capabilities: ModelCapabilities::default(),
+            },
+        );
+        project.providers.insert(
+            "openai".into(),
+            ProviderConfig {
+                base_url: "https://api.openai.com/v1".into(),
+                api_key_env: "OPENAI_API_KEY".into(),
+                models: project_models,
+            },
+        );
+
+        let merged = global.merge(project);
+        let model = &merged.providers["openai"].models["gpt-4o"];
+        assert_eq!(model.name, "Project Override");
+        assert_eq!(model.context_window, 64_000);
+        assert_eq!(model.max_output_tokens, Some(4096));
+    }
+
+    #[test]
+    fn default_theme_is_auto() {
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            config.theme,
+            crate::ui::terminal_detect::ThemePreference::Auto
+        );
+    }
+
+    #[test]
+    fn theme_dark_light_parse() {
+        let config: Config = serde_json::from_str(r#"{"theme": "dark"}"#).unwrap();
+        assert_eq!(
+            config.theme,
+            crate::ui::terminal_detect::ThemePreference::Dark
+        );
+
+        let config: Config = serde_json::from_str(r#"{"theme": "light"}"#).unwrap();
+        assert_eq!(
+            config.theme,
+            crate::ui::terminal_detect::ThemePreference::Light
+        );
+    }
+
+    #[test]
+    fn merge_preserves_global_theme_when_project_empty() {
+        let mut global = Config::default();
+        global.theme = crate::ui::terminal_detect::ThemePreference::Dark;
+        let project = Config::default();
+        let merged = global.merge(project);
+        // Project has Auto (default) theme, so global Dark should be preserved
+        assert_eq!(
+            merged.theme,
+            crate::ui::terminal_detect::ThemePreference::Dark
+        );
+    }
+
+    #[test]
+    fn merge_theme_only_project_overrides_global() {
+        // A project config with only "theme": "dark" and no providers/model
+        // should still override the global theme
+        let global = Config {
+            theme: crate::ui::terminal_detect::ThemePreference::Auto,
+            ..Default::default()
+        };
+        let mut project = Config::default();
+        project.theme = crate::ui::terminal_detect::ThemePreference::Dark;
+        let merged = global.merge(project);
+        assert_eq!(
+            merged.theme,
+            crate::ui::terminal_detect::ThemePreference::Dark
+        );
+    }
+
+    #[test]
+    fn merge_both_empty_returns_default() {
+        let merged = Config::default().merge(Config::default());
+        assert_eq!(merged.model, None);
+        assert!(merged.providers.is_empty());
+        // Note: Config::default() gives auto_compact=false (bool default),
+        // while serde deserialization gives auto_compact=true via default_auto_compact().
+        // Merging two defaults preserves the global's value (false).
+        assert!(!merged.auto_compact);
+    }
+
+    #[test]
+    fn model_cost_accepts_short_field_names() {
+        let cost: ModelCost = serde_json::from_str(r#"{"input": 3.0, "output": 15.0}"#).unwrap();
+        assert!((cost.input_per_million - 3.0).abs() < f64::EPSILON);
+        assert!((cost.output_per_million - 15.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn model_cost_accepts_full_field_names() {
+        let cost: ModelCost =
+            serde_json::from_str(r#"{"input_per_million": 3.0, "output_per_million": 15.0}"#)
+                .unwrap();
+        assert!((cost.input_per_million - 3.0).abs() < f64::EPSILON);
+        assert!((cost.output_per_million - 15.0).abs() < f64::EPSILON);
+    }
+
+    // -- Config loading tests --
 
     #[test]
     fn load_dotfile_jsonc() {
@@ -245,32 +657,17 @@ mod tests {
         std::fs::write(dir.path().join(".steve.jsonc"), "{{invalid").unwrap();
         let (config, warnings) = load(dir.path()).unwrap();
         assert!(!warnings.is_empty(), "should have a config warning");
-        assert!(warnings[0].contains(".steve.jsonc"), "warning mentions the file");
+        assert!(
+            warnings[0].contains(".steve.jsonc"),
+            "warning mentions the file"
+        );
         assert_eq!(config.model, None, "falls back to default config");
-    }
-
-    #[test]
-    fn agents_md_present() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("AGENTS.md"), "# My Agent\nHello").unwrap();
-        let content = load_agents_md(dir.path());
-        assert_eq!(content, Some("# My Agent\nHello".into()));
-    }
-
-    #[test]
-    fn agents_md_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(load_agents_md(dir.path()).is_none());
     }
 
     #[test]
     fn partial_config_uses_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join(".steve.jsonc"),
-            r#"{"model": "test/m"}"#,
-        )
-        .unwrap();
+        std::fs::write(dir.path().join(".steve.jsonc"), r#"{"model": "test/m"}"#).unwrap();
         let (config, _warnings) = load(dir.path()).unwrap();
         assert_eq!(config.model, Some("test/m".into()));
         assert!(config.auto_compact);
@@ -324,7 +721,8 @@ mod tests {
         std::fs::write(
             dir.path().join("config.jsonc"),
             r#"{"model": "openai/gpt-4o", "providers": {}}"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let found = find_global_config_in(Some(dir.path()));
         assert!(found.is_some(), "should find config.jsonc");
@@ -335,7 +733,10 @@ mod tests {
     fn global_config_missing_returns_none() {
         let dir = tempfile::tempdir().unwrap();
         let found = find_global_config_in(Some(dir.path()));
-        assert!(found.is_none(), "should return None when no config file exists");
+        assert!(
+            found.is_none(),
+            "should return None when no config file exists"
+        );
     }
 
     #[test]
@@ -344,7 +745,8 @@ mod tests {
         std::fs::write(
             dir.path().join("config.json"),
             r#"{"model": "openai/gpt-4o"}"#,
-        ).unwrap();
+        )
+        .unwrap();
         let found = find_global_config_in(Some(dir.path()));
         assert!(found.is_none(), "config.json (old name) should be ignored");
     }
@@ -355,14 +757,16 @@ mod tests {
         std::fs::write(
             dir.path().join("steve.json"),
             r#"{"model": "openai/gpt-4o"}"#,
-        ).unwrap();
+        )
+        .unwrap();
         let (config, _warnings) = load(dir.path()).unwrap();
         assert_eq!(config.model, None, "steve.json should not be loaded");
 
         std::fs::write(
             dir.path().join("steve.jsonc"),
             r#"{"model": "openai/gpt-4o"}"#,
-        ).unwrap();
+        )
+        .unwrap();
         let (config, _warnings) = load(dir.path()).unwrap();
         assert_eq!(config.model, None, "steve.jsonc should not be loaded");
     }
@@ -389,135 +793,9 @@ mod tests {
         let merged = global.merge(project);
 
         assert_eq!(merged.model, Some("openai/gpt-4o".into()));
-        assert!(merged.providers.contains_key("openai"), "global providers preserved");
-    }
-
-    // -- persist_allow_tool tests --
-
-    #[test]
-    fn persist_allow_tool_creates_config_if_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        persist_allow_tool(dir.path(), "edit").unwrap();
-
-        let (config, _warnings) = load(dir.path()).unwrap();
-        assert!(config.allow_tools.contains(&"edit".to_string()));
-    }
-
-    #[test]
-    fn persist_allow_tool_appends_to_existing() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join(".steve.jsonc"),
-            r#"{"model": "openai/gpt-4o", "allow_tools": ["bash"]}"#,
-        ).unwrap();
-
-        persist_allow_tool(dir.path(), "edit").unwrap();
-
-        let (config, _warnings) = load(dir.path()).unwrap();
-        assert!(config.allow_tools.contains(&"bash".to_string()), "existing tool preserved");
-        assert!(config.allow_tools.contains(&"edit".to_string()), "new tool added");
-        assert_eq!(config.model, Some("openai/gpt-4o".into()), "other fields preserved");
-    }
-
-    #[test]
-    fn persist_allow_tool_deduplicates() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join(".steve.jsonc"),
-            r#"{"allow_tools": ["edit"]}"#,
-        ).unwrap();
-
-        persist_allow_tool(dir.path(), "edit").unwrap();
-
-        let content = std::fs::read_to_string(dir.path().join(".steve.jsonc")).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&content).unwrap();
-        let arr = value["allow_tools"].as_array().unwrap();
-        assert_eq!(arr.len(), 1, "should not duplicate");
-    }
-
-    #[test]
-    fn persist_allow_tool_writes_to_dotfile() {
-        let dir = tempfile::tempdir().unwrap();
-
-        persist_allow_tool(dir.path(), "bash").unwrap();
-
-        // Should create .steve.jsonc
-        assert!(dir.path().join(".steve.jsonc").exists());
-        let (config, _warnings) = load(dir.path()).unwrap();
-        assert!(config.allow_tools.contains(&"bash".to_string()));
-    }
-
-    // -- load_agents_md_chain tests --
-
-    #[test]
-    fn agents_md_chain_single_root() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("AGENTS.md"), "# Root").unwrap();
-        let chain = load_agents_md_chain(dir.path(), dir.path());
-        assert_eq!(chain.len(), 1);
-        assert_eq!(chain[0].content, "# Root");
-    }
-
-    #[test]
-    fn agents_md_chain_nested() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        std::fs::write(root.join("AGENTS.md"), "# Root").unwrap();
-        let sub = root.join("sub").join("dir");
-        std::fs::create_dir_all(&sub).unwrap();
-        std::fs::write(sub.join("AGENTS.md"), "# Sub").unwrap();
-
-        let chain = load_agents_md_chain(root, &sub);
-        assert_eq!(chain.len(), 2);
-        assert_eq!(chain[0].content, "# Root", "root-first order");
-        assert_eq!(chain[1].content, "# Sub", "subdirectory last");
-    }
-
-    #[test]
-    fn agents_md_chain_middle_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        std::fs::write(root.join("AGENTS.md"), "# Root").unwrap();
-        let deep = root.join("a").join("b").join("c");
-        std::fs::create_dir_all(&deep).unwrap();
-        std::fs::write(deep.join("AGENTS.md"), "# Deep").unwrap();
-
-        let chain = load_agents_md_chain(root, &deep);
-        assert_eq!(chain.len(), 2);
-        assert_eq!(chain[0].content, "# Root");
-        assert_eq!(chain[1].content, "# Deep");
-    }
-
-    #[test]
-    fn agents_md_chain_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let chain = load_agents_md_chain(dir.path(), dir.path());
-        assert!(chain.is_empty());
-    }
-
-    #[test]
-    fn agents_md_chain_cwd_only() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        let sub = root.join("pkg");
-        std::fs::create_dir_all(&sub).unwrap();
-        std::fs::write(sub.join("AGENTS.md"), "# Pkg only").unwrap();
-
-        let chain = load_agents_md_chain(root, &sub);
-        assert_eq!(chain.len(), 1);
-        assert_eq!(chain[0].content, "# Pkg only");
-    }
-
-    #[test]
-    fn agents_md_chain_cwd_outside_root_falls_back() {
-        let root_dir = tempfile::tempdir().unwrap();
-        let other_dir = tempfile::tempdir().unwrap();
-        std::fs::write(root_dir.path().join("AGENTS.md"), "# Root").unwrap();
-        std::fs::write(other_dir.path().join("AGENTS.md"), "# Other").unwrap();
-
-        // cwd is not under project_root — should fall back to project_root
-        let chain = load_agents_md_chain(root_dir.path(), other_dir.path());
-        assert_eq!(chain.len(), 1);
-        assert_eq!(chain[0].content, "# Root", "should only find root, not the unrelated dir");
+        assert!(
+            merged.providers.contains_key("openai"),
+            "global providers preserved"
+        );
     }
 }

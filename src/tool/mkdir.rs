@@ -1,7 +1,6 @@
 //! Mkdir tool — create directories.
 
-use std::fs;
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -14,7 +13,12 @@ pub fn tool() -> ToolEntry {
     ToolEntry {
         def: ToolDef {
             name: ToolName::Mkdir,
-            description: func.get("description").unwrap().as_str().unwrap().to_string(),
+            description: func
+                .get("description")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string(),
             parameters: func.get("parameters").cloned().unwrap(),
         },
         handler: Box::new(execute),

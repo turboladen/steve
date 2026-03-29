@@ -185,8 +185,7 @@ impl<'a> SessionManager<'a> {
     ) -> Result<()> {
         session.token_usage.prompt_tokens += prompt_tokens as u64;
         session.token_usage.completion_tokens += completion_tokens as u64;
-        session.token_usage.total_tokens +=
-            (prompt_tokens + completion_tokens) as u64;
+        session.token_usage.total_tokens += (prompt_tokens + completion_tokens) as u64;
         session.updated_at = Utc::now();
         self.save_session(session)
     }
@@ -261,16 +260,16 @@ mod tests {
         with_test_manager(|mgr| {
             let session = mgr.create_session("m/x").expect("create");
 
-        let m1 = Message::user(&session.id, "first");
-        mgr.save_message(&m1).expect("save m1");
-        std::thread::sleep(Duration::from_millis(10));
+            let m1 = Message::user(&session.id, "first");
+            mgr.save_message(&m1).expect("save m1");
+            std::thread::sleep(Duration::from_millis(10));
 
-        let m2 = Message::user(&session.id, "second");
-        mgr.save_message(&m2).expect("save m2");
-        std::thread::sleep(Duration::from_millis(10));
+            let m2 = Message::user(&session.id, "second");
+            mgr.save_message(&m2).expect("save m2");
+            std::thread::sleep(Duration::from_millis(10));
 
-        let m3 = Message::user(&session.id, "third");
-        mgr.save_message(&m3).expect("save m3");
+            let m3 = Message::user(&session.id, "third");
+            mgr.save_message(&m3).expect("save m3");
 
             let messages = mgr.load_messages(&session.id).expect("load");
             assert_eq!(messages.len(), 3);
@@ -286,7 +285,8 @@ mod tests {
             let mut session = mgr.create_session("m/x").expect("create");
             assert_eq!(session.title, "New session");
 
-            mgr.rename_session(&mut session, "New Title").expect("rename");
+            mgr.rename_session(&mut session, "New Title")
+                .expect("rename");
             assert_eq!(session.title, "New Title");
 
             // Reload from storage to confirm persistence
@@ -376,7 +376,8 @@ mod tests {
         with_test_manager(|mgr| {
             let session = mgr.create_session("m/x").expect("create");
             // No messages saved — this is the typical prune scenario
-            mgr.delete_session(&session.id).expect("delete empty session");
+            mgr.delete_session(&session.id)
+                .expect("delete empty session");
             assert!(mgr.load_session(&session.id).is_err());
             assert!(mgr.load_messages(&session.id).expect("load").is_empty());
         });

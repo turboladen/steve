@@ -1,18 +1,18 @@
 //! Transport construction for MCP server connections.
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use anyhow::Result;
-use rmcp::ServiceExt;
-use rmcp::service::{RoleClient, RunningService};
-use rmcp::transport::streamable_http_client::{
-    StreamableHttpClientTransportConfig, StreamableHttpClientWorker,
+use rmcp::{
+    ServiceExt,
+    service::{RoleClient, RunningService},
+    transport::{
+        streamable_http_client::{StreamableHttpClientTransportConfig, StreamableHttpClientWorker},
+        worker::WorkerTransport,
+    },
 };
-use rmcp::transport::worker::WorkerTransport;
 
-use super::oauth::OAuthStatusTx;
-use super::types::expand_env;
+use super::{expand_env, oauth::OAuthStatusTx};
 
 /// Connect to a remote MCP server over Streamable HTTP.
 ///
@@ -35,7 +35,7 @@ pub async fn connect_http(
     credential_dir: Option<&Path>,
     status_tx: Option<OAuthStatusTx>,
 ) -> Result<RunningService<RoleClient, ()>> {
-    let expanded = headers.map(|h| expand_env(h)).unwrap_or_default();
+    let expanded = headers.map(expand_env).unwrap_or_default();
     let has_explicit_auth = expanded
         .keys()
         .any(|k| k.eq_ignore_ascii_case("Authorization"));
@@ -77,18 +77,30 @@ pub async fn connect_http(
     // (server_id comes from user config keys which may contain `/`, `..`, etc.).
     let safe_id: String = server_id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let credential_path = cred_dir.join(format!("{safe_id}.json"));
 
     // First attempt — may use stored (cached) credentials.
     let first_result = oauth_connect(
-        server_id, url, &expanded, credential_path.clone(),
-        client_id, client_secret, status_tx.clone(),
-    ).await;
+        server_id,
+        url,
+        &expanded,
+        credential_path.clone(),
+        client_id,
+        client_secret,
+        status_tx.clone(),
+    )
+    .await;
 
     match first_result {
-        Ok(service) => return Ok(service),
+        Ok(service) => Ok(service),
         Err(e) if is_auth_error(&e) && credential_path.exists() => {
             // Stored credentials are stale (expired/revoked) — clear them and
             // re-authorize, which will trigger the browser-based OAuth flow.
@@ -99,9 +111,15 @@ pub async fn connect_http(
             let _ = tokio::fs::remove_file(&credential_path).await;
 
             oauth_connect(
-                server_id, url, &expanded, credential_path,
-                client_id, client_secret, status_tx,
-            ).await
+                server_id,
+                url,
+                &expanded,
+                credential_path,
+                client_id,
+                client_secret,
+                status_tx,
+            )
+            .await
         }
         other => other,
     }
@@ -137,8 +155,14 @@ async fn oauth_connect(
     status_tx: Option<OAuthStatusTx>,
 ) -> Result<RunningService<RoleClient, ()>> {
     let auth_client = super::oauth::authorize(
-        server_id, url, credential_path, client_id, client_secret, status_tx,
-    ).await?;
+        server_id,
+        url,
+        credential_path,
+        client_id,
+        client_secret,
+        status_tx,
+    )
+    .await?;
 
     let config = build_config(url, expanded);
     let worker = StreamableHttpClientWorker::new(auth_client, config);

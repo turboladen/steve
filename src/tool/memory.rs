@@ -45,10 +45,15 @@ fn memory_path(ctx: &ToolContext) -> Option<PathBuf> {
 }
 
 fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
-    let action = args
+    let raw_action = args
         .get("action")
         .and_then(|v| v.as_str())
         .unwrap_or("read");
+    let action: super::MemoryAction = raw_action.parse().map_err(|_| {
+        anyhow::anyhow!(
+            "unknown memory action: '{raw_action}'. Use 'read', 'append', or 'replace'."
+        )
+    })?;
 
     let Some(path) = memory_path(&ctx) else {
         return Ok(ToolOutput {
@@ -59,7 +64,7 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
     };
 
     match action {
-        "read" => {
+        super::MemoryAction::Read => {
             let content = match std::fs::File::open(&path) {
                 Ok(file) => {
                     use std::io::Read;
@@ -85,11 +90,8 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
                 })
             }
         }
-        "append" => {
-            let content = args
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+        super::MemoryAction::Append => {
+            let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
             if content.is_empty() {
                 return Ok(ToolOutput {
                     title: "memory append".to_string(),
@@ -125,11 +127,8 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
                 is_error: false,
             })
         }
-        "replace" => {
-            let content = args
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+        super::MemoryAction::Replace => {
+            let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
             if content.is_empty() {
                 return Ok(ToolOutput {
                     title: "memory replace".to_string(),
@@ -149,7 +148,7 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
                 .truncate(true)
                 .open(&path)?;
             file.lock()?;
-            write!(&file, "{content}\n")?;
+            writeln!(&file, "{content}")?;
             let _ = file.unlock();
 
             Ok(ToolOutput {
@@ -158,11 +157,6 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
                 is_error: false,
             })
         }
-        _ => Ok(ToolOutput {
-            title: "memory".to_string(),
-            output: format!("Error: unknown action '{action}'. Use 'read', 'append', or 'replace'."),
-            is_error: true,
-        }),
     }
 }
 
@@ -206,8 +200,7 @@ mod tests {
     #[test]
     fn read_empty_memory() {
         let dir = tempfile::tempdir().unwrap();
-        let result =
-            execute(serde_json::json!({"action": "read"}), test_ctx(dir.path())).unwrap();
+        let result = execute(serde_json::json!({"action": "read"}), test_ctx(dir.path())).unwrap();
         assert!(!result.is_error);
         assert!(result.output.contains("empty"));
     }
@@ -240,10 +233,15 @@ mod tests {
     #[test]
     fn unknown_action_errors() {
         let dir = tempfile::tempdir().unwrap();
-        let result =
-            execute(serde_json::json!({"action": "badaction"}), test_ctx(dir.path())).unwrap();
-        assert!(result.is_error);
-        assert!(result.output.contains("unknown action"));
+        let err = execute(
+            serde_json::json!({"action": "badaction"}),
+            test_ctx(dir.path()),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("unknown memory action"),
+            "expected parse error, got: {err}"
+        );
     }
 
     #[test]
@@ -261,7 +259,10 @@ mod tests {
         )
         .unwrap();
         let result = execute(serde_json::json!({"action": "read"}), ctx).unwrap();
-        assert!(!result.output.contains("old stuff"), "old content should be gone");
+        assert!(
+            !result.output.contains("old stuff"),
+            "old content should be gone"
+        );
         assert!(result.output.contains("New content only"));
     }
 

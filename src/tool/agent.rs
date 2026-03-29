@@ -12,8 +12,20 @@ use strum::{Display, EnumIter, EnumString, IntoStaticStr};
 use super::{ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput};
 
 /// Types of child agents with different tool access and model selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize,
-         EnumString, Display, EnumIter, IntoStaticStr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    EnumString,
+    Display,
+    EnumIter,
+    IntoStaticStr,
+)]
 #[serde(rename_all = "lowercase")]
 #[strum(serialize_all = "lowercase")]
 pub enum AgentType {
@@ -69,6 +81,47 @@ impl AgentType {
             ],
         }
     }
+
+    /// Build a focused system prompt for a sub-agent of this type.
+    pub fn build_prompt(self, task: &str, context: Option<&str>) -> String {
+        let type_label = match self {
+            AgentType::Explore => "exploration",
+            AgentType::Plan => "architecture analysis",
+            AgentType::General => "implementation",
+        };
+
+        let tool_guidance = match self {
+            AgentType::Explore => {
+                "\
+You have read-only tools: read, grep, glob, list, symbols. \
+Search efficiently — use grep to find relevant code, then read specific sections. \
+Use glob for file discovery. Use symbols for structural queries."
+            }
+            AgentType::Plan => {
+                "\
+You have read-only tools plus LSP for semantic analysis: read, grep, glob, list, symbols, lsp. \
+Use LSP diagnostics, go-to-definition, and find-references for accurate cross-file analysis. \
+Focus on architecture, design, and feasibility."
+            }
+            AgentType::General => {
+                "\
+You have full tool access (read, write, edit, bash, etc.). \
+Follow the same safety practices as the parent agent. \
+Write operations may require user permission."
+            }
+        };
+
+        let ctx_section = context
+            .map(|c| format!("\n\nAdditional context:\n{c}"))
+            .unwrap_or_default();
+
+        format!(
+            "You are a focused {type_label} sub-agent. Your task:\n\n\
+             {task}{ctx_section}\n\n\
+             {tool_guidance}\n\n\
+             Be concise and thorough. When done, provide a clear summary of your findings or work."
+        )
+    }
 }
 
 pub fn tool() -> ToolEntry {
@@ -77,7 +130,12 @@ pub fn tool() -> ToolEntry {
     ToolEntry {
         def: ToolDef {
             name: ToolName::Agent,
-            description: func.get("description").unwrap().as_str().unwrap().to_string(),
+            description: func
+                .get("description")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string(),
             parameters: func.get("parameters").cloned().unwrap(),
         },
         handler: Box::new(execute),
@@ -192,14 +250,10 @@ mod tests {
     fn general_has_most_tools() {
         let tools = AgentType::General.allowed_tools();
         // General should have all tools except Agent
-        let all_except_agent: Vec<ToolName> = ToolName::iter()
-            .filter(|t| *t != ToolName::Agent)
-            .collect();
+        let all_except_agent: Vec<ToolName> =
+            ToolName::iter().filter(|t| *t != ToolName::Agent).collect();
         for t in &all_except_agent {
-            assert!(
-                tools.contains(t),
-                "General agent should include {t}"
-            );
+            assert!(tools.contains(t), "General agent should include {t}");
         }
     }
 

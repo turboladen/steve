@@ -178,9 +178,21 @@ impl McpOverlayState {
         // Generous upper bound on rendered lines per tab (~4 lines per item).
         let max = match self.active_tab {
             McpTab::Servers => servers.len().saturating_mul(6),
-            McpTab::Tools => servers.iter().map(|s| s.tools.len()).sum::<usize>().saturating_mul(4),
-            McpTab::Resources => servers.iter().map(|s| s.resources.len()).sum::<usize>().saturating_mul(4),
-            McpTab::Prompts => servers.iter().map(|s| s.prompts.len()).sum::<usize>().saturating_mul(4),
+            McpTab::Tools => servers
+                .iter()
+                .map(|s| s.tools.len())
+                .sum::<usize>()
+                .saturating_mul(4),
+            McpTab::Resources => servers
+                .iter()
+                .map(|s| s.resources.len())
+                .sum::<usize>()
+                .saturating_mul(4),
+            McpTab::Prompts => servers
+                .iter()
+                .map(|s| s.prompts.len())
+                .sum::<usize>()
+                .saturating_mul(4),
         };
         self.scroll_offsets[idx] = self.scroll_offsets[idx].saturating_add(n).min(max);
     }
@@ -256,9 +268,7 @@ fn build_servers_content<'a>(servers: &[&McpServerInfo], theme: &'a Theme) -> Ve
             Span::styled(format!("  {icon} "), Style::default().fg(icon_color)),
             Span::styled(
                 server.server_id.clone(),
-                Style::default()
-                    .fg(theme.fg)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("  [{}]", server.transport),
@@ -840,11 +850,7 @@ mod tests {
     #[test]
     fn render_filtered_title_shows_server_id() {
         let mut state = McpOverlayState::default();
-        state.open(
-            McpTab::Tools,
-            sample_snapshot(),
-            Some("github".to_string()),
-        );
+        state.open(McpTab::Tools, sample_snapshot(), Some("github".to_string()));
         let area = Rect::new(0, 0, 80, 30);
         let text = render_overlay_to_string(80, 30, &state, area);
         // Title should include the filter server id (with em-dash separator)

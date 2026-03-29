@@ -4,180 +4,199 @@
 //! MCP tools bypass the `ToolName` enum entirely — they have their own registry
 //! and execution path, integrated surgically into `stream.rs`.
 
+mod manager;
 pub mod oauth;
+mod server;
 mod transport;
-pub mod types;
+
+pub use manager::McpManager;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
-use std::process::Stdio;
-
-use anyhow::{Context, Result};
-use rmcp::ServiceExt;
-use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Prompt, RawContent, ReadResourceRequestParams, Resource,
-    ResourceContents, Tool,
-};
-use rmcp::service::{Peer, RoleClient, RunningService};
-use rmcp::transport::TokioChildProcess;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::io::AsyncBufReadExt;
 
-use types::{McpServerConfig, expand_env, parse_prefixed_tool_name, prefixed_tool_name};
-
-/// A connected MCP server instance wrapping an `rmcp` client session.
-struct McpServer {
-    server_id: String,
-    /// The running rmcp service (holds the peer + cancel token).
-    service: RunningService<RoleClient, ()>,
-    /// Cached tool definitions from the server.
-    cached_tools: Vec<Tool>,
-    /// Cached resource list from the server.
-    cached_resources: Vec<Resource>,
-    /// Cached prompt list from the server.
-    cached_prompts: Vec<Prompt>,
+/// Configuration for a single MCP server.
+///
+/// Uses `#[serde(untagged)]` so that a JSON object with `"url"` deserializes as
+/// `Http` and one with `"command"` deserializes as `Stdio`. **Http must come
+/// first** — serde tries variants in declaration order.
+///
+/// # Examples
+///
+/// GitHub MCP server (just a URL — Steve has built-in OAuth credentials):
+///
+/// ```
+/// # use steve::mcp::McpServerConfig;
+/// let config: McpServerConfig = serde_json::from_str(r#"{
+///     "url": "https://api.githubcopilot.com/mcp/"
+/// }"#).unwrap();
+/// assert!(config.is_http());
+/// ```
+///
+/// Remote server with a custom OAuth client_id (for servers that don't
+/// support dynamic client registration and aren't in Steve's built-in list):
+///
+/// ```
+/// # use steve::mcp::McpServerConfig;
+/// let config: McpServerConfig = serde_json::from_str(r#"{
+///     "url": "https://mcp.example.com",
+///     "client_id": "my-app-client-id"
+/// }"#).unwrap();
+/// assert!(config.is_http());
+/// ```
+///
+/// Remote server with a static bearer token:
+///
+/// ```
+/// # use steve::mcp::McpServerConfig;
+/// let config: McpServerConfig = serde_json::from_str(r#"{
+///     "url": "https://mcp.example.com",
+///     "headers": { "Authorization": "Bearer ${MCP_TOKEN}" }
+/// }"#).unwrap();
+/// assert!(config.is_http());
+/// ```
+///
+/// Local stdio server (child process):
+///
+/// ```
+/// # use steve::mcp::McpServerConfig;
+/// let config: McpServerConfig = serde_json::from_str(r#"{
+///     "command": "npx",
+///     "args": ["-y", "@modelcontextprotocol/server-github"],
+///     "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" }
+/// }"#).unwrap();
+/// assert!(!config.is_http());
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum McpServerConfig {
+    /// HTTP/SSE remote server — just needs a URL.
+    Http {
+        url: String,
+        /// Optional static headers (e.g., for pre-configured bearer tokens).
+        /// Values support `${VAR}` expansion.
+        #[serde(default)]
+        headers: Option<HashMap<String, String>>,
+        /// Optional OAuth client_id for servers that don't support dynamic
+        /// client registration (RFC 7591). If omitted, Steve tries dynamic
+        /// registration first, then fails if the server doesn't support it.
+        #[serde(default)]
+        client_id: Option<String>,
+        /// Optional OAuth client_secret. Required by some providers (e.g.,
+        /// GitHub OAuth Apps). Supports `${VAR}` expansion for secrets stored
+        /// in environment variables.
+        #[serde(default)]
+        client_secret: Option<String>,
+    },
+    /// Stdio child-process server (existing behavior).
+    Stdio {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        env: HashMap<String, String>,
+    },
 }
 
-impl McpServer {
-    /// Connect to an MCP server, complete the handshake, and cache tool definitions.
-    ///
-    /// Supports both stdio (child process) and HTTP (streamable HTTP) transports.
-    /// `credential_dir` is the directory for storing OAuth credentials (HTTP only).
-    async fn spawn(
-        server_id: String,
-        config: &McpServerConfig,
-        credential_dir: Option<&std::path::Path>,
-        status_tx: Option<oauth::OAuthStatusTx>,
-    ) -> Result<Self> {
-        let service = match config {
-            McpServerConfig::Stdio { command, args, env } => {
-                let expanded_env = expand_env(env);
+impl McpServerConfig {
+    /// Whether this is an HTTP remote server.
+    pub fn is_http(&self) -> bool {
+        matches!(self, Self::Http { .. })
+    }
+}
 
-                // Build the child process command
-                let mut cmd = tokio::process::Command::new(command);
-                cmd.args(args);
-                for (key, value) in &expanded_env {
-                    cmd.env(key, value);
-                }
+/// Prefix for MCP tool names.
+pub const MCP_NAME_PREFIX: &str = "mcp";
 
-                // Spawn via rmcp's TokioChildProcess transport.
-                // Use the builder API to capture stderr (default is inherit, which corrupts the TUI).
-                let (transport, stderr) = TokioChildProcess::builder(cmd)
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .context("failed to spawn MCP server process")?;
+/// Separator between prefix, server ID, and tool name.
+pub const MCP_PREFIX_SEP: &str = "__";
 
-                // Drain stderr in the background, routing lines to tracing so they
-                // appear in the log file instead of corrupting the terminal.
-                if let Some(stderr) = stderr {
-                    let sid = server_id.clone();
-                    tokio::spawn(async move {
-                        let reader = tokio::io::BufReader::new(stderr);
-                        let mut lines = reader.lines();
-                        while let Ok(Some(line)) = lines.next_line().await {
-                            tracing::debug!(server = %sid, "mcp stderr: {line}");
-                        }
-                    });
-                }
+/// Build a prefixed MCP tool name: `mcp__{server_id}__{tool_name}`.
+pub fn prefixed_tool_name(server_id: &str, tool_name: &str) -> String {
+    format!("{MCP_NAME_PREFIX}{MCP_PREFIX_SEP}{server_id}{MCP_PREFIX_SEP}{tool_name}")
+}
 
-                // Perform the MCP handshake — `()` implements the default ClientHandler
-                let svc: RunningService<RoleClient, ()> = ().serve(transport).await
-                    .map_err(|e| anyhow::anyhow!("MCP handshake failed for '{server_id}': {e}"))?;
-                svc
-            }
-            McpServerConfig::Http { url, headers, client_id, client_secret } => {
-                let expanded_secret = client_secret.as_ref().map(|s| types::expand_env_single(s));
-                transport::connect_http(&server_id, url, headers.as_ref(), client_id.as_deref(), expanded_secret.as_deref(), credential_dir, status_tx).await?
-            }
-        };
+/// Parse a prefixed MCP tool name back into `(server_id, tool_name)`.
+/// Returns `None` if the name doesn't match the expected format.
+pub fn parse_prefixed_tool_name(prefixed: &str) -> Option<(&str, &str)> {
+    let rest = prefixed.strip_prefix(MCP_NAME_PREFIX)?;
+    let rest = rest.strip_prefix(MCP_PREFIX_SEP)?;
+    let sep_pos = rest.find(MCP_PREFIX_SEP)?;
+    let server_id = &rest[..sep_pos];
+    let tool_name = &rest[sep_pos + MCP_PREFIX_SEP.len()..];
+    if server_id.is_empty() || tool_name.is_empty() {
+        return None;
+    }
+    Some((server_id, tool_name))
+}
 
-        // Cache tool definitions
-        let cached_tools = service
-            .peer()
-            .list_all_tools()
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(server = %server_id, error = %e, "failed to list MCP tools");
-                Vec::new()
-            });
+/// Validate that a server ID is safe for use in prefixed tool names.
+/// Rejects IDs containing the separator (`__`) to avoid ambiguous parsing.
+pub fn validate_server_id(server_id: &str) -> Result<(), String> {
+    if server_id.is_empty() {
+        return Err("MCP server ID cannot be empty".into());
+    }
+    if server_id.contains(MCP_PREFIX_SEP) {
+        return Err(format!(
+            "MCP server ID '{server_id}' must not contain '{MCP_PREFIX_SEP}' (double underscore)"
+        ));
+    }
+    Ok(())
+}
 
-        // Cache resource list (best-effort)
-        let cached_resources = service
-            .peer()
-            .list_all_resources()
-            .await
-            .unwrap_or_else(|e| {
-                tracing::debug!(server = %server_id, error = %e, "failed to list MCP resources (may not be supported)");
-                Vec::new()
-            });
-
-        // Cache prompt list (best-effort)
-        let cached_prompts = service
-            .peer()
-            .list_all_prompts()
-            .await
-            .unwrap_or_else(|e| {
-                tracing::debug!(server = %server_id, error = %e, "failed to list MCP prompts (may not be supported)");
-                Vec::new()
-            });
-
-        let transport_kind = if config.is_http() { "http" } else { "stdio" };
-        tracing::info!(
-            server = %server_id,
-            tools = cached_tools.len(),
-            resources = cached_resources.len(),
-            prompts = cached_prompts.len(),
-            transport = transport_kind,
-            "MCP server connected"
-        );
-
-        Ok(Self {
-            server_id,
-            service,
-            cached_tools,
-            cached_resources,
-            cached_prompts,
+/// Expand `${VAR}` patterns in environment variable values from the process environment.
+/// Missing vars are logged as warnings and left unexpanded.
+pub fn expand_env(env: &HashMap<String, String>) -> HashMap<String, String> {
+    env.iter()
+        .map(|(key, value)| {
+            let expanded = expand_env_value(value);
+            (key.clone(), expanded)
         })
-    }
+        .collect()
+}
 
-    fn peer(&self) -> &Peer<RoleClient> {
-        self.service.peer()
-    }
+/// Expand `${VAR}` patterns in a single string value (public API).
+pub fn expand_env_single(value: &str) -> String {
+    expand_env_value(value)
+}
 
-    /// Call a tool on this server.
-    async fn call_tool(&self, name: &str, args: Option<serde_json::Map<String, Value>>) -> Result<CallToolResult> {
-        let mut params = CallToolRequestParams::new(name.to_string());
-        if let Some(args) = args {
-            params = params.with_arguments(args);
+/// Expand `${VAR}` patterns in a single string value.
+fn expand_env_value(value: &str) -> String {
+    let mut result = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '$' && chars.peek() == Some(&'{') {
+            chars.next(); // consume '{'
+            let mut var_name = String::new();
+            let mut found_closing_brace = false;
+            for c in chars.by_ref() {
+                if c == '}' {
+                    found_closing_brace = true;
+                    break;
+                }
+                var_name.push(c);
+            }
+            if found_closing_brace {
+                match std::env::var(&var_name) {
+                    Ok(val) => result.push_str(&val),
+                    Err(_) => {
+                        tracing::warn!(var = %var_name, "MCP env var not found, leaving unexpanded");
+                        result.push_str(&format!("${{{var_name}}}"));
+                    }
+                }
+            } else {
+                // No closing brace found — treat the sequence as literal text
+                result.push_str("${");
+                result.push_str(&var_name);
+            }
+        } else {
+            result.push(ch);
         }
-        self.peer()
-            .call_tool(params)
-            .await
-            .map_err(|e| anyhow::anyhow!("MCP tool call failed on '{}': {e}", self.server_id))
     }
 
-    /// Read a resource by URI.
-    async fn read_resource(&self, uri: &str) -> Result<String> {
-        let params = ReadResourceRequestParams::new(uri);
-        let result = self
-            .peer()
-            .read_resource(params)
-            .await
-            .map_err(|e| anyhow::anyhow!("MCP read_resource failed on '{}': {e}", self.server_id))?;
-
-        // Concatenate all text content from the resource
-        let text: String = result
-            .contents
-            .iter()
-            .filter_map(|rc| match rc {
-                ResourceContents::TextResourceContents { text, .. } => Some(text.as_str()),
-                ResourceContents::BlobResourceContents { .. } => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        Ok(text)
-    }
+    result
 }
 
 /// Lock-free snapshot of MCP tool metadata.
@@ -189,9 +208,9 @@ impl McpServer {
 #[derive(Clone, Default)]
 pub struct McpToolSnapshot {
     /// Set of all prefixed MCP tool names for O(1) lookup.
-    known_tools: HashSet<String>,
+    pub(crate) known_tools: HashSet<String>,
     /// Pre-built OpenAI-compatible tool definitions.
-    tool_defs: Vec<Value>,
+    pub(crate) tool_defs: Vec<Value>,
 }
 
 impl McpToolSnapshot {
@@ -211,393 +230,12 @@ impl McpToolSnapshot {
     }
 }
 
-/// Singleton coordinator for all MCP server connections.
-pub struct McpManager {
-    servers: HashMap<String, McpServer>,
-    /// Servers that were configured but failed to connect.
-    /// Maps server_id → error message for sidebar/diagnostics display.
-    failed_servers: HashMap<String, String>,
-    /// Lock-free snapshot rebuilt after server initialization.
-    snapshot: Arc<McpToolSnapshot>,
-}
-
-impl McpManager {
-    pub fn new() -> Self {
-        Self {
-            servers: HashMap::new(),
-            failed_servers: HashMap::new(),
-            snapshot: Arc::new(McpToolSnapshot::default()),
-        }
-    }
-
-    /// Spawn all configured MCP servers. Failures are logged per-server; healthy
-    /// servers continue. Rebuilds the lock-free tool snapshot when done.
-    ///
-    /// `data_dir` is the application data directory; OAuth credentials are stored
-    /// under `{data_dir}/oauth/`. Pass `None` if no data directory is available
-    /// (OAuth-requiring servers will fail gracefully).
-    pub async fn start_servers(
-        &mut self,
-        configs: &HashMap<String, McpServerConfig>,
-        data_dir: Option<&std::path::Path>,
-        status_tx: Option<oauth::OAuthStatusTx>,
-    ) {
-        let credential_dir = data_dir.map(|d| d.join("oauth"));
-        if let Some(ref dir) = credential_dir {
-            if let Err(e) = tokio::fs::create_dir_all(dir).await {
-                tracing::warn!(error = %e, "failed to create OAuth credential directory");
-            }
-        }
-
-        for (server_id, config) in configs {
-            if let Err(e) = types::validate_server_id(server_id) {
-                tracing::error!(server = %server_id, error = %e, "invalid MCP server ID, skipping");
-                if let Some(ref tx) = status_tx {
-                    let _ = tx.send(format!("\u{26a0} MCP '{server_id}': {e}"));
-                }
-                self.failed_servers.insert(server_id.clone(), e.to_string());
-                continue;
-            }
-            if let McpServerConfig::Http { url, .. } = config {
-                if url::Url::parse(url).is_err() {
-                    tracing::error!(server = %server_id, url = %url, "invalid MCP server URL, skipping");
-                    let msg = format!("invalid URL: {url}");
-                    if let Some(ref tx) = status_tx {
-                        let _ = tx.send(format!("\u{26a0} MCP '{server_id}': {msg}"));
-                    }
-                    self.failed_servers.insert(server_id.clone(), msg);
-                    continue;
-                }
-            }
-            match McpServer::spawn(
-                server_id.clone(),
-                config,
-                credential_dir.as_deref(),
-                status_tx.clone(),
-            )
-            .await
-            {
-                Ok(server) => {
-                    self.servers.insert(server_id.clone(), server);
-                }
-                Err(e) => {
-                    tracing::error!(server = %server_id, error = %e, "failed to start MCP server");
-                    // Truncate error to first line for sidebar display.
-                    let msg = e.to_string();
-                    let short = msg.lines().next().unwrap_or("connection failed").to_string();
-                    self.failed_servers.insert(server_id.clone(), short.clone());
-                    // Also send to TUI so user sees the failure even if logs aren't working.
-                    if let Some(ref tx) = status_tx {
-                        let _ = tx.send(format!(
-                            "\u{26a0} MCP '{server_id}': failed to start \u{2014} {short}"
-                        ));
-                    }
-                }
-            }
-        }
-        self.rebuild_snapshot();
-    }
-
-    /// Rebuild the lock-free tool snapshot from current server state.
-    fn rebuild_snapshot(&mut self) {
-        let mut known_tools = HashSet::new();
-        let mut tool_defs = Vec::new();
-
-        for (server_id, server) in &self.servers {
-            for tool in &server.cached_tools {
-                let prefixed = prefixed_tool_name(server_id, &tool.name);
-                known_tools.insert(prefixed.clone());
-
-                let description = tool
-                    .description
-                    .as_deref()
-                    .unwrap_or("MCP tool");
-                let parameters = tool.schema_as_json_value();
-                tool_defs.push(serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": prefixed,
-                        "description": description,
-                        "parameters": parameters,
-                    }
-                }));
-            }
-        }
-
-        self.snapshot = Arc::new(McpToolSnapshot {
-            known_tools,
-            tool_defs,
-        });
-    }
-
-    /// Get a lock-free snapshot of tool metadata for use outside the mutex.
-    pub fn tool_snapshot(&self) -> Arc<McpToolSnapshot> {
-        Arc::clone(&self.snapshot)
-    }
-
-    /// Whether any MCP servers are connected.
-    pub fn has_servers(&self) -> bool {
-        !self.servers.is_empty()
-    }
-
-    /// Aggregate tool definitions from all servers, paired with their server ID.
-    pub fn all_tool_defs(&self) -> Vec<(&str, &Tool)> {
-        self.servers
-            .iter()
-            .flat_map(|(id, server)| {
-                server.cached_tools.iter().map(move |tool| (id.as_str(), tool))
-            })
-            .collect()
-    }
-
-    /// Call an MCP tool by its prefixed name. Returns `(text_result, is_error)`.
-    ///
-    /// This acquires no additional locks — callers should drop the McpManager
-    /// lock before calling if possible, but the method itself only does IPC.
-    pub async fn call_tool(&self, prefixed_name: &str, args: Value) -> Result<(String, bool)> {
-        let (server_id, tool_name) = parse_prefixed_tool_name(prefixed_name)
-            .ok_or_else(|| anyhow::anyhow!("invalid MCP tool name: {prefixed_name}"))?;
-
-        let server = self
-            .servers
-            .get(server_id)
-            .ok_or_else(|| anyhow::anyhow!("MCP server '{server_id}' not found"))?;
-
-        let args_map = match args {
-            Value::Object(map) => Some(map),
-            Value::Null => None,
-            other => {
-                tracing::warn!(
-                    tool = %prefixed_name,
-                    "MCP tool args is not an object or null, wrapping in {{\"input\": ...}}"
-                );
-                Some(serde_json::Map::from_iter([(
-                    "input".to_string(),
-                    other,
-                )]))
-            }
-        };
-
-        let result = server.call_tool(tool_name, args_map).await?;
-        let is_error = result.is_error.unwrap_or(false);
-        Ok((format_call_result(&result), is_error))
-    }
-
-    /// Aggregate prompts from all servers.
-    pub fn all_prompts(&self) -> Vec<(&str, &Prompt)> {
-        self.servers
-            .iter()
-            .flat_map(|(id, server)| {
-                server.cached_prompts.iter().map(move |p| (id.as_str(), p))
-            })
-            .collect()
-    }
-
-    /// Aggregate resources from all servers.
-    pub fn all_resources(&self) -> Vec<(&str, &Resource)> {
-        self.servers
-            .iter()
-            .flat_map(|(id, server)| {
-                server.cached_resources.iter().map(move |r| (id.as_str(), r))
-            })
-            .collect()
-    }
-
-    /// Read a specific resource from a server.
-    pub async fn read_resource(&self, server_id: &str, uri: &str) -> Result<String> {
-        let server = self
-            .servers
-            .get(server_id)
-            .ok_or_else(|| anyhow::anyhow!("MCP server '{server_id}' not found"))?;
-        server.read_resource(uri).await
-    }
-
-    /// Refresh cached resources from all servers (e.g., on /new or session switch).
-    pub async fn refresh_resources(&mut self) {
-        for (server_id, server) in &mut self.servers {
-            match server.peer().list_all_resources().await {
-                Ok(resources) => server.cached_resources = resources,
-                Err(e) => {
-                    tracing::debug!(server = %server_id, error = %e, "failed to refresh MCP resources");
-                }
-            }
-        }
-    }
-
-    /// Graceful shutdown of all servers.
-    pub async fn shutdown(&mut self) {
-        for (server_id, server) in self.servers.drain() {
-            tracing::info!(server = %server_id, "shutting down MCP server");
-            let _ = server.service.cancel().await;
-        }
-    }
-
-    /// Structured server status for sidebar display, including failed servers.
-    pub fn server_status(&self) -> Vec<crate::ui::sidebar::SidebarMcp> {
-        let mut result: Vec<crate::ui::sidebar::SidebarMcp> = self
-            .servers
-            .iter()
-            .map(|(id, server)| crate::ui::sidebar::SidebarMcp {
-                server_id: id.clone(),
-                tool_count: server.cached_tools.len(),
-                resource_count: server.cached_resources.len(),
-                prompt_count: server.cached_prompts.len(),
-                connected: true,
-                error: None,
-            })
-            .collect();
-
-        for (id, error) in &self.failed_servers {
-            result.push(crate::ui::sidebar::SidebarMcp {
-                server_id: id.clone(),
-                tool_count: 0,
-                resource_count: 0,
-                prompt_count: 0,
-                connected: false,
-                error: Some(error.clone()),
-            });
-        }
-
-        result
-    }
-
-    /// Build an owned snapshot of MCP data for the overlay UI.
-    pub fn overlay_snapshot(
-        &self,
-        configs: &HashMap<String, McpServerConfig>,
-    ) -> crate::ui::mcp_overlay::McpSnapshot {
-        use crate::ui::mcp_overlay::*;
-
-        let mut servers: Vec<McpServerInfo> = self
-            .servers
-            .iter()
-            .map(|(id, server)| {
-                let transport = configs
-                    .get(id)
-                    .map(|c| if c.is_http() { "http" } else { "stdio" })
-                    .unwrap_or("unknown");
-
-                McpServerInfo {
-                    server_id: id.clone(),
-                    connected: true,
-                    error: None,
-                    transport,
-                    tools: server
-                        .cached_tools
-                        .iter()
-                        .map(|t| McpToolInfo {
-                            name: t.name.to_string(),
-                            description: t.description.as_deref().unwrap_or("").to_string(),
-                        })
-                        .collect(),
-                    resources: server
-                        .cached_resources
-                        .iter()
-                        .map(|r| McpResourceInfo {
-                            name: r.name.clone(),
-                            uri: r.uri.as_str().to_string(),
-                            description: r.description.as_deref().unwrap_or("").to_string(),
-                        })
-                        .collect(),
-                    prompts: server
-                        .cached_prompts
-                        .iter()
-                        .map(|p| McpPromptInfo {
-                            name: p.name.clone(),
-                            description: p.description.as_deref().unwrap_or("").to_string(),
-                            arguments: p
-                                .arguments
-                                .as_deref()
-                                .unwrap_or(&[])
-                                .iter()
-                                .map(|a| McpPromptArg {
-                                    name: a.name.clone(),
-                                    description: a.description.as_deref().unwrap_or("").to_string(),
-                                    required: a.required.unwrap_or(false),
-                                })
-                                .collect(),
-                        })
-                        .collect(),
-                }
-            })
-            .collect();
-
-        // Add failed servers
-        for (id, error) in &self.failed_servers {
-            let transport = configs
-                .get(id)
-                .map(|c| if c.is_http() { "http" } else { "stdio" })
-                .unwrap_or("unknown");
-
-            servers.push(McpServerInfo {
-                server_id: id.clone(),
-                connected: false,
-                error: Some(error.clone()),
-                transport,
-                tools: vec![],
-                resources: vec![],
-                prompts: vec![],
-            });
-        }
-
-        // Sort by server_id for consistent ordering
-        servers.sort_by(|a, b| a.server_id.cmp(&b.server_id));
-
-        McpSnapshot { servers }
-    }
-
-    /// Summary of connected servers for status display.
-    pub fn server_summary(&self) -> Vec<String> {
-        self.servers
-            .iter()
-            .map(|(id, server)| {
-                let mut parts = Vec::new();
-                if server.cached_tools.len() > 0 {
-                    parts.push(format!("{} tools", server.cached_tools.len()));
-                }
-                if server.cached_resources.len() > 0 {
-                    parts.push(format!("{} resources", server.cached_resources.len()));
-                }
-                if server.cached_prompts.len() > 0 {
-                    parts.push(format!("{} prompts", server.cached_prompts.len()));
-                }
-                if parts.is_empty() {
-                    id.clone()
-                } else {
-                    format!("{id} ({})", parts.join(", "))
-                }
-            })
-            .collect()
-    }
-}
-
-/// Extract text content from a `CallToolResult`.
-fn format_call_result(result: &CallToolResult) -> String {
-    result
-        .content
-        .iter()
-        .filter_map(|content| match &content.raw {
-            RawContent::Text(text) => Some(text.text.as_str()),
-            RawContent::Image(_) => Some("[image content]"),
-            RawContent::Audio(_) => Some("[audio content]"),
-            RawContent::Resource(_) => Some("[embedded resource]"),
-            RawContent::ResourceLink(_) => Some("[resource link]"),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// Build a human-readable permission summary for an MCP tool call.
 pub fn mcp_permission_summary(prefixed_name: &str, args: &Value) -> String {
     if let Some((server_id, tool_name)) = parse_prefixed_tool_name(prefixed_name) {
-        let args_preview = serde_json::to_string(args)
-            .unwrap_or_default();
+        let args_preview = serde_json::to_string(args).unwrap_or_default();
         let truncated = if args_preview.len() > 80 {
-            // Truncate at a char boundary to avoid panicking on multi-byte UTF-8
-            let mut end = 80;
-            while end > 0 && !args_preview.is_char_boundary(end) {
-                end -= 1;
-            }
+            let end = crate::floor_char_boundary(&args_preview, 80);
             format!("{}...", &args_preview[..end])
         } else {
             args_preview
@@ -626,10 +264,7 @@ pub async fn build_resource_context(manager: &McpManager, max_chars: usize) -> O
         match manager.read_resource(server_id, uri).await {
             Ok(content) if !content.trim().is_empty() => {
                 let truncated = if content.len() > max_chars {
-                    let mut end = max_chars;
-                    while end > 0 && !content.is_char_boundary(end) {
-                        end -= 1;
-                    }
+                    let end = crate::floor_char_boundary(&content, max_chars);
                     format!("{}...\n(truncated)", &content[..end])
                 } else {
                     content
@@ -660,31 +295,229 @@ pub async fn build_resource_context(manager: &McpManager, max_chars: usize) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rmcp::model::RawTextContent;
 
-    fn text_content(text: &str) -> rmcp::model::Content {
-        rmcp::model::Annotated::new(
-            RawContent::Text(RawTextContent {
-                text: text.into(),
-                meta: None,
-            }),
-            None,
-        )
+    #[test]
+    fn prefixed_tool_name_format() {
+        assert_eq!(
+            prefixed_tool_name("github", "search_repos"),
+            "mcp__github__search_repos"
+        );
     }
 
     #[test]
-    fn format_call_result_text_content() {
-        let result = CallToolResult::success(vec![text_content("hello world")]);
-        assert_eq!(format_call_result(&result), "hello world");
+    fn parse_prefixed_tool_name_valid() {
+        let (server, tool) = parse_prefixed_tool_name("mcp__github__search_repos").unwrap();
+        assert_eq!(server, "github");
+        assert_eq!(tool, "search_repos");
     }
 
     #[test]
-    fn format_call_result_multiple_contents() {
-        let result = CallToolResult::success(vec![
-            text_content("line 1"),
-            text_content("line 2"),
-        ]);
-        assert_eq!(format_call_result(&result), "line 1\nline 2");
+    fn parse_prefixed_tool_name_with_underscores_in_tool() {
+        let (server, tool) = parse_prefixed_tool_name("mcp__my_server__my_cool_tool").unwrap();
+        assert_eq!(server, "my_server");
+        assert_eq!(tool, "my_cool_tool");
+    }
+
+    #[test]
+    fn parse_prefixed_tool_name_invalid() {
+        assert!(parse_prefixed_tool_name("read").is_none());
+        assert!(parse_prefixed_tool_name("mcp__").is_none());
+        assert!(parse_prefixed_tool_name("mcp____tool").is_none());
+        assert!(parse_prefixed_tool_name("notmcp__server__tool").is_none());
+    }
+
+    #[test]
+    fn parse_roundtrip() {
+        let prefixed = prefixed_tool_name("fs", "read_file");
+        let (server, tool) = parse_prefixed_tool_name(&prefixed).unwrap();
+        assert_eq!(server, "fs");
+        assert_eq!(tool, "read_file");
+    }
+
+    #[test]
+    fn validate_server_id_rejects_double_underscore() {
+        assert!(validate_server_id("my__server").is_err());
+        assert!(validate_server_id("a__b__c").is_err());
+    }
+
+    #[test]
+    fn validate_server_id_rejects_empty() {
+        assert!(validate_server_id("").is_err());
+    }
+
+    #[test]
+    fn validate_server_id_accepts_valid() {
+        assert!(validate_server_id("github").is_ok());
+        assert!(validate_server_id("my_server").is_ok());
+        assert!(validate_server_id("server-1").is_ok());
+    }
+
+    #[test]
+    fn expand_env_value_no_vars() {
+        assert_eq!(expand_env_value("hello world"), "hello world");
+    }
+
+    #[test]
+    fn expand_env_value_with_known_var() {
+        // SAFETY: test-only env vars with unique names, unlikely to race with other tests.
+        unsafe { std::env::set_var("STEVE_TEST_VAR", "expanded") };
+        assert_eq!(expand_env_value("${STEVE_TEST_VAR}"), "expanded");
+        assert_eq!(
+            expand_env_value("prefix-${STEVE_TEST_VAR}-suffix"),
+            "prefix-expanded-suffix"
+        );
+        unsafe { std::env::remove_var("STEVE_TEST_VAR") };
+    }
+
+    #[test]
+    fn expand_env_value_unclosed_brace_treated_as_literal() {
+        assert_eq!(expand_env_value("${UNCLOSED"), "${UNCLOSED");
+        assert_eq!(expand_env_value("prefix-${NO_CLOSE"), "prefix-${NO_CLOSE");
+        // Normal expansion still works alongside
+        // SAFETY: test-only env var with unique name, unlikely to race with other tests.
+        unsafe { std::env::set_var("STEVE_TEST_VAR", "ok") };
+        assert_eq!(
+            expand_env_value("${STEVE_TEST_VAR}-${UNCLOSED"),
+            "ok-${UNCLOSED"
+        );
+        unsafe { std::env::remove_var("STEVE_TEST_VAR") };
+    }
+
+    #[test]
+    fn expand_env_value_unknown_var_left_unexpanded() {
+        let result = expand_env_value("${STEVE_NONEXISTENT_VAR_12345}");
+        assert_eq!(result, "${STEVE_NONEXISTENT_VAR_12345}");
+    }
+
+    #[test]
+    fn expand_env_map() {
+        // SAFETY: test-only env var with unique name, unlikely to race with other tests.
+        unsafe { std::env::set_var("STEVE_TEST_KEY", "val") };
+        let mut env = HashMap::new();
+        env.insert("TOKEN".into(), "${STEVE_TEST_KEY}".into());
+        env.insert("PLAIN".into(), "no-expansion".into());
+
+        let expanded = expand_env(&env);
+        assert_eq!(expanded["TOKEN"], "val");
+        assert_eq!(expanded["PLAIN"], "no-expansion");
+        unsafe { std::env::remove_var("STEVE_TEST_KEY") };
+    }
+
+    #[test]
+    fn mcp_server_config_stdio_deserialize() {
+        let json = r#"{
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-github"],
+            "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" }
+        }"#;
+        let config: McpServerConfig = serde_json::from_str(json).unwrap();
+        match &config {
+            McpServerConfig::Stdio { command, args, env } => {
+                assert_eq!(command, "npx");
+                assert_eq!(
+                    args,
+                    &vec![
+                        "-y".to_string(),
+                        "@modelcontextprotocol/server-github".to_string()
+                    ]
+                );
+                assert_eq!(env["GITHUB_TOKEN"], "${GITHUB_TOKEN}");
+            }
+            McpServerConfig::Http { .. } => panic!("expected Stdio variant"),
+        }
+        assert!(!config.is_http());
+    }
+
+    #[test]
+    fn mcp_server_config_minimal_stdio() {
+        let json = r#"{"command": "my-server"}"#;
+        let config: McpServerConfig = serde_json::from_str(json).unwrap();
+        match &config {
+            McpServerConfig::Stdio { command, args, env } => {
+                assert_eq!(command, "my-server");
+                assert!(args.is_empty());
+                assert!(env.is_empty());
+            }
+            McpServerConfig::Http { .. } => panic!("expected Stdio variant"),
+        }
+        assert!(!config.is_http());
+    }
+
+    #[test]
+    fn mcp_server_config_http_deserialize() {
+        let json = r#"{"url": "https://mcp.example.com/sse"}"#;
+        let config: McpServerConfig = serde_json::from_str(json).unwrap();
+        match &config {
+            McpServerConfig::Http { url, headers, .. } => {
+                assert_eq!(url, "https://mcp.example.com/sse");
+                assert!(headers.is_none());
+            }
+            McpServerConfig::Stdio { .. } => panic!("expected Http variant"),
+        }
+        assert!(config.is_http());
+    }
+
+    #[test]
+    fn mcp_server_config_http_with_headers() {
+        let json = r#"{
+            "url": "https://mcp.example.com/sse",
+            "headers": { "Authorization": "Bearer tok_123" }
+        }"#;
+        let config: McpServerConfig = serde_json::from_str(json).unwrap();
+        match &config {
+            McpServerConfig::Http { url, headers, .. } => {
+                assert_eq!(url, "https://mcp.example.com/sse");
+                let h = headers.as_ref().expect("headers should be Some");
+                assert_eq!(h["Authorization"], "Bearer tok_123");
+            }
+            McpServerConfig::Stdio { .. } => panic!("expected Http variant"),
+        }
+        assert!(config.is_http());
+    }
+
+    #[test]
+    fn mcp_server_config_roundtrip_stdio() {
+        let config = McpServerConfig::Stdio {
+            command: "npx".into(),
+            args: vec!["-y".into(), "server".into()],
+            env: HashMap::from([("KEY".into(), "val".into())]),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: McpServerConfig = serde_json::from_str(&json).unwrap();
+        match back {
+            McpServerConfig::Stdio { command, args, env } => {
+                assert_eq!(command, "npx");
+                assert_eq!(args, vec!["-y", "server"]);
+                assert_eq!(env["KEY"], "val");
+            }
+            McpServerConfig::Http { .. } => panic!("expected Stdio variant"),
+        }
+    }
+
+    #[test]
+    fn mcp_server_config_ambiguous_picks_http() {
+        let json = r#"{"url": "https://example.com", "command": "npx"}"#;
+        let config: McpServerConfig = serde_json::from_str(json).unwrap();
+        assert!(matches!(config, McpServerConfig::Http { .. }));
+    }
+
+    #[test]
+    fn mcp_server_config_roundtrip_http() {
+        let config = McpServerConfig::Http {
+            url: "https://example.com".into(),
+            headers: Some(HashMap::from([("X-Key".into(), "abc".into())])),
+            client_id: None,
+            client_secret: None,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: McpServerConfig = serde_json::from_str(&json).unwrap();
+        match back {
+            McpServerConfig::Http { url, headers, .. } => {
+                assert_eq!(url, "https://example.com");
+                assert_eq!(headers.unwrap()["X-Key"], "abc");
+            }
+            McpServerConfig::Stdio { .. } => panic!("expected Http variant"),
+        }
     }
 
     #[test]
@@ -699,21 +532,10 @@ mod tests {
 
     #[test]
     fn mcp_permission_summary_truncates_safely() {
-        // Create a JSON string with a multi-byte char near the 80-byte boundary
-        let long_val = "a".repeat(75) + "🦀🦀🦀"; // 75 + 12 bytes = 87
+        let long_val = "a".repeat(75) + "🦀🦀🦀";
         let args = serde_json::json!({"key": long_val});
-        // Should not panic on multi-byte truncation
         let summary = mcp_permission_summary("mcp__s__t", &args);
         assert!(summary.contains("..."));
-    }
-
-    #[test]
-    fn mcp_manager_new_has_no_servers() {
-        let mgr = McpManager::new();
-        assert!(!mgr.has_servers());
-        assert!(mgr.all_tool_defs().is_empty());
-        assert!(mgr.all_resources().is_empty());
-        assert!(mgr.tool_snapshot().is_empty());
     }
 
     #[test]

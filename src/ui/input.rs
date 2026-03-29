@@ -1,5 +1,4 @@
-use std::path::Path;
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
 use ratatui::{
     Frame,
@@ -11,8 +10,10 @@ use ratatui::{
 use ratatui_textarea::TextArea;
 use unicode_width::UnicodeWidthChar;
 
-use super::status_line::{format_elapsed_human, format_tokens};
-use super::theme::Theme;
+use super::{
+    status_line::{format_elapsed_human, format_tokens},
+    theme::Theme,
+};
 
 /// Overhead rows above the textarea: 1 border + 1 context line.
 const INPUT_OVERHEAD: u16 = 2;
@@ -124,11 +125,14 @@ pub fn count_visual_lines(lines: &[String], width: usize) -> u16 {
     let total: u32 = lines
         .iter()
         .map(|line| {
-            let line_width: usize = line.chars().map(|c| UnicodeWidthChar::width(c).unwrap_or(0)).sum();
+            let line_width: usize = line
+                .chars()
+                .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+                .sum();
             if line_width == 0 {
                 1u32
             } else {
-                ((line_width + width - 1) / width) as u32
+                line_width.div_ceil(width) as u32
             }
         })
         .sum();
@@ -298,7 +302,12 @@ impl InputState {
     /// `available_width` is the textarea column width for wrapping calculations.
     pub fn desired_height(&self, max_height: u16, available_width: u16) -> u16 {
         let cap = max_height.max(MIN_INPUT_HEIGHT);
-        let lines: Vec<String> = self.textarea.lines().iter().map(|s| s.to_string()).collect();
+        let lines: Vec<String> = self
+            .textarea
+            .lines()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let width = available_width as usize;
         let mut visual_rows = count_visual_lines(&lines, width);
 
@@ -314,7 +323,7 @@ impl InputState {
                         .chars()
                         .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
                         .sum();
-                    if line_width > 0 && line_width % width == 0 {
+                    if line_width > 0 && line_width.is_multiple_of(width) {
                         visual_rows = visual_rows.saturating_add(1);
                     }
                 }
@@ -429,12 +438,7 @@ pub fn abbreviate_path(path: &Path) -> String {
 ///
 /// Replaces `TextArea`'s built-in rendering with a pre-wrapped `Paragraph`
 /// so that long lines wrap visually instead of scrolling horizontally.
-fn render_wrapped_textarea(
-    frame: &mut Frame,
-    area: Rect,
-    state: &mut InputState,
-    theme: &Theme,
-) {
+fn render_wrapped_textarea(frame: &mut Frame, area: Rect, state: &mut InputState, theme: &Theme) {
     let width = area.width as usize;
     let lines = state.textarea.lines();
     let (cursor_row, cursor_col) = state.textarea.cursor();
@@ -449,9 +453,10 @@ fn render_wrapped_textarea(
     // Check if textarea is empty (single empty line)
     if lines.len() == 1 && lines[0].is_empty() {
         let placeholder_style = Style::default().fg(theme.dim);
-        let mut all_lines: Vec<Line<'static>> = vec![Line::from(vec![
-            Span::styled("Type a message...", placeholder_style),
-        ])];
+        let mut all_lines: Vec<Line<'static>> = vec![Line::from(vec![Span::styled(
+            "Type a message...",
+            placeholder_style,
+        )])];
         // Show cursor at position 0
         all_lines[0] = Line::from(vec![
             Span::styled(" ", cursor_style),
@@ -475,10 +480,10 @@ fn render_wrapped_textarea(
 
         let wrapped = wrap_line_with_cursor(line, width, cur_col, normal_style, cursor_style);
 
-        if i == cursor_row {
-            if let Some(row_in_wrapped) = wrapped.cursor_visual_row {
-                cursor_visual_row = all_visual_lines.len() as u16 + row_in_wrapped as u16;
-            }
+        if i == cursor_row
+            && let Some(row_in_wrapped) = wrapped.cursor_visual_row
+        {
+            cursor_visual_row = all_visual_lines.len() as u16 + row_in_wrapped as u16;
         }
 
         all_visual_lines.extend(wrapped.visual_lines);
@@ -522,7 +527,7 @@ pub fn render_input(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // context line
-            Constraint::Min(1),   // textarea with chevron
+            Constraint::Min(1),    // textarea with chevron
         ])
         .split(inner_area);
 
@@ -544,10 +549,7 @@ pub fn render_input(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled(
-            context.working_dir.clone(),
-            Style::default().fg(theme.dim),
-        ),
+        Span::styled(context.working_dir.clone(), Style::default().fg(theme.dim)),
     ];
 
     let mut right_spans: Vec<Span> = Vec::new();
@@ -605,7 +607,7 @@ pub fn render_input(
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Length(CHEVRON_WIDTH), // "> "
-            Constraint::Min(1),               // textarea
+            Constraint::Min(1),                // textarea
         ])
         .split(textarea_area);
 
@@ -640,7 +642,11 @@ pub fn render_paste_preview(
         _ => return,
     };
 
-    let lines: Vec<&str> = paste.full_text.lines().take(MAX_PASTE_PREVIEW_LINES).collect();
+    let lines: Vec<&str> = paste
+        .full_text
+        .lines()
+        .take(MAX_PASTE_PREVIEW_LINES)
+        .collect();
     let total_lines = paste.full_text.lines().count();
     let truncated = total_lines > MAX_PASTE_PREVIEW_LINES;
 
@@ -652,7 +658,10 @@ pub fn render_paste_preview(
 
     if truncated {
         display_lines.push(Line::from(Span::styled(
-            format!("  ... ({} more lines)", total_lines - MAX_PASTE_PREVIEW_LINES),
+            format!(
+                "  ... ({} more lines)",
+                total_lines - MAX_PASTE_PREVIEW_LINES
+            ),
             Style::default().fg(theme.dim),
         )));
     }
@@ -684,15 +693,16 @@ pub fn render_paste_preview(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .title(Line::from(vec![
-            Span::styled(
-                " Paste Preview ",
-                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
-            ),
-        ]))
-        .title_bottom(Line::from(vec![
-            Span::styled(" Ctrl+P to close ", Style::default().fg(theme.dim)),
-        ]));
+        .title(Line::from(vec![Span::styled(
+            " Paste Preview ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )]))
+        .title_bottom(Line::from(vec![Span::styled(
+            " Ctrl+P to close ",
+            Style::default().fg(theme.dim),
+        )]));
 
     let paragraph = Paragraph::new(display_lines)
         .block(block)
@@ -710,7 +720,10 @@ mod tests {
         if let Ok(home) = std::env::var("HOME") {
             let test_path = Path::new(&home).join("projects").join("steve");
             let result = abbreviate_path(&test_path);
-            assert!(result.starts_with("~/"), "expected ~/ prefix, got: {result}");
+            assert!(
+                result.starts_with("~/"),
+                "expected ~/ prefix, got: {result}"
+            );
             assert!(result.contains("projects/steve"));
         }
     }
@@ -795,7 +808,10 @@ mod tests {
         for x in 0..80 {
             let cell = &buf[(x, 1)]; // context line is row 1 (after border)
             if cell.symbol() == "B" {
-                assert_eq!(cell.bg, theme.mode_build, "Build badge should have mode_build bg color");
+                assert_eq!(
+                    cell.bg, theme.mode_build,
+                    "Build badge should have mode_build bg color"
+                );
                 break;
             }
         }
@@ -809,7 +825,10 @@ mod tests {
         for x in 0..80 {
             let cell = &buf[(x, 1)];
             if cell.symbol() == "P" {
-                assert_eq!(cell.bg, theme.mode_plan, "Plan badge should have mode_plan bg color");
+                assert_eq!(
+                    cell.bg, theme.mode_plan,
+                    "Plan badge should have mode_plan bg color"
+                );
                 break;
             }
         }
@@ -824,7 +843,10 @@ mod tests {
         for x in (0..80).rev() {
             let cell = &buf[(x, 1)];
             if cell.symbol() == "3" {
-                assert_eq!(cell.fg, theme.dim, "30% should use dim color (low pressure)");
+                assert_eq!(
+                    cell.fg, theme.dim,
+                    "30% should use dim color (low pressure)"
+                );
                 break;
             }
         }
@@ -840,12 +862,18 @@ mod tests {
         for x in (0..80).rev() {
             let cell = &buf[(x, 1)];
             if cell.symbol() == "5" {
-                assert_eq!(cell.fg, theme.context_amber, "50% should use amber-brown color");
+                assert_eq!(
+                    cell.fg, theme.context_amber,
+                    "50% should use amber-brown color"
+                );
                 found = true;
                 break;
             }
         }
-        assert!(found, "should find '5' digit in buffer for 50% context pressure");
+        assert!(
+            found,
+            "should find '5' digit in buffer for 50% context pressure"
+        );
     }
 
     #[test]
@@ -896,7 +924,11 @@ mod tests {
         let mut state = InputState::default();
         // Insert 6 lines via newline-separated text
         state.textarea.insert_str("1\n2\n3\n4\n5\n6");
-        assert_eq!(state.textarea.lines().len(), 6, "insert_str must split on newlines");
+        assert_eq!(
+            state.textarea.lines().len(),
+            6,
+            "insert_str must split on newlines"
+        );
         // 2 overhead + 6 lines = 8
         assert_eq!(state.desired_height(20, 80), 8);
     }
@@ -905,7 +937,10 @@ mod tests {
     fn desired_height_clamped_to_max() {
         let mut state = InputState::default();
         // Insert 30 lines
-        let text = (1..=30).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
+        let text = (1..=30)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         state.textarea.insert_str(&text);
         // 2 + 30 = 32, but max_height is 12
         assert_eq!(state.desired_height(12, 80), 12);
@@ -1101,7 +1136,10 @@ mod tests {
         state.collapse_paste("a\nb\nc\nd");
         assert!(state.is_collapsed());
         let textarea_text = state.textarea.lines().join("\n");
-        assert!(textarea_text.contains("4 lines"), "textarea should show summary, got: {textarea_text}");
+        assert!(
+            textarea_text.contains("4 lines"),
+            "textarea should show summary, got: {textarea_text}"
+        );
     }
 
     #[test]
@@ -1154,8 +1192,14 @@ mod tests {
         state.collapse_paste("a\nb\nc");
         assert!(state.is_collapsed());
         let text = state.take_text();
-        assert!(text.starts_with("prefix: "), "should preserve existing text, got: {text}");
-        assert!(text.contains("a\nb\nc"), "should contain pasted content, got: {text}");
+        assert!(
+            text.starts_with("prefix: "),
+            "should preserve existing text, got: {text}"
+        );
+        assert!(
+            text.contains("a\nb\nc"),
+            "should contain pasted content, got: {text}"
+        );
     }
 
     #[test]
@@ -1166,8 +1210,14 @@ mod tests {
         state.collapse_paste("second\npaste");
         assert!(state.is_collapsed());
         let text = state.take_text();
-        assert!(text.contains("first\npaste"), "should contain first paste, got: {text}");
-        assert!(text.contains("second\npaste"), "should contain second paste, got: {text}");
+        assert!(
+            text.contains("first\npaste"),
+            "should contain first paste, got: {text}"
+        );
+        assert!(
+            text.contains("second\npaste"),
+            "should contain second paste, got: {text}"
+        );
     }
 
     #[test]
@@ -1194,7 +1244,10 @@ mod tests {
                 break;
             }
         }
-        assert!(has_border, "row 0 should contain a horizontal border character");
+        assert!(
+            has_border,
+            "row 0 should contain a horizontal border character"
+        );
     }
 
     // -- paste_preview_visible reset tests --
@@ -1233,13 +1286,7 @@ mod tests {
         let state = InputState::default();
         let theme = Theme::default();
         let buf = super::super::render_to_buffer(60, 20, |frame| {
-            render_paste_preview(
-                frame,
-                Rect::new(0, 0, 60, 20),
-                &state,
-                &theme,
-                0,
-            );
+            render_paste_preview(frame, Rect::new(0, 0, 60, 20), &state, &theme, 0);
         });
         let mut text = String::new();
         for y in 0..20 {
@@ -1247,7 +1294,10 @@ mod tests {
                 text.push_str(buf[(x, y)].symbol());
             }
         }
-        assert!(!text.contains("Paste Preview"), "should not render when not visible");
+        assert!(
+            !text.contains("Paste Preview"),
+            "should not render when not visible"
+        );
     }
 
     #[test]
@@ -1257,13 +1307,7 @@ mod tests {
         state.paste_preview_visible = true;
         let theme = Theme::default();
         let buf = super::super::render_to_buffer(60, 20, |frame| {
-            render_paste_preview(
-                frame,
-                Rect::new(0, 0, 60, 20),
-                &state,
-                &theme,
-                0,
-            );
+            render_paste_preview(frame, Rect::new(0, 0, 60, 20), &state, &theme, 0);
         });
         let mut text = String::new();
         for y in 0..20 {
@@ -1271,25 +1315,28 @@ mod tests {
                 text.push_str(buf[(x, y)].symbol());
             }
         }
-        assert!(text.contains("Paste Preview"), "should show title, got:\n{text}");
-        assert!(text.contains("line1"), "should show paste content, got:\n{text}");
+        assert!(
+            text.contains("Paste Preview"),
+            "should show title, got:\n{text}"
+        );
+        assert!(
+            text.contains("line1"),
+            "should show paste content, got:\n{text}"
+        );
     }
 
     #[test]
     fn paste_preview_truncates_long_content() {
         let mut state = InputState::default();
-        let long_paste = (1..=30).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let long_paste = (1..=30)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         state.collapse_paste(&long_paste);
         state.paste_preview_visible = true;
         let theme = Theme::default();
         let buf = super::super::render_to_buffer(60, 30, |frame| {
-            render_paste_preview(
-                frame,
-                Rect::new(0, 0, 60, 30),
-                &state,
-                &theme,
-                0,
-            );
+            render_paste_preview(frame, Rect::new(0, 0, 60, 30), &state, &theme, 0);
         });
         let mut text = String::new();
         for y in 0..30 {
@@ -1297,7 +1344,10 @@ mod tests {
                 text.push_str(buf[(x, y)].symbol());
             }
         }
-        assert!(text.contains("more lines"), "should show truncation indicator, got:\n{text}");
+        assert!(
+            text.contains("more lines"),
+            "should show truncation indicator, got:\n{text}"
+        );
     }
 
     // -- elapsed timer tests --
@@ -1353,11 +1403,20 @@ mod tests {
             128000,
             Some(Duration::from_secs(83)),
         );
-        assert!(text.contains("1m 23s"), "should show elapsed time, got:\n{text}");
-        assert!(text.contains("12.8k/128.0k"), "should still show tokens, got:\n{text}");
+        assert!(
+            text.contains("1m 23s"),
+            "should show elapsed time, got:\n{text}"
+        );
+        assert!(
+            text.contains("12.8k/128.0k"),
+            "should still show tokens, got:\n{text}"
+        );
         let elapsed_pos = text.find("1m 23s").unwrap();
         let token_pos = text.find("12.8k").unwrap();
-        assert!(elapsed_pos < token_pos, "elapsed should appear before tokens");
+        assert!(
+            elapsed_pos < token_pos,
+            "elapsed should appear before tokens"
+        );
     }
 
     #[test]
@@ -1371,22 +1430,21 @@ mod tests {
             0,
             Some(Duration::from_secs(5)),
         );
-        assert!(text.contains("5s"), "should show elapsed time alone, got:\n{text}");
+        assert!(
+            text.contains("5s"),
+            "should show elapsed time alone, got:\n{text}"
+        );
         assert!(!text.contains("·"), "no separator when no tokens");
     }
 
     #[test]
     fn buffer_no_elapsed_with_tokens() {
-        let (_buf, text) = render_input_with_elapsed(
-            80,
-            5,
-            AgentMode::Build,
-            10,
-            12800,
-            128000,
-            None,
+        let (_buf, text) =
+            render_input_with_elapsed(80, 5, AgentMode::Build, 10, 12800, 128000, None);
+        assert!(
+            text.contains("12.8k/128.0k"),
+            "should show tokens, got:\n{text}"
         );
-        assert!(text.contains("12.8k/128.0k"), "should show tokens, got:\n{text}");
         assert!(!text.contains("·"), "no separator when no elapsed");
     }
 }
