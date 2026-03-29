@@ -26,6 +26,15 @@ pub fn persist_allow_tool(project_root: &Path, tool_name: &str) -> Result<()> {
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("config root is not an object"))?;
 
+    if let Some(existing) = obj.get("allow_tools")
+        && !existing.is_array()
+    {
+        anyhow::bail!(
+            "config {} has non-array allow_tools; expected an array",
+            config_path.display()
+        );
+    }
+
     let allow_tools = obj
         .entry("allow_tools")
         .or_insert_with(|| serde_json::Value::Array(Vec::new()));
@@ -128,5 +137,21 @@ mod tests {
         assert!(dir.path().join(".steve.jsonc").exists());
         let (config, _warnings) = load(dir.path()).unwrap();
         assert!(config.allow_tools.contains(&"bash".to_string()));
+    }
+
+    #[test]
+    fn persist_allow_tool_errors_on_non_array_allow_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".steve.jsonc"),
+            r#"{"allow_tools": "edit"}"#,
+        )
+        .unwrap();
+
+        let err = persist_allow_tool(dir.path(), "bash").unwrap_err();
+        assert!(
+            err.to_string().contains("non-array allow_tools"),
+            "expected non-array error, got: {err}"
+        );
     }
 }

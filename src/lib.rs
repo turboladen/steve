@@ -66,7 +66,9 @@ where
     }
 
     fn display_full_utc(&self) -> String {
-        self.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+        self.with_timezone(&chrono::Utc)
+            .format("%Y-%m-%d %H:%M:%S UTC")
+            .to_string()
     }
 }
 

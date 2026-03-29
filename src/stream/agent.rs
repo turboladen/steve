@@ -154,8 +154,22 @@ pub(super) async fn run_sub_agent(
             }
         }
 
-        // Once stream is done and channel is drained, exit.
-        if stream_done && sub_rx.is_empty() {
+        // Once stream is done, drain any remaining events before exiting.
+        if stream_done {
+            while let Ok(event) = sub_rx.try_recv() {
+                match event {
+                    AppEvent::LlmDelta { text } => final_text.push_str(&text),
+                    AppEvent::LlmFinish { usage: Some(u) } => {
+                        sub_agent_usage += u;
+                    }
+                    AppEvent::LlmFinish { usage: None } => {}
+                    AppEvent::LlmError { error } => {
+                        tracing::error!(call_id, %error, "sub-agent error (during drain)");
+                        last_error = Some(error);
+                    }
+                    _ => {}
+                }
+            }
             break;
         }
     }
