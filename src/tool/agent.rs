@@ -81,6 +81,47 @@ impl AgentType {
             ],
         }
     }
+
+    /// Build a focused system prompt for a sub-agent of this type.
+    pub fn build_prompt(self, task: &str, context: Option<&str>) -> String {
+        let type_label = match self {
+            AgentType::Explore => "exploration",
+            AgentType::Plan => "architecture analysis",
+            AgentType::General => "implementation",
+        };
+
+        let tool_guidance = match self {
+            AgentType::Explore => {
+                "\
+You have read-only tools: read, grep, glob, list, symbols. \
+Search efficiently — use grep to find relevant code, then read specific sections. \
+Use glob for file discovery. Use symbols for structural queries."
+            }
+            AgentType::Plan => {
+                "\
+You have read-only tools plus LSP for semantic analysis: read, grep, glob, list, symbols, lsp. \
+Use LSP diagnostics, go-to-definition, and find-references for accurate cross-file analysis. \
+Focus on architecture, design, and feasibility."
+            }
+            AgentType::General => {
+                "\
+You have full tool access (read, write, edit, bash, etc.). \
+Follow the same safety practices as the parent agent. \
+Write operations may require user permission."
+            }
+        };
+
+        let ctx_section = context
+            .map(|c| format!("\n\nAdditional context:\n{c}"))
+            .unwrap_or_default();
+
+        format!(
+            "You are a focused {type_label} sub-agent. Your task:\n\n\
+             {task}{ctx_section}\n\n\
+             {tool_guidance}\n\n\
+             Be concise and thorough. When done, provide a clear summary of your findings or work."
+        )
+    }
 }
 
 pub fn tool() -> ToolEntry {

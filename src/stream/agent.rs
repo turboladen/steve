@@ -10,51 +10,6 @@ use crate::{
     tool::{ToolRegistry, agent::AgentType},
 };
 
-/// Build a focused system prompt for a sub-agent.
-pub(super) fn build_sub_agent_prompt(
-    agent_type: AgentType,
-    task: &str,
-    context: Option<&str>,
-) -> String {
-    let type_label = match agent_type {
-        AgentType::Explore => "exploration",
-        AgentType::Plan => "architecture analysis",
-        AgentType::General => "implementation",
-    };
-
-    let tool_guidance = match agent_type {
-        AgentType::Explore => {
-            "\
-You have read-only tools: read, grep, glob, list, symbols. \
-Search efficiently — use grep to find relevant code, then read specific sections. \
-Use glob for file discovery. Use symbols for structural queries."
-        }
-        AgentType::Plan => {
-            "\
-You have read-only tools plus LSP for semantic analysis: read, grep, glob, list, symbols, lsp. \
-Use LSP diagnostics, go-to-definition, and find-references for accurate cross-file analysis. \
-Focus on architecture, design, and feasibility."
-        }
-        AgentType::General => {
-            "\
-You have full tool access (read, write, edit, bash, etc.). \
-Follow the same safety practices as the parent agent. \
-Write operations may require user permission."
-        }
-    };
-
-    let ctx_section = context
-        .map(|c| format!("\n\nAdditional context:\n{c}"))
-        .unwrap_or_default();
-
-    format!(
-        "You are a focused {type_label} sub-agent. Your task:\n\n\
-         {task}{ctx_section}\n\n\
-         {tool_guidance}\n\n\
-         Be concise and thorough. When done, provide a clear summary of your findings or work."
-    )
-}
-
 /// Run a sub-agent stream, collecting its final text response.
 ///
 /// Creates a fresh conversation with a focused system prompt and restricted tools.
@@ -80,7 +35,7 @@ pub(super) async fn run_sub_agent(
     let registry = ToolRegistry::filtered(spawner.project_root.clone(), &allowed);
     let child_cancel = spawner.cancel_token.child_token();
 
-    let system_prompt = build_sub_agent_prompt(agent_type, task, context);
+    let system_prompt = agent_type.build_prompt(task, context);
 
     // Private event channel for the sub-agent
     let (sub_tx, mut sub_rx) = mpsc::unbounded_channel::<AppEvent>();
