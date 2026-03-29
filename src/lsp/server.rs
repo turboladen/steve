@@ -202,46 +202,18 @@ pub(crate) fn path_to_uri(path: &Path) -> Result<Uri> {
         std::env::current_dir()?.join(path)
     };
     let canonical = std::fs::canonicalize(&abs).unwrap_or(abs);
-    let uri_string = format!("file://{}", canonical.display());
-    uri_string
+    let file_url = url::Url::from_file_path(&canonical)
+        .map_err(|()| anyhow::anyhow!("invalid file path for URI: {}", canonical.display()))?;
+    file_url
+        .as_str()
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid URI for path {}: {e}", canonical.display()))
 }
 
 pub fn uri_to_path(uri_str: &str) -> Option<PathBuf> {
-    uri_str
-        .strip_prefix("file://")
-        .map(|p| PathBuf::from(percent_decode(p)))
-}
-
-fn percent_decode(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let mut chars = input.bytes();
-    while let Some(b) = chars.next() {
-        if b == b'%' {
-            let hi = chars.next();
-            let lo = chars.next();
-            if let (Some(hi), Some(lo)) = (hi, lo)
-                && let (Some(h), Some(l)) = (hex_val(hi), hex_val(lo))
-            {
-                result.push((h << 4 | l) as char);
-                continue;
-            }
-            result.push('%');
-        } else {
-            result.push(b as char);
-        }
-    }
-    result
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
+    url::Url::parse(uri_str)
+        .ok()
+        .and_then(|u| u.to_file_path().ok())
 }
 
 fn parse_locations(value: Value) -> Result<Vec<Location>> {
@@ -362,15 +334,14 @@ mod tests {
     }
 
     #[test]
-    fn percent_decode_passthrough() {
-        assert_eq!(percent_decode("no-encoding"), "no-encoding");
-        assert_eq!(percent_decode(""), "");
+    fn uri_to_path_space_in_path() {
+        let path = uri_to_path("file:///home/my%20project/test.rs").unwrap();
+        assert_eq!(path, PathBuf::from("/home/my project/test.rs"));
     }
 
     #[test]
-    fn percent_decode_malformed() {
-        assert_eq!(percent_decode("abc%"), "abc%");
-        assert_eq!(percent_decode("abc%2G"), "abc%");
+    fn uri_to_path_non_file_returns_none() {
+        assert!(uri_to_path("https://example.com").is_none());
     }
 
     #[test]

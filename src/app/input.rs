@@ -6,6 +6,19 @@ impl App {
             return self.handle_command(&text).await;
         }
 
+        // Validate model + provider before creating session or persisting messages,
+        // so failed sends don't leave orphaned sessions/messages in storage.
+        let Some(model_ref) = &self.current_model.clone() else {
+            self.messages.push(MessageBlock::Error {
+                text: "No model selected. Set 'model' in .steve.jsonc or ~/.config/steve/config.jsonc.".to_string(),
+            });
+            return Ok(());
+        };
+
+        let Some((resolved, client)) = self.resolve_client(model_ref) else {
+            return Ok(());
+        };
+
         // Ensure we have a session
         self.ensure_session();
 
@@ -32,18 +45,6 @@ impl App {
         self.messages
             .push(MessageBlock::User { text: display_text });
         self.message_area_state.scroll_to_bottom();
-
-        // Resolve provider + model + client
-        let Some(model_ref) = &self.current_model.clone() else {
-            self.messages.push(MessageBlock::Error {
-                text: "No model selected. Set 'model' in .steve.jsonc or ~/.config/steve/config.jsonc.".to_string(),
-            });
-            return Ok(());
-        };
-
-        let Some((resolved, client)) = self.resolve_client(model_ref) else {
-            return Ok(());
-        };
 
         // Create the assistant message that will accumulate streaming deltas
         let assistant_msg = Message::assistant(&session_id, "");
