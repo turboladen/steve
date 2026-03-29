@@ -9,7 +9,10 @@ use async_openai::types::chat::{
 };
 use serde_json::Value;
 
-use crate::{context::cache::ToolResultCache, tool::ToolName};
+use crate::{
+    context::cache::ToolResultCache,
+    tool::{EditOperation, ToolName},
+};
 
 /// Accumulated tool call from streaming fragments.
 #[derive(Default)]
@@ -46,36 +49,34 @@ pub(super) fn build_permission_summary(tool_name: ToolName, args: &Value) -> Str
                 .get("file_path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("(unknown file)");
-            let operation = args
+            let operation: EditOperation = args
                 .get("operation")
                 .and_then(|v| v.as_str())
-                .unwrap_or("find_replace");
+                .unwrap_or("find_replace")
+                .parse()
+                .unwrap_or(EditOperation::FindReplace);
             match operation {
-                "insert_lines" => {
+                EditOperation::InsertLines => {
                     let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
                     format!("Insert lines at line {line} in {file}")
                 }
-                "delete_lines" => {
+                EditOperation::DeleteLines => {
                     let start = args.get("start_line").and_then(|v| v.as_u64()).unwrap_or(0);
                     let end = args.get("end_line").and_then(|v| v.as_u64()).unwrap_or(0);
                     format!("Delete lines {start}-{end} from {file}")
                 }
-                "replace_range" => {
+                EditOperation::ReplaceRange => {
                     let start = args.get("start_line").and_then(|v| v.as_u64()).unwrap_or(0);
                     let end = args.get("end_line").and_then(|v| v.as_u64()).unwrap_or(0);
                     format!("Replace lines {start}-{end} in {file}")
                 }
-                "find_replace" => format!("Edit file: {file}"),
-                "multi_find_replace" => {
+                EditOperation::FindReplace => format!("Edit file: {file}"),
+                EditOperation::MultiFindReplace => {
                     let count = args
                         .get("edits")
                         .and_then(|v| v.as_array())
                         .map_or(0, |a| a.len());
                     format!("Multi-edit ({count} replacements) in {file}")
-                }
-                other => {
-                    tracing::warn!("unhandled edit operation for permission summary: {other}");
-                    format!("Edit file: {file}")
                 }
             }
         }
