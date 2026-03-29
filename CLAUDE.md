@@ -71,12 +71,39 @@ use `"provider_id/model_id"` format throughout. MCP servers merge by server ID (
 The `App` struct (coordination point) lives in `app/mod.rs`. Submodules split by concern:
 `event_loop.rs` (run/handle_event), `key_handling.rs`, `input.rs`, `commands.rs`,
 `session.rs`, `prompt.rs`, `context.rs` (diagnostics/sidebar/tokens), `helpers.rs`,
-`tool_display.rs`, `constants.rs`, `types.rs`, `tests.rs`. Each submodule defines its own
-`impl App {}` block — Rust allows multiple impl blocks across child modules. Submodules use
-`use super::*;` to inherit mod.rs imports. Use `pub(super)` for cross-submodule methods,
-`pub` only for external API (`extract_args_summary`, `extract_result_summary`,
-`should_show_sidebar`). Use `close_all_overlays()` and `resolve_client()` helpers to avoid
+`tool_display.rs`, `constants.rs`. Each submodule defines its own `impl App {}` block — Rust
+allows multiple impl blocks across child modules. Submodules use `use super::*;` to inherit
+mod.rs imports. Use `pub(super)` for cross-submodule methods, `pub` only for external API
+(`extract_args_summary`, `extract_result_summary`, `should_show_sidebar`). Use
+`close_all_overlays()`, `resolve_client()`, and `resolve_file_refs()` helpers to avoid
 duplication. Use `r#""#` raw strings for multi-line system prompts in `constants.rs`.
+
+### Module Structure Convention
+
+Each major module follows a consistent pattern: `mod.rs` owns types and public API,
+submodules split by concern (e.g., `server.rs`/`manager.rs` for LSP and MCP). No `types.rs`
+files — types belong in `mod.rs` alongside the code that uses them. Tests live in each
+submodule's `#[cfg(test)] mod tests {}` block, not in a separate `tests.rs`. Shared test
+helpers go in `mod.rs`'s test module with `pub(crate)` visibility.
+
+### Enums over Strings
+
+Tool operations use typed enums (`EditOperation`, `SymbolsOperation`, `LspOperation`,
+`MemoryAction`, `TaskAction`) instead of string matching. Tree-sitter languages use
+`TreeSitterLang` enum. Parse from JSON args with `.parse()`, match exhaustively — adding
+a variant produces compiler errors at every unhandled site.
+
+### Stream Module (`stream/`)
+
+`StreamRequest::spawn()` launches the stream task; `StreamRequest::run()` is the main loop.
+Submodules: `agent.rs` (sub-agent spawning), `tools.rs` (tool call helpers), `recovery.rs`
+(length/iteration recovery), `phases.rs` (4 tool execution phases extracted from the loop).
+
+### Crate-Level Utilities (`lib.rs`)
+
+`floor_char_boundary()` — UTF-8-safe string truncation (polyfill for unstable
+`str::floor_char_boundary`). `DateTimeExt` trait — `display_short()`, `display_date()`,
+`display_full_utc()` for consistent date formatting.
 
 ### Critical Invariants
 
@@ -99,22 +126,41 @@ All must update when adding a `ToolName` variant:
 
 `extract_args_summary()` and `extract_diff_content()` in `app/tool_display.rs`, `extract_tool_summary()` in
 `export.rs`, `cache_key()` and `extract_path()` in `context/cache.rs`, `compress_tool_output()` in
-`context/compressor.rs`, `build_permission_summary()` and `extract_tool_path()` in `stream.rs`,
+`context/compressor.rs`, `build_permission_summary()` and `extract_tool_path()` in `stream/tools.rs`,
 `is_write_tool()`/`intent_category()`/`tool_marker()`/`visual_category()`/`gutter_char()`/`path_arg_keys()` in
 `tool/mod.rs`, `build_mode_rules()` and `plan_mode_rules()` in `permission/mod.rs`.
 
 `path_arg_keys()` in `tool/mod.rs` is the single source of truth for tool→path-arg-key mapping.
 
-When adding edit operations: update `extract_diff_content()` in `app/tool_display.rs` and
-`build_permission_summary()` in `stream.rs`.
+When adding edit operations: update `EditOperation` enum in `tool/mod.rs`,
+`extract_diff_content()` in `app/tool_display.rs`, and `build_permission_summary()` in
+`stream/tools.rs`.
+
+When adding tree-sitter languages: update `TreeSitterLang` enum and `detect_language()` in
+`tool/symbols.rs`, add `symbol_node_types()` and `container_node_types()` entries (exhaustive
+match — compiler enforces), and add `kind_label()` mappings.
 
 ### MCP Client Integration (`mcp/`)
 
 MCP tools bypass `ToolName` entirely — own registry with `McpToolSnapshot` (lock-free `Arc`) for
-lookups. Three integration points in `stream.rs`: tool defs, name resolution fallback, Phase 4
-sequential execution. Server IDs must not contain `__` (the separator).
+lookups. Three integration points in `stream/phases.rs`: tool defs, name resolution fallback,
+Phase 4 sequential execution. Server IDs must not contain `__` (the separator).
+Submodules: `server.rs` (McpServer connection), `manager.rs` (McpManager orchestration),
+`transport.rs` (rmcp transport setup), `oauth/` (OAuth flow).
 
 `AllowAlways` for MCP tools is session-only (not persisted) — MCP tool names are runtime-dynamic.
+
+### LSP Integration (`lsp/`)
+
+Submodules: `server.rs` (LspServer + URI helpers), `manager.rs` (LspManager lifecycle),
+`client.rs` (JSON-RPC transport). Uses `workspace_folders` (not deprecated `root_uri`) for
+LSP init. URI encoding via `url::Url::from_file_path`/`to_file_path`. Binary discovery via
+`which` crate (no shell-out).
+
+## Formatting
+
+`rustfmt.toml` configures `imports_granularity = "Crate"` (nightly-only). Run
+`cargo +nightly fmt` to apply. Imports group by crate with nested paths.
 
 ## Key Dependency Gotchas
 
