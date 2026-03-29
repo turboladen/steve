@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use super::{AgentSpawner, StreamRequest, run_stream};
+use super::{AgentSpawner, StreamRequest};
 use crate::{
     event::{AppEvent, StreamUsage},
     tool::{ToolRegistry, agent::AgentType},
@@ -140,7 +140,7 @@ pub(super) async fn run_sub_agent(
     let mut stream_done = false;
     let mut sub_agent_usage = StreamUsage::default();
 
-    let mut stream_future = Box::pin(run_stream(sub_request));
+    let mut stream_future = Box::pin(sub_request.run());
 
     loop {
         tokio::select! {

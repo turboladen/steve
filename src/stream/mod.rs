@@ -146,204 +146,205 @@ pub struct StreamRequest {
     pub mcp_manager: Option<Arc<tokio::sync::Mutex<crate::mcp::McpManager>>>,
 }
 
-/// Spawn a tokio task that streams the LLM response and sends events.
-/// Returns the JoinHandle so the caller can track task completion.
-pub fn spawn_stream(req: StreamRequest) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        if run_stream(req).await.is_err() {
-            // Error already sent via channel in run_stream
-        }
-    })
-}
-
-async fn run_stream(req: StreamRequest) -> Result<(), ()> {
-    let StreamRequest {
-        stream_provider,
-        model,
-        system_prompt,
-        history,
-        user_message,
-        event_tx,
-        tool_registry,
-        tool_context,
-        permission_engine,
-        tool_cache,
-        cancel_token,
-        context_window,
-        mut interjection_rx,
-        usage_writer,
-        usage_project_id,
-        usage_session_id,
-        usage_model_cost,
-        is_plan_mode,
-        agent_spawner,
-        mcp_manager,
-    } = req;
-
-    tracing::info!(model = %model, "starting LLM stream");
-
-    // Build initial messages: system prompt + history + new user message
-    let mut messages: Vec<ChatCompletionRequestMessage> = Vec::new();
-
-    if let Some(system) = system_prompt {
-        messages.push(ChatCompletionRequestMessage::System(
-            ChatCompletionRequestSystemMessage {
-                content: ChatCompletionRequestSystemMessageContent::Text(system),
-                name: None,
-            },
-        ));
+impl StreamRequest {
+    /// Spawn a tokio task that streams the LLM response and sends events.
+    /// Returns the JoinHandle so the caller can track task completion.
+    pub fn spawn(self) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            if self.run().await.is_err() {
+                // Error already sent via channel in run()
+            }
+        })
     }
 
-    // Append prior conversation history
-    messages.extend(history);
+    pub(super) async fn run(self) -> Result<(), ()> {
+        let StreamRequest {
+            stream_provider,
+            model,
+            system_prompt,
+            history,
+            user_message,
+            event_tx,
+            tool_registry,
+            tool_context,
+            permission_engine,
+            tool_cache,
+            cancel_token,
+            context_window,
+            mut interjection_rx,
+            usage_writer,
+            usage_project_id,
+            usage_session_id,
+            usage_model_cost,
+            is_plan_mode,
+            agent_spawner,
+            mcp_manager,
+        } = self;
 
-    messages.push(ChatCompletionRequestMessage::User(
-        ChatCompletionRequestUserMessage {
-            content: ChatCompletionRequestUserMessageContent::Text(user_message),
-            name: None,
-        },
-    ));
+        tracing::info!(model = %model, "starting LLM stream");
 
-    // Build tool definitions for the API (mutable — stripped at CRITICAL threshold).
-    // Helper: convert a JSON tool def to ChatCompletionTools.
-    fn json_to_tool(def: &Value) -> Option<ChatCompletionTools> {
-        let func = def.get("function")?;
-        Some(ChatCompletionTools::Function(ChatCompletionTool {
-            function: FunctionObject {
-                name: func.get("name")?.as_str()?.to_string(),
-                description: func
-                    .get("description")
-                    .and_then(|d| d.as_str())
-                    .map(String::from),
-                parameters: func.get("parameters").cloned(),
-                strict: None,
-            },
-        }))
-    }
+        // Build initial messages: system prompt + history + new user message
+        let mut messages: Vec<ChatCompletionRequestMessage> = Vec::new();
 
-    // Get a lock-free snapshot of MCP tool metadata. We briefly await the lock
-    // only to clone the Arc, then drop it so streams always get a consistent
-    // view of available MCP tools.
-    let mcp_snapshot: Option<std::sync::Arc<crate::mcp::McpToolSnapshot>> =
-        if let Some(ref mgr) = mcp_manager {
-            let mgr = mgr.lock().await;
-            let snap = mgr.tool_snapshot();
-            if !snap.is_empty() { Some(snap) } else { None }
-        } else {
-            None
-        };
-
-    // Helper closure rebuilds tools from the registry + MCP snapshot (no mutex needed).
-    let build_tools = |registry: &ToolRegistry,
-                       snap: &Option<std::sync::Arc<crate::mcp::McpToolSnapshot>>|
-     -> Vec<ChatCompletionTools> {
-        let mut tools: Vec<ChatCompletionTools> = registry
-            .tool_definitions()
-            .into_iter()
-            .filter_map(|def| json_to_tool(&def))
-            .collect();
-
-        // Append MCP tool definitions from the lock-free snapshot
-        if let Some(snap) = snap {
-            tools.extend(snap.tool_definitions().iter().filter_map(json_to_tool));
-        }
-
-        tools
-    };
-    let mut tools: Option<Vec<ChatCompletionTools>> = tool_registry
-        .as_ref()
-        .map(|r| build_tools(r, &mcp_snapshot));
-
-    let mut total_usage = StreamUsage::default();
-    let mut current_iteration_tool_count: usize = 0;
-    let mut current_iteration_cache_repeats: usize;
-
-    // Tool result cache — shared across stream tasks within a session.
-    // Avoids re-executing identical read operations across messages.
-
-    // Safety limit: prevent infinite tool-call loops (e.g. compressor/cache
-    // feedback oscillation where the LLM re-reads the same files forever).
-    // Resets when the user grants a permission (proving active supervision).
-    // Plan mode uses a lower limit since it's read-only analysis.
-    const MAX_TOOL_ITERATIONS: u32 = 75;
-    const MAX_PLAN_ITERATIONS: u32 = 55;
-    let effective_max = if is_plan_mode {
-        MAX_PLAN_ITERATIONS
-    } else {
-        MAX_TOOL_ITERATIONS
-    };
-    let mut iteration_count: u32 = 0;
-    let mut total_iteration_count: u32 = 0;
-
-    // Bitmask tracks which escalating warnings have fired this cycle
-    // (resets with iteration_count on user interaction).
-    let mut warnings_sent: u8 = 0;
-
-    // Tool stripping: at CRITICAL threshold, tools are removed from the API request
-    // so the LLM structurally cannot make tool calls — it must produce text.
-    let mut tools_stripped = false;
-
-    // Final chance: at hard limit, one last tool-free API call is made before termination.
-    let mut final_chance_taken = false;
-
-    // Track previous iteration's tool count for keeping 2 iterations uncompressed.
-    // Updated at bottom of loop before current_iteration_tool_count is reset to 0.
-    let mut prev_iteration_tool_count: usize = 0;
-
-    // Track consecutive iterations where ALL tool calls were cache-repeat hits.
-    // When this reaches the threshold, inject a strong "stop looping" message.
-    let mut consecutive_cached_iterations: u32 = 0;
-    const MAX_CONSECUTIVE_CACHED: u32 = 2;
-
-    // Mid-stream error retry limit (separate from stream creation retries).
-    const MAX_STREAM_RETRIES: u32 = 2;
-    let mut stream_retry_count: u32 = 0;
-
-    // Tool call loop — keep going until the LLM produces a response with no tool calls
-    loop {
-        // Check for cancellation before each LLM call
-        if cancel_token.is_cancelled() {
-            tracing::info!("stream cancelled before LLM call");
-            let _ = event_tx.send(AppEvent::LlmFinish {
-                usage: Some(total_usage),
-            });
-            return Ok(());
-        }
-
-        // Drain pending user interjections before the next LLM call
-        while let Ok(text) = interjection_rx.try_recv() {
-            tracing::info!("user interjection received: {} chars", text.len());
-            messages.push(ChatCompletionRequestMessage::User(
-                ChatCompletionRequestUserMessage {
-                    content: ChatCompletionRequestUserMessageContent::Text(text),
+        if let Some(system) = system_prompt {
+            messages.push(ChatCompletionRequestMessage::System(
+                ChatCompletionRequestSystemMessage {
+                    content: ChatCompletionRequestSystemMessageContent::Text(system),
                     name: None,
                 },
             ));
-            iteration_count = 0; // User interaction resets safety counter
-            warnings_sent = 0;
-            // Restore tools if they were stripped — user interaction proves supervision
-            if tools_stripped {
-                tools_stripped = false;
-                final_chance_taken = false;
-                tools = tool_registry
-                    .as_ref()
-                    .map(|r| build_tools(r, &mcp_snapshot));
-            }
         }
 
-        total_iteration_count += 1;
-        iteration_count += 1;
-        // NOTE: prev_iteration_tool_count is updated at the bottom of the loop,
-        // right before current_iteration_tool_count is reset to 0, so it captures
-        // the actual tool count from the previous iteration.
-        let mut user_interacted_this_iteration = false;
-        let call_start = std::time::Instant::now();
-        if iteration_count > effective_max {
-            if !final_chance_taken {
-                final_chance_taken = true;
-                tools = None;
-                tools_stripped = true;
+        // Append prior conversation history
+        messages.extend(history);
+
+        messages.push(ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessage {
+                content: ChatCompletionRequestUserMessageContent::Text(user_message),
+                name: None,
+            },
+        ));
+
+        // Build tool definitions for the API (mutable — stripped at CRITICAL threshold).
+        // Helper: convert a JSON tool def to ChatCompletionTools.
+        fn json_to_tool(def: &Value) -> Option<ChatCompletionTools> {
+            let func = def.get("function")?;
+            Some(ChatCompletionTools::Function(ChatCompletionTool {
+                function: FunctionObject {
+                    name: func.get("name")?.as_str()?.to_string(),
+                    description: func
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .map(String::from),
+                    parameters: func.get("parameters").cloned(),
+                    strict: None,
+                },
+            }))
+        }
+
+        // Get a lock-free snapshot of MCP tool metadata. We briefly await the lock
+        // only to clone the Arc, then drop it so streams always get a consistent
+        // view of available MCP tools.
+        let mcp_snapshot: Option<std::sync::Arc<crate::mcp::McpToolSnapshot>> =
+            if let Some(ref mgr) = mcp_manager {
+                let mgr = mgr.lock().await;
+                let snap = mgr.tool_snapshot();
+                if !snap.is_empty() { Some(snap) } else { None }
+            } else {
+                None
+            };
+
+        // Helper closure rebuilds tools from the registry + MCP snapshot (no mutex needed).
+        let build_tools = |registry: &ToolRegistry,
+                           snap: &Option<std::sync::Arc<crate::mcp::McpToolSnapshot>>|
+         -> Vec<ChatCompletionTools> {
+            let mut tools: Vec<ChatCompletionTools> = registry
+                .tool_definitions()
+                .into_iter()
+                .filter_map(|def| json_to_tool(&def))
+                .collect();
+
+            // Append MCP tool definitions from the lock-free snapshot
+            if let Some(snap) = snap {
+                tools.extend(snap.tool_definitions().iter().filter_map(json_to_tool));
+            }
+
+            tools
+        };
+        let mut tools: Option<Vec<ChatCompletionTools>> = tool_registry
+            .as_ref()
+            .map(|r| build_tools(r, &mcp_snapshot));
+
+        let mut total_usage = StreamUsage::default();
+        let mut current_iteration_tool_count: usize = 0;
+        let mut current_iteration_cache_repeats: usize;
+
+        // Tool result cache — shared across stream tasks within a session.
+        // Avoids re-executing identical read operations across messages.
+
+        // Safety limit: prevent infinite tool-call loops (e.g. compressor/cache
+        // feedback oscillation where the LLM re-reads the same files forever).
+        // Resets when the user grants a permission (proving active supervision).
+        // Plan mode uses a lower limit since it's read-only analysis.
+        const MAX_TOOL_ITERATIONS: u32 = 75;
+        const MAX_PLAN_ITERATIONS: u32 = 55;
+        let effective_max = if is_plan_mode {
+            MAX_PLAN_ITERATIONS
+        } else {
+            MAX_TOOL_ITERATIONS
+        };
+        let mut iteration_count: u32 = 0;
+        let mut total_iteration_count: u32 = 0;
+
+        // Bitmask tracks which escalating warnings have fired this cycle
+        // (resets with iteration_count on user interaction).
+        let mut warnings_sent: u8 = 0;
+
+        // Tool stripping: at CRITICAL threshold, tools are removed from the API request
+        // so the LLM structurally cannot make tool calls — it must produce text.
+        let mut tools_stripped = false;
+
+        // Final chance: at hard limit, one last tool-free API call is made before termination.
+        let mut final_chance_taken = false;
+
+        // Track previous iteration's tool count for keeping 2 iterations uncompressed.
+        // Updated at bottom of loop before current_iteration_tool_count is reset to 0.
+        let mut prev_iteration_tool_count: usize = 0;
+
+        // Track consecutive iterations where ALL tool calls were cache-repeat hits.
+        // When this reaches the threshold, inject a strong "stop looping" message.
+        let mut consecutive_cached_iterations: u32 = 0;
+        const MAX_CONSECUTIVE_CACHED: u32 = 2;
+
+        // Mid-stream error retry limit (separate from stream creation retries).
+        const MAX_STREAM_RETRIES: u32 = 2;
+        let mut stream_retry_count: u32 = 0;
+
+        // Tool call loop — keep going until the LLM produces a response with no tool calls
+        loop {
+            // Check for cancellation before each LLM call
+            if cancel_token.is_cancelled() {
+                tracing::info!("stream cancelled before LLM call");
+                let _ = event_tx.send(AppEvent::LlmFinish {
+                    usage: Some(total_usage),
+                });
+                return Ok(());
+            }
+
+            // Drain pending user interjections before the next LLM call
+            while let Ok(text) = interjection_rx.try_recv() {
+                tracing::info!("user interjection received: {} chars", text.len());
                 messages.push(ChatCompletionRequestMessage::User(
+                    ChatCompletionRequestUserMessage {
+                        content: ChatCompletionRequestUserMessageContent::Text(text),
+                        name: None,
+                    },
+                ));
+                iteration_count = 0; // User interaction resets safety counter
+                warnings_sent = 0;
+                // Restore tools if they were stripped — user interaction proves supervision
+                if tools_stripped {
+                    tools_stripped = false;
+                    final_chance_taken = false;
+                    tools = tool_registry
+                        .as_ref()
+                        .map(|r| build_tools(r, &mcp_snapshot));
+                }
+            }
+
+            total_iteration_count += 1;
+            iteration_count += 1;
+            // NOTE: prev_iteration_tool_count is updated at the bottom of the loop,
+            // right before current_iteration_tool_count is reset to 0, so it captures
+            // the actual tool count from the previous iteration.
+            let mut user_interacted_this_iteration = false;
+            let call_start = std::time::Instant::now();
+            if iteration_count > effective_max {
+                if !final_chance_taken {
+                    final_chance_taken = true;
+                    tools = None;
+                    tools_stripped = true;
+                    messages.push(ChatCompletionRequestMessage::User(
                     ChatCompletionRequestUserMessage {
                         content: ChatCompletionRequestUserMessageContent::Text(
                             "[SYSTEM: Maximum tool calls exceeded. Provide your complete response \
@@ -354,400 +355,524 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                         name: None,
                     },
                 ));
-                let _ = event_tx.send(AppEvent::StreamNotice {
-                    text: "⚙ Tool limit reached — requesting final response".to_string(),
+                    let _ = event_tx.send(AppEvent::StreamNotice {
+                        text: "⚙ Tool limit reached — requesting final response".to_string(),
+                    });
+                    tracing::warn!(
+                        iterations = iteration_count,
+                        total_iterations = total_iteration_count,
+                        effective_max,
+                        "tool loop hit max iterations — making final-chance API call"
+                    );
+                    continue; // One more API call with no tools
+                } else {
+                    // Final chance already taken — truly done
+                    tracing::error!(
+                        iterations = iteration_count,
+                        total_iterations = total_iteration_count,
+                        effective_max,
+                        "tool loop exceeded max iterations (final chance exhausted)"
+                    );
+                    let _ = event_tx.send(AppEvent::LlmError {
+                        error: format!(
+                            "Tool loop exceeded {effective_max} iterations. Try /compact or /new."
+                        ),
+                    });
+                    let _ = event_tx.send(AppEvent::LlmFinish {
+                        usage: Some(total_usage),
+                    });
+                    return Ok(());
+                }
+            }
+
+            // Compress old tool results from prior iterations to reduce token usage.
+            // Deferred: only compress when context usage exceeds 40% of the window.
+            // This prevents destroying tool results the LLM still needs early on.
+            // Keep the last 2 iterations uncompressed so the LLM has recent context.
+            let has_tool_messages = messages
+                .iter()
+                .any(|m| matches!(m, ChatCompletionRequestMessage::Tool(_)));
+            let keep_recent = current_iteration_tool_count + prev_iteration_tool_count;
+            if has_tool_messages || current_iteration_tool_count > 0 {
+                let payload_estimate: usize = messages.iter().map(estimate_message_chars).sum();
+                // Rough heuristic: ~4 chars/token. Underestimates for code-heavy content,
+                // but the 60% aggressive pruning safety valve catches underestimates.
+                let estimated_tokens = payload_estimate / 4;
+                let should_compress = context_window
+                    .map(|cw| cw > 0 && estimated_tokens as u64 > cw * 40 / 100)
+                    .unwrap_or(true); // Compress if we don't know the window size
+
+                if should_compress {
+                    crate::context::compressor::compress_old_tool_results(
+                        &mut messages,
+                        keep_recent,
+                    );
+                }
+            }
+
+            // Aggressive pruning: if conversation is still large after normal compression,
+            // compress ALL tool results (including current iteration) to stay under budget.
+            // Uses keep_recent=0 so even the latest tool results get compressed.
+            if let Some(ctx_window) = context_window {
+                let estimated_chars: usize = messages.iter().map(estimate_message_chars).sum();
+                let estimated_tokens = estimated_chars / 4;
+                if ctx_window > 0 && estimated_tokens as u64 > ctx_window * 60 / 100 {
+                    tracing::info!(
+                        estimated_tokens,
+                        context_window = ctx_window,
+                        "aggressive pruning triggered — compressing all tool results"
+                    );
+                    crate::context::compressor::compress_old_tool_results(&mut messages, 0);
+                }
+            }
+
+            // Capture this iteration's tool count before resetting, so keep_recent
+            // at the top of the next iteration correctly reflects "last 2 iterations".
+            prev_iteration_tool_count = current_iteration_tool_count;
+            current_iteration_tool_count = 0;
+            current_iteration_cache_repeats = 0;
+
+            // Estimate payload size for diagnostics
+            let payload_chars: usize = messages
+                .iter()
+                .map(|m| match m {
+                    ChatCompletionRequestMessage::System(s) => match &s.content {
+                        ChatCompletionRequestSystemMessageContent::Text(t) => t.len(),
+                        _ => 0,
+                    },
+                    ChatCompletionRequestMessage::User(u) => match &u.content {
+                        ChatCompletionRequestUserMessageContent::Text(t) => t.len(),
+                        _ => 0,
+                    },
+                    ChatCompletionRequestMessage::Assistant(a) => match &a.content {
+                        Some(ChatCompletionRequestAssistantMessageContent::Text(t)) => t.len(),
+                        _ => 0,
+                    },
+                    ChatCompletionRequestMessage::Tool(t) => match &t.content {
+                        ChatCompletionRequestToolMessageContent::Text(t) => t.len(),
+                        _ => 0,
+                    },
+                    _ => 0,
+                })
+                .sum();
+            tracing::info!(
+                message_count = messages.len(),
+                payload_chars,
+                estimated_tokens = payload_chars / 4,
+                "sending request to LLM"
+            );
+
+            let mut request = CreateChatCompletionRequest {
+                model: model.clone(),
+                messages: messages.clone(),
+                stream: Some(true),
+                stream_options: Some(ChatCompletionStreamOptions {
+                    include_usage: Some(true),
+                    include_obfuscation: None,
+                }),
+                ..Default::default()
+            };
+
+            if let Some(ref t) = tools
+                && !t.is_empty()
+            {
+                request.tools = Some(t.clone());
+            }
+
+            // Open the stream with retry for transient errors
+            const MAX_RETRIES: u32 = 3;
+            let stream_start = std::time::Instant::now();
+            let mut stream_result: Option<ChatCompletionResponseStream> = None;
+            for attempt in 1..=MAX_RETRIES {
+                match stream_provider.create_stream(request.clone()).await {
+                    Ok(s) => {
+                        if attempt > 1 {
+                            tracing::info!(attempt, "stream connection succeeded after retry");
+                        }
+                        tracing::info!(
+                            elapsed_ms = stream_start.elapsed().as_millis() as u64,
+                            "stream connection opened"
+                        );
+                        stream_result = Some(s);
+                        break;
+                    }
+                    Err(e) => {
+                        if attempt < MAX_RETRIES && is_transient_error(&e) {
+                            let delay = std::time::Duration::from_secs(1 << (attempt - 1)); // 1s, 2s
+                            tracing::warn!(
+                                error = %e,
+                                attempt,
+                                max_attempts = MAX_RETRIES,
+                                delay_secs = delay.as_secs(),
+                                "transient error, retrying stream creation"
+                            );
+                            let _ = event_tx.send(AppEvent::LlmRetry {
+                                attempt,
+                                max_attempts: MAX_RETRIES,
+                                error: e.to_string(),
+                            });
+                            tokio::time::sleep(delay).await;
+                            if cancel_token.is_cancelled() {
+                                let _ = event_tx.send(AppEvent::LlmFinish {
+                                    usage: Some(total_usage),
+                                });
+                                return Ok(());
+                            }
+                            continue;
+                        }
+                        // Non-transient or max retries exceeded
+                        tracing::error!(error = %e, attempt, "stream creation failed");
+                        let _ = event_tx.send(AppEvent::LlmError {
+                            error: format!("API error: {e}"),
+                        });
+                        return Err(());
+                    }
+                }
+            }
+            let Some(mut stream) = stream_result else {
+                // Should not happen — loop always breaks or returns — but handle gracefully
+                tracing::error!("stream_result was None after retry loop (should be unreachable)");
+                let _ = event_tx.send(AppEvent::LlmError {
+                    error: "internal error: stream creation produced no result".to_string(),
                 });
-                tracing::warn!(
-                    iterations = iteration_count,
-                    total_iterations = total_iteration_count,
-                    effective_max,
-                    "tool loop hit max iterations — making final-chance API call"
-                );
-                continue; // One more API call with no tools
-            } else {
-                // Final chance already taken — truly done
+                return Err(());
+            };
+
+            // Accumulate tool call fragments
+            let mut pending_tool_calls: HashMap<u32, PendingToolCall> = HashMap::new();
+            let mut finish_reason: Option<FinishReason> = None;
+            let mut assistant_content = String::new();
+            let mut first_token_logged = false;
+            let mut stream_chunk_error: Option<String> = None;
+
+            // Process chunks — use select! to check cancellation while streaming
+            loop {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        tracing::info!("stream cancelled during processing");
+                        let _ = event_tx.send(AppEvent::LlmFinish {
+                            usage: Some(total_usage),
+                        });
+                        return Ok(());
+                    }
+                    maybe_chunk = stream.next() => {
+                        let Some(result) = maybe_chunk else {
+                            // Stream ended
+                            break;
+                        };
+
+                        if !first_token_logged {
+                            first_token_logged = true;
+                            tracing::info!(
+                                ttft_ms = stream_start.elapsed().as_millis() as u64,
+                                "first token received"
+                            );
+                        }
+
+                        match result {
+                            Ok(response) => {
+                                // Check for usage in the final chunk
+                                if let Some(u) = &response.usage {
+                                    tracing::info!(
+                                        prompt = u.prompt_tokens,
+                                        completion = u.completion_tokens,
+                                        total = u.total_tokens,
+                                        "usage data received in stream chunk"
+                                    );
+                                    total_usage.prompt_tokens += u.prompt_tokens;
+                                    total_usage.completion_tokens += u.completion_tokens;
+                                    total_usage.total_tokens += u.total_tokens;
+
+                                    // Send current-call usage to UI for live token counter updates
+                                    let _ = event_tx.send(AppEvent::LlmUsageUpdate {
+                                        usage: StreamUsage {
+                                            prompt_tokens: u.prompt_tokens,
+                                            completion_tokens: u.completion_tokens,
+                                            total_tokens: u.total_tokens,
+                                        },
+                                    });
+
+                                    // Record per-call usage to SQLite
+                                    let cost = usage_model_cost.as_ref().map(|mc| {
+                                        u.prompt_tokens as f64 * mc.input_per_million / 1_000_000.0
+                                            + u.completion_tokens as f64 * mc.output_per_million
+                                                / 1_000_000.0
+                                    });
+                                    usage_writer.record_api_call(ApiCallRecord {
+                                        timestamp: chrono::Utc::now(),
+                                        project_id: usage_project_id.clone(),
+                                        session_id: usage_session_id.clone(),
+                                        model_ref: model.clone(),
+                                        prompt_tokens: u.prompt_tokens,
+                                        completion_tokens: u.completion_tokens,
+                                        total_tokens: u.total_tokens,
+                                        cost,
+                                        duration_ms: call_start.elapsed().as_millis() as u64,
+                                        iteration: total_iteration_count.saturating_sub(1),
+                                    });
+                                }
+
+                                // Process each choice's delta
+                                for choice in &response.choices {
+                                    // TODO: Emit AppEvent::LlmReasoning for reasoning/thinking tokens.
+                                    // OpenAI o1/o3 models send reasoning content via a `reasoning_content`
+                                    // field on the stream delta, but async-openai 0.32 does not expose this
+                                    // field on ChatCompletionStreamResponseDelta. When async-openai adds
+                                    // support (or if we switch to raw JSON parsing), add:
+                                    //
+                                    //   if let Some(reasoning) = &choice.delta.reasoning_content {
+                                    //       if !reasoning.is_empty() {
+                                    //           let _ = event_tx.send(AppEvent::LlmReasoning {
+                                    //               text: reasoning.clone(),
+                                    //           });
+                                    //       }
+                                    //   }
+
+                                    // Text content delta
+                                    if let Some(content) = &choice.delta.content
+                                        && !content.is_empty() {
+                                            assistant_content.push_str(content);
+                                            let _ = event_tx.send(AppEvent::LlmDelta {
+                                                text: content.clone(),
+                                            });
+                                        }
+
+                                    // Tool call fragments
+                                    if let Some(tool_calls) = &choice.delta.tool_calls {
+                                        for tc in tool_calls {
+                                            let func_name = tc.function.as_ref().and_then(|f| f.name.as_deref());
+                                            let func_args = tc.function.as_ref().and_then(|f| f.arguments.as_deref());
+                                            accumulate_tool_call(
+                                                &mut pending_tool_calls,
+                                                tc.index,
+                                                tc.id.as_deref(),
+                                                func_name,
+                                                func_args,
+                                            );
+                                        }
+
+                                        // Notify UI when new tool calls appear
+                                        // (done outside the entry borrow to satisfy the borrow checker)
+                                        for tc in tool_calls {
+                                            if tc.function.as_ref().and_then(|f| f.name.as_ref()).is_some()
+                                                && let Some(entry) = pending_tool_calls.get(&tc.index)
+                                                    && let Ok(name) = entry.function_name.parse::<ToolName>() {
+                                                        let _ = event_tx.send(AppEvent::LlmToolCallStreaming {
+                                                            count: pending_tool_calls.len(),
+                                                            tool_name: name,
+                                                        });
+                                                    }
+                                        }
+                                    }
+
+                                    // Track finish reason
+                                    if let Some(reason) = &choice.finish_reason {
+                                        finish_reason = Some(*reason);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    error = %e,
+                                    error_debug = ?e,
+                                    iteration = total_iteration_count,
+                                    message_count = messages.len(),
+                                    chunks_received = if first_token_logged { "yes" } else { "no" },
+                                    partial_text_len = assistant_content.len(),
+                                    pending_tool_calls = pending_tool_calls.len(),
+                                    "stream chunk error"
+                                );
+                                stream_chunk_error = Some(e.to_string());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Mid-stream error — retry the LLM call if retries remain.
+            if let Some(err_msg) = stream_chunk_error {
+                stream_retry_count += 1;
+                if stream_retry_count <= MAX_STREAM_RETRIES {
+                    tracing::warn!(
+                        error = %err_msg,
+                        attempt = stream_retry_count,
+                        max = MAX_STREAM_RETRIES,
+                        "mid-stream error, retrying LLM call"
+                    );
+                    let _ = event_tx.send(AppEvent::LlmRetry {
+                        attempt: stream_retry_count,
+                        max_attempts: MAX_STREAM_RETRIES,
+                        error: err_msg,
+                    });
+                    // Don't count this as a tool iteration — it's a retry of
+                    // the same call. Undo the increment from the top of the loop.
+                    total_iteration_count -= 1;
+                    iteration_count -= 1;
+                    continue;
+                }
                 tracing::error!(
-                    iterations = iteration_count,
-                    total_iterations = total_iteration_count,
-                    effective_max,
-                    "tool loop exceeded max iterations (final chance exhausted)"
+                    error = %err_msg,
+                    retries = stream_retry_count,
+                    "mid-stream error, retries exhausted"
                 );
                 let _ = event_tx.send(AppEvent::LlmError {
-                    error: format!(
-                        "Tool loop exceeded {effective_max} iterations. Try /compact or /new."
-                    ),
+                    error: format!("stream error: {err_msg}"),
                 });
                 let _ = event_tx.send(AppEvent::LlmFinish {
                     usage: Some(total_usage),
                 });
                 return Ok(());
             }
-        }
+            // Reset stream retry counter on successful completion
+            stream_retry_count = 0;
 
-        // Compress old tool results from prior iterations to reduce token usage.
-        // Deferred: only compress when context usage exceeds 40% of the window.
-        // This prevents destroying tool results the LLM still needs early on.
-        // Keep the last 2 iterations uncompressed so the LLM has recent context.
-        let has_tool_messages = messages
-            .iter()
-            .any(|m| matches!(m, ChatCompletionRequestMessage::Tool(_)));
-        let keep_recent = current_iteration_tool_count + prev_iteration_tool_count;
-        if has_tool_messages || current_iteration_tool_count > 0 {
-            let payload_estimate: usize = messages.iter().map(estimate_message_chars).sum();
-            // Rough heuristic: ~4 chars/token. Underestimates for code-heavy content,
-            // but the 60% aggressive pruning safety valve catches underestimates.
-            let estimated_tokens = payload_estimate / 4;
-            let should_compress = context_window
-                .map(|cw| cw > 0 && estimated_tokens as u64 > cw * 40 / 100)
-                .unwrap_or(true); // Compress if we don't know the window size
+            // Stream ended — check if we have tool calls to execute.
+            // Some providers don't set finish_reason=tool_calls reliably,
+            // so we check for accumulated tool call fragments regardless.
+            let has_valid_tool_calls = pending_tool_calls
+                .values()
+                .any(|tc| !tc.id.is_empty() && !tc.function_name.is_empty());
 
-            if should_compress {
-                crate::context::compressor::compress_old_tool_results(&mut messages, keep_recent);
-            }
-        }
-
-        // Aggressive pruning: if conversation is still large after normal compression,
-        // compress ALL tool results (including current iteration) to stay under budget.
-        // Uses keep_recent=0 so even the latest tool results get compressed.
-        if let Some(ctx_window) = context_window {
-            let estimated_chars: usize = messages.iter().map(estimate_message_chars).sum();
-            let estimated_tokens = estimated_chars / 4;
-            if ctx_window > 0 && estimated_tokens as u64 > ctx_window * 60 / 100 {
+            if pending_tool_calls.is_empty() || !has_valid_tool_calls {
                 tracing::info!(
-                    estimated_tokens,
-                    context_window = ctx_window,
-                    "aggressive pruning triggered — compressing all tool results"
+                    finish_reason = ?finish_reason,
+                    pending_tool_calls = pending_tool_calls.len(),
+                    "stream finished (no tool calls)"
                 );
-                crate::context::compressor::compress_old_tool_results(&mut messages, 0);
-            }
-        }
+                tracing::info!(
+                    prompt = total_usage.prompt_tokens,
+                    completion = total_usage.completion_tokens,
+                    total = total_usage.total_tokens,
+                    "final usage totals"
+                );
+                // If the model stopped due to length, recover based on cause:
+                // context pressure → compress + strip tools + retry
+                // output truncation → strip tools only + retry
+                if matches!(finish_reason, Some(FinishReason::Length)) {
+                    let cause = classify_length_cause(total_usage.prompt_tokens, context_window);
+                    let msgs = length_recovery_no_tools(&cause);
 
-        // Capture this iteration's tool count before resetting, so keep_recent
-        // at the top of the next iteration correctly reflects "last 2 iterations".
-        prev_iteration_tool_count = current_iteration_tool_count;
-        current_iteration_tool_count = 0;
-        current_iteration_cache_repeats = 0;
+                    if !tools_stripped {
+                        tools_stripped = true;
+                        tools = None;
 
-        // Estimate payload size for diagnostics
-        let payload_chars: usize = messages
-            .iter()
-            .map(|m| match m {
-                ChatCompletionRequestMessage::System(s) => match &s.content {
-                    ChatCompletionRequestSystemMessageContent::Text(t) => t.len(),
-                    _ => 0,
-                },
-                ChatCompletionRequestMessage::User(u) => match &u.content {
-                    ChatCompletionRequestUserMessageContent::Text(t) => t.len(),
-                    _ => 0,
-                },
-                ChatCompletionRequestMessage::Assistant(a) => match &a.content {
-                    Some(ChatCompletionRequestAssistantMessageContent::Text(t)) => t.len(),
-                    _ => 0,
-                },
-                ChatCompletionRequestMessage::Tool(t) => match &t.content {
-                    ChatCompletionRequestToolMessageContent::Text(t) => t.len(),
-                    _ => 0,
-                },
-                _ => 0,
-            })
-            .sum();
-        tracing::info!(
-            message_count = messages.len(),
-            payload_chars,
-            estimated_tokens = payload_chars / 4,
-            "sending request to LLM"
-        );
-
-        let mut request = CreateChatCompletionRequest {
-            model: model.clone(),
-            messages: messages.clone(),
-            stream: Some(true),
-            stream_options: Some(ChatCompletionStreamOptions {
-                include_usage: Some(true),
-                include_obfuscation: None,
-            }),
-            ..Default::default()
-        };
-
-        if let Some(ref t) = tools
-            && !t.is_empty()
-        {
-            request.tools = Some(t.clone());
-        }
-
-        // Open the stream with retry for transient errors
-        const MAX_RETRIES: u32 = 3;
-        let stream_start = std::time::Instant::now();
-        let mut stream_result: Option<ChatCompletionResponseStream> = None;
-        for attempt in 1..=MAX_RETRIES {
-            match stream_provider.create_stream(request.clone()).await {
-                Ok(s) => {
-                    if attempt > 1 {
-                        tracing::info!(attempt, "stream connection succeeded after retry");
-                    }
-                    tracing::info!(
-                        elapsed_ms = stream_start.elapsed().as_millis() as u64,
-                        "stream connection opened"
-                    );
-                    stream_result = Some(s);
-                    break;
-                }
-                Err(e) => {
-                    if attempt < MAX_RETRIES && is_transient_error(&e) {
-                        let delay = std::time::Duration::from_secs(1 << (attempt - 1)); // 1s, 2s
-                        tracing::warn!(
-                            error = %e,
-                            attempt,
-                            max_attempts = MAX_RETRIES,
-                            delay_secs = delay.as_secs(),
-                            "transient error, retrying stream creation"
-                        );
-                        let _ = event_tx.send(AppEvent::LlmRetry {
-                            attempt,
-                            max_attempts: MAX_RETRIES,
-                            error: e.to_string(),
-                        });
-                        tokio::time::sleep(delay).await;
-                        if cancel_token.is_cancelled() {
-                            let _ = event_tx.send(AppEvent::LlmFinish {
-                                usage: Some(total_usage),
-                            });
-                            return Ok(());
+                        if matches!(cause, LengthCause::ContextPressure) {
+                            tracing::warn!(
+                                "finish_reason=Length with no tool calls (context pressured) — compressing and retrying without tools"
+                            );
+                            crate::context::compressor::compress_old_tool_results(&mut messages, 0);
+                        } else {
+                            tracing::info!(
+                                prompt = total_usage.prompt_tokens,
+                                completion = total_usage.completion_tokens,
+                                context_window = ?context_window,
+                                "output truncation recovery (context not pressured)"
+                            );
                         }
+
+                        // Add any partial assistant text before the retry
+                        if !assistant_content.is_empty() {
+                            #[allow(deprecated)]
+                            messages.push(ChatCompletionRequestMessage::Assistant(
+                                ChatCompletionRequestAssistantMessage {
+                                    content: Some(
+                                        ChatCompletionRequestAssistantMessageContent::Text(
+                                            assistant_content.clone(),
+                                        ),
+                                    ),
+                                    name: None,
+                                    audio: None,
+                                    tool_calls: None,
+                                    function_call: None,
+                                    refusal: None,
+                                },
+                            ));
+                        }
+
+                        messages.push(ChatCompletionRequestMessage::User(
+                            ChatCompletionRequestUserMessage {
+                                content: ChatCompletionRequestUserMessageContent::Text(
+                                    msgs.system_msg.to_string(),
+                                ),
+                                name: None,
+                            },
+                        ));
+                        let _ = event_tx.send(AppEvent::StreamNotice {
+                            text: msgs.notice.to_string(),
+                        });
                         continue;
                     }
-                    // Non-transient or max retries exceeded
-                    tracing::error!(error = %e, attempt, "stream creation failed");
+                    // Already retried
                     let _ = event_tx.send(AppEvent::LlmError {
-                        error: format!("API error: {e}"),
+                        error: msgs.error_msg.to_string(),
                     });
-                    return Err(());
-                }
-            }
-        }
-        let Some(mut stream) = stream_result else {
-            // Should not happen — loop always breaks or returns — but handle gracefully
-            tracing::error!("stream_result was None after retry loop (should be unreachable)");
-            let _ = event_tx.send(AppEvent::LlmError {
-                error: "internal error: stream creation produced no result".to_string(),
-            });
-            return Err(());
-        };
-
-        // Accumulate tool call fragments
-        let mut pending_tool_calls: HashMap<u32, PendingToolCall> = HashMap::new();
-        let mut finish_reason: Option<FinishReason> = None;
-        let mut assistant_content = String::new();
-        let mut first_token_logged = false;
-        let mut stream_chunk_error: Option<String> = None;
-
-        // Process chunks — use select! to check cancellation while streaming
-        loop {
-            tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    tracing::info!("stream cancelled during processing");
                     let _ = event_tx.send(AppEvent::LlmFinish {
                         usage: Some(total_usage),
                     });
                     return Ok(());
                 }
-                maybe_chunk = stream.next() => {
-                    let Some(result) = maybe_chunk else {
-                        // Stream ended
-                        break;
-                    };
-
-                    if !first_token_logged {
-                        first_token_logged = true;
-                        tracing::info!(
-                            ttft_ms = stream_start.elapsed().as_millis() as u64,
-                            "first token received"
-                        );
-                    }
-
-                    match result {
-                        Ok(response) => {
-                            // Check for usage in the final chunk
-                            if let Some(u) = &response.usage {
-                                tracing::info!(
-                                    prompt = u.prompt_tokens,
-                                    completion = u.completion_tokens,
-                                    total = u.total_tokens,
-                                    "usage data received in stream chunk"
-                                );
-                                total_usage.prompt_tokens += u.prompt_tokens;
-                                total_usage.completion_tokens += u.completion_tokens;
-                                total_usage.total_tokens += u.total_tokens;
-
-                                // Send current-call usage to UI for live token counter updates
-                                let _ = event_tx.send(AppEvent::LlmUsageUpdate {
-                                    usage: StreamUsage {
-                                        prompt_tokens: u.prompt_tokens,
-                                        completion_tokens: u.completion_tokens,
-                                        total_tokens: u.total_tokens,
-                                    },
-                                });
-
-                                // Record per-call usage to SQLite
-                                let cost = usage_model_cost.as_ref().map(|mc| {
-                                    u.prompt_tokens as f64 * mc.input_per_million / 1_000_000.0
-                                        + u.completion_tokens as f64 * mc.output_per_million
-                                            / 1_000_000.0
-                                });
-                                usage_writer.record_api_call(ApiCallRecord {
-                                    timestamp: chrono::Utc::now(),
-                                    project_id: usage_project_id.clone(),
-                                    session_id: usage_session_id.clone(),
-                                    model_ref: model.clone(),
-                                    prompt_tokens: u.prompt_tokens,
-                                    completion_tokens: u.completion_tokens,
-                                    total_tokens: u.total_tokens,
-                                    cost,
-                                    duration_ms: call_start.elapsed().as_millis() as u64,
-                                    iteration: total_iteration_count.saturating_sub(1),
-                                });
-                            }
-
-                            // Process each choice's delta
-                            for choice in &response.choices {
-                                // TODO: Emit AppEvent::LlmReasoning for reasoning/thinking tokens.
-                                // OpenAI o1/o3 models send reasoning content via a `reasoning_content`
-                                // field on the stream delta, but async-openai 0.32 does not expose this
-                                // field on ChatCompletionStreamResponseDelta. When async-openai adds
-                                // support (or if we switch to raw JSON parsing), add:
-                                //
-                                //   if let Some(reasoning) = &choice.delta.reasoning_content {
-                                //       if !reasoning.is_empty() {
-                                //           let _ = event_tx.send(AppEvent::LlmReasoning {
-                                //               text: reasoning.clone(),
-                                //           });
-                                //       }
-                                //   }
-
-                                // Text content delta
-                                if let Some(content) = &choice.delta.content
-                                    && !content.is_empty() {
-                                        assistant_content.push_str(content);
-                                        let _ = event_tx.send(AppEvent::LlmDelta {
-                                            text: content.clone(),
-                                        });
-                                    }
-
-                                // Tool call fragments
-                                if let Some(tool_calls) = &choice.delta.tool_calls {
-                                    for tc in tool_calls {
-                                        let func_name = tc.function.as_ref().and_then(|f| f.name.as_deref());
-                                        let func_args = tc.function.as_ref().and_then(|f| f.arguments.as_deref());
-                                        accumulate_tool_call(
-                                            &mut pending_tool_calls,
-                                            tc.index,
-                                            tc.id.as_deref(),
-                                            func_name,
-                                            func_args,
-                                        );
-                                    }
-
-                                    // Notify UI when new tool calls appear
-                                    // (done outside the entry borrow to satisfy the borrow checker)
-                                    for tc in tool_calls {
-                                        if tc.function.as_ref().and_then(|f| f.name.as_ref()).is_some()
-                                            && let Some(entry) = pending_tool_calls.get(&tc.index)
-                                                && let Ok(name) = entry.function_name.parse::<ToolName>() {
-                                                    let _ = event_tx.send(AppEvent::LlmToolCallStreaming {
-                                                        count: pending_tool_calls.len(),
-                                                        tool_name: name,
-                                                    });
-                                                }
-                                    }
-                                }
-
-                                // Track finish reason
-                                if let Some(reason) = &choice.finish_reason {
-                                    finish_reason = Some(*reason);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                error = %e,
-                                error_debug = ?e,
-                                iteration = total_iteration_count,
-                                message_count = messages.len(),
-                                chunks_received = if first_token_logged { "yes" } else { "no" },
-                                partial_text_len = assistant_content.len(),
-                                pending_tool_calls = pending_tool_calls.len(),
-                                "stream chunk error"
-                            );
-                            stream_chunk_error = Some(e.to_string());
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Mid-stream error — retry the LLM call if retries remain.
-        if let Some(err_msg) = stream_chunk_error {
-            stream_retry_count += 1;
-            if stream_retry_count <= MAX_STREAM_RETRIES {
-                tracing::warn!(
-                    error = %err_msg,
-                    attempt = stream_retry_count,
-                    max = MAX_STREAM_RETRIES,
-                    "mid-stream error, retrying LLM call"
-                );
-                let _ = event_tx.send(AppEvent::LlmRetry {
-                    attempt: stream_retry_count,
-                    max_attempts: MAX_STREAM_RETRIES,
-                    error: err_msg,
+                let _ = event_tx.send(AppEvent::LlmFinish {
+                    usage: Some(total_usage),
                 });
-                // Don't count this as a tool iteration — it's a retry of
-                // the same call. Undo the increment from the top of the loop.
-                total_iteration_count -= 1;
-                iteration_count -= 1;
-                continue;
+                return Ok(());
             }
-            tracing::error!(
-                error = %err_msg,
-                retries = stream_retry_count,
-                "mid-stream error, retries exhausted"
-            );
-            let _ = event_tx.send(AppEvent::LlmError {
-                error: format!("stream error: {err_msg}"),
-            });
-            let _ = event_tx.send(AppEvent::LlmFinish {
-                usage: Some(total_usage),
-            });
-            return Ok(());
-        }
-        // Reset stream retry counter on successful completion
-        stream_retry_count = 0;
 
-        // Stream ended — check if we have tool calls to execute.
-        // Some providers don't set finish_reason=tool_calls reliably,
-        // so we check for accumulated tool call fragments regardless.
-        let has_valid_tool_calls = pending_tool_calls
-            .values()
-            .any(|tc| !tc.id.is_empty() && !tc.function_name.is_empty());
+            if !matches!(finish_reason, Some(FinishReason::ToolCalls)) {
+                tracing::warn!(
+                    finish_reason = ?finish_reason,
+                    tool_call_count = pending_tool_calls.len(),
+                    "finish_reason is not ToolCalls but tool calls were streamed — executing anyway"
+                );
+            }
 
-        if pending_tool_calls.is_empty() || !has_valid_tool_calls {
-            tracing::info!(
-                finish_reason = ?finish_reason,
-                pending_tool_calls = pending_tool_calls.len(),
-                "stream finished (no tool calls)"
-            );
-            tracing::info!(
-                prompt = total_usage.prompt_tokens,
-                completion = total_usage.completion_tokens,
-                total = total_usage.total_tokens,
-                "final usage totals"
-            );
-            // If the model stopped due to length, recover based on cause:
-            // context pressure → compress + strip tools + retry
-            // output truncation → strip tools only + retry
-            if matches!(finish_reason, Some(FinishReason::Length)) {
+            // We have tool calls — execute them and loop
+            let Some(ref registry) = tool_registry else {
+                let _ = event_tx.send(AppEvent::LlmFinish {
+                    usage: Some(total_usage),
+                });
+                return Ok(());
+            };
+
+            let ctx = tool_context.clone().unwrap_or_else(|| ToolContext {
+                project_root: std::path::PathBuf::from("."),
+                storage_dir: None,
+                task_store: None,
+                lsp_manager: None,
+            });
+
+            // Sort tool calls by index for deterministic ordering
+            let mut sorted_indices: Vec<u32> = pending_tool_calls.keys().cloned().collect();
+            sorted_indices.sort();
+
+            // Filter out truncated tool calls (common when finish_reason=Length).
+            // The last tool call's JSON arguments are often cut off mid-stream.
+            let pre_filter_count = sorted_indices.len();
+            sorted_indices.retain(|idx| {
+                let tc = &pending_tool_calls[idx];
+                if is_valid_tool_call(tc) {
+                    true
+                } else {
+                    tracing::warn!(
+                        tool = %tc.function_name,
+                        call_id = %tc.id,
+                        args_len = tc.arguments.len(),
+                        "dropping tool call with invalid/truncated data"
+                    );
+                    false
+                }
+            });
+            if sorted_indices.len() < pre_filter_count {
+                tracing::info!(
+                    dropped = pre_filter_count - sorted_indices.len(),
+                    remaining = sorted_indices.len(),
+                    "filtered out truncated tool calls"
+                );
+            }
+
+            if sorted_indices.is_empty() {
                 let cause = classify_length_cause(total_usage.prompt_tokens, context_window);
-                let msgs = length_recovery_no_tools(&cause);
+                let msgs = length_recovery_truncated_tools(&cause);
 
                 if !tools_stripped {
                     tools_stripped = true;
@@ -755,7 +880,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
 
                     if matches!(cause, LengthCause::ContextPressure) {
                         tracing::warn!(
-                            "finish_reason=Length with no tool calls (context pressured) — compressing and retrying without tools"
+                            "all tool calls truncated (context pressured) — compressing and retrying without tools"
                         );
                         crate::context::compressor::compress_old_tool_results(&mut messages, 0);
                     } else {
@@ -767,7 +892,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                         );
                     }
 
-                    // Add any partial assistant text before the retry
+                    // Preserve any partial assistant text from this turn
                     if !assistant_content.is_empty() {
                         #[allow(deprecated)]
                         messages.push(ChatCompletionRequestMessage::Assistant(
@@ -798,6 +923,7 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                     continue;
                 }
                 // Already retried
+                tracing::error!("all tool calls truncated after retry — giving up");
                 let _ = event_tx.send(AppEvent::LlmError {
                     error: msgs.error_msg.to_string(),
                 });
@@ -806,146 +932,26 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
                 });
                 return Ok(());
             }
-            let _ = event_tx.send(AppEvent::LlmFinish {
-                usage: Some(total_usage),
-            });
-            return Ok(());
-        }
 
-        if !matches!(finish_reason, Some(FinishReason::ToolCalls)) {
-            tracing::warn!(
-                finish_reason = ?finish_reason,
-                tool_call_count = pending_tool_calls.len(),
-                "finish_reason is not ToolCalls but tool calls were streamed — executing anyway"
-            );
-        }
+            tracing::info!(count = sorted_indices.len(), "executing tool calls");
 
-        // We have tool calls — execute them and loop
-        let Some(ref registry) = tool_registry else {
-            let _ = event_tx.send(AppEvent::LlmFinish {
-                usage: Some(total_usage),
-            });
-            return Ok(());
-        };
-
-        let ctx = tool_context.clone().unwrap_or_else(|| ToolContext {
-            project_root: std::path::PathBuf::from("."),
-            storage_dir: None,
-            task_store: None,
-            lsp_manager: None,
-        });
-
-        // Sort tool calls by index for deterministic ordering
-        let mut sorted_indices: Vec<u32> = pending_tool_calls.keys().cloned().collect();
-        sorted_indices.sort();
-
-        // Filter out truncated tool calls (common when finish_reason=Length).
-        // The last tool call's JSON arguments are often cut off mid-stream.
-        let pre_filter_count = sorted_indices.len();
-        sorted_indices.retain(|idx| {
-            let tc = &pending_tool_calls[idx];
-            if is_valid_tool_call(tc) {
-                true
-            } else {
-                tracing::warn!(
-                    tool = %tc.function_name,
-                    call_id = %tc.id,
-                    args_len = tc.arguments.len(),
-                    "dropping tool call with invalid/truncated data"
-                );
-                false
-            }
-        });
-        if sorted_indices.len() < pre_filter_count {
-            tracing::info!(
-                dropped = pre_filter_count - sorted_indices.len(),
-                remaining = sorted_indices.len(),
-                "filtered out truncated tool calls"
-            );
-        }
-
-        if sorted_indices.is_empty() {
-            let cause = classify_length_cause(total_usage.prompt_tokens, context_window);
-            let msgs = length_recovery_truncated_tools(&cause);
-
-            if !tools_stripped {
-                tools_stripped = true;
-                tools = None;
-
-                if matches!(cause, LengthCause::ContextPressure) {
-                    tracing::warn!(
-                        "all tool calls truncated (context pressured) — compressing and retrying without tools"
-                    );
-                    crate::context::compressor::compress_old_tool_results(&mut messages, 0);
-                } else {
-                    tracing::info!(
-                        prompt = total_usage.prompt_tokens,
-                        completion = total_usage.completion_tokens,
-                        context_window = ?context_window,
-                        "output truncation recovery (context not pressured)"
-                    );
-                }
-
-                // Preserve any partial assistant text from this turn
-                if !assistant_content.is_empty() {
-                    #[allow(deprecated)]
-                    messages.push(ChatCompletionRequestMessage::Assistant(
-                        ChatCompletionRequestAssistantMessage {
-                            content: Some(ChatCompletionRequestAssistantMessageContent::Text(
-                                assistant_content.clone(),
-                            )),
-                            name: None,
-                            audio: None,
-                            tool_calls: None,
-                            function_call: None,
-                            refusal: None,
+            // Build the assistant message with tool calls for the conversation history
+            let api_tool_calls: Vec<ChatCompletionMessageToolCalls> = sorted_indices
+                .iter()
+                .map(|idx| {
+                    let tc = &pending_tool_calls[idx];
+                    ChatCompletionMessageToolCalls::Function(ChatCompletionMessageToolCall {
+                        id: tc.id.clone(),
+                        function: FunctionCall {
+                            name: tc.function_name.clone(),
+                            arguments: tc.arguments.clone(),
                         },
-                    ));
-                }
-
-                messages.push(ChatCompletionRequestMessage::User(
-                    ChatCompletionRequestUserMessage {
-                        content: ChatCompletionRequestUserMessageContent::Text(
-                            msgs.system_msg.to_string(),
-                        ),
-                        name: None,
-                    },
-                ));
-                let _ = event_tx.send(AppEvent::StreamNotice {
-                    text: msgs.notice.to_string(),
-                });
-                continue;
-            }
-            // Already retried
-            tracing::error!("all tool calls truncated after retry — giving up");
-            let _ = event_tx.send(AppEvent::LlmError {
-                error: msgs.error_msg.to_string(),
-            });
-            let _ = event_tx.send(AppEvent::LlmFinish {
-                usage: Some(total_usage),
-            });
-            return Ok(());
-        }
-
-        tracing::info!(count = sorted_indices.len(), "executing tool calls");
-
-        // Build the assistant message with tool calls for the conversation history
-        let api_tool_calls: Vec<ChatCompletionMessageToolCalls> = sorted_indices
-            .iter()
-            .map(|idx| {
-                let tc = &pending_tool_calls[idx];
-                ChatCompletionMessageToolCalls::Function(ChatCompletionMessageToolCall {
-                    id: tc.id.clone(),
-                    function: FunctionCall {
-                        name: tc.function_name.clone(),
-                        arguments: tc.arguments.clone(),
-                    },
+                    })
                 })
-            })
-            .collect();
+                .collect();
 
-        // Add assistant message with tool calls to conversation
-        #[allow(deprecated)]
+            // Add assistant message with tool calls to conversation
+            #[allow(deprecated)]
         messages.push(ChatCompletionRequestMessage::Assistant(
             ChatCompletionRequestAssistantMessage {
                 content: if assistant_content.is_empty() {
@@ -965,194 +971,195 @@ async fn run_stream(req: StreamRequest) -> Result<(), ()> {
             },
         ));
 
-        // ── Phases 1–4: Partition and execute tool calls ──
-        let mut counters = phases::IterationCounters {
-            tool_count: current_iteration_tool_count,
-            cache_repeats: current_iteration_cache_repeats,
-            user_interacted: user_interacted_this_iteration,
-            total_usage,
-        };
+            // ── Phases 1–4: Partition and execute tool calls ──
+            let mut counters = phases::IterationCounters {
+                tool_count: current_iteration_tool_count,
+                cache_repeats: current_iteration_cache_repeats,
+                user_interacted: user_interacted_this_iteration,
+                total_usage,
+            };
 
-        // Phase 1: Pre-check permissions and partition tool calls
-        let partitioned = phases::partition_tool_calls(
-            &pending_tool_calls,
-            &sorted_indices,
-            &mcp_snapshot,
-            &permission_engine,
-            &tool_context,
-            &mut messages,
-            &mut counters,
-        )
-        .await;
-
-        // Phase 2: Execute auto-allowed tools in parallel
-        if matches!(
-            phases::execute_parallel_tools(
-                &partitioned.auto_allowed,
-                registry,
-                &ctx,
-                &tool_cache,
-                &cancel_token,
-                &event_tx,
-                &mut messages,
-                &mut counters,
-            )
-            .await,
-            phases::PhaseOutcome::Cancelled
-        ) {
-            return Ok(());
-        }
-
-        // Phase 3: Execute permission-required tools sequentially
-        if matches!(
-            phases::execute_sequential_tools(
-                &partitioned.needs_interaction,
-                registry,
-                &ctx,
-                &tool_cache,
-                &cancel_token,
-                &event_tx,
+            // Phase 1: Pre-check permissions and partition tool calls
+            let partitioned = phases::partition_tool_calls(
+                &pending_tool_calls,
+                &sorted_indices,
+                &mcp_snapshot,
                 &permission_engine,
-                &agent_spawner,
+                &tool_context,
                 &mut messages,
                 &mut counters,
             )
-            .await,
-            phases::PhaseOutcome::Cancelled
-        ) {
-            return Ok(());
-        }
+            .await;
 
-        // Phase 4: Execute MCP tool calls sequentially
-        if matches!(
-            phases::execute_mcp_tools(
-                &partitioned.mcp_calls,
-                &mcp_manager,
-                &cancel_token,
-                &event_tx,
-                &permission_engine,
-                &mut messages,
-                &mut counters,
-            )
-            .await,
-            phases::PhaseOutcome::Cancelled
-        ) {
-            return Ok(());
-        }
-
-        // Sync counters back
-        current_iteration_tool_count = counters.tool_count;
-        current_iteration_cache_repeats = counters.cache_repeats;
-        user_interacted_this_iteration = counters.user_interacted;
-        total_usage = counters.total_usage;
-
-        // Reset iteration counter if user granted permission this iteration
-        if user_interacted_this_iteration {
-            tracing::debug!(
-                iterations = iteration_count,
-                total_iterations = total_iteration_count,
-                "resetting iteration counter (user granted permission)"
-            );
-            iteration_count = 0;
-            warnings_sent = 0;
-            consecutive_cached_iterations = 0;
-            // Restore tools if they were stripped — permission grant proves supervision
-            if tools_stripped {
-                tools_stripped = false;
-                final_chance_taken = false;
-                tools = tool_registry
-                    .as_ref()
-                    .map(|r| build_tools(r, &mcp_snapshot));
+            // Phase 2: Execute auto-allowed tools in parallel
+            if matches!(
+                phases::execute_parallel_tools(
+                    &partitioned.auto_allowed,
+                    registry,
+                    &ctx,
+                    &tool_cache,
+                    &cancel_token,
+                    &event_tx,
+                    &mut messages,
+                    &mut counters,
+                )
+                .await,
+                phases::PhaseOutcome::Cancelled
+            ) {
+                return Ok(());
             }
-        }
 
-        // Detect "stuck in cache" loops: if ALL tool calls in this iteration
-        // returned cache-repeat summaries, the LLM is re-reading content it
-        // already has. After MAX_CONSECUTIVE_CACHED such iterations, inject
-        // a strong directive to stop looping and respond.
-        if current_iteration_tool_count > 0
-            && current_iteration_cache_repeats == current_iteration_tool_count
-        {
-            consecutive_cached_iterations += 1;
-            tracing::warn!(
-                consecutive = consecutive_cached_iterations,
-                tools = current_iteration_tool_count,
-                "all tool calls returned cache-repeat summaries"
-            );
-            if consecutive_cached_iterations >= MAX_CONSECUTIVE_CACHED {
-                let stop_msg = "\n\n[STOP: You are re-reading files you already have. All tool \
+            // Phase 3: Execute permission-required tools sequentially
+            if matches!(
+                phases::execute_sequential_tools(
+                    &partitioned.needs_interaction,
+                    registry,
+                    &ctx,
+                    &tool_cache,
+                    &cancel_token,
+                    &event_tx,
+                    &permission_engine,
+                    &agent_spawner,
+                    &mut messages,
+                    &mut counters,
+                )
+                .await,
+                phases::PhaseOutcome::Cancelled
+            ) {
+                return Ok(());
+            }
+
+            // Phase 4: Execute MCP tool calls sequentially
+            if matches!(
+                phases::execute_mcp_tools(
+                    &partitioned.mcp_calls,
+                    &mcp_manager,
+                    &cancel_token,
+                    &event_tx,
+                    &permission_engine,
+                    &mut messages,
+                    &mut counters,
+                )
+                .await,
+                phases::PhaseOutcome::Cancelled
+            ) {
+                return Ok(());
+            }
+
+            // Sync counters back
+            current_iteration_tool_count = counters.tool_count;
+            current_iteration_cache_repeats = counters.cache_repeats;
+            user_interacted_this_iteration = counters.user_interacted;
+            total_usage = counters.total_usage;
+
+            // Reset iteration counter if user granted permission this iteration
+            if user_interacted_this_iteration {
+                tracing::debug!(
+                    iterations = iteration_count,
+                    total_iterations = total_iteration_count,
+                    "resetting iteration counter (user granted permission)"
+                );
+                iteration_count = 0;
+                warnings_sent = 0;
+                consecutive_cached_iterations = 0;
+                // Restore tools if they were stripped — permission grant proves supervision
+                if tools_stripped {
+                    tools_stripped = false;
+                    final_chance_taken = false;
+                    tools = tool_registry
+                        .as_ref()
+                        .map(|r| build_tools(r, &mcp_snapshot));
+                }
+            }
+
+            // Detect "stuck in cache" loops: if ALL tool calls in this iteration
+            // returned cache-repeat summaries, the LLM is re-reading content it
+            // already has. After MAX_CONSECUTIVE_CACHED such iterations, inject
+            // a strong directive to stop looping and respond.
+            if current_iteration_tool_count > 0
+                && current_iteration_cache_repeats == current_iteration_tool_count
+            {
+                consecutive_cached_iterations += 1;
+                tracing::warn!(
+                    consecutive = consecutive_cached_iterations,
+                    tools = current_iteration_tool_count,
+                    "all tool calls returned cache-repeat summaries"
+                );
+                if consecutive_cached_iterations >= MAX_CONSECUTIVE_CACHED {
+                    let stop_msg = "\n\n[STOP: You are re-reading files you already have. All tool \
                                 calls returned cached content. You MUST respond to the user NOW \
                                 with the information already in your conversation. Do NOT make \
                                 any more tool calls.]";
+                    for msg in messages.iter_mut().rev() {
+                        if let ChatCompletionRequestMessage::Tool(tool_msg) = msg {
+                            if let ChatCompletionRequestToolMessageContent::Text(content) =
+                                &mut tool_msg.content
+                            {
+                                content.push_str(stop_msg);
+                            }
+                            break;
+                        }
+                    }
+                    let _ = event_tx.send(AppEvent::StreamNotice {
+                        text: "⚙ Cache loop detected — forcing response".to_string(),
+                    });
+                    // Reset so the stop message doesn't fire every subsequent iteration
+                    consecutive_cached_iterations = 0;
+                }
+            } else {
+                consecutive_cached_iterations = 0;
+            }
+
+            // Escalating warnings: append a nudge to the last tool result message
+            // so the LLM sees iteration pressure as contextual feedback.
+            if let Some(text) =
+                check_iteration_warning(iteration_count, effective_max, &mut warnings_sent)
+            {
+                // Append warning to the last Tool message in the conversation
                 for msg in messages.iter_mut().rev() {
                     if let ChatCompletionRequestMessage::Tool(tool_msg) = msg {
                         if let ChatCompletionRequestToolMessageContent::Text(content) =
                             &mut tool_msg.content
                         {
-                            content.push_str(stop_msg);
+                            content.push_str(&text);
                         }
                         break;
                     }
                 }
-                let _ = event_tx.send(AppEvent::StreamNotice {
-                    text: "⚙ Cache loop detected — forcing response".to_string(),
-                });
-                // Reset so the stop message doesn't fire every subsequent iteration
-                consecutive_cached_iterations = 0;
-            }
-        } else {
-            consecutive_cached_iterations = 0;
-        }
-
-        // Escalating warnings: append a nudge to the last tool result message
-        // so the LLM sees iteration pressure as contextual feedback.
-        if let Some(text) =
-            check_iteration_warning(iteration_count, effective_max, &mut warnings_sent)
-        {
-            // Append warning to the last Tool message in the conversation
-            for msg in messages.iter_mut().rev() {
-                if let ChatCompletionRequestMessage::Tool(tool_msg) = msg {
-                    if let ChatCompletionRequestToolMessageContent::Text(content) =
-                        &mut tool_msg.content
-                    {
-                        content.push_str(&text);
-                    }
-                    break;
-                }
-            }
-            // Also notify the TUI so the user sees why the LLM might wrap up
-            let stripped = text.trim().trim_start_matches('[').trim_end_matches(']');
-            let display_text = format!("⚙ {stripped}");
-            let _ = event_tx.send(AppEvent::StreamNotice { text: display_text });
-            tracing::info!(
-                iteration_count,
-                total_iteration_count,
-                "tool loop warning injected"
-            );
-        }
-
-        // Tool stripping: at CRITICAL threshold, remove tool definitions from the
-        // API request so the LLM structurally cannot make tool calls.
-        // The CRITICAL warning message is already injected by check_iteration_warning()
-        // above — this block just does the structural enforcement.
-        if !tools_stripped {
-            let critical_at = effective_max * WARN_CRITICAL_PCT / 100;
-            if iteration_count >= critical_at {
-                tools_stripped = true;
-                tools = None;
-                let _ = event_tx.send(AppEvent::StreamNotice {
-                    text: "⚙ Tool access revoked — forcing response".to_string(),
-                });
-                tracing::warn!(
+                // Also notify the TUI so the user sees why the LLM might wrap up
+                let stripped = text.trim().trim_start_matches('[').trim_end_matches(']');
+                let display_text = format!("⚙ {stripped}");
+                let _ = event_tx.send(AppEvent::StreamNotice { text: display_text });
+                tracing::info!(
                     iteration_count,
                     total_iteration_count,
-                    critical_at,
-                    "tool definitions stripped from API request"
+                    "tool loop warning injected"
                 );
             }
-        }
 
-        // Loop back to send the messages (with tool results) to the LLM again
+            // Tool stripping: at CRITICAL threshold, remove tool definitions from the
+            // API request so the LLM structurally cannot make tool calls.
+            // The CRITICAL warning message is already injected by check_iteration_warning()
+            // above — this block just does the structural enforcement.
+            if !tools_stripped {
+                let critical_at = effective_max * WARN_CRITICAL_PCT / 100;
+                if iteration_count >= critical_at {
+                    tools_stripped = true;
+                    tools = None;
+                    let _ = event_tx.send(AppEvent::StreamNotice {
+                        text: "⚙ Tool access revoked — forcing response".to_string(),
+                    });
+                    tracing::warn!(
+                        iteration_count,
+                        total_iteration_count,
+                        critical_at,
+                        "tool definitions stripped from API request"
+                    );
+                }
+            }
+
+            // Loop back to send the messages (with tool results) to the LLM again
+        }
     }
 }
 
@@ -1384,7 +1391,7 @@ mod tests {
         ]]));
         let (tx, rx) = mpsc::unbounded_channel();
         let req = mock_stream_request(mock, tx);
-        run_stream(req).await.expect("stream should succeed");
+        req.run().await.expect("stream should succeed");
         let events = collect_events(rx).await;
 
         // Should have delta events for text content
@@ -1422,7 +1429,7 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let req = mock_stream_request(mock, tx);
         req.cancel_token.cancel(); // Cancel before stream starts
-        run_stream(req)
+        req.run()
             .await
             .expect("should handle cancellation gracefully");
         let events = collect_events(rx).await;
@@ -1482,7 +1489,7 @@ mod tests {
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
         )));
 
-        run_stream(req)
+        req.run()
             .await
             .expect("stream with tool call should succeed");
         let events = collect_events(rx).await;
@@ -1559,7 +1566,7 @@ mod tests {
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
         )));
 
-        run_stream(req)
+        req.run()
             .await
             .expect("stream should handle truncated tool calls");
         let events = collect_events(rx).await;
@@ -1597,7 +1604,7 @@ mod tests {
         ))]]));
         let (tx, rx) = mpsc::unbounded_channel();
         let req = mock_stream_request(mock, tx);
-        run_stream(req)
+        req.run()
             .await
             .expect("empty stream with finish should work");
         let events = collect_events(rx).await;
@@ -1655,9 +1662,7 @@ mod tests {
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
         )));
 
-        run_stream(req)
-            .await
-            .expect("parallel tool calls should succeed");
+        req.run().await.expect("parallel tool calls should succeed");
         let events = collect_events(rx).await;
 
         // Should have tool results for all 3 calls
@@ -1752,9 +1757,7 @@ mod tests {
             mcp_manager: None,
         };
 
-        run_stream(req)
-            .await
-            .expect("cache hit stream should succeed");
+        req.run().await.expect("cache hit stream should succeed");
         let events = collect_events(rx).await;
 
         // Should still have a tool result (from cache)
@@ -1801,7 +1804,7 @@ mod tests {
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
         )));
 
-        run_stream(req).await.expect("should terminate gracefully");
+        req.run().await.expect("should terminate gracefully");
         let events = collect_events(rx).await;
 
         // Should emit LlmError about exceeding max iterations
@@ -1847,7 +1850,7 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let req = mock_stream_request(mock, tx);
 
-        run_stream(req)
+        req.run()
             .await
             .expect("should recover from mid-stream error");
         let events = collect_events(rx).await;
@@ -1906,7 +1909,7 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let req = mock_stream_request(mock, tx);
 
-        run_stream(req)
+        req.run()
             .await
             .expect("should handle exhausted retries gracefully");
         let events = collect_events(rx).await;
@@ -1987,9 +1990,7 @@ mod tests {
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
         )));
 
-        run_stream(req)
-            .await
-            .expect("interjection stream should succeed");
+        req.run().await.expect("interjection stream should succeed");
         let events = collect_events(rx).await;
 
         // Should complete successfully
@@ -2047,7 +2048,7 @@ mod tests {
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
         )));
 
-        run_stream(req)
+        req.run()
             .await
             .expect("multi-interjection stream should succeed");
         let events = collect_events(rx).await;
@@ -2075,7 +2076,7 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let req = mock_stream_request(mock, tx);
 
-        run_stream(req)
+        req.run()
             .await
             .expect("empty interjection channel should be fine");
         let events = collect_events(rx).await;
@@ -2130,7 +2131,7 @@ mod tests {
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
         )));
 
-        run_stream(req)
+        req.run()
             .await
             .expect("interjection with tool calls should succeed");
         let events = collect_events(rx).await;
@@ -2209,9 +2210,7 @@ mod tests {
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
         )));
 
-        run_stream(req)
-            .await
-            .expect("cache loop stream should succeed");
+        req.run().await.expect("cache loop stream should succeed");
         let events = collect_events(rx).await;
 
         // Should have a StreamNotice about cache loop detection
@@ -2302,9 +2301,7 @@ mod tests {
             crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
         )));
 
-        run_stream(req)
-            .await
-            .expect("multi-tool chain should succeed");
+        req.run().await.expect("multi-tool chain should succeed");
         let events = collect_events(rx).await;
 
         // Should have tool results for both glob and read
@@ -2395,7 +2392,7 @@ mod tests {
 
         // Spawn the stream, then drain events auto-granting any permission requests
         let mut perm_rx = rx;
-        let stream_handle = tokio::spawn(async move { run_stream(req).await });
+        let stream_handle = tokio::spawn(async move { req.run().await });
 
         let mut events = Vec::new();
         let mut saw_permission = false;
@@ -2502,9 +2499,7 @@ mod tests {
             mcp_manager: None,
         };
 
-        run_stream(req)
-            .await
-            .expect("plan mode stream should succeed");
+        req.run().await.expect("plan mode stream should succeed");
         let events = collect_events(rx).await;
 
         // Should have a tool result that indicates denial
@@ -2627,7 +2622,7 @@ mod tests {
             mcp_manager: None,
         };
 
-        run_stream(req)
+        req.run()
             .await
             .expect("trust-mode edit stream should succeed");
         let events = collect_events(rx).await;

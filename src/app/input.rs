@@ -83,7 +83,7 @@ impl App {
             .bump_generation();
 
         // Launch the streaming task with tool support
-        stream::spawn_stream(StreamRequest {
+        StreamRequest {
             stream_provider: std::sync::Arc::new(stream::OpenAIChatStream::new(
                 client.inner().clone(),
             )),
@@ -148,7 +148,8 @@ impl App {
                 mcp_manager: Some(self.mcp_manager.clone()),
             }),
             mcp_manager: Some(self.mcp_manager.clone()),
-        });
+        }
+        .spawn();
 
         Ok(())
     }
