@@ -45,33 +45,51 @@ fn render_session_section<'a>(
         format!(" {model}"),
         Style::default().fg(theme.fg),
     )));
-    // Cumulative token breakdown: In/Out/Tot
+    // Cumulative token breakdown: In/Out paired, Tot/Cost paired
+    let in_str = format_tokens(state.prompt_tokens);
+    let out_str = format_tokens(state.completion_tokens);
     lines.push(Line::from(Span::styled(
-        format!(" In:  {}", format_tokens(state.prompt_tokens)),
+        format!(" In: {in_str:>5}  Out: {out_str:>5}"),
         Style::default().fg(theme.dim),
     )));
+    let tot_str = format_tokens(state.total_tokens);
+    let cost_str = match state.session_cost {
+        Some(cost) => format!("${:.4}", cost),
+        None => "N/A".into(),
+    };
     lines.push(Line::from(Span::styled(
-        format!(" Out: {}", format_tokens(state.completion_tokens)),
+        format!(" Tot: {tot_str:>5} Cost: {cost_str}"),
         Style::default().fg(theme.dim),
     )));
-    lines.push(Line::from(Span::styled(
-        format!(" Tot: {}", format_tokens(state.total_tokens)),
-        Style::default().fg(theme.dim),
-    )));
-    match state.session_cost {
-        Some(cost) => {
-            lines.push(Line::from(Span::styled(
-                format!(" Cost: ${:.4}", cost),
-                Style::default().fg(theme.dim),
-            )));
-        }
-        None => {
-            lines.push(Line::from(Span::styled(
-                " Cost: N/A",
-                Style::default().fg(theme.dim),
-            )));
-        }
-    }
+    // Health status (merged from standalone section)
+    let summary = &state.diagnostics_summary;
+    let max_sev = summary.max_severity();
+    let (health_icon, health_icon_color, health_label) = match max_sev {
+        Severity::Error => (
+            "\u{25cf}",
+            theme.error,
+            format!("{} errors", summary.error_count),
+        ),
+        Severity::Warning => (
+            "\u{25cf}",
+            theme.warning,
+            format!("{} warnings", summary.warning_count),
+        ),
+        Severity::Info if summary.info_count > 0 => (
+            "\u{2139}",
+            theme.dim,
+            format!("{} info", summary.info_count),
+        ),
+        Severity::Info => ("\u{2713}", theme.success, "ok".into()),
+    };
+    lines.push(Line::from(vec![
+        Span::styled(" Health: ", Style::default().fg(theme.dim)),
+        Span::styled(
+            format!("{health_icon} "),
+            Style::default().fg(health_icon_color),
+        ),
+        Span::styled(health_label, Style::default().fg(theme.dim)),
+    ]));
     lines.push(primitives::section_separator(sidebar_width, theme));
 }
 
@@ -88,11 +106,38 @@ fn render_git_section<'a>(
     };
 
     lines.push(primitives::section_header("Git", header_color));
-    if let Some(repo_name) = &state.git_repo_name {
-        lines.push(Line::from(Span::styled(
-            format!(" {repo_name}"),
-            Style::default().fg(theme.dim),
-        )));
+    // Repo name + dirty/clean status on one line (when both available)
+    match (&state.git_repo_name, state.git_dirty) {
+        (Some(repo_name), Some(dirty)) => {
+            let (icon, status_text, status_color) = if dirty {
+                ("\u{25cf}", "dirty", theme.warning)
+            } else {
+                ("\u{25cf}", "clean", theme.success)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {repo_name} "), Style::default().fg(theme.dim)),
+                Span::styled(format!("{icon} "), Style::default().fg(status_color)),
+                Span::styled(status_text, Style::default().fg(status_color)),
+            ]));
+        }
+        (Some(repo_name), None) => {
+            lines.push(Line::from(Span::styled(
+                format!(" {repo_name}"),
+                Style::default().fg(theme.dim),
+            )));
+        }
+        (None, Some(dirty)) => {
+            let (icon, status_text, status_color) = if dirty {
+                ("\u{25cf}", "dirty", theme.warning)
+            } else {
+                ("\u{25cf}", "clean", theme.success)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {icon} "), Style::default().fg(status_color)),
+                Span::styled(status_text, Style::default().fg(status_color)),
+            ]));
+        }
+        (None, None) => {}
     }
     let max_branch = max_branch_display(sidebar_width);
     let truncated_branch = if max_branch > 0 && branch.chars().count() > max_branch {
@@ -105,17 +150,6 @@ fn render_git_section<'a>(
         format!(" {truncated_branch}"),
         Style::default().fg(theme.fg),
     )));
-    if let Some(dirty) = state.git_dirty {
-        let (status_text, status_color) = if dirty {
-            ("dirty", theme.warning)
-        } else {
-            ("clean", theme.success)
-        };
-        lines.push(Line::from(Span::styled(
-            format!(" {status_text}"),
-            Style::default().fg(status_color),
-        )));
-    }
     // Inline file-change stats (formerly the standalone "Changes" section)
     if !state.changes.is_empty() {
         lines.push(Line::from(""));
@@ -238,35 +272,7 @@ fn render_servers_section<'a>(
         lines.push(primitives::section_separator(sidebar_width, theme));
     }
 
-    // -- Health section (header + separate status line) --
-    {
-        lines.push(primitives::section_header("Health", header_color));
-        let summary = &state.diagnostics_summary;
-        let max_sev = summary.max_severity();
-        let (icon, icon_color, label) = match max_sev {
-            Severity::Error => (
-                "\u{25cf}",
-                theme.error,
-                format!("{} errors", summary.error_count),
-            ),
-            Severity::Warning => (
-                "\u{25cf}",
-                theme.warning,
-                format!("{} warnings", summary.warning_count),
-            ),
-            Severity::Info if summary.info_count > 0 => (
-                "\u{2139}",
-                theme.dim,
-                format!("{} info", summary.info_count),
-            ),
-            Severity::Info => ("\u{2713}", theme.success, "ok".into()),
-        };
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {icon} "), Style::default().fg(icon_color)),
-            Span::styled(label, Style::default().fg(theme.dim)),
-        ]));
-        lines.push(primitives::section_separator(sidebar_width, theme));
-    }
+    // Health is now rendered inside render_session_section.
 }
 
 fn render_tasks_section<'a>(
@@ -1095,8 +1101,7 @@ mod tests {
         let text = render_sidebar_to_string(40, 30, &state);
         // Priority abbreviation was removed from line 1
         assert!(text.contains("task-nopr0001"), "should show task ID");
-        // "hi" appears in "Health" header, so check it doesn't appear on the task ID line
-        // by checking the line doesn't contain " hi" after the ID
+        // Verify priority abbreviation doesn't appear on the task ID line
         let id_line = text.lines().find(|l| l.contains("task-nopr0001")).unwrap();
         assert!(
             !id_line.contains(" hi"),
