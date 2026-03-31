@@ -812,6 +812,57 @@ impl StreamRequest {
                     });
                     return Ok(());
                 }
+                // Before finishing, check for user interjections that arrived
+                // during streaming. If found, push the assistant's response and
+                // the interjection(s) into the conversation and continue the loop
+                // so the LLM can respond to them.
+                let mut has_interjection = false;
+                while let Ok(text) = interjection_rx.try_recv() {
+                    if !has_interjection {
+                        // Push the assistant's completed response first
+                        if !assistant_content.is_empty() {
+                            #[allow(deprecated)]
+                            messages.push(ChatCompletionRequestMessage::Assistant(
+                                ChatCompletionRequestAssistantMessage {
+                                    content: Some(
+                                        ChatCompletionRequestAssistantMessageContent::Text(
+                                            assistant_content.clone(),
+                                        ),
+                                    ),
+                                    name: None,
+                                    audio: None,
+                                    tool_calls: None,
+                                    function_call: None,
+                                    refusal: None,
+                                },
+                            ));
+                        }
+                        has_interjection = true;
+                    }
+                    tracing::info!(
+                        "user interjection received after response: {} chars",
+                        text.len()
+                    );
+                    messages.push(ChatCompletionRequestMessage::User(
+                        ChatCompletionRequestUserMessage {
+                            content: ChatCompletionRequestUserMessageContent::Text(text),
+                            name: None,
+                        },
+                    ));
+                    iteration_count = 0;
+                    warnings_sent = 0;
+                    if tools_stripped {
+                        tools_stripped = false;
+                        final_chance_taken = false;
+                        tools = tool_registry
+                            .as_ref()
+                            .map(|r| build_tools(r, &mcp_snapshot));
+                    }
+                }
+                if has_interjection {
+                    continue;
+                }
+
                 let _ = event_tx.send(AppEvent::LlmFinish {
                     usage: Some(total_usage),
                 });
@@ -2081,6 +2132,117 @@ mod tests {
             .expect("empty interjection channel should be fine");
         let events = collect_events(rx).await;
 
+        let finishes: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
+            .collect();
+        assert_eq!(finishes.len(), 1);
+    }
+
+    /// A stream provider that injects a user interjection into the channel
+    /// after the first chunk of the first API call, simulating a user typing
+    /// while the LLM is streaming a text-only response.
+    struct InterjectionInjectorMock {
+        inner: MockChatStream,
+        inject_tx: Mutex<Option<mpsc::UnboundedSender<String>>>,
+        message: String,
+    }
+
+    impl ChatStreamProvider for InterjectionInjectorMock {
+        fn create_stream(
+            &self,
+            _request: CreateChatCompletionRequest,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<ChatCompletionResponseStream, OpenAIError>> + Send + '_,
+            >,
+        > {
+            Box::pin(async move {
+                let chunks = self
+                    .inner
+                    .streams
+                    .lock()
+                    .expect("lock poisoned")
+                    .pop_front()
+                    .unwrap_or_default();
+
+                // If this is the first call, build a stream that injects the
+                // interjection after the first chunk
+                let mut inject_tx_guard = self.inject_tx.lock().expect("lock poisoned");
+                if let Some(tx) = inject_tx_guard.take() {
+                    let msg = self.message.clone();
+                    // Feed chunks through a channel-based stream so we can
+                    // inject the interjection mid-stream
+                    let (chunk_tx, chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+                    tokio::spawn(async move {
+                        let mut first = true;
+                        for chunk in chunks {
+                            let _ = chunk_tx.send(chunk);
+                            if first {
+                                // After first chunk, inject the interjection
+                                let _ = tx.send(msg.clone());
+                                first = false;
+                            }
+                            // Yield so the receiver can process
+                            tokio::task::yield_now().await;
+                        }
+                    });
+                    let stream =
+                        tokio_stream::wrappers::UnboundedReceiverStream::new(chunk_rx);
+                    Ok(Box::pin(stream) as ChatCompletionResponseStream)
+                } else {
+                    let stream = tokio_stream::iter(chunks);
+                    Ok(Box::pin(stream) as ChatCompletionResponseStream)
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn interjection_during_text_response_triggers_followup() {
+        // When the LLM produces a text-only response (no tool calls) but the
+        // user sends an interjection during streaming, the stream should
+        // continue with another API call so the LLM can respond to it.
+        let (interjection_tx, interjection_rx) = mpsc::unbounded_channel();
+
+        let mock = Arc::new(InterjectionInjectorMock {
+            inner: MockChatStream::new(vec![
+                // First call: text-only response
+                vec![
+                    Ok(text_delta("Working on it...")),
+                    Ok(finish_chunk(FinishReason::Stop, 50, 10)),
+                ],
+                // Second call: LLM responds to the interjection
+                vec![
+                    Ok(text_delta("Got your message!")),
+                    Ok(finish_chunk(FinishReason::Stop, 100, 15)),
+                ],
+            ]),
+            inject_tx: Mutex::new(Some(interjection_tx)),
+            message: "actually focus on tests".to_string(),
+        });
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut req = mock_stream_request(mock, tx);
+        req.interjection_rx = interjection_rx;
+
+        req.run()
+            .await
+            .expect("interjection during text response should trigger followup");
+        let events = collect_events(rx).await;
+
+        // Should have text deltas from BOTH API calls
+        let deltas: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmDelta { .. }))
+            .collect();
+        assert!(
+            deltas.len() >= 2,
+            "should have deltas from both calls: {:?}",
+            deltas
+        );
+
+        // Should complete successfully
         let finishes: Vec<&AppEvent> = events
             .iter()
             .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))

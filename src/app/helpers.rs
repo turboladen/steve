@@ -233,16 +233,13 @@ impl App {
             return;
         }
 
-        let Some(tx) = self.interjection_tx.clone() else {
-            return;
-        };
-
         let (display_text, api_text) = self.resolve_file_refs(&text);
 
-        // Send augmented text to stream task via interjection channel
-        if tx.send(api_text.clone()).is_err() {
-            // Channel closed — stream already finished
-            return;
+        // Try to send to the active stream task via the interjection channel.
+        // If the channel is closed (stream already exited), we still persist
+        // and display the message so it appears in history for the next stream.
+        if let Some(tx) = self.interjection_tx.clone() {
+            let _ = tx.send(api_text.clone());
         }
 
         // Persist to storage
@@ -423,15 +420,16 @@ mod tests {
     }
 
     #[test]
-    fn handle_interjection_noop_when_no_sender() {
+    fn handle_interjection_persists_when_no_sender() {
         let mut app = make_test_app();
         assert!(app.interjection_tx.is_none());
 
         let initial_count = app.messages.len();
         app.handle_interjection("hello".to_string());
 
-        // Should silently do nothing
-        assert_eq!(app.messages.len(), initial_count);
+        // Message should still be displayed even without an active channel,
+        // so it appears in history for the next stream
+        assert_eq!(app.messages.len(), initial_count + 1);
     }
 
     // -- close_all_overlays tests --
