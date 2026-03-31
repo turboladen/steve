@@ -63,21 +63,8 @@ pub trait ChatStreamProvider: Send + Sync {
 }
 
 /// Build a text-only assistant message for the conversation history.
-///
-/// Wraps the deprecated `ChatCompletionRequestAssistantMessage` construction
-/// that async-openai 0.33 requires, keeping the `#[allow(deprecated)]` in one place.
-#[allow(deprecated)]
 fn assistant_text_message(content: &str) -> ChatCompletionRequestMessage {
-    ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
-        content: Some(ChatCompletionRequestAssistantMessageContent::Text(
-            content.to_string(),
-        )),
-        name: None,
-        audio: None,
-        tool_calls: None,
-        function_call: None,
-        refusal: None,
-    })
+    ChatCompletionRequestAssistantMessage::from(content).into()
 }
 
 /// Production implementation wrapping async-openai's Client.
