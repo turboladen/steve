@@ -436,6 +436,21 @@ mod tests {
         assert_eq!(app.messages.len(), initial_count + 1);
     }
 
+    #[test]
+    fn handle_interjection_persists_when_receiver_dropped() {
+        let mut app = make_test_app();
+        let (tx, rx) = mpsc::unbounded_channel();
+        app.interjection_tx = Some(tx);
+        // Drop the receiver — simulates the stream task having already exited
+        drop(rx);
+
+        let initial_count = app.messages.len();
+        app.handle_interjection("late message".to_string());
+
+        // Message should still be displayed and persisted despite send failure
+        assert_eq!(app.messages.len(), initial_count + 1);
+    }
+
     // -- close_all_overlays tests --
 
     #[test]
