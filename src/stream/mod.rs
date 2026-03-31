@@ -62,11 +62,6 @@ pub trait ChatStreamProvider: Send + Sync {
     >;
 }
 
-/// Build a text-only assistant message for the conversation history.
-fn assistant_text_message(content: &str) -> ChatCompletionRequestMessage {
-    ChatCompletionRequestAssistantMessage::from(content).into()
-}
-
 /// Production implementation wrapping async-openai's Client.
 pub struct OpenAIChatStream {
     client: Client<OpenAIConfig>,
@@ -778,7 +773,7 @@ impl StreamRequest {
 
                         // Add any partial assistant text before the retry
                         if !assistant_content.is_empty() {
-                            messages.push(assistant_text_message(&assistant_content));
+                            messages.push(ChatCompletionRequestAssistantMessage::from(assistant_content.as_str()).into());
                         }
 
                         messages.push(ChatCompletionRequestMessage::User(
@@ -812,7 +807,7 @@ impl StreamRequest {
                     if !has_interjection {
                         // Push the assistant's completed response first
                         if !assistant_content.is_empty() {
-                            messages.push(assistant_text_message(&assistant_content));
+                            messages.push(ChatCompletionRequestAssistantMessage::from(assistant_content.as_str()).into());
                         }
                         has_interjection = true;
                     }
@@ -922,7 +917,7 @@ impl StreamRequest {
 
                     // Preserve any partial assistant text from this turn
                     if !assistant_content.is_empty() {
-                        messages.push(assistant_text_message(&assistant_content));
+                        messages.push(ChatCompletionRequestAssistantMessage::from(assistant_content.as_str()).into());
                     }
 
                     messages.push(ChatCompletionRequestMessage::User(
