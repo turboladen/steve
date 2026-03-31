@@ -227,6 +227,10 @@ impl App {
     /// Inject a user message into the active tool loop without cancelling it.
     /// The message is sent via the interjection channel to the stream task,
     /// which drains it before the next LLM API call.
+    ///
+    /// Only called from `handle_key` when `is_loading` is true (active stream).
+    /// Always persists and displays the message even if the channel is closed,
+    /// so the message appears in history for the next stream.
     pub(super) fn handle_interjection(&mut self, text: String) {
         // Silently reject slash commands during interjection
         if text.starts_with('/') {

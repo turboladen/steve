@@ -62,6 +62,24 @@ pub trait ChatStreamProvider: Send + Sync {
     >;
 }
 
+/// Build a text-only assistant message for the conversation history.
+///
+/// Wraps the deprecated `ChatCompletionRequestAssistantMessage` construction
+/// that async-openai 0.33 requires, keeping the `#[allow(deprecated)]` in one place.
+#[allow(deprecated)]
+fn assistant_text_message(content: &str) -> ChatCompletionRequestMessage {
+    ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
+        content: Some(ChatCompletionRequestAssistantMessageContent::Text(
+            content.to_string(),
+        )),
+        name: None,
+        audio: None,
+        tool_calls: None,
+        function_call: None,
+        refusal: None,
+    })
+}
+
 /// Production implementation wrapping async-openai's Client.
 pub struct OpenAIChatStream {
     client: Client<OpenAIConfig>,
@@ -773,21 +791,7 @@ impl StreamRequest {
 
                         // Add any partial assistant text before the retry
                         if !assistant_content.is_empty() {
-                            #[allow(deprecated)]
-                            messages.push(ChatCompletionRequestMessage::Assistant(
-                                ChatCompletionRequestAssistantMessage {
-                                    content: Some(
-                                        ChatCompletionRequestAssistantMessageContent::Text(
-                                            assistant_content.clone(),
-                                        ),
-                                    ),
-                                    name: None,
-                                    audio: None,
-                                    tool_calls: None,
-                                    function_call: None,
-                                    refusal: None,
-                                },
-                            ));
+                            messages.push(assistant_text_message(&assistant_content));
                         }
 
                         messages.push(ChatCompletionRequestMessage::User(
@@ -821,21 +825,7 @@ impl StreamRequest {
                     if !has_interjection {
                         // Push the assistant's completed response first
                         if !assistant_content.is_empty() {
-                            #[allow(deprecated)]
-                            messages.push(ChatCompletionRequestMessage::Assistant(
-                                ChatCompletionRequestAssistantMessage {
-                                    content: Some(
-                                        ChatCompletionRequestAssistantMessageContent::Text(
-                                            assistant_content.clone(),
-                                        ),
-                                    ),
-                                    name: None,
-                                    audio: None,
-                                    tool_calls: None,
-                                    function_call: None,
-                                    refusal: None,
-                                },
-                            ));
+                            messages.push(assistant_text_message(&assistant_content));
                         }
                         has_interjection = true;
                     }
@@ -945,19 +935,7 @@ impl StreamRequest {
 
                     // Preserve any partial assistant text from this turn
                     if !assistant_content.is_empty() {
-                        #[allow(deprecated)]
-                        messages.push(ChatCompletionRequestMessage::Assistant(
-                            ChatCompletionRequestAssistantMessage {
-                                content: Some(ChatCompletionRequestAssistantMessageContent::Text(
-                                    assistant_content.clone(),
-                                )),
-                                name: None,
-                                audio: None,
-                                tool_calls: None,
-                                function_call: None,
-                                refusal: None,
-                            },
-                        ));
+                        messages.push(assistant_text_message(&assistant_content));
                     }
 
                     messages.push(ChatCompletionRequestMessage::User(
@@ -2141,23 +2119,31 @@ mod tests {
 
     /// A stream provider that injects a user interjection into the channel
     /// after the first chunk of the first API call, simulating a user typing
-    /// while the LLM is streaming a text-only response.
+    /// while the LLM is streaming a text-only response. Captures requests
+    /// sent to each `create_stream` call for assertion.
     struct InterjectionInjectorMock {
         inner: MockChatStream,
         inject_tx: Mutex<Option<mpsc::UnboundedSender<String>>>,
         message: String,
+        captured_requests: Mutex<Vec<Vec<ChatCompletionRequestMessage>>>,
     }
 
     impl ChatStreamProvider for InterjectionInjectorMock {
         fn create_stream(
             &self,
-            _request: CreateChatCompletionRequest,
+            request: CreateChatCompletionRequest,
         ) -> Pin<
             Box<
                 dyn Future<Output = Result<ChatCompletionResponseStream, OpenAIError>> + Send + '_,
             >,
         > {
             Box::pin(async move {
+                // Capture the messages for later assertion
+                self.captured_requests
+                    .lock()
+                    .expect("lock poisoned")
+                    .push(request.messages);
+
                 let chunks = self
                     .inner
                     .streams
@@ -2220,10 +2206,11 @@ mod tests {
             ]),
             inject_tx: Mutex::new(Some(interjection_tx)),
             message: "actually focus on tests".to_string(),
+            captured_requests: Mutex::new(Vec::new()),
         });
 
         let (tx, rx) = mpsc::unbounded_channel();
-        let mut req = mock_stream_request(mock, tx);
+        let mut req = mock_stream_request(mock.clone(), tx);
         req.interjection_rx = interjection_rx;
 
         req.run()
@@ -2248,6 +2235,38 @@ mod tests {
             .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
             .collect();
         assert_eq!(finishes.len(), 1);
+
+        // Verify the second API call includes the assistant's response followed
+        // by the user's interjection in the correct order
+        let requests = mock.captured_requests.lock().expect("lock poisoned");
+        assert_eq!(requests.len(), 2, "should have made 2 API calls");
+
+        let second_call_msgs = &requests[1];
+        // Last two messages should be: Assistant("Working on it..."), User("actually focus on tests")
+        let len = second_call_msgs.len();
+        assert!(len >= 2, "second call should have at least 2 messages");
+
+        let penultimate = &second_call_msgs[len - 2];
+        assert!(
+            matches!(
+                penultimate,
+                ChatCompletionRequestMessage::Assistant(a)
+                    if matches!(&a.content, Some(ChatCompletionRequestAssistantMessageContent::Text(t)) if t == "Working on it...")
+            ),
+            "penultimate message should be assistant with first response text, got: {:?}",
+            penultimate
+        );
+
+        let last = &second_call_msgs[len - 1];
+        assert!(
+            matches!(
+                last,
+                ChatCompletionRequestMessage::User(u)
+                    if matches!(&u.content, ChatCompletionRequestUserMessageContent::Text(t) if t == "actually focus on tests")
+            ),
+            "last message should be user interjection, got: {:?}",
+            last
+        );
     }
 
     #[tokio::test]
