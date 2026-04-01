@@ -494,6 +494,7 @@ pub(super) async fn execute_sequential_tools(
                     let _ = event_tx.send(AppEvent::PermissionRequest(PermissionRequest {
                         call_id: tc.id.clone(),
                         tool_name: tc.tool_name,
+                        display_name: None,
                         arguments_summary: summary,
                         tool_args: tc.args.clone(),
                         response_tx,
@@ -638,6 +639,7 @@ pub(super) async fn execute_sequential_tools(
                 let _ = event_tx.send(AppEvent::PermissionRequest(PermissionRequest {
                     call_id: tc.id.clone(),
                     tool_name: tc.tool_name,
+                    display_name: None,
                     arguments_summary: summary,
                     tool_args: tc.args.clone(),
                     response_tx,
@@ -850,14 +852,14 @@ pub(super) async fn execute_mcp_tools(
 
         if matches!(mcp_tc.action, PermissionAction::Ask) {
             // Send permission request to UI
-            let summary = crate::mcp::mcp_permission_summary(&mcp_tc.prefixed_name, &mcp_tc.args);
+            let (display_name, args_preview) =
+                crate::mcp::mcp_permission_parts(&mcp_tc.prefixed_name, &mcp_tc.args);
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-            // Use the first native tool name just for the PermissionRequest type
-            // (the UI will show the MCP summary string, not the tool name)
             let _ = event_tx.send(AppEvent::PermissionRequest(PermissionRequest {
                 call_id: mcp_tc.id.clone(),
-                tool_name: ToolName::Bash, // placeholder — UI shows summary, not this
-                arguments_summary: summary,
+                tool_name: ToolName::Bash, // placeholder — not displayed (display_name wins)
+                display_name: Some(display_name),
+                arguments_summary: args_preview,
                 tool_args: mcp_tc.args.clone(),
                 response_tx: reply_tx,
             }));

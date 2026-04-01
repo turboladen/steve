@@ -432,8 +432,12 @@ impl App {
             AppEvent::PermissionRequest(req) => {
                 // Show permission prompt to user, with diff preview if available
                 let diff_content = extract_diff_content(req.tool_name, &req.tool_args);
+                let shown_name = req
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| req.tool_name.to_string());
                 self.messages.push(MessageBlock::Permission {
-                    tool_name: req.tool_name.to_string(),
+                    tool_name: shown_name,
                     args_summary: req.arguments_summary.clone(),
                     diff_content,
                 });

@@ -230,20 +230,32 @@ impl McpToolSnapshot {
     }
 }
 
-/// Build a human-readable permission summary for an MCP tool call.
-pub fn mcp_permission_summary(prefixed_name: &str, args: &Value) -> String {
-    if let Some((server_id, tool_name)) = parse_prefixed_tool_name(prefixed_name) {
-        let args_preview = serde_json::to_string(args).unwrap_or_default();
-        let truncated = if args_preview.len() > 80 {
-            let end = crate::floor_char_boundary(&args_preview, 80);
-            format!("{}...", &args_preview[..end])
-        } else {
-            args_preview
-        };
-        format!("MCP: {server_id}/{tool_name}({truncated})")
+/// Return the display name and truncated args preview for an MCP tool call.
+///
+/// Returns `(display_name, args_preview)` — e.g. `("MCP: github/get_me", "{}")`.
+pub fn mcp_permission_parts(prefixed_name: &str, args: &Value) -> (String, String) {
+    let args_json = serde_json::to_string(args).unwrap_or_default();
+    let args_preview = if args_json.len() > 80 {
+        let end = crate::floor_char_boundary(&args_json, 80);
+        format!("{}...", &args_json[..end])
+    } else {
+        args_json
+    };
+
+    let display_name = if let Some((server_id, tool_name)) = parse_prefixed_tool_name(prefixed_name)
+    {
+        format!("MCP: {server_id}/{tool_name}")
     } else {
         format!("MCP: {prefixed_name}")
-    }
+    };
+
+    (display_name, args_preview)
+}
+
+/// Build a human-readable permission summary for an MCP tool call.
+pub fn mcp_permission_summary(prefixed_name: &str, args: &Value) -> String {
+    let (display_name, args_preview) = mcp_permission_parts(prefixed_name, args);
+    format!("{display_name}({args_preview})")
 }
 
 /// Build MCP resource content for injection into the system prompt.
@@ -536,6 +548,36 @@ mod tests {
         let args = serde_json::json!({"key": long_val});
         let summary = mcp_permission_summary("mcp__s__t", &args);
         assert!(summary.contains("..."));
+    }
+
+    #[test]
+    fn mcp_permission_parts_splits_name_and_args() {
+        let (name, args) = mcp_permission_parts(
+            "mcp__github__get_me",
+            &serde_json::json!({}),
+        );
+        assert_eq!(name, "MCP: github/get_me");
+        assert_eq!(args, "{}");
+    }
+
+    #[test]
+    fn mcp_permission_parts_truncates_args() {
+        let long_val = "x".repeat(100);
+        let (name, args) = mcp_permission_parts(
+            "mcp__srv__tool",
+            &serde_json::json!({"k": long_val}),
+        );
+        assert_eq!(name, "MCP: srv/tool");
+        assert!(args.ends_with("..."));
+        // Verify the combined summary is consistent
+        let combined = mcp_permission_summary("mcp__srv__tool", &serde_json::json!({"k": long_val}));
+        assert_eq!(combined, format!("{name}({args})"));
+    }
+
+    #[test]
+    fn mcp_permission_parts_unparseable_name() {
+        let (name, _) = mcp_permission_parts("bad_name", &serde_json::json!({}));
+        assert_eq!(name, "MCP: bad_name");
     }
 
     #[test]

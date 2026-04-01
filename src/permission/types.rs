@@ -99,6 +99,9 @@ impl From<PermissionActionSerde> for PermissionAction {
 pub struct PermissionRequest {
     pub call_id: String,
     pub tool_name: ToolName,
+    /// Override for the tool name shown in the permission prompt (used for MCP tools
+    /// where `tool_name` is a placeholder that should not be displayed).
+    pub display_name: Option<String>,
     pub arguments_summary: String,
     /// Full tool call arguments for diff preview in the permission prompt.
     pub tool_args: serde_json::Value,
