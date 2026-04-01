@@ -544,7 +544,7 @@ pub fn render_input(
         Span::styled(
             format!(" {} ", state.mode.display_name()),
             Style::default()
-                .fg(theme.border)
+                .fg(theme.code_bg)
                 .bg(mode_color)
                 .add_modifier(Modifier::BOLD),
         ),

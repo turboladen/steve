@@ -84,14 +84,14 @@ mod tests {
         let mut h = try_highlighter("rust").unwrap();
         let line = "fn main() {}";
         let regions = h.highlight_line(line, syntax_set()).unwrap();
-        let spans = syntect_to_spans(&regions, Color::Rgb(28, 26, 23));
+        let spans = syntect_to_spans(&regions, Color::Rgb(30, 27, 22));
         let joined: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(joined, line, "concatenated spans should match input");
     }
 
     #[test]
     fn syntect_to_spans_uses_code_bg() {
-        let code_bg = Color::Rgb(28, 26, 23);
+        let code_bg = Color::Rgb(30, 27, 22);
         let mut h = try_highlighter("rust").unwrap();
         let regions = h.highlight_line("let x = 42;", syntax_set()).unwrap();
         let spans = syntect_to_spans(&regions, code_bg);
@@ -109,7 +109,7 @@ mod tests {
     fn syntect_to_spans_produces_distinct_fg_colors() {
         let mut h = try_highlighter("python").unwrap();
         let regions = h.highlight_line("def foo(): pass", syntax_set()).unwrap();
-        let spans = syntect_to_spans(&regions, Color::Rgb(28, 26, 23));
+        let spans = syntect_to_spans(&regions, Color::Rgb(30, 27, 22));
         // Syntax highlighting should produce at least 2 distinct foreground colors
         // (e.g., keyword vs identifier) — not just a single color for everything
         let fg_colors: std::collections::HashSet<_> = spans.iter().map(|s| s.style.fg).collect();
