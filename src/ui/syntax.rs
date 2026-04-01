@@ -14,7 +14,7 @@ static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_
 
 static THEME: LazyLock<Theme> = LazyLock::new(|| {
     let ts = ThemeSet::load_defaults();
-    ts.themes["base16-ocean.dark"].clone()
+    ts.themes["base16-mocha.dark"].clone()
 });
 
 /// Returns a reference to the global syntax set (needed for `highlight_line` calls).

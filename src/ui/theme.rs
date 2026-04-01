@@ -5,9 +5,10 @@ pub const CONTEXT_TIER_1: u8 = 40;
 pub const CONTEXT_TIER_2: u8 = 60;
 pub const CONTEXT_TIER_3: u8 = 80;
 
-/// Color palette for the TUI — "Warm Terminal" identity.
-/// Rich amber accent, warm grays, coral for write operations.
-/// User messages use a distinct blue tint for immediate visual separation.
+/// Color palette derived from the Steve brand photo — golden-yellow accent,
+/// warm browns, and a colorblind-safe blue-orange status axis.
+/// Gold is purely decorative (accent/headings); warnings use orange.
+/// Success uses blue-teal (not green) for red/green deficiency safety.
 #[derive(Debug, PartialEq)]
 pub struct Theme {
     pub fg: Color,
@@ -80,66 +81,65 @@ impl Theme {
         }
     }
 
-    /// Default dark theme with warm palette.
+    /// Default dark theme — photo-derived, colorblind-safe.
     pub fn dark() -> Self {
         Self {
-            fg: Color::Rgb(230, 228, 222), // Warm cream (softer than pure white)
+            fg: Color::Rgb(232, 226, 210), // Warm cream (shirt in golden light)
             bg: Color::Reset,
-            accent: Color::Rgb(230, 165, 55), // Rich amber (warmer, refined)
-            dim: Color::Rgb(110, 105, 95),    // Warm gray (readable secondary text)
-            error: Color::Rgb(235, 90, 90),   // Soft red (less harsh)
-            warning: Color::Rgb(240, 190, 60), // Warm gold
-            success: Color::Rgb(85, 195, 120), // Soft green
-            user_msg: Color::Rgb(145, 185, 225), // Soft blue (distinct from assistant)
-            user_msg_bg: Color::Rgb(25, 30, 40), // Barely-visible blue-gray tint
-            assistant_msg: Color::Rgb(225, 222, 215), // Warm cream
-            tool_read: Color::Rgb(130, 125, 115), // Warm mid-gray (brighter than dim)
-            tool_write: Color::Rgb(240, 120, 85), // Warm coral (slightly softer)
-            reasoning: Color::Rgb(165, 150, 190), // Richer lavender
-            border: Color::Rgb(65, 63, 60),   // Subtle dark border
-            mode_build: Color::Rgb(230, 165, 55), // Match accent
-            mode_plan: Color::Rgb(110, 155, 230), // Richer blue
-            permission: Color::Rgb(240, 190, 60), // Match warning
-            code_bg: Color::Rgb(28, 26, 23),  // Darker code background
-            context_amber: Color::Rgb(150, 125, 55), // Warm amber-brown
-            system_msg: Color::Rgb(130, 145, 160), // Cool slate (distinct from dim)
-            selection_bg: Color::Rgb(60, 60, 80), // Subtle blue-gray selection tint
-            heading: Color::Rgb(230, 180, 80), // Warm gold for headers
-            inline_code_bg: Color::Rgb(45, 42, 38), // Subtle bg tint for inline code
-            link: Color::Rgb(130, 170, 210),  // Soft blue for link text
-            question: Color::Rgb(90, 185, 180), // Soft teal
+            accent: Color::Rgb(240, 190, 50),    // Golden-yellow (photo background)
+            dim: Color::Rgb(120, 105, 80),        // Warm brown (hair/beard tones)
+            error: Color::Rgb(235, 100, 55),      // Red-orange (danger ramp top)
+            warning: Color::Rgb(230, 145, 45),    // Deep orange (not gold — brand-safe)
+            success: Color::Rgb(85, 170, 210),    // Blue-teal (colorblind-safe, sunglasses)
+            user_msg: Color::Rgb(140, 180, 220),  // Cool blue ("you" vs warm "Steve")
+            user_msg_bg: Color::Rgb(25, 30, 40),  // Blue-gray tint
+            assistant_msg: Color::Rgb(228, 222, 208), // Warm cream
+            tool_read: Color::Rgb(140, 120, 95),  // Brown family (brighter than dim)
+            tool_write: Color::Rgb(230, 120, 60), // Orange-coral (danger family)
+            reasoning: Color::Rgb(185, 160, 120), // Warm sand (skin tones)
+            border: Color::Rgb(70, 62, 50),       // Shadow browns
+            mode_build: Color::Rgb(240, 190, 50), // Match accent
+            mode_plan: Color::Rgb(100, 155, 220), // Cool blue (analysis = cool)
+            permission: Color::Rgb(230, 145, 45), // Match warning
+            code_bg: Color::Rgb(30, 27, 22),      // Subtle warmth
+            context_amber: Color::Rgb(180, 120, 45), // Muted orange (tier 1 pressure)
+            system_msg: Color::Rgb(135, 125, 110),   // Warm gray-brown
+            selection_bg: Color::Rgb(55, 50, 60),    // Warm neutral
+            heading: Color::Rgb(240, 195, 65),    // Near-accent gold
+            inline_code_bg: Color::Rgb(48, 42, 34),  // Brown-leaning dark tint
+            link: Color::Rgb(120, 165, 210),      // Blue (cool family)
+            question: Color::Rgb(80, 175, 165),   // Teal
         }
     }
 
-    /// Light theme — dark text on light backgrounds.
-    /// All RGB values shifted for readability against white/light terminal backgrounds.
+    /// Light theme — photo-derived, colorblind-safe, dark text on light backgrounds.
     pub fn light() -> Self {
         Self {
-            fg: Color::Rgb(30, 30, 30),        // Near-black (dark text on light bg)
-            bg: Color::Reset,                  // Terminal provides background
-            accent: Color::Rgb(180, 110, 0),   // Dark amber (visible on white)
-            dim: Color::Rgb(120, 115, 110),    // Slightly lighter warm gray
-            error: Color::Rgb(200, 40, 40),    // Dark red
-            warning: Color::Rgb(180, 130, 0),  // Dark gold
-            success: Color::Rgb(30, 140, 60),  // Dark green
-            user_msg: Color::Rgb(40, 90, 160), // Dark blue
-            user_msg_bg: Color::Rgb(220, 230, 245), // Subtle light blue tint
-            assistant_msg: Color::Rgb(40, 38, 35), // Near-black
-            tool_read: Color::Rgb(100, 95, 90), // Darker gray
-            tool_write: Color::Rgb(190, 60, 30), // Dark coral
-            reasoning: Color::Rgb(100, 75, 140), // Dark lavender
-            border: Color::Rgb(190, 188, 185), // Light gray (subtle on light bg)
-            mode_build: Color::Rgb(180, 110, 0), // Match accent
-            mode_plan: Color::Rgb(40, 90, 170), // Dark blue
-            permission: Color::Rgb(180, 130, 0), // Match warning
-            code_bg: Color::Rgb(240, 238, 235), // Off-white (slight tint from bg)
-            context_amber: Color::Rgb(160, 120, 40), // Darker amber for light bg
-            system_msg: Color::Rgb(70, 90, 110), // Dark slate
-            selection_bg: Color::Rgb(180, 210, 240), // Light blue selection tint
-            heading: Color::Rgb(160, 100, 0),  // Dark gold for headers
-            inline_code_bg: Color::Rgb(230, 228, 225), // Subtle bg tint for inline code
-            link: Color::Rgb(30, 80, 150),     // Dark blue for links
-            question: Color::Rgb(0, 130, 120), // Dark teal
+            fg: Color::Rgb(35, 30, 25),           // Dark warm brown
+            bg: Color::Reset,                     // Terminal provides background
+            accent: Color::Rgb(175, 130, 0),      // Dark gold
+            dim: Color::Rgb(130, 115, 90),        // Warm brown mid-tone
+            error: Color::Rgb(200, 70, 25),       // Dark red-orange
+            warning: Color::Rgb(185, 105, 10),    // Dark orange (not gold)
+            success: Color::Rgb(20, 115, 160),    // Dark blue-teal (colorblind-safe)
+            user_msg: Color::Rgb(35, 85, 155),    // Dark blue
+            user_msg_bg: Color::Rgb(220, 232, 245), // Subtle light blue tint
+            assistant_msg: Color::Rgb(42, 38, 30),   // Near-black, warm
+            tool_read: Color::Rgb(110, 100, 80),  // Warm brown
+            tool_write: Color::Rgb(185, 80, 20),  // Dark orange-coral
+            reasoning: Color::Rgb(130, 105, 70),  // Dark sand (skin tones)
+            border: Color::Rgb(195, 185, 170),    // Warm light border
+            mode_build: Color::Rgb(175, 130, 0),  // Match accent
+            mode_plan: Color::Rgb(30, 90, 160),   // Dark blue
+            permission: Color::Rgb(185, 105, 10), // Match warning
+            code_bg: Color::Rgb(242, 236, 225),   // Warm off-white
+            context_amber: Color::Rgb(165, 100, 20), // Dark muted orange
+            system_msg: Color::Rgb(100, 90, 75),  // Warm dark gray
+            selection_bg: Color::Rgb(210, 200, 170), // Warm golden selection tint
+            heading: Color::Rgb(160, 115, 0),     // Dark gold
+            inline_code_bg: Color::Rgb(235, 228, 215), // Warm light tint
+            link: Color::Rgb(20, 80, 150),        // Dark blue
+            question: Color::Rgb(0, 120, 115),    // Dark teal
         }
     }
 }
@@ -154,9 +154,9 @@ mod tests {
     }
 
     #[test]
-    fn accent_is_amber_rgb() {
+    fn accent_is_gold_rgb() {
         let t = Theme::dark();
-        assert!(matches!(t.accent, Color::Rgb(230, 165, 55)));
+        assert!(matches!(t.accent, Color::Rgb(240, 190, 50)));
     }
 
     #[test]
@@ -174,7 +174,7 @@ mod tests {
     #[test]
     fn code_bg_is_rgb() {
         let t = Theme::dark();
-        assert!(matches!(t.code_bg, Color::Rgb(28, 26, 23)));
+        assert!(matches!(t.code_bg, Color::Rgb(30, 27, 22)));
     }
 
     #[test]
