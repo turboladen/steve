@@ -3,7 +3,97 @@
 use std::{collections::HashMap, sync::Arc};
 
 use axum::{extract::Query, response::Html, routing::get};
+use base64::Engine;
 use tokio::{net::TcpListener, sync::oneshot};
+
+/// Steve logo PNG, embedded at compile time and base64-encoded on first access.
+static LOGO_BASE64: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let bytes = include_bytes!("../../../i-am-steve.png");
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+});
+
+fn callback_page(title: &str, message: &str, status_class: &str) -> String {
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Steve — {title}</title>
+<style>
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #fff8e1 0%, #ffecb3 100%);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: #3e2723;
+  }}
+  .card {{
+    background: #fff;
+    border-radius: 20px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.10);
+    padding: 48px 40px 36px;
+    max-width: 420px;
+    width: 90%;
+    text-align: center;
+  }}
+  .logo {{
+    width: 120px;
+    height: 120px;
+    border-radius: 50%;
+    object-fit: cover;
+    object-position: center top;
+    border: 4px solid #ffd54f;
+    margin-bottom: 24px;
+  }}
+  h1 {{
+    font-size: 1.5rem;
+    margin-bottom: 8px;
+    font-weight: 700;
+  }}
+  .message {{
+    font-size: 1.05rem;
+    color: #5d4037;
+    line-height: 1.5;
+    margin-bottom: 24px;
+  }}
+  .status {{
+    display: inline-block;
+    padding: 6px 18px;
+    border-radius: 999px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }}
+  .success {{ background: #e8f5e9; color: #2e7d32; }}
+  .error   {{ background: #fbe9e7; color: #c62828; }}
+  .warning {{ background: #fff3e0; color: #e65100; }}
+  .footer {{
+    margin-top: 28px;
+    font-size: 0.8rem;
+    color: #a1887f;
+  }}
+</style>
+</head>
+<body>
+<div class="card">
+  <img class="logo" src="data:image/png;base64,{logo}" alt="Steve">
+  <h1>{title}</h1>
+  <p class="message">{message}</p>
+  <span class="status {status_class}">{title}</span>
+  <p class="footer">steve · rust tui coding agent</p>
+</div>
+</body>
+</html>"#,
+        title = title,
+        message = message,
+        status_class = status_class,
+        logo = &*LOGO_BASE64,
+    )
+}
 
 /// The authorization code and state received from the OAuth callback.
 #[derive(Debug, Clone)]
@@ -50,13 +140,11 @@ pub async fn start_callback_server() -> anyhow::Result<(
                         // (RecvError) instead of waiting for the 5-minute timeout.
                         drop(tx.lock().await.take());
                         // Static HTML — never interpolate untrusted query params.
-                        return Html(
-                            "<html><body>\
-                             <h2>Authorization failed.</h2>\
-                             <p>Please return to the application for details.</p>\
-                             </body></html>"
-                                .to_string(),
-                        );
+                        return Html(callback_page(
+                            "Authorization Failed",
+                            "Something went wrong during authorization. Please return to Steve for details.",
+                            "error",
+                        ));
                     }
 
                     let code = params.get("code").cloned().unwrap_or_default();
@@ -66,19 +154,17 @@ pub async fn start_callback_server() -> anyhow::Result<(
                         if let Some(sender) = tx.lock().await.take() {
                             let _ = sender.send(CallbackResult { code, state });
                         }
-                        Html(
-                            "<html><body>\
-                             <h2>Authorization successful! You can close this tab.</h2>\
-                             </body></html>"
-                                .into(),
-                        )
+                        Html(callback_page(
+                            "Authorization Successful",
+                            "You're all set! You can close this tab and return to Steve.",
+                            "success",
+                        ))
                     } else {
-                        Html(
-                            "<html><body>\
-                             <h2>Missing or empty code/state parameter.</h2>\
-                             </body></html>"
-                                .into(),
-                        )
+                        Html(callback_page(
+                            "Missing Parameters",
+                            "The authorization response was incomplete. Please try again from Steve.",
+                            "warning",
+                        ))
                     }
                 }
             }
@@ -117,7 +203,7 @@ mod tests {
             .unwrap();
         assert!(resp.status().is_success());
         let body = resp.text().await.unwrap();
-        assert!(body.contains("successful"));
+        assert!(body.contains("Authorization Successful"));
 
         let result = rx.await.unwrap();
         assert_eq!(result.code, "test_code");
@@ -138,7 +224,7 @@ mod tests {
             .unwrap();
         assert!(resp.status().is_success());
         let body = resp.text().await.unwrap();
-        assert!(body.contains("Authorization failed"));
+        assert!(body.contains("Authorization Failed"));
         handle.abort();
     }
 
@@ -153,7 +239,7 @@ mod tests {
             .unwrap();
         assert!(resp.status().is_success());
         let body = resp.text().await.unwrap();
-        assert!(body.contains("Missing or empty code/state"));
+        assert!(body.contains("Missing Parameters"));
         handle.abort();
     }
 }

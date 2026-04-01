@@ -1,5 +1,9 @@
 # Steve
 
+<p align="center">
+  <img src="i-am-steve.png" alt="Steve" width="200">
+</p>
+
 A Rust TUI AI coding agent with built-in LSP integration, tree-sitter analysis, and a layered
 permission system. Steve connects to any OpenAI-compatible LLM API, streams responses
 token-by-token, and provides an 18-tool calling loop that lets the LLM read, search, edit, and
