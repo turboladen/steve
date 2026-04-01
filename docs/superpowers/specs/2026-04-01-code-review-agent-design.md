@@ -148,9 +148,22 @@ Focus assignment by reviewer count:
 - AGENTS.md content (if present) — so reviewers understand project conventions
 - Project root path — implicit via tool context, so they can explore surrounding code
 
+### Finding Format
+
+Each finding must include all of the following (the system prompt enforces this):
+
+1. **File path + line number** — exact location, e.g. `src/stream/mod.rs:142`. Use `grep`,
+   `read`, or `lsp` to verify line numbers against the current file, not just diff offsets.
+2. **Code snippet** — the problematic line(s) quoted verbatim from the source.
+3. **What's wrong** — clear explanation of the issue.
+4. **Impact** — what breaks or could break if unfixed. Use `lsp` and `grep` to trace callers
+   and identify concrete impact (e.g. "callers X and Y pass None here, which would panic").
+5. **Suggested fix** — concrete code change or specific description of what to do. Should be
+   actionable enough that a coding agent or human can apply it without further research.
+
 ### Grading System
 
-Each reviewer grades findings on two axes:
+Each finding is graded on two axes:
 
 - **Severity**: Critical / Important / Suggestion
 - **Confidence**: 0–100 score indicating likelihood this is a real issue vs. false positive
@@ -179,10 +192,15 @@ Examples of false positives reviewers should score low:
 ### Findings
 
 **[Critical, 95]** Possible panic in `stream/mod.rs:142`
-...
+> let value = map.get(key).unwrap();
+**Impact:** `handle_event()` in `app/event_loop.rs:88` passes user-supplied keys —
+a missing key panics the stream task silently.
+**Fix:** Use `map.get(key).ok_or_else(|| anyhow!("unknown key: {key}"))?`
 
 **[Suggestion, 60]** Consider extracting helper in `app/input.rs:88`
-...
+> if self.is_loading || self.streaming_active || self.pending_permission.is_some() {
+**Impact:** This guard is duplicated in 3 command handlers.
+**Fix:** Extract `fn is_busy(&self) -> bool` and call it from each handler.
 
 ── Review: GPT-4o ────────────────────────────
 ### Findings
