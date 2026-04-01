@@ -27,7 +27,7 @@ config file, and invoked with a slash command.
 2. Steve gathers the diff (`git diff HEAD`, or scoped to the path argument)
 3. If diff is empty → "Nothing to review — no uncommitted changes"
 4. If `agents.code-review` not configured → "Code review agent not configured — add
-   `agents.code-review.reviewers` to your config"
+   `agents.code-review.reviewers` to your config, then run `/reload`"
 5. Spawn N reviewer sub-agents in parallel
 6. Show loading indicator with reviewer count
 7. As each reviewer finishes, render its output as a labeled block in the conversation
