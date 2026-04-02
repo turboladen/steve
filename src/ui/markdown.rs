@@ -5,11 +5,15 @@ use ratatui::{
 
 use super::theme::Theme;
 
-/// A rendered markdown line with both styled spans (for ratatui) and plain text
-/// (for ContentMap / clipboard selection, with markdown syntax stripped).
+/// A rendered markdown line with styled spans, plain text, and raw source.
+///
+/// - `styled`: ratatui `Line` with colors/modifiers for display.
+/// - `plain`: markdown syntax stripped, matching visual display width (for wrapping math).
+/// - `raw`: original markdown source line (for clipboard copy).
 pub struct MarkdownLine<'a> {
     pub styled: Line<'a>,
     pub plain: String,
+    pub raw: String,
 }
 
 /// Render a single line of markdown-formatted text into styled spans.
@@ -23,12 +27,15 @@ pub fn render_markdown_line(
     theme: &Theme,
     available_width: usize,
 ) -> MarkdownLine<'static> {
+    let raw = line.to_string();
+
     // Horizontal rule: 3+ of the same char (-, *, _) optionally with spaces
     if is_horizontal_rule(line) {
         let rule = "\u{2500}".repeat(available_width);
         return MarkdownLine {
             styled: Line::from(Span::styled(rule, Style::default().fg(theme.dim))),
             plain: String::new(),
+            raw,
         };
     }
 
@@ -51,6 +58,7 @@ pub fn render_markdown_line(
         return MarkdownLine {
             styled: Line::from(spans),
             plain,
+            raw,
         };
     }
 
@@ -68,6 +76,7 @@ pub fn render_markdown_line(
         return MarkdownLine {
             styled: Line::from(spans),
             plain,
+            raw,
         };
     }
 
@@ -78,6 +87,7 @@ pub fn render_markdown_line(
     MarkdownLine {
         styled: Line::from(spans),
         plain,
+        raw,
     }
 }
 
@@ -566,6 +576,7 @@ pub fn render_table(
             result.push(MarkdownLine {
                 styled: Line::from(spans),
                 plain,
+                raw: rows[row_idx].clone(),
             });
             continue;
         }
@@ -595,6 +606,7 @@ pub fn render_table(
         result.push(MarkdownLine {
             styled: Line::from(spans),
             plain,
+            raw: rows[row_idx].clone(),
         });
     }
 
@@ -921,5 +933,70 @@ mod tests {
     fn render_table_empty() {
         let result = render_table(&[], &dark(), 60);
         assert!(result.is_empty());
+    }
+
+    // -- Raw markdown preservation --
+
+    #[test]
+    fn raw_preserves_header_syntax() {
+        let result = render_markdown_line("## Heading", &dark(), 40);
+        assert_eq!(result.raw, "## Heading");
+        assert_eq!(result.plain, "Heading");
+    }
+
+    #[test]
+    fn raw_preserves_bold_syntax() {
+        let result = render_markdown_line("this is **bold** text", &dark(), 40);
+        assert_eq!(result.raw, "this is **bold** text");
+        assert_eq!(result.plain, "this is bold text");
+    }
+
+    #[test]
+    fn raw_preserves_inline_code_syntax() {
+        let result = render_markdown_line("use `foo` here", &dark(), 40);
+        assert_eq!(result.raw, "use `foo` here");
+        assert_eq!(result.plain, "use foo here");
+    }
+
+    #[test]
+    fn raw_preserves_list_syntax() {
+        let result = render_markdown_line("- item one", &dark(), 40);
+        assert_eq!(result.raw, "- item one");
+        assert_eq!(result.plain, "\u{2022} item one"); // bullet • replaces -
+    }
+
+    #[test]
+    fn raw_preserves_link_syntax() {
+        let result = render_markdown_line("see [docs](https://example.com)", &dark(), 40);
+        assert_eq!(result.raw, "see [docs](https://example.com)");
+        assert_eq!(result.plain, "see docs");
+    }
+
+    #[test]
+    fn raw_preserves_horizontal_rule() {
+        let result = render_markdown_line("---", &dark(), 20);
+        assert_eq!(result.raw, "---");
+        assert_eq!(result.plain, "");
+    }
+
+    #[test]
+    fn raw_preserves_italic_syntax() {
+        let result = render_markdown_line("this is *italic* text", &dark(), 40);
+        assert_eq!(result.raw, "this is *italic* text");
+        assert_eq!(result.plain, "this is italic text");
+    }
+
+    #[test]
+    fn raw_preserves_table_rows() {
+        let rows = vec![
+            "| Name | Age |".to_string(),
+            "| --- | --- |".to_string(),
+            "| Alice | 30 |".to_string(),
+        ];
+        let result = render_table(&rows, &dark(), 60);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].raw, "| Name | Age |");
+        assert_eq!(result[1].raw, "| --- | --- |");
+        assert_eq!(result[2].raw, "| Alice | 30 |");
     }
 }

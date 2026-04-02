@@ -28,6 +28,12 @@ use steve::{
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Build a ContentMap where raw == plain (no markdown processing).
+fn build_plain(line_texts: Vec<String>, full_width: usize) -> ContentMap {
+    let raws = line_texts.clone();
+    ContentMap::build(line_texts, raws, full_width)
+}
+
 /// Mirror of `make_test_app()` from `app.rs` using only public APIs.
 fn make_test_app() -> App {
     let root = PathBuf::from("/tmp/test");
@@ -307,7 +313,7 @@ fn content_map_build_computes_wrapped_rows() {
         "Short".to_string(),       // display_width = 3+5 = 8, ceil(8/20) = 1 row
         "".to_string(),            // empty → 1 row
     ];
-    let map = ContentMap::build(lines, 20);
+    let map = build_plain(lines, 20);
 
     assert_eq!(
         map.total_wrapped_rows, 3,
@@ -329,7 +335,7 @@ fn content_map_long_line_wraps() {
         "abcdefghijklmnopqrstuvwxyz".to_string(),
         "short".to_string(),
     ];
-    let map = ContentMap::build(lines, 20);
+    let map = build_plain(lines, 20);
 
     assert_eq!(
         map.total_wrapped_rows, 3,
@@ -344,7 +350,7 @@ fn content_map_long_line_wraps() {
 #[test]
 fn screen_to_content_basic_mapping() {
     let lines = vec!["Hello".to_string(), "World".to_string()];
-    let map = ContentMap::build(lines, 40);
+    let map = build_plain(lines, 40);
 
     // Row 0, col 3 (gutter) → line 0, char 0
     let pos = map.screen_to_content(0, 3, 0, 0, 0);
@@ -384,7 +390,7 @@ fn screen_to_content_with_scroll_offset() {
         "Line B".to_string(),
         "Line C".to_string(),
     ];
-    let map = ContentMap::build(lines, 40);
+    let map = build_plain(lines, 40);
 
     // With scroll_offset=1, screen row 0 maps to content row 1 → line 1
     let pos = map.screen_to_content(0, 3, 1, 0, 0);
@@ -400,7 +406,7 @@ fn screen_to_content_with_scroll_offset() {
 #[test]
 fn screen_to_content_in_gutter_gives_offset_zero() {
     let lines = vec!["Hello".to_string()];
-    let map = ContentMap::build(lines, 40);
+    let map = build_plain(lines, 40);
 
     // Column 0 (in gutter) → char_offset should be 0 (not None)
     let pos = map.screen_to_content(0, 0, 0, 0, 0);
@@ -416,7 +422,7 @@ fn screen_to_content_in_gutter_gives_offset_zero() {
 #[test]
 fn extract_text_single_line() {
     let lines = vec!["Hello World".to_string()];
-    let map = ContentMap::build(lines, 80);
+    let map = build_plain(lines, 80);
 
     let start = ContentPos {
         line: 0,
@@ -436,7 +442,7 @@ fn extract_text_multi_line() {
         "Second line".to_string(),
         "Third line".to_string(),
     ];
-    let map = ContentMap::build(lines, 80);
+    let map = build_plain(lines, 80);
 
     let start = ContentPos {
         line: 0,
@@ -453,7 +459,7 @@ fn extract_text_multi_line() {
 #[test]
 fn extract_text_reversed_range_is_normalized() {
     let lines = vec!["Hello World".to_string()];
-    let map = ContentMap::build(lines, 80);
+    let map = build_plain(lines, 80);
 
     // Pass end before start — should still extract "Hello"
     let start = ContentPos {
@@ -470,7 +476,7 @@ fn extract_text_reversed_range_is_normalized() {
 #[test]
 fn extract_text_clamps_offset_to_line_length() {
     let lines = vec!["Hi".to_string()];
-    let map = ContentMap::build(lines, 80);
+    let map = build_plain(lines, 80);
 
     let start = ContentPos {
         line: 0,

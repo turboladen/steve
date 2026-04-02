@@ -186,7 +186,7 @@ fn render_assistant_block<'a>(
             AssistantPart::Text(text) => {
                 let md_lines = render_text_with_code_blocks(text, theme, content_width);
                 for ml in md_lines {
-                    glines.push_with_text(ml.styled, GutterMark::Empty, ml.plain);
+                    glines.push_with_text(ml.styled, GutterMark::Empty, ml.plain, ml.raw);
                 }
                 last_intent = None;
             }
@@ -483,8 +483,8 @@ pub fn render_message_blocks(
         }
 
         // Render and return early — skip the message loop
-        let (lines, texts) = glines.into_lines_and_texts();
-        let content_map = ContentMap::build(texts, available_width);
+        let (lines, texts, raws) = glines.into_parts();
+        let content_map = ContentMap::build(texts, raws, available_width);
         state.content_map = Some(content_map);
         let content_height = lines.len() as u16;
         state.update_dimensions(content_height, visible_height);
@@ -514,7 +514,7 @@ pub fn render_message_blocks(
                     spans.extend(style_file_refs(text_line, theme));
                     // Use push_with_text to exclude the "│ " decoration from clipboard text
                     let line = Line::from(spans).style(Style::default().bg(theme.user_msg_bg));
-                    glines.push_with_text(line, GutterMark::Empty, text_line.to_string());
+                    glines.push_with_text(line, GutterMark::Empty, text_line.to_string(), text_line.to_string());
                 }
             }
 
@@ -631,10 +631,10 @@ pub fn render_message_blocks(
         glines.push(Line::from(""), GutterMark::Empty);
     }
 
-    let (mut lines, texts) = glines.into_lines_and_texts();
+    let (mut lines, texts, raws) = glines.into_parts();
 
     // Build content map for coordinate mapping (used by mouse selection)
-    let content_map = ContentMap::build(texts, available_width);
+    let content_map = ContentMap::build(texts, raws, available_width);
     state.content_map = Some(content_map);
 
     // Apply selection highlighting
@@ -947,6 +947,7 @@ fn render_text_with_code_blocks(
                     result.push(MarkdownLine {
                         plain: label.trim().to_string(),
                         styled: line,
+                        raw: text_line.to_string(),
                     });
                 } else {
                     // No language: emit a thin rule header for visual framing
@@ -956,6 +957,7 @@ fn render_text_with_code_blocks(
                     result.push(MarkdownLine {
                         plain: String::new(),
                         styled: line,
+                        raw: text_line.to_string(),
                     });
                 }
                 in_code_block = true;
@@ -969,6 +971,7 @@ fn render_text_with_code_blocks(
                 result.push(MarkdownLine {
                     plain: String::new(),
                     styled: line,
+                    raw: text_line.to_string(),
                 });
                 in_code_block = false;
                 highlighter = None;
@@ -996,6 +999,7 @@ fn render_text_with_code_blocks(
                 result.push(MarkdownLine {
                     plain: text_line.to_string(),
                     styled: code_line,
+                    raw: text_line.to_string(),
                 });
             }
             CodeFence::NotFence => {

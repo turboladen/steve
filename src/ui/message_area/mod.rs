@@ -150,11 +150,15 @@ fn prepend_gutter<'a>(line: Line<'a>, mark: GutterMark, theme: &Theme) -> Line<'
 }
 
 /// Wrapper around `Vec<Line>` that auto-prepends gutter marks to every line
-/// and tracks parallel plain text for ContentMap building.
+/// and tracks parallel plain text + raw markdown for ContentMap building.
 pub(super) struct GutteredLines<'a> {
     lines: Vec<Line<'a>>,
     /// Plain text for each line (gutter-stripped), parallel to `lines`.
+    /// Used for display-width wrapping calculations.
     texts: Vec<String>,
+    /// Raw markdown source for each line, parallel to `texts`.
+    /// Used for clipboard copy — preserves original markdown syntax.
+    raws: Vec<String>,
     theme: &'a Theme,
 }
 
@@ -163,6 +167,7 @@ impl<'a> GutteredLines<'a> {
         Self {
             lines: Vec::new(),
             texts: Vec::new(),
+            raws: Vec::new(),
             theme,
         }
     }
@@ -170,15 +175,17 @@ impl<'a> GutteredLines<'a> {
     fn push(&mut self, line: Line<'a>, mark: GutterMark) {
         let plain = extract_plain_text(&line);
         self.lines.push(prepend_gutter(line, mark, self.theme));
+        self.raws.push(plain.clone());
         self.texts.push(plain);
     }
 
-    /// Push a line with an explicit plain text override.
+    /// Push a line with explicit plain text and raw markdown overrides.
     /// Use when the line contains decoration spans (e.g. `│ `) that shouldn't
-    /// appear in clipboard text.
-    fn push_with_text(&mut self, line: Line<'a>, mark: GutterMark, plain: String) {
+    /// appear in clipboard text, or when raw markdown differs from plain text.
+    fn push_with_text(&mut self, line: Line<'a>, mark: GutterMark, plain: String, raw: String) {
         self.lines.push(prepend_gutter(line, mark, self.theme));
         self.texts.push(plain);
+        self.raws.push(raw);
     }
 
     /// Extend with lines from a helper function, applying the same mark to all.
@@ -186,12 +193,13 @@ impl<'a> GutteredLines<'a> {
         for line in new_lines {
             let plain = extract_plain_text(&line);
             self.lines.push(prepend_gutter(line, mark, self.theme));
+            self.raws.push(plain.clone());
             self.texts.push(plain);
         }
     }
 
-    fn into_lines_and_texts(self) -> (Vec<Line<'a>>, Vec<String>) {
-        (self.lines, self.texts)
+    fn into_parts(self) -> (Vec<Line<'a>>, Vec<String>, Vec<String>) {
+        (self.lines, self.texts, self.raws)
     }
 }
 

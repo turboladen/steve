@@ -61,7 +61,11 @@ const GUTTER_WIDTH: usize = 3;
 /// built during render to enable screen coordinate → content position mapping.
 pub struct ContentMap {
     /// Plain text for each logical line (gutter-stripped).
+    /// Matches visual display width — used for wrapping math and coordinate mapping.
     pub line_texts: Vec<String>,
+    /// Raw markdown source for each logical line, parallel to `line_texts`.
+    /// Used for clipboard extraction — preserves original markdown syntax.
+    pub raw_line_texts: Vec<String>,
     /// Cumulative wrapped row index where each logical line starts.
     /// `wrapped_row_start[i]` = sum of wrapped rows for lines 0..i.
     pub wrapped_row_start: Vec<u32>,
@@ -72,8 +76,12 @@ pub struct ContentMap {
 }
 
 impl ContentMap {
-    /// Build a ContentMap from line texts and the available width (full area width).
-    pub fn build(line_texts: Vec<String>, full_width: usize) -> Self {
+    /// Build a ContentMap from line texts, raw markdown texts, and the available width.
+    ///
+    /// `line_texts` must match visual display widths (for wrapping calculations).
+    /// `raw_line_texts` preserves original markdown source (for clipboard copy).
+    pub fn build(line_texts: Vec<String>, raw_line_texts: Vec<String>, full_width: usize) -> Self {
+        debug_assert_eq!(line_texts.len(), raw_line_texts.len());
         let available_width = full_width.max(1);
         let mut wrapped_row_start = Vec::with_capacity(line_texts.len());
         let mut cumulative: u32 = 0;
@@ -91,6 +99,7 @@ impl ContentMap {
 
         Self {
             line_texts,
+            raw_line_texts,
             wrapped_row_start,
             total_wrapped_rows: cumulative,
             available_width,
@@ -192,7 +201,11 @@ impl ContentMap {
         })
     }
 
-    /// Extract plain text between two content positions (inclusive of start, exclusive of end).
+    /// Extract text between two content positions (inclusive of start, exclusive of end).
+    ///
+    /// Fully-selected lines return raw markdown (preserving `#`, `**`, `` ` ``, etc.).
+    /// Partially-selected first/last lines return plain text (char offsets are computed
+    /// against `line_texts` display widths and don't map to `raw_line_texts`).
     pub fn extract_text(&self, start: &ContentPos, end: &ContentPos) -> String {
         // Ensure start < end
         let (start, end) = if start.before(end) {
@@ -202,31 +215,47 @@ impl ContentMap {
         };
 
         if start.line == end.line {
-            // Single line selection
             let text = &self.line_texts[start.line];
             let chars: Vec<char> = text.chars().collect();
             let from = start.char_offset.min(chars.len());
             let to = end.char_offset.min(chars.len());
-            chars[from..to].iter().collect()
+            // Fully selected → raw markdown; partial → plain slice.
+            // Use end.char_offset (pre-clamp) to distinguish "selected past end"
+            // from "selected nothing" on empty display lines (e.g. code fence
+            // closers where plain="" but raw="```").
+            if from == 0 && end.char_offset > 0 && to >= chars.len() {
+                self.raw_line_texts[start.line].clone()
+            } else {
+                chars[from..to].iter().collect()
+            }
         } else {
             let mut result = String::new();
 
-            // First line: from start offset to end
+            // First line: full if starting at offset 0, otherwise partial plain
             let first_chars: Vec<char> = self.line_texts[start.line].chars().collect();
             let from = start.char_offset.min(first_chars.len());
-            result.extend(&first_chars[from..]);
-
-            // Middle lines: full text
-            for line_idx in (start.line + 1)..end.line {
-                result.push('\n');
-                result.push_str(&self.line_texts[line_idx]);
+            if from == 0 {
+                result.push_str(&self.raw_line_texts[start.line]);
+            } else {
+                result.extend(&first_chars[from..]);
             }
 
-            // Last line: from start to end offset
+            // Middle lines: always fully selected → raw markdown
+            for line_idx in (start.line + 1)..end.line {
+                result.push('\n');
+                result.push_str(&self.raw_line_texts[line_idx]);
+            }
+
+            // Last line: full if selecting to end, otherwise partial plain.
+            // Use end.char_offset (pre-clamp) to handle empty display lines.
             result.push('\n');
             let last_chars: Vec<char> = self.line_texts[end.line].chars().collect();
             let to = end.char_offset.min(last_chars.len());
-            result.extend(&last_chars[..to]);
+            if end.char_offset > 0 && to >= last_chars.len() {
+                result.push_str(&self.raw_line_texts[end.line]);
+            } else {
+                result.extend(&last_chars[..to]);
+            }
 
             result
         }
@@ -236,6 +265,12 @@ impl ContentMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Helper: build a ContentMap where raw == plain (no markdown processing).
+    fn build_plain(line_texts: Vec<String>, full_width: usize) -> ContentMap {
+        let raws = line_texts.clone();
+        ContentMap::build(line_texts, raws, full_width)
+    }
 
     // -- ContentPos ordering --
 
@@ -380,21 +415,21 @@ mod tests {
 
     #[test]
     fn build_empty() {
-        let map = ContentMap::build(vec![], 80);
+        let map = build_plain(vec![], 80);
         assert_eq!(map.total_wrapped_rows, 0);
         assert!(map.line_texts.is_empty());
     }
 
     #[test]
     fn build_single_short_line() {
-        let map = ContentMap::build(vec!["hello".to_string()], 80);
+        let map = build_plain(vec!["hello".to_string()], 80);
         assert_eq!(map.total_wrapped_rows, 1);
         assert_eq!(map.wrapped_row_start, vec![0]);
     }
 
     #[test]
     fn build_empty_line_counts_as_one_row() {
-        let map = ContentMap::build(vec!["".to_string()], 80);
+        let map = build_plain(vec!["".to_string()], 80);
         assert_eq!(map.total_wrapped_rows, 1);
     }
 
@@ -402,7 +437,7 @@ mod tests {
     fn build_wrapped_line() {
         // "hello world" = 11 chars + 3 gutter = 14 display width
         // With available_width=10, wraps to ceil(14/10)=2 rows
-        let map = ContentMap::build(vec!["hello world".to_string()], 10);
+        let map = build_plain(vec!["hello world".to_string()], 10);
         assert_eq!(map.total_wrapped_rows, 2);
     }
 
@@ -412,7 +447,7 @@ mod tests {
             "short".to_string(),   // 5+3=8 chars, 1 row at width 80
             "another".to_string(), // 7+3=10 chars, 1 row at width 80
         ];
-        let map = ContentMap::build(lines, 80);
+        let map = build_plain(lines, 80);
         assert_eq!(map.wrapped_row_start, vec![0, 1]);
         assert_eq!(map.total_wrapped_rows, 2);
     }
@@ -421,7 +456,7 @@ mod tests {
 
     #[test]
     fn screen_to_content_basic() {
-        let map = ContentMap::build(
+        let map = build_plain(
             vec!["Hello, world!".to_string(), "Second line".to_string()],
             80,
         );
@@ -439,7 +474,7 @@ mod tests {
 
     #[test]
     fn screen_to_content_second_line() {
-        let map = ContentMap::build(vec!["Hello".to_string(), "World".to_string()], 80);
+        let map = build_plain(vec!["Hello".to_string(), "World".to_string()], 80);
 
         let pos = map.screen_to_content(1, 3, 0, 0, 0).unwrap();
         assert_eq!(pos.line, 1);
@@ -448,7 +483,7 @@ mod tests {
 
     #[test]
     fn screen_to_content_with_scroll_offset() {
-        let map = ContentMap::build(
+        let map = build_plain(
             vec![
                 "Line 0".to_string(),
                 "Line 1".to_string(),
@@ -464,7 +499,7 @@ mod tests {
 
     #[test]
     fn screen_to_content_with_area_offset() {
-        let map = ContentMap::build(vec!["Hello".to_string()], 80);
+        let map = build_plain(vec!["Hello".to_string()], 80);
 
         // Area starts at (5, 10)
         let pos = map.screen_to_content(10, 8, 0, 10, 5).unwrap();
@@ -474,7 +509,7 @@ mod tests {
 
     #[test]
     fn screen_to_content_clamps_past_line_end() {
-        let map = ContentMap::build(
+        let map = build_plain(
             vec![
                 "Hi".to_string(), // 2 chars
             ],
@@ -489,7 +524,7 @@ mod tests {
 
     #[test]
     fn screen_to_content_gutter_click() {
-        let map = ContentMap::build(vec!["Hello".to_string()], 80);
+        let map = build_plain(vec!["Hello".to_string()], 80);
 
         // Click in gutter area (col < GUTTER_WIDTH)
         let pos = map.screen_to_content(0, 0, 0, 0, 0).unwrap();
@@ -499,7 +534,7 @@ mod tests {
 
     #[test]
     fn screen_to_content_beyond_content() {
-        let map = ContentMap::build(vec!["Only line".to_string()], 80);
+        let map = build_plain(vec!["Only line".to_string()], 80);
 
         // Row 5 is way beyond our single line
         let result = map.screen_to_content(5, 3, 0, 0, 0);
@@ -508,7 +543,7 @@ mod tests {
 
     #[test]
     fn screen_to_content_empty_map() {
-        let map = ContentMap::build(vec![], 80);
+        let map = build_plain(vec![], 80);
         assert!(map.screen_to_content(0, 0, 0, 0, 0).is_none());
     }
 
@@ -516,7 +551,7 @@ mod tests {
 
     #[test]
     fn extract_text_single_line() {
-        let map = ContentMap::build(vec!["Hello, world!".to_string()], 80);
+        let map = build_plain(vec!["Hello, world!".to_string()], 80);
 
         let start = ContentPos {
             line: 0,
@@ -531,7 +566,7 @@ mod tests {
 
     #[test]
     fn extract_text_partial_line() {
-        let map = ContentMap::build(vec!["Hello, world!".to_string()], 80);
+        let map = build_plain(vec!["Hello, world!".to_string()], 80);
 
         let start = ContentPos {
             line: 0,
@@ -546,7 +581,7 @@ mod tests {
 
     #[test]
     fn extract_text_multi_line() {
-        let map = ContentMap::build(
+        let map = build_plain(
             vec![
                 "First line".to_string(),
                 "Second line".to_string(),
@@ -568,7 +603,7 @@ mod tests {
 
     #[test]
     fn extract_text_reversed_range() {
-        let map = ContentMap::build(vec!["Hello, world!".to_string()], 80);
+        let map = build_plain(vec!["Hello, world!".to_string()], 80);
 
         // Pass end before start — should still work
         let start = ContentPos {
@@ -584,7 +619,7 @@ mod tests {
 
     #[test]
     fn extract_text_empty_selection() {
-        let map = ContentMap::build(vec!["Hello".to_string()], 80);
+        let map = build_plain(vec!["Hello".to_string()], 80);
 
         let pos = ContentPos {
             line: 0,
@@ -595,7 +630,7 @@ mod tests {
 
     #[test]
     fn extract_text_clamps_offsets() {
-        let map = ContentMap::build(
+        let map = build_plain(
             vec![
                 "Hi".to_string(), // 2 chars
             ],
@@ -615,7 +650,7 @@ mod tests {
 
     #[test]
     fn extract_text_adjacent_lines() {
-        let map = ContentMap::build(vec!["AAAA".to_string(), "BBBB".to_string()], 80);
+        let map = build_plain(vec!["AAAA".to_string(), "BBBB".to_string()], 80);
 
         let start = ContentPos {
             line: 0,
@@ -626,5 +661,211 @@ mod tests {
             char_offset: 2,
         };
         assert_eq!(map.extract_text(&start, &end), "AA\nBB");
+    }
+
+    // -- Raw markdown extraction --
+
+    #[test]
+    fn extract_text_full_line_returns_raw() {
+        let map = ContentMap::build(
+            vec!["Hello World".to_string()],
+            vec!["# Hello World".to_string()],
+            80,
+        );
+        let start = ContentPos {
+            line: 0,
+            char_offset: 0,
+        };
+        let end = ContentPos {
+            line: 0,
+            char_offset: 100,
+        };
+        assert_eq!(map.extract_text(&start, &end), "# Hello World");
+    }
+
+    #[test]
+    fn extract_text_partial_line_returns_plain() {
+        let map = ContentMap::build(
+            vec!["Hello World".to_string()],
+            vec!["# Hello World".to_string()],
+            80,
+        );
+        let start = ContentPos {
+            line: 0,
+            char_offset: 0,
+        };
+        let end = ContentPos {
+            line: 0,
+            char_offset: 5,
+        };
+        assert_eq!(map.extract_text(&start, &end), "Hello");
+    }
+
+    #[test]
+    fn extract_text_multi_line_middle_uses_raw() {
+        let map = ContentMap::build(
+            vec![
+                "First".to_string(),
+                "bold text".to_string(),
+                "Third".to_string(),
+            ],
+            vec![
+                "# First".to_string(),
+                "**bold** text".to_string(),
+                "### Third".to_string(),
+            ],
+            80,
+        );
+        let start = ContentPos {
+            line: 0,
+            char_offset: 0,
+        };
+        let end = ContentPos {
+            line: 2,
+            char_offset: 100,
+        };
+        assert_eq!(
+            map.extract_text(&start, &end),
+            "# First\n**bold** text\n### Third"
+        );
+    }
+
+    #[test]
+    fn extract_text_partial_first_line_raw_rest() {
+        let map = ContentMap::build(
+            vec![
+                "Hello World".to_string(),
+                "bold text".to_string(),
+                "Third".to_string(),
+            ],
+            vec![
+                "# Hello World".to_string(),
+                "**bold** text".to_string(),
+                "### Third".to_string(),
+            ],
+            80,
+        );
+        let start = ContentPos {
+            line: 0,
+            char_offset: 6,
+        };
+        let end = ContentPos {
+            line: 2,
+            char_offset: 100,
+        };
+        // First line partial (from plain), middle raw, last full raw
+        assert_eq!(
+            map.extract_text(&start, &end),
+            "World\n**bold** text\n### Third"
+        );
+    }
+
+    #[test]
+    fn extract_text_code_fence_raw_preserved() {
+        let map = ContentMap::build(
+            vec![
+                "rust".to_string(),
+                "let x = 1;".to_string(),
+                "".to_string(),
+            ],
+            vec![
+                "```rust".to_string(),
+                "let x = 1;".to_string(),
+                "```".to_string(),
+            ],
+            80,
+        );
+        let start = ContentPos {
+            line: 0,
+            char_offset: 0,
+        };
+        let end = ContentPos {
+            line: 2,
+            char_offset: 100,
+        };
+        assert_eq!(
+            map.extract_text(&start, &end),
+            "```rust\nlet x = 1;\n```"
+        );
+    }
+
+    #[test]
+    fn extract_text_partial_last_line_uses_plain() {
+        let map = ContentMap::build(
+            vec![
+                "First".to_string(),
+                "bold text".to_string(),
+            ],
+            vec![
+                "# First".to_string(),
+                "**bold** text".to_string(),
+            ],
+            80,
+        );
+        let start = ContentPos {
+            line: 0,
+            char_offset: 0,
+        };
+        let end = ContentPos {
+            line: 1,
+            char_offset: 4,
+        };
+        // First line full (raw), last line partial (plain)
+        assert_eq!(map.extract_text(&start, &end), "# First\nbold");
+    }
+
+    #[test]
+    fn extract_text_empty_plain_line_does_not_return_raw() {
+        // Code fence closer: plain is "" (rendered as decorative rule) but raw is "```".
+        // Selecting TO this line at offset 0 should not emit the raw fence marker.
+        let map = ContentMap::build(
+            vec![
+                "let x = 1;".to_string(),
+                "".to_string(), // fence closer plain
+            ],
+            vec![
+                "let x = 1;".to_string(),
+                "```".to_string(), // fence closer raw
+            ],
+            80,
+        );
+        let start = ContentPos {
+            line: 0,
+            char_offset: 0,
+        };
+        let end = ContentPos {
+            line: 1,
+            char_offset: 0,
+        };
+        // Last line has char_offset=0 on empty plain → should NOT return raw "```"
+        assert_eq!(map.extract_text(&start, &end), "let x = 1;\n");
+    }
+
+    #[test]
+    fn extract_text_empty_plain_line_full_selection_returns_raw() {
+        // When an empty-plain line is a middle line (fully selected), raw IS returned.
+        let map = ContentMap::build(
+            vec![
+                "code".to_string(),
+                "".to_string(), // fence closer plain
+                "next".to_string(),
+            ],
+            vec![
+                "code".to_string(),
+                "```".to_string(), // fence closer raw
+                "next".to_string(),
+            ],
+            80,
+        );
+        let start = ContentPos {
+            line: 0,
+            char_offset: 0,
+        };
+        let end = ContentPos {
+            line: 2,
+            char_offset: 100,
+        };
+        // Middle line is fully selected → raw "```" included
+        assert_eq!(map.extract_text(&start, &end), "code\n```\nnext");
     }
 }
