@@ -74,7 +74,8 @@ impl App {
         self.prompt_model_if_needed();
 
         // Initial render
-        terminal.draw(|frame| ui::render(frame, self))?;
+        let completed = terminal.draw(|frame| ui::render(frame, self))?;
+        ui::write_osc8_hyperlinks(completed.buffer, completed.area);
 
         loop {
             tokio::select! {
@@ -93,7 +94,8 @@ impl App {
                 }
             }
 
-            terminal.draw(|frame| ui::render(frame, self))?;
+            let completed = terminal.draw(|frame| ui::render(frame, self))?;
+            ui::write_osc8_hyperlinks(completed.buffer, completed.area);
 
             if self.should_quit {
                 break;
