@@ -16,18 +16,27 @@ pub mod syntax;
 pub mod terminal_detect;
 pub mod theme;
 
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write};
 
 use anyhow::Result;
 use crossterm::{
+    cursor::MoveTo,
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
         KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
-    execute,
+    execute, queue,
+    style::Print,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Frame, Terminal, backend::CrosstermBackend, style::Style, widgets::Block};
+use ratatui::{
+    Frame, Terminal,
+    backend::CrosstermBackend,
+    buffer::Buffer,
+    layout::{Position, Rect},
+    style::Style,
+    widgets::Block,
+};
 
 use crate::app::App;
 use autocomplete::render_autocomplete;
@@ -95,6 +104,70 @@ pub fn restore_terminal(terminal: &mut Tui) -> Result<()> {
     )?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+/// Write OSC 8 hyperlink sequences directly to stdout for URLs in the buffer.
+///
+/// Called AFTER `terminal.draw()` has flushed the frame to the terminal.
+/// Scans the rendered buffer for bare URLs and re-writes them with OSC 8
+/// escape sequences wrapping the text. Since this writes directly to stdout
+/// (bypassing ratatui's buffer), it doesn't affect width calculations,
+/// cell state, or crossterm's buffer diffing.
+pub fn write_osc8_hyperlinks(buf: &Buffer, area: Rect) {
+    let mut stdout = io::stdout();
+
+    for y in area.y..area.y + area.height {
+        // Collect chars from cell symbols with mapping to x positions
+        let mut chars: Vec<char> = Vec::new();
+        let mut char_to_x: Vec<u16> = Vec::new();
+
+        for x in area.x..area.x + area.width {
+            if let Some(cell) = buf.cell(Position::new(x, y)) {
+                let sym = cell.symbol();
+                for ch in sym.chars() {
+                    chars.push(ch);
+                    char_to_x.push(x);
+                }
+            }
+        }
+
+        // Find URLs and emit OSC 8 sequences
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == 'h'
+                && let Some((url, end)) = markdown::scan_bare_url(&chars, i)
+            {
+                let first_x = char_to_x[i];
+                let last_x = char_to_x[end - 1];
+
+                // Skip URLs at right edge (likely truncated by wrapping)
+                if last_x >= area.x + area.width - 1 {
+                    i = end;
+                    continue;
+                }
+
+                // Collect the label from cells
+                let label: String = (first_x..=last_x)
+                    .filter_map(|x| buf.cell(Position::new(x, y)).map(|c| c.symbol()))
+                    .collect();
+
+                // Move to URL start, write OSC 8 open, re-write label, write OSC 8 close
+                let _ = queue!(
+                    stdout,
+                    MoveTo(first_x, y),
+                    Print(format!("\x1b]8;;{url}\x1b\\")),
+                    Print(&label),
+                    Print("\x1b]8;;\x1b\\"),
+                );
+
+                i = end;
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    let _ = stdout.flush();
 }
 
 /// Render a widget into a headless test buffer. Used by rendering tests.
