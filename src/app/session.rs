@@ -39,9 +39,14 @@ impl App {
                 }
             }
 
-            // Restore model from session, falling back to config if the saved
-            // model_ref is no longer valid (e.g. config was updated after save).
-            self.current_model = Some(self.validated_model_ref(&session.model_ref));
+            // Use the current config model for new prompts; fall back to the
+            // session's saved model only when config has no default set.
+            self.current_model = Some(
+                self.config
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| self.validated_model_ref(&session.model_ref)),
+            );
             self.usage_writer.upsert_session(SessionRecord {
                 session_id: session.id.clone(),
                 project_id: self.project.id.clone(),
