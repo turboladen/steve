@@ -2097,9 +2097,9 @@ mod tests {
         // "before", header, "line1", "line2" = 4 lines
         assert_eq!(ml.len(), 4);
         // Lines 2 and 3 (code lines) should have code_bg background on Line.style
-        for i in 2..4 {
+        for (i, line) in ml.iter().enumerate().take(4).skip(2) {
             assert_eq!(
-                ml[i].styled.style.bg,
+                line.styled.style.bg,
                 Some(theme.code_bg),
                 "unclosed code line {i} should have code_bg"
             );

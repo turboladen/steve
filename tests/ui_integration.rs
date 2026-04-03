@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use ratatui::{Frame, Terminal, backend::TestBackend, buffer::Buffer, layout::Rect, style::Color};
+use ratatui::{Frame, Terminal, backend::TestBackend, buffer::Buffer, layout::Rect};
 
 use steve::{
     app::App,

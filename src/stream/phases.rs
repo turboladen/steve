@@ -946,7 +946,6 @@ mod tests {
                 id: format!("call_{idx}"),
                 function_name: function_name.to_string(),
                 arguments: args.to_string(),
-                ..Default::default()
             },
         )
     }

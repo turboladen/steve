@@ -260,10 +260,10 @@ mod tests {
         for entry in fs::read_dir(storage.base_dir()).expect("read_dir failed") {
             let entry = entry.expect("entry failed");
             let path = entry.path();
-            if let Some(name) = path.file_name() {
-                if name.to_string_lossy().ends_with(".json.tmp") {
-                    tmp_files.push(path);
-                }
+            if let Some(name) = path.file_name()
+                && name.to_string_lossy().ends_with(".json.tmp")
+            {
+                tmp_files.push(path);
             }
         }
         assert!(

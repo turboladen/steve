@@ -304,8 +304,10 @@ mod tests {
 
     #[test]
     fn small_model_configured_no_check() {
-        let mut config = Config::default();
-        config.small_model = Some("openai/gpt-4o-mini".into());
+        let config = Config {
+            small_model: Some("openai/gpt-4o-mini".into()),
+            ..Default::default()
+        };
         let checks = ai_environment_checks(Some("ok"), 1000, &config);
         assert!(!checks.iter().any(|c| c.label.contains("No small_model")));
     }
