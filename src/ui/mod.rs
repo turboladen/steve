@@ -179,7 +179,10 @@ pub fn write_osc8_hyperlinks(buf: &Buffer, area: Rect) {
 fn osc7_sequence(cwd: &std::path::Path) -> Option<String> {
     let mut url = url::Url::from_file_path(cwd).ok()?;
     let hostname = gethostname::gethostname();
-    let _ = url.set_host(Some(&hostname.to_string_lossy()));
+    let hostname = hostname.to_string_lossy();
+    if hostname.is_empty() || url.set_host(Some(&hostname)).is_err() {
+        url.set_host(Some("localhost")).ok()?;
+    }
     Some(format!("\x1b]7;{url}\x1b\\"))
 }
 
