@@ -170,6 +170,36 @@ pub fn write_osc8_hyperlinks(buf: &Buffer, area: Rect) {
     let _ = stdout.flush();
 }
 
+/// Build the OSC 7 escape sequence for the given path.
+///
+/// Uses `url::Url::from_file_path` to produce a properly percent-encoded
+/// `file://` URI (spaces → `%20`, `#` → `%23`, etc.), then grafts the
+/// local hostname onto it so terminal emulators can distinguish local
+/// from remote sessions.
+fn osc7_sequence(cwd: &std::path::Path) -> Option<String> {
+    let mut url = url::Url::from_file_path(cwd).ok()?;
+    let hostname = gethostname::gethostname();
+    let hostname = hostname.to_string_lossy();
+    if hostname.is_empty() || url.set_host(Some(&hostname)).is_err() {
+        url.set_host(Some("localhost")).ok()?;
+    }
+    Some(format!("\x1b]7;{url}\x1b\\"))
+}
+
+/// Emit OSC 7 to tell the terminal our working directory.
+///
+/// Called once after entering the alternate screen so new tabs/splits
+/// opened from this terminal inherit the project CWD.  Emitting once
+/// is sufficient because Steve has no `/cd` command — the project CWD
+/// is fixed for the lifetime of the session.
+pub fn write_osc7_cwd(cwd: &std::path::Path) {
+    if let Some(seq) = osc7_sequence(cwd) {
+        let mut stdout = io::stdout();
+        let _ = queue!(stdout, Print(seq));
+        let _ = stdout.flush();
+    }
+}
+
 /// Render a widget into a headless test buffer. Used by rendering tests.
 #[cfg(test)]
 pub(crate) fn render_to_buffer(
@@ -361,6 +391,33 @@ mod tests {
             "sidebar 'Session' header should be visible at 120 cols"
         );
         assert!(text.contains("gpt-4o"), "sidebar should show model name");
+    }
+
+    #[test]
+    fn osc7_sequence_simple_path() {
+        let seq = osc7_sequence(std::path::Path::new("/Users/dev/my-project")).unwrap();
+        // Should start with OSC 7 opener, contain file:// URI, end with ST
+        assert!(seq.starts_with("\x1b]7;file://"));
+        assert!(seq.ends_with("\x1b\\"));
+        assert!(seq.contains("/Users/dev/my-project"));
+    }
+
+    #[test]
+    fn osc7_sequence_percent_encodes_spaces() {
+        let seq = osc7_sequence(std::path::Path::new("/Users/dev/my project")).unwrap();
+        assert!(
+            seq.contains("/Users/dev/my%20project"),
+            "spaces must be percent-encoded, got: {seq}"
+        );
+    }
+
+    #[test]
+    fn osc7_sequence_percent_encodes_special_chars() {
+        let seq = osc7_sequence(std::path::Path::new("/Users/dev/foo#bar")).unwrap();
+        assert!(
+            seq.contains("/Users/dev/foo%23bar"),
+            "# must be percent-encoded, got: {seq}"
+        );
     }
 
     #[test]
