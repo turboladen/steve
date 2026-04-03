@@ -655,9 +655,10 @@ impl StreamRequest {
                 }
             }
 
-            // Process usage once after stream ends (last-wins avoids double-counting
-            // when providers emit usage in multiple chunks).
-            if let Some(u) = &call_usage {
+            // Process usage once after a successful stream ends (last-wins avoids
+            // double-counting when providers emit usage in multiple chunks).
+            // Skip on mid-stream errors — the call may be retried.
+            if stream_chunk_error.is_none() && let Some(u) = &call_usage {
                 tracing::info!(
                     prompt = u.prompt_tokens,
                     completion = u.completion_tokens,

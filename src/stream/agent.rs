@@ -13,8 +13,9 @@ use crate::{
 /// Run a sub-agent stream, collecting its final text response.
 ///
 /// Creates a fresh conversation with a focused system prompt and restricted tools.
-/// Sub-agent events are monitored on a private channel — only usage updates and
-/// permission requests are forwarded to the parent.
+/// Sub-agent events are monitored on a private channel — only permission requests
+/// and tool progress are forwarded to the parent. Usage updates are intentionally
+/// suppressed to avoid overwriting the parent's context pressure metrics.
 pub(super) async fn run_sub_agent(
     spawner: &AgentSpawner,
     agent_type: AgentType,

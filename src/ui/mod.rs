@@ -118,7 +118,7 @@ pub fn write_osc8_hyperlinks(buf: &Buffer, area: Rect) {
     let mut stdout = io::stdout();
     // Save cursor position before writing OSC 8 sequences — these bypass ratatui's
     // buffer and leave the cursor wherever the last URL ended.
-    let _ = queue!(stdout, cursor::SavePosition, cursor::Hide);
+    let _ = queue!(stdout, cursor::SavePosition);
 
     for y in area.y..area.y + area.height {
         // Collect chars from cell symbols with mapping to x positions
@@ -171,7 +171,7 @@ pub fn write_osc8_hyperlinks(buf: &Buffer, area: Rect) {
         }
     }
 
-    let _ = queue!(stdout, cursor::RestorePosition, cursor::Show);
+    let _ = queue!(stdout, cursor::RestorePosition);
     let _ = stdout.flush();
 }
 
