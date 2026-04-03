@@ -75,7 +75,7 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
             return Ok(ToolOutput {
                 title: format!("lsp {path_str}"),
                 output: format!(
-                    "Unknown operation: '{raw_operation}'. Expected one of: diagnostics, definition, references, rename"
+                    "Error: unknown operation: '{raw_operation}'. Expected one of: diagnostics, definition, references, rename"
                 ),
                 is_error: true,
             });
@@ -488,7 +488,7 @@ mod tests {
         let output = execute(args, test_ctx_with_lsp(dir.path())).unwrap();
         assert!(output.is_error);
         assert!(
-            output.output.contains("Unknown operation"),
+            output.output.contains("unknown operation"),
             "expected parse error, got: {}",
             output.output
         );
