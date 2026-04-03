@@ -39,14 +39,8 @@ impl App {
                 }
             }
 
-            // Use the current config model for new prompts; fall back to the
-            // session's saved model only when config has no default set.
-            self.current_model = Some(
-                self.config
-                    .model
-                    .clone()
-                    .unwrap_or_else(|| self.validated_model_ref(&session.model_ref)),
-            );
+            self.current_model = Some(self.resolve_session_model(&session.model_ref));
+            self.sync_context_window();
             self.usage_writer.upsert_session(SessionRecord {
                 session_id: session.id.clone(),
                 project_id: self.project.id.clone(),
@@ -91,6 +85,8 @@ impl App {
         self.pending_question = None;
         self.pending_agents_update = None;
         self.model_picker.close();
+        self.selection_state.clear();
+        self.autocomplete_state.hide();
         *self.tool_cache.lock().expect("lock poisoned") =
             ToolResultCache::new(self.project.root.clone());
 
@@ -121,7 +117,7 @@ impl App {
         meta.last_model = Some(session.model_ref.clone());
         let _ = mgr.save_project_meta(&meta);
 
-        self.current_model = Some(self.validated_model_ref(&session.model_ref));
+        self.current_model = Some(self.resolve_session_model(&session.model_ref));
         self.sync_context_window();
         self.usage_writer.upsert_session(SessionRecord {
             session_id: session.id.clone(),
@@ -246,6 +242,18 @@ impl App {
         }
     }
 
+    /// Choose the model when loading a session: config default wins,
+    /// falling back to the session's saved model_ref. Both paths are
+    /// validated against the provider registry.
+    pub(super) fn resolve_session_model(&self, session_model_ref: &str) -> String {
+        let preferred = self
+            .config
+            .model
+            .as_deref()
+            .unwrap_or(session_model_ref);
+        self.validated_model_ref(preferred)
+    }
+
     /// Apply a generated title to the current session, persisting to storage.
     pub(super) fn apply_session_title(&mut self, title: &str) {
         if title.is_empty() {
@@ -322,7 +330,59 @@ pub(super) fn sanitize_title(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tests::{create_test_session, make_test_app_with_storage};
+    use crate::app::tests::{create_test_session, make_test_app_with_storage, make_test_registry};
+
+    // -- resolve_session_model tests --
+
+    #[test]
+    fn resolve_session_model_prefers_valid_config_default() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        app.provider_registry = Some(make_test_registry(128_000));
+        app.config.model = Some("test/test-model".to_string());
+        let result = app.resolve_session_model("session/model");
+        assert_eq!(result, "test/test-model");
+    }
+
+    #[test]
+    fn resolve_session_model_falls_back_to_session_when_no_config() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        app.provider_registry = Some(make_test_registry(128_000));
+        app.config.model = None;
+        // Session model is valid in the registry
+        let result = app.resolve_session_model("test/test-model");
+        assert_eq!(result, "test/test-model");
+    }
+
+    #[test]
+    fn resolve_session_model_warns_on_invalid_config_model() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        app.provider_registry = Some(make_test_registry(128_000));
+        // Config model is invalid — validated_model_ref falls back to config.model
+        // (which is the same invalid string, but logs a warning)
+        app.config.model = Some("nonexistent/model".to_string());
+        let result = app.resolve_session_model("test/test-model");
+        // validated_model_ref's fallback is config.model itself
+        assert_eq!(result, "nonexistent/model");
+    }
+
+    #[test]
+    fn resolve_session_model_invalid_session_model_falls_back_to_config() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        app.provider_registry = Some(make_test_registry(128_000));
+        app.config.model = None;
+        // Session model is invalid and no config default — returns session model as-is
+        let result = app.resolve_session_model("nonexistent/model");
+        assert_eq!(result, "nonexistent/model");
+    }
+
+    #[test]
+    fn resolve_session_model_no_registry_returns_config_model() {
+        let (mut app, _dir) = make_test_app_with_storage();
+        assert!(app.provider_registry.is_none());
+        app.config.model = Some("any/model".to_string());
+        let result = app.resolve_session_model("session/model");
+        assert_eq!(result, "any/model");
+    }
 
     // -- title_fallback tests --
 
