@@ -514,7 +514,12 @@ pub fn render_message_blocks(
                     spans.extend(style_file_refs(text_line, theme));
                     // Use push_with_text to exclude the "│ " decoration from clipboard text
                     let line = Line::from(spans).style(Style::default().bg(theme.user_msg_bg));
-                    glines.push_with_text(line, GutterMark::Empty, text_line.to_string(), text_line.to_string());
+                    glines.push_with_text(
+                        line,
+                        GutterMark::Empty,
+                        text_line.to_string(),
+                        text_line.to_string(),
+                    );
                 }
             }
 

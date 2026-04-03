@@ -143,7 +143,9 @@ fn parse_inline_spans(text: &str, theme: &Theme) -> Vec<InlineSpan<'static>> {
         }
 
         // Bare URL: https:// or http://
-        if ch == 'h' && let Some((url, end)) = scan_bare_url(&chars, i) {
+        if ch == 'h'
+            && let Some((url, end)) = scan_bare_url(&chars, i)
+        {
             // Flush plain buffer
             if !plain_buf.is_empty() {
                 spans.push(InlineSpan {
@@ -853,8 +855,7 @@ mod tests {
 
     #[test]
     fn link_preserves_raw() {
-        let result =
-            render_markdown_line("see [docs](https://example.com) here", &dark(), 80);
+        let result = render_markdown_line("see [docs](https://example.com) here", &dark(), 80);
         assert_eq!(result.raw, "see [docs](https://example.com) here");
     }
 
@@ -1208,7 +1209,9 @@ mod tests {
 
     #[test]
     fn scan_bare_url_with_path_and_query() {
-        let chars: Vec<char> = "https://example.com/path?q=1&r=2#frag rest".chars().collect();
+        let chars: Vec<char> = "https://example.com/path?q=1&r=2#frag rest"
+            .chars()
+            .collect();
         let result = scan_bare_url(&chars, 0);
         assert_eq!(
             result,
@@ -1299,11 +1302,7 @@ mod tests {
 
     #[test]
     fn bare_url_multiple_urls() {
-        let result = render_markdown_line(
-            "see https://a.com and https://b.com",
-            &dark(),
-            60,
-        );
+        let result = render_markdown_line("see https://a.com and https://b.com", &dark(), 60);
         let url_spans: Vec<_> = result
             .styled
             .spans

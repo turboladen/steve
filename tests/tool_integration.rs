@@ -487,7 +487,11 @@ fn lsp_tool_unknown_operation() {
         .unwrap();
 
     assert!(output.is_error);
-    assert!(output.output.contains("Unknown operation"));
+    assert!(
+        output.output.contains("Unknown operation"),
+        "expected Unknown operation error, got: {}",
+        output.output
+    );
 }
 
 #[test]
