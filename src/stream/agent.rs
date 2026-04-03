@@ -108,8 +108,11 @@ pub(super) async fn run_sub_agent(
                     Some(AppEvent::LlmDelta { text }) => {
                         final_text.push_str(&text);
                     }
-                    Some(AppEvent::LlmUsageUpdate { usage }) => {
-                        let _ = parent_event_tx.send(AppEvent::LlmUsageUpdate { usage });
+                    Some(AppEvent::LlmUsageUpdate { .. }) => {
+                        // Don't forward sub-agent usage to parent — it would overwrite
+                        // parent's last_prompt_tokens with the sub-agent's context size,
+                        // breaking auto-compact thresholds. Sub-agent totals are tracked
+                        // via LlmFinish → sub_agent_usage and returned to the caller.
                     }
                     Some(AppEvent::LlmToolCall { tool_name, arguments, .. }) => {
                         tool_count += 1;

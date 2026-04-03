@@ -435,13 +435,20 @@ mod tests {
 
     #[test]
     fn extract_args_summary_all_variants_covered() {
-        // Ensure every ToolName variant is handled (exhaustive match).
-        // This test will fail to compile if a new variant is added without
-        // updating extract_args_summary.
+        // Every variant with empty args produces a deterministic result.
+        // Verifies the exhaustive match compiles and each branch behaves correctly.
         let args = json!({});
         for tool in ToolName::iter() {
-            // Just ensure it doesn't panic
-            let _ = extract_args_summary(tool, &args);
+            let result = extract_args_summary(tool, &args);
+            if matches!(tool, ToolName::Move | ToolName::Copy) {
+                assert_eq!(result, " \u{2192} ", "{tool} empty args should produce arrow");
+            } else if matches!(tool, ToolName::Lsp) {
+                assert_eq!(result, " diagnostics", "{tool} defaults to diagnostics op");
+            } else if matches!(tool, ToolName::Agent) {
+                assert!(result.starts_with("explore:"), "{tool} defaults to explore type");
+            } else {
+                assert_eq!(result, "", "{tool} empty args should return empty string");
+            }
         }
     }
 
@@ -640,17 +647,10 @@ mod tests {
     #[test]
     fn diff_content_non_write_tools_return_none() {
         let args = json!({"path": "src/main.rs"});
-        for tool in [
-            ToolName::Read,
-            ToolName::Grep,
-            ToolName::Glob,
-            ToolName::List,
-            ToolName::Bash,
-            ToolName::Question,
-            ToolName::Task,
-            ToolName::Webfetch,
-            ToolName::Memory,
-        ] {
+        for tool in ToolName::iter() {
+            if tool.is_write_tool() {
+                continue;
+            }
             assert!(
                 extract_diff_content(tool, &args).is_none(),
                 "{tool} should return None"

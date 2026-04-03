@@ -83,6 +83,7 @@ pub(super) enum PhaseOutcome {
 /// Unknown tool names get an error tool-result message pushed to `messages`.
 /// Valid calls are split into auto-allowed (parallel-eligible), needs-interaction
 /// (sequential), and MCP calls.
+// Structural — all parameters are distinct coordination concerns (tools, permissions, state, events)
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn partition_tool_calls(
     pending_tool_calls: &HashMap<u32, PendingToolCall>,
@@ -208,6 +209,7 @@ pub(super) async fn partition_tool_calls(
 /// Execute auto-allowed (read-only, pre-permitted) tools in parallel.
 ///
 /// Returns `PhaseOutcome::Cancelled` if the cancel token fires during result processing.
+// Structural — each parameter is a distinct resource (registry, cache, events, cancellation, counters)
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_parallel_tools(
     tools: &[PreparedToolCall],
@@ -361,6 +363,7 @@ pub(super) async fn execute_parallel_tools(
 /// cache checking, and cache invalidation for write tools.
 ///
 /// Returns `PhaseOutcome::Cancelled` if the cancel token fires.
+// Structural — sequential execution requires all coordination handles (registry, permissions, cache, events, agents)
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_sequential_tools(
     tools: &[PreparedToolCall],
@@ -817,6 +820,7 @@ pub(super) async fn execute_sequential_tools(
 /// Execute MCP tool calls sequentially (external IPC, always sequential).
 ///
 /// Returns `PhaseOutcome::Cancelled` if the cancel token fires.
+// Structural — MCP execution needs all coordination handles (manager, permissions, events, counters)
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_mcp_tools(
     tools: &[McpPreparedToolCall],

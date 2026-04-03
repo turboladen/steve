@@ -17,7 +17,7 @@ use async_openai::{
     Client,
     config::OpenAIConfig,
     types::chat::{
-        ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
+        ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls, CompletionUsage,
         ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
         ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
         ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessageContent,
@@ -544,6 +544,7 @@ impl StreamRequest {
             let mut assistant_content = String::new();
             let mut first_token_logged = false;
             let mut stream_chunk_error: Option<String> = None;
+            let mut call_usage: Option<CompletionUsage> = None;
 
             // Process chunks — use select! to check cancellation while streaming
             loop {
@@ -571,45 +572,9 @@ impl StreamRequest {
 
                         match result {
                             Ok(response) => {
-                                // Check for usage in the final chunk
-                                if let Some(u) = &response.usage {
-                                    tracing::info!(
-                                        prompt = u.prompt_tokens,
-                                        completion = u.completion_tokens,
-                                        total = u.total_tokens,
-                                        "usage data received in stream chunk"
-                                    );
-                                    total_usage.prompt_tokens += u.prompt_tokens;
-                                    total_usage.completion_tokens += u.completion_tokens;
-                                    total_usage.total_tokens += u.total_tokens;
-
-                                    // Send current-call usage to UI for live token counter updates
-                                    let _ = event_tx.send(AppEvent::LlmUsageUpdate {
-                                        usage: StreamUsage {
-                                            prompt_tokens: u.prompt_tokens,
-                                            completion_tokens: u.completion_tokens,
-                                            total_tokens: u.total_tokens,
-                                        },
-                                    });
-
-                                    // Record per-call usage to SQLite
-                                    let cost = usage_model_cost.as_ref().map(|mc| {
-                                        u.prompt_tokens as f64 * mc.input_per_million / 1_000_000.0
-                                            + u.completion_tokens as f64 * mc.output_per_million
-                                                / 1_000_000.0
-                                    });
-                                    usage_writer.record_api_call(ApiCallRecord {
-                                        timestamp: chrono::Utc::now(),
-                                        project_id: usage_project_id.clone(),
-                                        session_id: usage_session_id.clone(),
-                                        model_ref: model.clone(),
-                                        prompt_tokens: u.prompt_tokens,
-                                        completion_tokens: u.completion_tokens,
-                                        total_tokens: u.total_tokens,
-                                        cost,
-                                        duration_ms: call_start.elapsed().as_millis() as u64,
-                                        iteration: total_iteration_count.saturating_sub(1),
-                                    });
+                                // Capture usage (last-wins — some providers emit multiple chunks)
+                                if let Some(u) = response.usage {
+                                    call_usage = Some(u);
                                 }
 
                                 // Process each choice's delta
@@ -688,6 +653,45 @@ impl StreamRequest {
                         }
                     }
                 }
+            }
+
+            // Process usage once after stream ends (last-wins avoids double-counting
+            // when providers emit usage in multiple chunks).
+            if let Some(u) = &call_usage {
+                tracing::info!(
+                    prompt = u.prompt_tokens,
+                    completion = u.completion_tokens,
+                    total = u.total_tokens,
+                    "usage data received"
+                );
+                total_usage.prompt_tokens += u.prompt_tokens;
+                total_usage.completion_tokens += u.completion_tokens;
+                total_usage.total_tokens += u.total_tokens;
+
+                let _ = event_tx.send(AppEvent::LlmUsageUpdate {
+                    usage: StreamUsage {
+                        prompt_tokens: u.prompt_tokens,
+                        completion_tokens: u.completion_tokens,
+                        total_tokens: u.total_tokens,
+                    },
+                });
+
+                let cost = usage_model_cost.as_ref().map(|mc| {
+                    u.prompt_tokens as f64 * mc.input_per_million / 1_000_000.0
+                        + u.completion_tokens as f64 * mc.output_per_million / 1_000_000.0
+                });
+                usage_writer.record_api_call(ApiCallRecord {
+                    timestamp: chrono::Utc::now(),
+                    project_id: usage_project_id.clone(),
+                    session_id: usage_session_id.clone(),
+                    model_ref: model.clone(),
+                    prompt_tokens: u.prompt_tokens,
+                    completion_tokens: u.completion_tokens,
+                    total_tokens: u.total_tokens,
+                    cost,
+                    duration_ms: call_start.elapsed().as_millis() as u64,
+                    iteration: total_iteration_count.saturating_sub(1),
+                });
             }
 
             // Mid-stream error — retry the LLM call if retries remain.

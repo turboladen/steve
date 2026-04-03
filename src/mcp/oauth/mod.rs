@@ -185,6 +185,18 @@ async fn browser_auth_flow(
         .await
         .context("failed to start OAuth callback server")?;
 
+    // RAII guard ensures the callback server is aborted even if this future is dropped
+    // (e.g., during app shutdown while OAuth is in progress).
+    struct AbortOnDrop(tokio::task::JoinHandle<()>);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _server_guard = AbortOnDrop(server_handle);
+
+    // Binding needed so _server_guard drops after the async block completes
+    #[allow(clippy::let_and_return)]
     let result = async {
         // Resolve client_id (dynamic registration → config → well-known)
         let resolved = resolve_client_id(
@@ -256,7 +268,7 @@ async fn browser_auth_flow(
     }
     .await;
 
-    server_handle.abort();
+    // _server_guard drops here, aborting the callback server
     result
 }
 

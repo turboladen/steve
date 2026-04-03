@@ -84,6 +84,7 @@ impl App {
         self.pending_permission = None;
         self.pending_question = None;
         self.pending_agents_update = None;
+        self.interjection_tx = None;
         self.model_picker.close();
         self.selection_state.clear();
         self.autocomplete_state.hide();

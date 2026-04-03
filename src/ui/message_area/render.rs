@@ -292,6 +292,7 @@ fn render_permission_block<'a>(
 }
 
 /// Render a question prompt block.
+// Structural — rendering needs the question content, UI containers, theme, and layout dimensions
 #[allow(clippy::too_many_arguments)]
 fn render_question_block(
     glines: &mut GutteredLines<'_>,

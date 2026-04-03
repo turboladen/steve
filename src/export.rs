@@ -512,12 +512,16 @@ mod tests {
 
     #[test]
     fn extract_tool_summary_all_tools() {
-        // Every ToolName variant must be handled (compile-time + runtime exhaustiveness).
+        // Every ToolName variant with empty args: tools with required string fields
+        // return a fallback like "(no path)"; tools keyed on optional fields return "".
         let args = json!({});
         for tool in ToolName::iter() {
             let result = extract_tool_summary(tool, &args);
-            // All variants should produce a non-panicking result
-            let _ = result;
+            if matches!(tool, ToolName::Question | ToolName::Task | ToolName::Memory) {
+                assert_eq!(result, "", "{tool} with empty args should return empty string");
+            } else {
+                assert!(!result.is_empty(), "{tool} with empty args should return a non-empty fallback");
+            }
         }
     }
 
