@@ -269,8 +269,9 @@ fn load_jsonc_file(path: &Path) -> Result<Config> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read config file: {}", path.display()))?;
 
-    let json_value = jsonc_parser::parse_to_serde_value(&content, &Default::default())
-        .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", path.display()))?;
+    let json_value: Option<serde_json::Value> =
+        jsonc_parser::parse_to_serde_value(&content, &Default::default())
+            .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", path.display()))?;
 
     match json_value {
         Some(value) => serde_json::from_value(value)

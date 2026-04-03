@@ -451,7 +451,7 @@ async fn save_credentials(
 // -- PKCE helpers --
 
 fn generate_pkce_verifier() -> String {
-    use rand::Rng;
+    use rand::RngExt;
     let mut rng = rand::rng();
     let bytes: Vec<u8> = (0..32).map(|_| rng.random()).collect();
     base64_url_encode(&bytes)
@@ -464,7 +464,7 @@ fn generate_pkce_challenge(verifier: &str) -> String {
 }
 
 fn generate_random_state() -> String {
-    use rand::Rng;
+    use rand::RngExt;
     let mut rng = rand::rng();
     let bytes: Vec<u8> = (0..16).map(|_| rng.random()).collect();
     base64_url_encode(&bytes)
