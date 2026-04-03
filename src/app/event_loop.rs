@@ -210,6 +210,27 @@ impl App {
             }
 
             // -- Streaming events --
+            AppEvent::LlmResponseStart => {
+                if self.streaming_active {
+                    // Save the completed assistant message from the previous response
+                    if let Some(msg) = self.streaming_message.take()
+                        && !msg.text_content().is_empty()
+                    {
+                        let mgr = SessionManager::new(&self.storage, &self.project.id);
+                        let _ = mgr.save_message(&msg);
+                        self.stored_messages.push(msg);
+                    }
+
+                    // Start a fresh assistant block for the interjection response
+                    if let Some(session) = &self.current_session {
+                        self.streaming_message = Some(Message::assistant(&session.id, ""));
+                    }
+                    self.messages.push(MessageBlock::Assistant {
+                        thinking: None,
+                        parts: vec![],
+                    });
+                }
+            }
             AppEvent::LlmDelta { text } => {
                 if self.streaming_active {
                     // Append to the display message
@@ -644,6 +665,66 @@ mod tests {
 
         // No new messages, no panic
         assert_eq!(app.messages.len(), msg_count);
+    }
+
+    #[tokio::test]
+    async fn event_llm_response_start_creates_new_assistant_block() {
+        let mut app = make_test_app();
+        start_streaming(&mut app);
+
+        // Simulate first response
+        app.handle_event(AppEvent::LlmDelta {
+            text: "First response".into(),
+        })
+        .await
+        .unwrap();
+
+        let msg_count = app.messages.len();
+
+        // LlmResponseStart should push a new empty Assistant block
+        app.handle_event(AppEvent::LlmResponseStart).await.unwrap();
+
+        assert_eq!(app.messages.len(), msg_count + 1);
+        assert!(app.messages.last().unwrap().is_empty_assistant());
+
+        // New deltas should go to the NEW block, not the first one
+        app.handle_event(AppEvent::LlmDelta {
+            text: "Second response".into(),
+        })
+        .await
+        .unwrap();
+
+        // First assistant block should still have only "First response"
+        let first_text = match &app.messages[msg_count - 1] {
+            MessageBlock::Assistant { parts, .. } => parts
+                .iter()
+                .filter_map(|p| {
+                    if let AssistantPart::Text(t) = p {
+                        Some(t.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<String>(),
+            other => panic!("expected Assistant, got {other:?}"),
+        };
+        assert_eq!(first_text, "First response");
+
+        // Last assistant block should have "Second response"
+        let second_text = match app.messages.last().unwrap() {
+            MessageBlock::Assistant { parts, .. } => parts
+                .iter()
+                .filter_map(|p| {
+                    if let AssistantPart::Text(t) = p {
+                        Some(t.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<String>(),
+            other => panic!("expected Assistant, got {other:?}"),
+        };
+        assert_eq!(second_text, "Second response");
     }
 
     #[tokio::test]

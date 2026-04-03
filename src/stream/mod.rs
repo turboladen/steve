@@ -849,6 +849,8 @@ impl StreamRequest {
                     }
                 }
                 if has_interjection {
+                    // Tell the UI to start a fresh Assistant block for the new response
+                    let _ = event_tx.send(AppEvent::LlmResponseStart);
                     continue;
                 }
 
