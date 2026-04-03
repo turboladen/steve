@@ -76,6 +76,7 @@ impl App {
         // Initial render
         let completed = terminal.draw(|frame| ui::render(frame, self))?;
         ui::write_osc8_hyperlinks(completed.buffer, completed.area);
+        ui::write_osc7_cwd(&self.project.cwd);
 
         loop {
             tokio::select! {

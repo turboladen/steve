@@ -123,6 +123,7 @@ sha2 = "0.10"
 rand = "0.9"
 urlencoding = "2"
 oauth2 = "5"
+gethostname = "1.1.0"
 
 [dev-dependencies]
 tempfile = "3"

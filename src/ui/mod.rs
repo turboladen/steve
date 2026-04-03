@@ -170,6 +170,24 @@ pub fn write_osc8_hyperlinks(buf: &Buffer, area: Rect) {
     let _ = stdout.flush();
 }
 
+/// Build the OSC 7 escape sequence for the given hostname and path.
+fn osc7_sequence(hostname: &str, path: &std::path::Path) -> String {
+    format!("\x1b]7;file://{}{}\x1b\\", hostname, path.display())
+}
+
+/// Emit OSC 7 to tell the terminal our working directory.
+///
+/// Format: `\x1b]7;file://hostname/path\x1b\\`
+/// Called once after entering the alternate screen so new tabs/splits
+/// opened from this terminal inherit the project CWD.
+pub fn write_osc7_cwd(cwd: &std::path::Path) {
+    let hostname = gethostname::gethostname();
+    let hostname = hostname.to_string_lossy();
+    let mut stdout = io::stdout();
+    let _ = queue!(stdout, Print(osc7_sequence(&hostname, cwd)));
+    let _ = stdout.flush();
+}
+
 /// Render a widget into a headless test buffer. Used by rendering tests.
 #[cfg(test)]
 pub(crate) fn render_to_buffer(
@@ -361,6 +379,13 @@ mod tests {
             "sidebar 'Session' header should be visible at 120 cols"
         );
         assert!(text.contains("gpt-4o"), "sidebar should show model name");
+    }
+
+    #[test]
+    fn osc7_sequence_format() {
+        let path = std::path::Path::new("/Users/dev/my-project");
+        let seq = osc7_sequence("myhost", path);
+        assert_eq!(seq, "\x1b]7;file://myhost/Users/dev/my-project\x1b\\");
     }
 
     #[test]
