@@ -518,9 +518,15 @@ mod tests {
         for tool in ToolName::iter() {
             let result = extract_tool_summary(tool, &args);
             if matches!(tool, ToolName::Question | ToolName::Task | ToolName::Memory) {
-                assert_eq!(result, "", "{tool} with empty args should return empty string");
+                assert_eq!(
+                    result, "",
+                    "{tool} with empty args should return empty string"
+                );
             } else {
-                assert!(!result.is_empty(), "{tool} with empty args should return a non-empty fallback");
+                assert!(
+                    !result.is_empty(),
+                    "{tool} with empty args should return a non-empty fallback"
+                );
             }
         }
     }

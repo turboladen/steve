@@ -17,14 +17,14 @@ use async_openai::{
     Client,
     config::OpenAIConfig,
     types::chat::{
-        ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls, CompletionUsage,
+        ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
         ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
         ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
         ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessageContent,
         ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
         ChatCompletionResponseStream, ChatCompletionStreamOptions, ChatCompletionTool,
-        ChatCompletionTools, CreateChatCompletionRequest, FinishReason, FunctionCall,
-        FunctionObject,
+        ChatCompletionTools, CompletionUsage, CreateChatCompletionRequest, FinishReason,
+        FunctionCall, FunctionObject,
     },
 };
 use serde_json::Value;
@@ -658,7 +658,9 @@ impl StreamRequest {
             // Process usage once after a successful stream ends (last-wins avoids
             // double-counting when providers emit usage in multiple chunks).
             // Skip on mid-stream errors — the call may be retried.
-            if stream_chunk_error.is_none() && let Some(u) = &call_usage {
+            if stream_chunk_error.is_none()
+                && let Some(u) = &call_usage
+            {
                 tracing::info!(
                     prompt = u.prompt_tokens,
                     completion = u.completion_tokens,

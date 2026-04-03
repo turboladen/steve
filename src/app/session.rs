@@ -247,11 +247,7 @@ impl App {
     /// falling back to the session's saved model_ref. Both paths are
     /// validated against the provider registry.
     pub(super) fn resolve_session_model(&self, session_model_ref: &str) -> String {
-        let preferred = self
-            .config
-            .model
-            .as_deref()
-            .unwrap_or(session_model_ref);
+        let preferred = self.config.model.as_deref().unwrap_or(session_model_ref);
         self.validated_model_ref(preferred)
     }
 

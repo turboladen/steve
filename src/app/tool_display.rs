@@ -441,11 +441,17 @@ mod tests {
         for tool in ToolName::iter() {
             let result = extract_args_summary(tool, &args);
             if matches!(tool, ToolName::Move | ToolName::Copy) {
-                assert_eq!(result, " \u{2192} ", "{tool} empty args should produce arrow");
+                assert_eq!(
+                    result, " \u{2192} ",
+                    "{tool} empty args should produce arrow"
+                );
             } else if matches!(tool, ToolName::Lsp) {
                 assert_eq!(result, " diagnostics", "{tool} defaults to diagnostics op");
             } else if matches!(tool, ToolName::Agent) {
-                assert!(result.starts_with("explore:"), "{tool} defaults to explore type");
+                assert!(
+                    result.starts_with("explore:"),
+                    "{tool} defaults to explore type"
+                );
             } else {
                 assert_eq!(result, "", "{tool} empty args should return empty string");
             }
