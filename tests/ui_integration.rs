@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use ratatui::{Frame, Terminal, backend::TestBackend, buffer::Buffer, layout::Rect, style::Color};
+use ratatui::{Frame, Terminal, backend::TestBackend, buffer::Buffer, layout::Rect};
 
 use steve::{
     app::App,
@@ -731,7 +731,7 @@ fn code_block_has_code_bg_background() {
     });
 
     // Find the row containing "let x = 42" and verify it has code_bg
-    let expected_bg = Color::Rgb(28, 26, 23); // theme.code_bg for dark theme
+    let expected_bg = theme.code_bg; // theme.code_bg for dark theme
     let mut found_code_line = false;
     for y in 0..height {
         let mut row_text = String::new();
@@ -784,7 +784,7 @@ fn unknown_language_still_renders_with_code_bg() {
     );
 
     // Verify code_bg is still applied
-    let expected_bg = Color::Rgb(28, 26, 23);
+    let expected_bg = theme.code_bg;
     let mut found = false;
     for y in 0..height {
         let mut row_text = String::new();

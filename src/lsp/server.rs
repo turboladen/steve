@@ -365,14 +365,14 @@ mod tests {
             })),
         };
 
+        #[allow(clippy::mutable_key_type)]
+        // Uri has interior mutability but we only use it as a lookup key
         let mut diagnostics: HashMap<Uri, Vec<Diagnostic>> = HashMap::new();
-        if notif.method == "textDocument/publishDiagnostics" {
-            if let Some(params) = notif.params {
-                if let Ok(diag_params) = serde_json::from_value::<PublishDiagnosticsParams>(params)
-                {
-                    diagnostics.insert(diag_params.uri, diag_params.diagnostics);
-                }
-            }
+        if notif.method == "textDocument/publishDiagnostics"
+            && let Some(params) = notif.params
+            && let Ok(diag_params) = serde_json::from_value::<PublishDiagnosticsParams>(params)
+        {
+            diagnostics.insert(diag_params.uri, diag_params.diagnostics);
         }
 
         assert_eq!(diagnostics.len(), 1);

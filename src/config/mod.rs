@@ -561,8 +561,10 @@ mod tests {
 
     #[test]
     fn merge_preserves_global_theme_when_project_empty() {
-        let mut global = Config::default();
-        global.theme = crate::ui::terminal_detect::ThemePreference::Dark;
+        let global = Config {
+            theme: crate::ui::terminal_detect::ThemePreference::Dark,
+            ..Default::default()
+        };
         let project = Config::default();
         let merged = global.merge(project);
         // Project has Auto (default) theme, so global Dark should be preserved
@@ -580,8 +582,10 @@ mod tests {
             theme: crate::ui::terminal_detect::ThemePreference::Auto,
             ..Default::default()
         };
-        let mut project = Config::default();
-        project.theme = crate::ui::terminal_detect::ThemePreference::Dark;
+        let project = Config {
+            theme: crate::ui::terminal_detect::ThemePreference::Dark,
+            ..Default::default()
+        };
         let merged = global.merge(project);
         assert_eq!(
             merged.theme,

@@ -552,10 +552,7 @@ mod tests {
 
     #[test]
     fn mcp_permission_parts_splits_name_and_args() {
-        let (name, args) = mcp_permission_parts(
-            "mcp__github__get_me",
-            &serde_json::json!({}),
-        );
+        let (name, args) = mcp_permission_parts("mcp__github__get_me", &serde_json::json!({}));
         assert_eq!(name, "MCP: github/get_me");
         assert_eq!(args, "{}");
     }
@@ -563,14 +560,13 @@ mod tests {
     #[test]
     fn mcp_permission_parts_truncates_args() {
         let long_val = "x".repeat(100);
-        let (name, args) = mcp_permission_parts(
-            "mcp__srv__tool",
-            &serde_json::json!({"k": long_val}),
-        );
+        let (name, args) =
+            mcp_permission_parts("mcp__srv__tool", &serde_json::json!({"k": long_val}));
         assert_eq!(name, "MCP: srv/tool");
         assert!(args.ends_with("..."));
         // Verify the combined summary is consistent
-        let combined = mcp_permission_summary("mcp__srv__tool", &serde_json::json!({"k": long_val}));
+        let combined =
+            mcp_permission_summary("mcp__srv__tool", &serde_json::json!({"k": long_val}));
         assert_eq!(combined, format!("{name}({args})"));
     }
 

@@ -65,17 +65,22 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing 'path' argument"))?;
 
-    let operation: super::LspOperation = args
+    let raw_operation = args
         .get("operation")
         .and_then(|v| v.as_str())
-        .unwrap_or("diagnostics")
-        .parse()
-        .map_err(|_| {
-            let raw = args.get("operation").and_then(|v| v.as_str()).unwrap_or("?");
-            anyhow::anyhow!(
-                "unknown lsp operation: '{raw}'. Expected one of: diagnostics, definition, references, rename"
-            )
-        })?;
+        .unwrap_or("diagnostics");
+    let operation: super::LspOperation = match raw_operation.parse() {
+        Ok(op) => op,
+        Err(_) => {
+            return Ok(ToolOutput {
+                title: format!("lsp {path_str}"),
+                output: format!(
+                    "Error: unknown operation: '{raw_operation}'. Expected one of: diagnostics, definition, references, rename"
+                ),
+                is_error: true,
+            });
+        }
+    };
 
     // Resolve path relative to project root
     let path = if Path::new(path_str).is_absolute() {
@@ -480,10 +485,12 @@ mod tests {
             "path": file.to_str().unwrap(),
             "operation": "unknown_op"
         });
-        let err = execute(args, test_ctx_with_lsp(dir.path())).unwrap_err();
+        let output = execute(args, test_ctx_with_lsp(dir.path())).unwrap();
+        assert!(output.is_error);
         assert!(
-            err.to_string().contains("unknown lsp operation"),
-            "expected parse error, got: {err}"
+            output.output.contains("unknown operation"),
+            "expected parse error, got: {}",
+            output.output
         );
     }
 

@@ -770,8 +770,10 @@ mod tests {
         ctx_window: u64,
     ) -> (ratatui::buffer::Buffer, String) {
         let theme = Theme::default();
-        let mut state = InputState::default();
-        state.mode = mode;
+        let mut state = InputState {
+            mode,
+            ..Default::default()
+        };
         let context = InputContext {
             working_dir: "~/projects/steve".to_string(),
             last_prompt_tokens: last_prompt,
@@ -972,12 +974,12 @@ mod tests {
     fn desired_height_wraps_long_line() {
         let mut state = InputState::default();
         // 100-char line at width 50 → 2 visual rows
-        state.textarea.insert_str(&"x".repeat(100));
+        state.textarea.insert_str("x".repeat(100));
         // 2 overhead + max(2, 3 MIN_TEXTAREA_ROWS) = 5
         assert_eq!(state.desired_height(20, 50), MIN_INPUT_HEIGHT);
         // 200-char line at width 50 → 4 visual rows + 1 EOL cursor overflow = 5
         let mut state2 = InputState::default();
-        state2.textarea.insert_str(&"x".repeat(200));
+        state2.textarea.insert_str("x".repeat(200));
         // 2 overhead + 5 visual rows = 7
         assert_eq!(state2.desired_height(20, 50), 7);
     }
@@ -1092,13 +1094,13 @@ mod tests {
         let mut state = InputState::default();
         // Insert exactly 50 chars at width 50 — line fills exactly.
         // Cursor is at EOL (col 50), so it overflows to a new visual row.
-        state.textarea.insert_str(&"x".repeat(50));
+        state.textarea.insert_str("x".repeat(50));
         // Without the fix: count_visual_lines gives 1, desired_height = 2 + max(1, 3) = 5
         // With the fix: 1 + 1 = 2 visual rows, desired_height = 2 + max(2, 3) = 5
         // Need more than MIN_TEXTAREA_ROWS to see the effect:
         // 200 chars at width 50 = 4 visual rows, cursor at EOL = 5 visual rows
         let mut state2 = InputState::default();
-        state2.textarea.insert_str(&"x".repeat(200));
+        state2.textarea.insert_str("x".repeat(200));
         // cursor at col 200 (EOL), line_width=200, 200%50=0 → overflow row
         assert_eq!(state2.desired_height(20, 50), 7); // 2 + 5 = 7
     }
@@ -1363,8 +1365,10 @@ mod tests {
         elapsed: Option<Duration>,
     ) -> (ratatui::buffer::Buffer, String) {
         let theme = Theme::default();
-        let mut state = InputState::default();
-        state.mode = mode;
+        let mut state = InputState {
+            mode,
+            ..Default::default()
+        };
         let context = InputContext {
             working_dir: "~/projects/steve".to_string(),
             last_prompt_tokens: last_prompt,

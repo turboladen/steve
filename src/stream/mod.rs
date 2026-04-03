@@ -773,7 +773,12 @@ impl StreamRequest {
 
                         // Add any partial assistant text before the retry
                         if !assistant_content.is_empty() {
-                            messages.push(ChatCompletionRequestAssistantMessage::from(assistant_content.as_str()).into());
+                            messages.push(
+                                ChatCompletionRequestAssistantMessage::from(
+                                    assistant_content.as_str(),
+                                )
+                                .into(),
+                            );
                         }
 
                         messages.push(ChatCompletionRequestMessage::User(
@@ -807,7 +812,12 @@ impl StreamRequest {
                     if !has_interjection {
                         // Push the assistant's completed response first
                         if !assistant_content.is_empty() {
-                            messages.push(ChatCompletionRequestAssistantMessage::from(assistant_content.as_str()).into());
+                            messages.push(
+                                ChatCompletionRequestAssistantMessage::from(
+                                    assistant_content.as_str(),
+                                )
+                                .into(),
+                            );
                         }
                         has_interjection = true;
                     }
@@ -917,7 +927,10 @@ impl StreamRequest {
 
                     // Preserve any partial assistant text from this turn
                     if !assistant_content.is_empty() {
-                        messages.push(ChatCompletionRequestAssistantMessage::from(assistant_content.as_str()).into());
+                        messages.push(
+                            ChatCompletionRequestAssistantMessage::from(assistant_content.as_str())
+                                .into(),
+                        );
                     }
 
                     messages.push(ChatCompletionRequestMessage::User(
@@ -2115,9 +2128,7 @@ mod tests {
             &self,
             request: CreateChatCompletionRequest,
         ) -> Pin<
-            Box<
-                dyn Future<Output = Result<ChatCompletionResponseStream, OpenAIError>> + Send + '_,
-            >,
+            Box<dyn Future<Output = Result<ChatCompletionResponseStream, OpenAIError>> + Send + '_>,
         > {
             Box::pin(async move {
                 // Capture the messages for later assertion
@@ -2155,8 +2166,7 @@ mod tests {
                             tokio::task::yield_now().await;
                         }
                     });
-                    let stream =
-                        tokio_stream::wrappers::UnboundedReceiverStream::new(chunk_rx);
+                    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(chunk_rx);
                     Ok(Box::pin(stream) as ChatCompletionResponseStream)
                 } else {
                     let stream = tokio_stream::iter(chunks);

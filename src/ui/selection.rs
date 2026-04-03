@@ -763,11 +763,7 @@ mod tests {
     #[test]
     fn extract_text_code_fence_raw_preserved() {
         let map = ContentMap::build(
-            vec![
-                "rust".to_string(),
-                "let x = 1;".to_string(),
-                "".to_string(),
-            ],
+            vec!["rust".to_string(), "let x = 1;".to_string(), "".to_string()],
             vec![
                 "```rust".to_string(),
                 "let x = 1;".to_string(),
@@ -783,23 +779,14 @@ mod tests {
             line: 2,
             char_offset: 100,
         };
-        assert_eq!(
-            map.extract_text(&start, &end),
-            "```rust\nlet x = 1;\n```"
-        );
+        assert_eq!(map.extract_text(&start, &end), "```rust\nlet x = 1;\n```");
     }
 
     #[test]
     fn extract_text_partial_last_line_uses_plain() {
         let map = ContentMap::build(
-            vec![
-                "First".to_string(),
-                "bold text".to_string(),
-            ],
-            vec![
-                "# First".to_string(),
-                "**bold** text".to_string(),
-            ],
+            vec!["First".to_string(), "bold text".to_string()],
+            vec!["# First".to_string(), "**bold** text".to_string()],
             80,
         );
         let start = ContentPos {
