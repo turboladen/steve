@@ -119,12 +119,7 @@ pub fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
 
     // Reject simple commands that duplicate native tools
     if let Some(redirect) = check_native_tool_redirect(command) {
-        let title = if command.chars().count() > 60 {
-            let truncated: String = command.chars().take(57).collect();
-            format!("$ {truncated}...")
-        } else {
-            format!("$ {command}")
-        };
+        let title = format!("$ {}", crate::truncate_chars(command, 60));
         return Ok(ToolOutput {
             title,
             output: redirect,
@@ -136,12 +131,7 @@ pub fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
 
     let result = run_command(command, &ctx.project_root, timeout_secs)?;
 
-    let title = if command.chars().count() > 60 {
-        let truncated: String = command.chars().take(57).collect();
-        format!("$ {truncated}...")
-    } else {
-        format!("$ {command}")
-    };
+    let title = format!("$ {}", crate::truncate_chars(command, 60));
 
     Ok(ToolOutput {
         title,

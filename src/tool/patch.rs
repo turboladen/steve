@@ -1,6 +1,6 @@
 //! Patch tool — applies unified diffs to files.
 
-use std::{fs, path::PathBuf};
+use std::fs;
 
 use anyhow::{Context, Result};
 use mpatch::ApplyOptions;
@@ -61,7 +61,7 @@ pub fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
         .and_then(|v| v.as_str())
         .context("missing 'patch' parameter")?;
 
-    let file_path = resolve_path(file_path_str, &ctx.project_root);
+    let file_path = super::resolve_path(file_path_str, &ctx.project_root);
 
     // Read the original file
     let original = fs::read_to_string(&file_path)
@@ -94,15 +94,6 @@ fn apply_unified_diff(original: &str, patch: &str) -> Result<String> {
     }
 
     Ok(result)
-}
-
-fn resolve_path(path_str: &str, project_root: &std::path::Path) -> PathBuf {
-    let path = PathBuf::from(path_str);
-    if path.is_absolute() {
-        path
-    } else {
-        project_root.join(path)
-    }
 }
 
 #[cfg(test)]

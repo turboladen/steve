@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::tool::ToolName;
-use types::{PermissionAction, PermissionRule, ToolMatcher};
+use types::{PermissionAction, PermissionActionSerde, PermissionRule, ToolMatcher};
 
 /// Normalize a raw tool path relative to the project root.
 ///
@@ -378,221 +378,82 @@ fn cautious_build_rules() -> Vec<PermissionRule> {
 }
 
 /// Build the default Build mode permission rules (Standard profile).
-pub fn build_mode_rules() -> Vec<PermissionRule> {
+/// Shorthand for building a permission rule for a specific tool.
+fn rule(tool: ToolName, action: PermissionActionSerde) -> PermissionRule {
+    PermissionRule {
+        tool: ToolMatcher::Specific(tool),
+        pattern: "*".into(),
+        action,
+    }
+}
+
+/// Read-only and utility tools that are always auto-allowed in both modes.
+fn always_allowed_rules() -> Vec<PermissionRule> {
     use crate::tool::ToolName;
-    use types::PermissionActionSerde::*;
+    use types::PermissionActionSerde::Allow;
 
     vec![
-        // Read-only tools: always allowed
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Read),
-            pattern: "*".into(),
-            action: Allow,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Grep),
-            pattern: "*".into(),
-            action: Allow,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Glob),
-            pattern: "*".into(),
-            action: Allow,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::List),
-            pattern: "*".into(),
-            action: Allow,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Symbols),
-            pattern: "*".into(),
-            action: Allow,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Lsp),
-            pattern: "*".into(),
-            action: Allow,
-        },
-        // Utility tools: always allowed (no filesystem side effects)
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Memory),
-            pattern: "*".into(),
-            action: Allow,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Task),
-            pattern: "*".into(),
-            action: Allow,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Question),
-            pattern: "*".into(),
-            action: Allow,
-        },
-        // Write/execute tools: require permission
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Edit),
-            pattern: "*".into(),
-            action: Ask,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Write),
-            pattern: "*".into(),
-            action: Ask,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Patch),
-            pattern: "*".into(),
-            action: Ask,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Move),
-            pattern: "*".into(),
-            action: Ask,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Copy),
-            pattern: "*".into(),
-            action: Ask,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Delete),
-            pattern: "*".into(),
-            action: Ask,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Mkdir),
-            pattern: "*".into(),
-            action: Ask,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Bash),
-            pattern: "*".into(),
-            action: Ask,
-        },
-        // Network tools: require permission (external side effects)
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Webfetch),
-            pattern: "*".into(),
-            action: Ask,
-        },
-        // Agent tool: requires permission (spawns sub-agents with their own tool loops)
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Agent),
-            pattern: "*".into(),
-            action: Ask,
-        },
+        // Read-only tools
+        rule(ToolName::Read, Allow),
+        rule(ToolName::Grep, Allow),
+        rule(ToolName::Glob, Allow),
+        rule(ToolName::List, Allow),
+        rule(ToolName::Symbols, Allow),
+        rule(ToolName::Lsp, Allow),
+        // Utility tools (no filesystem side effects)
+        rule(ToolName::Memory, Allow),
+        rule(ToolName::Task, Allow),
+        rule(ToolName::Question, Allow),
     ]
 }
 
-/// Build the Plan mode permission rules (read-only, no writes).
+/// Build the Build mode permission rules (read=Allow, write/execute=Ask).
+pub fn build_mode_rules() -> Vec<PermissionRule> {
+    use crate::tool::ToolName;
+    use types::PermissionActionSerde::Ask;
+
+    let mut rules = always_allowed_rules();
+    rules.extend([
+        // Write/execute tools: require permission
+        rule(ToolName::Edit, Ask),
+        rule(ToolName::Write, Ask),
+        rule(ToolName::Patch, Ask),
+        rule(ToolName::Move, Ask),
+        rule(ToolName::Copy, Ask),
+        rule(ToolName::Delete, Ask),
+        rule(ToolName::Mkdir, Ask),
+        rule(ToolName::Bash, Ask),
+        // Network tools: require permission (external side effects)
+        rule(ToolName::Webfetch, Ask),
+        // Agent tool: requires permission (spawns sub-agents with their own tool loops)
+        rule(ToolName::Agent, Ask),
+    ]);
+    rules
+}
+
+/// Build the Plan mode permission rules (read=Allow, most writes=Deny).
 pub fn plan_mode_rules() -> Vec<PermissionRule> {
     use crate::tool::ToolName;
-    use types::PermissionActionSerde::*;
+    use types::PermissionActionSerde::{Ask, Deny};
 
-    vec![
-        // Read-only tools: always allowed
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Read),
-            pattern: "*".into(),
-            action: Allow,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Grep),
-            pattern: "*".into(),
-            action: Allow,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Glob),
-            pattern: "*".into(),
-            action: Allow,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::List),
-            pattern: "*".into(),
-            action: Allow,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Symbols),
-            pattern: "*".into(),
-            action: Allow,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Lsp),
-            pattern: "*".into(),
-            action: Allow,
-        },
-        // Utility tools: always allowed (even in Plan mode)
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Memory),
-            pattern: "*".into(),
-            action: Allow,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Task),
-            pattern: "*".into(),
-            action: Allow,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Question),
-            pattern: "*".into(),
-            action: Allow,
-        },
-        // Write/execute tools: denied in Plan mode
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Edit),
-            pattern: "*".into(),
-            action: Deny,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Write),
-            pattern: "*".into(),
-            action: Deny,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Patch),
-            pattern: "*".into(),
-            action: Deny,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Move),
-            pattern: "*".into(),
-            action: Deny,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Copy),
-            pattern: "*".into(),
-            action: Deny,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Delete),
-            pattern: "*".into(),
-            action: Deny,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Mkdir),
-            pattern: "*".into(),
-            action: Deny,
-        },
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Bash),
-            pattern: "*".into(),
-            action: Ask,
-        },
-        // Network tools: require permission (external side effects)
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Webfetch),
-            pattern: "*".into(),
-            action: Ask,
-        },
-        // Agent tool: denied in Plan mode (could spawn General agents that write)
-        PermissionRule {
-            tool: ToolMatcher::Specific(ToolName::Agent),
-            pattern: "*".into(),
-            action: Deny,
-        },
-    ]
+    let mut rules = always_allowed_rules();
+    rules.extend([
+        // Write tools: denied in Plan mode
+        rule(ToolName::Edit, Deny),
+        rule(ToolName::Write, Deny),
+        rule(ToolName::Patch, Deny),
+        rule(ToolName::Move, Deny),
+        rule(ToolName::Copy, Deny),
+        rule(ToolName::Delete, Deny),
+        rule(ToolName::Mkdir, Deny),
+        // Bash: Ask (may be needed for read-only commands)
+        rule(ToolName::Bash, Ask),
+        // Network tools: require permission
+        rule(ToolName::Webfetch, Ask),
+        // Agent tool: denied (could spawn General agents that write)
+        rule(ToolName::Agent, Deny),
+    ]);
+    rules
 }
 
 #[cfg(test)]

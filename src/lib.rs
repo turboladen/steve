@@ -37,10 +37,42 @@ mod lib_tests {
     }
 
     #[test]
+    fn truncate_chars_short_passthrough() {
+        assert_eq!(truncate_chars("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_chars_exact_length() {
+        assert_eq!(truncate_chars("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_chars_truncates() {
+        assert_eq!(truncate_chars("hello world", 8), "hello...");
+    }
+
+    #[test]
+    fn truncate_chars_unicode() {
+        let s = "🦀".repeat(10);
+        let result = truncate_chars(&s, 7);
+        assert_eq!(result.chars().count(), 7);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
     fn floor_char_boundary_empty() {
         assert_eq!(floor_char_boundary("", 0), 0);
         assert_eq!(floor_char_boundary("", 5), 0);
     }
+}
+
+/// Truncate a string to at most `max` display characters, appending "..." if truncated.
+pub fn truncate_chars(s: &str, max: usize) -> String {
+    if max < 4 || s.chars().count() <= max {
+        return s.to_string();
+    }
+    let truncated: String = s.chars().take(max - 3).collect();
+    format!("{truncated}...")
 }
 
 /// Extension trait for consistent date/time formatting across the codebase.

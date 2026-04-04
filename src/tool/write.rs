@@ -1,6 +1,6 @@
 //! Write tool — creates or overwrites files.
 
-use std::{fs, path::PathBuf};
+use std::fs;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -60,7 +60,7 @@ pub fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
         .and_then(|v| v.as_str())
         .context("missing 'content' parameter")?;
 
-    let file_path = resolve_path(file_path_str, &ctx.project_root);
+    let file_path = super::resolve_path(file_path_str, &ctx.project_root);
 
     // Create parent directories if needed
     if let Some(parent) = file_path.parent() {
@@ -89,29 +89,11 @@ pub fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
     })
 }
 
-fn resolve_path(path_str: &str, project_root: &std::path::Path) -> PathBuf {
-    let path = PathBuf::from(path_str);
-    if path.is_absolute() {
-        path
-    } else {
-        project_root.join(path)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::tempdir;
-
-    fn make_ctx(dir: &std::path::Path) -> ToolContext {
-        ToolContext {
-            project_root: dir.to_path_buf(),
-            storage_dir: None,
-            task_store: None,
-            lsp_manager: None,
-        }
-    }
 
     #[test]
     fn creates_new_file() {
@@ -120,7 +102,11 @@ mod tests {
             "file_path": "hello.txt",
             "content": "hello world"
         });
-        let result = execute(args, make_ctx(dir.path())).unwrap();
+        let result = execute(
+            args,
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+        )
+        .unwrap();
         assert!(!result.is_error);
         assert!(result.output.contains("Created"));
         assert!(dir.path().join("hello.txt").exists());
@@ -139,7 +125,11 @@ mod tests {
             "file_path": "existing.txt",
             "content": "new content"
         });
-        let result = execute(args, make_ctx(dir.path())).unwrap();
+        let result = execute(
+            args,
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+        )
+        .unwrap();
         assert!(!result.is_error);
         assert!(result.output.contains("Overwrote"));
         assert_eq!(
@@ -155,7 +145,11 @@ mod tests {
             "file_path": "sub/dir/file.txt",
             "content": "nested"
         });
-        let result = execute(args, make_ctx(dir.path())).unwrap();
+        let result = execute(
+            args,
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+        )
+        .unwrap();
         assert!(!result.is_error);
         assert!(dir.path().join("sub/dir/file.txt").exists());
         assert_eq!(
@@ -170,7 +164,10 @@ mod tests {
         let args = json!({
             "content": "no path"
         });
-        let result = execute(args, make_ctx(dir.path()));
+        let result = execute(
+            args,
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+        );
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -185,7 +182,10 @@ mod tests {
         let args = json!({
             "file_path": "test.txt"
         });
-        let result = execute(args, make_ctx(dir.path()));
+        let result = execute(
+            args,
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+        );
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -201,7 +201,11 @@ mod tests {
             "file_path": "relative/path.txt",
             "content": "resolved"
         });
-        let result = execute(args, make_ctx(dir.path())).unwrap();
+        let result = execute(
+            args,
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+        )
+        .unwrap();
         assert!(!result.is_error);
         let expected = dir.path().join("relative/path.txt");
         assert!(

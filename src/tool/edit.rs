@@ -7,7 +7,7 @@
 //! - `replace_range`: Replace a range of lines with new content
 //! - `multi_find_replace`: Apply multiple find-replace pairs atomically
 
-use std::{fs, path::PathBuf};
+use std::fs;
 
 use anyhow::{Context, Result, bail};
 use ropey::Rope;
@@ -150,7 +150,7 @@ fn execute_find_replace(
         .and_then(|v| v.as_str())
         .context("missing 'new_string' parameter for find_replace")?;
 
-    let file_path = resolve_path(file_path_str, &ctx.project_root);
+    let file_path = super::resolve_path(file_path_str, &ctx.project_root);
 
     let content = fs::read_to_string(&file_path)
         .with_context(|| format!("failed to read file: {}", file_path.display()))?;
@@ -207,7 +207,7 @@ fn execute_insert_lines(
         bail!("line number must be >= 1 (1-indexed), got 0");
     }
 
-    let file_path = resolve_path(file_path_str, &ctx.project_root);
+    let file_path = super::resolve_path(file_path_str, &ctx.project_root);
 
     let file_content = fs::read_to_string(&file_path)
         .with_context(|| format!("failed to read file: {}", file_path.display()))?;
@@ -293,7 +293,7 @@ fn execute_delete_lines(
         bail!("start_line ({start_line}) must be <= end_line ({end_line})");
     }
 
-    let file_path = resolve_path(file_path_str, &ctx.project_root);
+    let file_path = super::resolve_path(file_path_str, &ctx.project_root);
 
     let file_content = fs::read_to_string(&file_path)
         .with_context(|| format!("failed to read file: {}", file_path.display()))?;
@@ -373,7 +373,7 @@ fn execute_replace_range(
         bail!("start_line ({start_line}) must be <= end_line ({end_line})");
     }
 
-    let file_path = resolve_path(file_path_str, &ctx.project_root);
+    let file_path = super::resolve_path(file_path_str, &ctx.project_root);
 
     let file_content = fs::read_to_string(&file_path)
         .with_context(|| format!("failed to read file: {}", file_path.display()))?;
@@ -475,7 +475,7 @@ fn execute_multi_find_replace(
         }
     }
 
-    let file_path = resolve_path(file_path_str, &ctx.project_root);
+    let file_path = super::resolve_path(file_path_str, &ctx.project_root);
     let content = fs::read_to_string(&file_path)
         .with_context(|| format!("failed to read file: {}", file_path.display()))?;
 
@@ -552,15 +552,6 @@ fn total_lines(rope: &Rope) -> usize {
         len - 1
     } else {
         len
-    }
-}
-
-fn resolve_path(path_str: &str, project_root: &std::path::Path) -> PathBuf {
-    let path = PathBuf::from(path_str);
-    if path.is_absolute() {
-        path
-    } else {
-        project_root.join(path)
     }
 }
 
@@ -672,18 +663,6 @@ mod tests {
         let result = execute(args, test_ctx(&dir)).unwrap();
         assert!(!result.is_error);
         assert!(fs::read_to_string(&file).unwrap().contains("println"));
-    }
-
-    #[test]
-    fn resolve_path_absolute_passthrough() {
-        let abs = resolve_path("/tmp/file.txt", std::path::Path::new("/project"));
-        assert_eq!(abs, PathBuf::from("/tmp/file.txt"));
-    }
-
-    #[test]
-    fn resolve_path_relative_joins() {
-        let rel = resolve_path("src/main.rs", std::path::Path::new("/project"));
-        assert_eq!(rel, PathBuf::from("/project/src/main.rs"));
     }
 
     // ── insert_lines tests ──

@@ -79,18 +79,13 @@ fn execute(args: Value, _ctx: ToolContext) -> anyhow::Result<ToolOutput> {
 mod tests {
     use super::*;
 
-    fn make_ctx() -> ToolContext {
-        ToolContext {
-            project_root: std::path::PathBuf::from("/tmp"),
-            storage_dir: None,
-            task_store: None,
-            lsp_manager: None,
-        }
-    }
-
     #[test]
     fn stub_handler_returns_not_error() {
-        let result = execute(serde_json::json!({"question": "Pick a color?"}), make_ctx()).unwrap();
+        let result = execute(
+            serde_json::json!({"question": "Pick a color?"}),
+            crate::tool::tests::test_tool_context(std::path::PathBuf::from("/tmp")),
+        )
+        .unwrap();
         assert!(!result.is_error, "question stub should not be an error");
     }
 
@@ -98,7 +93,7 @@ mod tests {
     fn stub_handler_output_contains_question_text() {
         let result = execute(
             serde_json::json!({"question": "What is your name?"}),
-            make_ctx(),
+            crate::tool::tests::test_tool_context(std::path::PathBuf::from("/tmp")),
         )
         .unwrap();
         assert!(
@@ -110,7 +105,11 @@ mod tests {
 
     #[test]
     fn stub_handler_missing_question_uses_fallback() {
-        let result = execute(serde_json::json!({}), make_ctx()).unwrap();
+        let result = execute(
+            serde_json::json!({}),
+            crate::tool::tests::test_tool_context(std::path::PathBuf::from("/tmp")),
+        )
+        .unwrap();
         assert!(
             result.output.contains("(no question provided)"),
             "output should contain fallback text: {}",

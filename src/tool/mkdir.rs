@@ -1,6 +1,6 @@
 //! Mkdir tool — create directories.
 
-use std::{fs, path::PathBuf};
+use std::fs;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -51,7 +51,7 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
         .and_then(|v| v.as_str())
         .context("missing 'path' parameter")?;
 
-    let path = resolve_path(path_str, &ctx.project_root);
+    let path = super::resolve_path(path_str, &ctx.project_root);
 
     if path.exists() {
         return Ok(ToolOutput {
@@ -71,34 +71,20 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
     })
 }
 
-fn resolve_path(path_str: &str, project_root: &std::path::Path) -> PathBuf {
-    let path = PathBuf::from(path_str);
-    if path.is_absolute() {
-        path
-    } else {
-        project_root.join(path)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::tempdir;
 
-    fn make_ctx(dir: &std::path::Path) -> ToolContext {
-        ToolContext {
-            project_root: dir.to_path_buf(),
-            storage_dir: None,
-            task_store: None,
-            lsp_manager: None,
-        }
-    }
-
     #[test]
     fn create_directory() {
         let dir = tempdir().unwrap();
-        let result = execute(json!({"path": "new_dir"}), make_ctx(dir.path())).unwrap();
+        let result = execute(
+            json!({"path": "new_dir"}),
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+        )
+        .unwrap();
         assert!(!result.is_error);
         assert!(result.output.contains("Created"));
         assert!(dir.path().join("new_dir").is_dir());
@@ -107,7 +93,11 @@ mod tests {
     #[test]
     fn create_nested_directories() {
         let dir = tempdir().unwrap();
-        let result = execute(json!({"path": "a/b/c"}), make_ctx(dir.path())).unwrap();
+        let result = execute(
+            json!({"path": "a/b/c"}),
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+        )
+        .unwrap();
         assert!(!result.is_error);
         assert!(dir.path().join("a/b/c").is_dir());
     }
@@ -116,7 +106,11 @@ mod tests {
     fn already_exists_not_error() {
         let dir = tempdir().unwrap();
         fs::create_dir(dir.path().join("existing")).unwrap();
-        let result = execute(json!({"path": "existing"}), make_ctx(dir.path())).unwrap();
+        let result = execute(
+            json!({"path": "existing"}),
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+        )
+        .unwrap();
         assert!(!result.is_error);
         assert!(result.output.contains("already exists"));
     }
@@ -124,6 +118,12 @@ mod tests {
     #[test]
     fn missing_path_errors() {
         let dir = tempdir().unwrap();
-        assert!(execute(json!({}), make_ctx(dir.path())).is_err());
+        assert!(
+            execute(
+                json!({}),
+                crate::tool::tests::test_tool_context(dir.path().to_path_buf())
+            )
+            .is_err()
+        );
     }
 }

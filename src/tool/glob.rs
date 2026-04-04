@@ -39,13 +39,7 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
     let search_path = args
         .get("path")
         .and_then(|v| v.as_str())
-        .map(|p| {
-            if std::path::Path::new(p).is_absolute() {
-                std::path::PathBuf::from(p)
-            } else {
-                ctx.project_root.join(p)
-            }
-        })
+        .map(|p| super::resolve_path(p, &ctx.project_root))
         .unwrap_or_else(|| ctx.project_root.clone());
 
     let glob_pattern = match ::glob::Pattern::new(pattern_str) {
@@ -121,15 +115,6 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
-    fn make_ctx(dir: &std::path::Path) -> ToolContext {
-        ToolContext {
-            project_root: dir.to_path_buf(),
-            storage_dir: None,
-            task_store: None,
-            lsp_manager: None,
-        }
-    }
-
     /// Initialize a minimal git repo so the `ignore` crate's walker works
     /// without being confused by parent .gitignore files.
     fn init_git(dir: &std::path::Path) {
@@ -148,7 +133,11 @@ mod tests {
         fs::write(dir.path().join("test.txt"), "hello").unwrap();
 
         let args = json!({ "pattern": "*.rs" });
-        let result = execute(args, make_ctx(dir.path())).unwrap();
+        let result = execute(
+            args,
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+        )
+        .unwrap();
         assert!(!result.is_error);
         assert!(
             result.output.contains("test.rs"),
@@ -171,7 +160,11 @@ mod tests {
         fs::write(dir.path().join("b.rs"), "").unwrap();
 
         let args = json!({ "pattern": "*.rs" });
-        let result = execute(args, make_ctx(dir.path())).unwrap();
+        let result = execute(
+            args,
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+        )
+        .unwrap();
         assert!(!result.is_error);
         let lines: Vec<&str> = result.output.lines().collect();
         assert_eq!(lines, vec!["a.rs", "b.rs", "c.rs"]);
@@ -181,7 +174,11 @@ mod tests {
     fn invalid_pattern_returns_error() {
         let dir = tempdir().unwrap();
         let args = json!({ "pattern": "[invalid" });
-        let result = execute(args, make_ctx(dir.path())).unwrap();
+        let result = execute(
+            args,
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+        )
+        .unwrap();
         assert!(result.is_error);
         assert!(
             result.output.contains("invalid glob pattern"),
@@ -196,7 +193,11 @@ mod tests {
         init_git(dir.path());
 
         let args = json!({ "pattern": "*.xyz" });
-        let result = execute(args, make_ctx(dir.path())).unwrap();
+        let result = execute(
+            args,
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+        )
+        .unwrap();
         assert!(!result.is_error);
         assert!(
             result.output.contains("No files found"),
@@ -214,7 +215,11 @@ mod tests {
         fs::write(dir.path().join("sub/nested.rs"), "").unwrap();
 
         let args = json!({ "pattern": "*.rs", "path": "sub" });
-        let result = execute(args, make_ctx(dir.path())).unwrap();
+        let result = execute(
+            args,
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+        )
+        .unwrap();
         assert!(!result.is_error);
         assert!(
             result.output.contains("nested.rs"),

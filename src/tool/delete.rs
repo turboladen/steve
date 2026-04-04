@@ -1,6 +1,6 @@
 //! Delete tool — remove files or directories with safety checks.
 
-use std::{fs, path::PathBuf};
+use std::fs;
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -51,7 +51,7 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
         .and_then(|v| v.as_str())
         .context("missing 'path' parameter")?;
 
-    let path = resolve_path(path_str, &ctx.project_root);
+    let path = super::resolve_path(path_str, &ctx.project_root);
 
     if !path.exists() {
         bail!("path does not exist: {}", path.display());
@@ -86,36 +86,22 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
     })
 }
 
-fn resolve_path(path_str: &str, project_root: &std::path::Path) -> PathBuf {
-    let path = PathBuf::from(path_str);
-    if path.is_absolute() {
-        path
-    } else {
-        project_root.join(path)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::tempdir;
 
-    fn make_ctx(dir: &std::path::Path) -> ToolContext {
-        ToolContext {
-            project_root: dir.to_path_buf(),
-            storage_dir: None,
-            task_store: None,
-            lsp_manager: None,
-        }
-    }
-
     #[test]
     fn delete_file() {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("doomed.txt"), "bye").unwrap();
 
-        let result = execute(json!({"path": "doomed.txt"}), make_ctx(dir.path())).unwrap();
+        let result = execute(
+            json!({"path": "doomed.txt"}),
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+        )
+        .unwrap();
         assert!(!result.is_error);
         assert!(result.output.contains("file"));
         assert!(!dir.path().join("doomed.txt").exists());
@@ -127,7 +113,11 @@ mod tests {
         fs::create_dir_all(dir.path().join("sub/nested")).unwrap();
         fs::write(dir.path().join("sub/nested/f.txt"), "data").unwrap();
 
-        let result = execute(json!({"path": "sub"}), make_ctx(dir.path())).unwrap();
+        let result = execute(
+            json!({"path": "sub"}),
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+        )
+        .unwrap();
         assert!(!result.is_error);
         assert!(result.output.contains("directory"));
         assert!(!dir.path().join("sub").exists());
@@ -136,7 +126,10 @@ mod tests {
     #[test]
     fn delete_nonexistent_errors() {
         let dir = tempdir().unwrap();
-        let result = execute(json!({"path": "nope.txt"}), make_ctx(dir.path()));
+        let result = execute(
+            json!({"path": "nope.txt"}),
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("does not exist"));
     }
@@ -147,7 +140,7 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         let result = execute(
             json!({"path": root.to_string_lossy()}),
-            make_ctx(dir.path()),
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("project root"));

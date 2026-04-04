@@ -73,24 +73,12 @@ pub fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
             .to_string(),
         ToolName::Bash => {
             let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            if cmd.chars().count() > 40 {
-                let truncated: String = cmd.chars().take(37).collect();
-                format!("{truncated}...")
-            } else {
-                cmd.to_string()
-            }
+            crate::truncate_chars(cmd, 40)
         }
         ToolName::Question => args
             .get("question")
             .and_then(|v| v.as_str())
-            .map(|s| {
-                if s.chars().count() > 30 {
-                    let truncated: String = s.chars().take(27).collect();
-                    format!("{truncated}...")
-                } else {
-                    s.to_string()
-                }
-            })
+            .map(|s| crate::truncate_chars(s, 30))
             .unwrap_or_default(),
         ToolName::Task => args
             .get("action")
@@ -129,12 +117,7 @@ pub fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
                 .and_then(|v| v.as_str())
                 .unwrap_or("explore");
             let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
-            let truncated = if task.chars().count() > 30 {
-                let t: String = task.chars().take(27).collect();
-                format!("{t}...")
-            } else {
-                task.to_string()
-            };
+            let truncated = crate::truncate_chars(task, 30);
             format!("{agent_type}: {truncated}")
         }
     }
@@ -144,12 +127,7 @@ pub fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
 /// Public so `stream.rs` can use it for sub-agent progress updates.
 pub fn extract_result_summary(tool_name: ToolName, output: &crate::tool::ToolOutput) -> String {
     let _ = tool_name; // All tools use the same truncation logic for now
-    if output.output.chars().count() > 80 {
-        let truncated: String = output.output.chars().take(77).collect();
-        format!("{truncated}...")
-    } else {
-        output.output.clone()
-    }
+    crate::truncate_chars(&output.output, 80)
 }
 
 /// Extract inline diff content from tool call arguments for UI rendering.

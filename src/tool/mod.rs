@@ -128,12 +128,9 @@ impl ToolName {
         )
     }
 
-    /// Whether this tool's results can be cached.
+    /// Whether this tool's results can be cached (currently same set as read-only).
     pub fn is_cacheable(self) -> bool {
-        matches!(
-            self,
-            ToolName::Read | ToolName::Grep | ToolName::Glob | ToolName::List | ToolName::Symbols
-        )
+        self.is_read_only()
     }
 
     /// Whether this is the memory tool.
@@ -370,6 +367,17 @@ pub struct ToolContext {
     pub lsp_manager: Option<Arc<std::sync::Mutex<LspManager>>>,
 }
 
+/// Resolve a path string relative to the project root.
+/// Absolute paths are returned as-is; relative paths are joined with `project_root`.
+pub fn resolve_path(path_str: &str, project_root: &std::path::Path) -> PathBuf {
+    let p = std::path::Path::new(path_str);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        project_root.join(p)
+    }
+}
+
 /// Definition of a tool (for sending to the LLM as a function schema).
 pub struct ToolDef {
     pub name: ToolName,
@@ -521,6 +529,30 @@ impl ToolRegistry {
 mod tests {
     use super::*;
     use strum::IntoEnumIterator;
+
+    #[test]
+    fn resolve_path_absolute_passthrough() {
+        let root = std::path::Path::new("/project");
+        let result = resolve_path("/absolute/file.rs", root);
+        assert_eq!(result, std::path::PathBuf::from("/absolute/file.rs"));
+    }
+
+    #[test]
+    fn resolve_path_relative_joins() {
+        let root = std::path::Path::new("/project");
+        let result = resolve_path("src/main.rs", root);
+        assert_eq!(result, std::path::PathBuf::from("/project/src/main.rs"));
+    }
+
+    /// Create a minimal ToolContext for unit tests.
+    pub(crate) fn test_tool_context(project_root: std::path::PathBuf) -> ToolContext {
+        ToolContext {
+            project_root,
+            storage_dir: None,
+            task_store: None,
+            lsp_manager: None,
+        }
+    }
 
     /// Every variant round-trips through as_str -> FromStr.
     #[test]

@@ -272,12 +272,7 @@ impl App {
 
 /// Enforce a 60-char cap on a title, appending "..." if truncated.
 pub(super) fn truncate_title(text: &str) -> String {
-    if text.chars().count() > 60 {
-        let truncated: String = text.chars().take(57).collect();
-        format!("{truncated}...")
-    } else {
-        text.to_string()
-    }
+    crate::truncate_chars(text, 60)
 }
 
 /// Truncate the first user message to produce a sync fallback session title.
