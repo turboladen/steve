@@ -2,39 +2,9 @@
 #![warn(clippy::cargo)]
 #![allow(clippy::multiple_crate_versions)]
 
-/// Find the largest valid UTF-8 char boundary at or before `byte_index`.
-/// Polyfill for the unstable `str::floor_char_boundary`.
-pub fn floor_char_boundary(s: &str, byte_index: usize) -> usize {
-    if byte_index >= s.len() {
-        return s.len();
-    }
-    let mut i = byte_index;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
 #[cfg(test)]
 mod lib_tests {
     use super::*;
-
-    #[test]
-    fn floor_char_boundary_ascii() {
-        assert_eq!(floor_char_boundary("hello", 3), 3);
-        assert_eq!(floor_char_boundary("hello", 10), 5); // past end → len
-        assert_eq!(floor_char_boundary("hello", 0), 0);
-    }
-
-    #[test]
-    fn floor_char_boundary_multibyte() {
-        // '🦀' is 4 bytes: bytes 0..4
-        let s = "🦀abc";
-        assert_eq!(floor_char_boundary(s, 4), 4); // right after the emoji
-        assert_eq!(floor_char_boundary(s, 3), 0); // mid-emoji → back to 0
-        assert_eq!(floor_char_boundary(s, 2), 0);
-        assert_eq!(floor_char_boundary(s, 1), 0);
-    }
 
     #[test]
     fn truncate_chars_short_passthrough() {
@@ -57,12 +27,6 @@ mod lib_tests {
         let result = truncate_chars(&s, 7);
         assert_eq!(result.chars().count(), 7);
         assert!(result.ends_with("..."));
-    }
-
-    #[test]
-    fn floor_char_boundary_empty() {
-        assert_eq!(floor_char_boundary("", 0), 0);
-        assert_eq!(floor_char_boundary("", 5), 0);
     }
 }
 

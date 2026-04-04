@@ -236,7 +236,7 @@ impl McpToolSnapshot {
 pub fn mcp_permission_parts(prefixed_name: &str, args: &Value) -> (String, String) {
     let args_json = serde_json::to_string(args).unwrap_or_default();
     let args_preview = if args_json.len() > 80 {
-        let end = crate::floor_char_boundary(&args_json, 80);
+        let end = args_json.floor_char_boundary(80);
         format!("{}...", &args_json[..end])
     } else {
         args_json
@@ -276,7 +276,7 @@ pub async fn build_resource_context(manager: &McpManager, max_chars: usize) -> O
         match manager.read_resource(server_id, uri).await {
             Ok(content) if !content.trim().is_empty() => {
                 let truncated = if content.len() > max_chars {
-                    let end = crate::floor_char_boundary(&content, max_chars);
+                    let end = content.floor_char_boundary(max_chars);
                     format!("{}...\n(truncated)", &content[..end])
                 } else {
                     content

@@ -111,7 +111,7 @@ impl App {
             && !memory.trim().is_empty()
         {
             let truncated = if memory.len() > 2000 {
-                let end = crate::floor_char_boundary(&memory, 2000);
+                let end = memory.floor_char_boundary(2000);
                 format!(
                     "{}...\n(use memory tool to read full content)",
                     &memory[..end]
@@ -336,7 +336,8 @@ impl App {
         // Cap total output at ~10K chars
         let mut result = parts.join("\n\n");
         if result.len() > 10_000 {
-            result.truncate(crate::floor_char_boundary(&result, 10_000));
+            let boundary = result.floor_char_boundary(10_000);
+            result.truncate(boundary);
             result.push_str("\n\n(truncated)");
         }
         result

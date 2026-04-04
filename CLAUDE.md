@@ -101,9 +101,9 @@ Submodules: `agent.rs` (sub-agent spawning), `tools.rs` (tool call helpers), `re
 
 ### Crate-Level Utilities (`lib.rs`)
 
-`floor_char_boundary()` — UTF-8-safe string truncation (polyfill for unstable
-`str::floor_char_boundary`). `DateTimeExt` trait — `display_short()`, `display_date()`,
-`display_full_utc()` for consistent date formatting.
+`DateTimeExt` trait — `display_short()`, `display_date()`,
+`display_full_utc()` for consistent date formatting. UTF-8-safe truncation uses the stdlib
+`str::floor_char_boundary()` (stable since Rust 1.80).
 
 ### Critical Invariants
 
