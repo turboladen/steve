@@ -2132,9 +2132,9 @@ dependencies = [
 
 [[package]]
 name = "mpatch"
-version = "1.4.0"
+version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "195eb79b82648c93a8d066294e14ae23262291e28711a1e896a45e2b595bf5f4"
+checksum = "709872312c6c6543daa5d992a81ad389650269354945ef11ae6de10e2b324c82"
 dependencies = [
  "anyhow",
  "clap",
@@ -3306,9 +3306,9 @@ dependencies = [
 
 [[package]]
 name = "semver"
-version = "1.0.27"
+version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
+checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "serde"
