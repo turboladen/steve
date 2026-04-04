@@ -30,10 +30,16 @@ mod lib_tests {
     }
 }
 
-/// Truncate a string to at most `max` display characters, appending "..." if truncated.
+/// Truncate a string to at most `max` display characters.
+/// Appends "..." when truncated (requires `max >= 4`).
+/// For `max < 4`, truncates without ellipsis to always enforce the limit.
 pub fn truncate_chars(s: &str, max: usize) -> String {
-    if max < 4 || s.chars().count() <= max {
+    let len = s.chars().count();
+    if len <= max {
         return s.to_string();
+    }
+    if max < 4 {
+        return s.chars().take(max).collect();
     }
     let truncated: String = s.chars().take(max - 3).collect();
     format!("{truncated}...")

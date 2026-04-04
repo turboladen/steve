@@ -172,7 +172,11 @@ fn write_message_part(out: &mut String, part: &MessagePart) {
 /// Delegate to the shared args summary, but use "(no ...)" fallbacks for export readability.
 fn extract_tool_summary(tool_name: ToolName, input: &serde_json::Value) -> String {
     let summary = crate::app::extract_args_summary(tool_name, input);
-    if summary.is_empty() {
+    let trimmed = summary.trim();
+    let needs_fallback = trimmed.is_empty()
+        || matches!(tool_name, ToolName::Move | ToolName::Copy) && trimmed == "\u{2192}"
+        || matches!(tool_name, ToolName::Agent) && trimmed.ends_with(':');
+    if needs_fallback {
         // Provide a readable fallback for export context
         match tool_name {
             ToolName::Read
