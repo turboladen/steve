@@ -2842,4 +2842,182 @@ mod tests {
             "file should be updated"
         );
     }
+
+    #[tokio::test]
+    async fn parallel_agents_all_execute_and_accumulate_usage() {
+        // LLM returns 3 agent (explore) tool calls in a single response.
+        // Each sub-agent gets its own mock response (simple text).
+        // The final parent response is text.
+        //
+        // Mock stream queue: [parent call 1, sub-agent 1, sub-agent 2, sub-agent 3, parent call 2]
+        // The sub-agents are spawned concurrently, so consumption order from the mock
+        // is non-deterministic — but each pops from the same VecDeque.
+        let mock = Arc::new(MockChatStream::new(vec![
+            // Parent call 1: return 3 agent tool calls
+            vec![
+                Ok(tool_call_chunk(
+                    0,
+                    Some("call_agent_1"),
+                    Some("agent"),
+                    Some(r#"{"agent_type":"explore","task":"find permissions"}"#),
+                )),
+                Ok(tool_call_chunk(
+                    1,
+                    Some("call_agent_2"),
+                    Some("agent"),
+                    Some(r#"{"agent_type":"explore","task":"find caching"}"#),
+                )),
+                Ok(tool_call_chunk(
+                    2,
+                    Some("call_agent_3"),
+                    Some("agent"),
+                    Some(r#"{"agent_type":"explore","task":"find sessions"}"#),
+                )),
+                Ok(finish_chunk(FinishReason::ToolCalls, 200, 50)),
+            ],
+            // Sub-agent 1 response
+            vec![
+                Ok(text_delta("Agent 1 result.")),
+                Ok(finish_chunk(FinishReason::Stop, 100, 20)),
+            ],
+            // Sub-agent 2 response
+            vec![
+                Ok(text_delta("Agent 2 result.")),
+                Ok(finish_chunk(FinishReason::Stop, 100, 25)),
+            ],
+            // Sub-agent 3 response
+            vec![
+                Ok(text_delta("Agent 3 result.")),
+                Ok(finish_chunk(FinishReason::Stop, 100, 30)),
+            ],
+            // Parent call 2: final text response
+            vec![
+                Ok(text_delta("All agents done.")),
+                Ok(finish_chunk(FinishReason::Stop, 300, 15)),
+            ],
+        ]));
+
+        let root = std::path::PathBuf::from("/tmp/test-parallel-agents");
+        let cancel_token = CancellationToken::new();
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (_interjection_tx, interjection_rx) = mpsc::unbounded_channel();
+
+        let spawner = AgentSpawner {
+            stream_provider: mock.clone(),
+            primary_model: "test-model".to_string(),
+            small_model: None,
+            project_root: root.clone(),
+            tool_context: ToolContext {
+                project_root: root.clone(),
+                storage_dir: None,
+                task_store: None,
+                lsp_manager: None,
+            },
+            permission_engine: None,
+            context_window: None,
+            usage_writer: crate::usage::test_usage_writer(),
+            usage_project_id: "test-project".to_string(),
+            usage_session_id: "test-session".to_string(),
+            cancel_token: cancel_token.clone(),
+            mcp_manager: None,
+        };
+
+        let req = StreamRequest {
+            stream_provider: mock,
+            model: "test-model".to_string(),
+            system_prompt: None,
+            history: vec![],
+            user_message: "test parallel agents".to_string(),
+            event_tx: tx,
+            tool_registry: Some(Arc::new(ToolRegistry::new(root.clone()))),
+            tool_context: Some(ToolContext {
+                project_root: root.clone(),
+                storage_dir: None,
+                task_store: None,
+                lsp_manager: None,
+            }),
+            permission_engine: Some(Arc::new(tokio::sync::Mutex::new(
+                crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
+            ))),
+            tool_cache: Arc::new(std::sync::Mutex::new(ToolResultCache::new(root))),
+            cancel_token,
+            context_window: None,
+            interjection_rx,
+            usage_writer: crate::usage::test_usage_writer(),
+            usage_project_id: "test-project".to_string(),
+            usage_session_id: "test-session".to_string(),
+            usage_model_cost: None,
+            is_plan_mode: false,
+            agent_spawner: Some(spawner),
+            mcp_manager: None,
+        };
+
+        req.run()
+            .await
+            .expect("parallel agent stream should succeed");
+        let events = collect_events(rx).await;
+
+        // Should complete with LlmFinish
+        let finishes: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
+            .collect();
+        assert_eq!(finishes.len(), 1, "should get exactly one LlmFinish");
+
+        // Should have tool results for all 3 agents
+        let tool_results: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    AppEvent::ToolResult {
+                        tool_name: ToolName::Agent,
+                        ..
+                    }
+                )
+            })
+            .collect();
+        assert_eq!(tool_results.len(), 3, "should have 3 agent tool results");
+
+        // Verify none errored
+        for result in &tool_results {
+            let AppEvent::ToolResult { output, .. } = result else {
+                unreachable!();
+            };
+            assert!(
+                !output.is_error,
+                "agent should not error: {}",
+                output.output
+            );
+        }
+
+        // Should have text deltas from the final parent response
+        let deltas: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmDelta { .. }))
+            .collect();
+        assert!(
+            !deltas.is_empty(),
+            "should have text deltas from final response"
+        );
+
+        // Verify usage was accumulated from sub-agents
+        let AppEvent::LlmFinish { usage: Some(usage) } = finishes[0] else {
+            panic!("LlmFinish should have usage");
+        };
+        // Parent: 200+300=500 prompt, 50+15=65 completion
+        // Sub-agents: 3×100=300 prompt, 20+25+30=75 completion
+        // Total: 800 prompt, 140 completion
+        assert!(
+            usage.prompt_tokens >= 500,
+            "usage should include sub-agent prompt tokens, got {}",
+            usage.prompt_tokens
+        );
+        assert!(
+            usage.completion_tokens >= 65,
+            "usage should include sub-agent completion tokens, got {}",
+            usage.completion_tokens
+        );
+    }
 }
