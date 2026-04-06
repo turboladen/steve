@@ -94,6 +94,7 @@ impl ChatStreamProvider for OpenAIChatStream {
 /// Constructed in `app.rs` alongside the parent `StreamRequest`, then passed
 /// into `run_stream()`. When a sub-agent is spawned, a fresh `StreamRequest`
 /// is built from these fields with `agent_spawner: None` to prevent recursion.
+#[derive(Clone)]
 pub struct AgentSpawner {
     pub stream_provider: Arc<dyn ChatStreamProvider>,
     pub primary_model: String,

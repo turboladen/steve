@@ -377,6 +377,66 @@ pub(super) async fn execute_sequential_tools(
     messages: &mut Vec<ChatCompletionRequestMessage>,
     counters: &mut IterationCounters,
 ) -> PhaseOutcome {
+    // Pre-spawn auto-allowed agents (Explore/Plan) in parallel.
+    // General agents needing user permission are handled sequentially in the loop.
+    type AgentHandle = tokio::task::JoinHandle<(Result<String, String>, StreamUsage)>;
+    let mut agent_handles: HashMap<String, AgentHandle> = HashMap::new();
+    if let Some(spawner) = agent_spawner {
+        for tc in tools {
+            if !matches!(tc.tool_name, ToolName::Agent) {
+                continue;
+            }
+            let agent_type_str = tc
+                .args
+                .get("agent_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("explore");
+            let agent_type: AgentType = agent_type_str.parse().unwrap_or(AgentType::Explore);
+
+            // Only pre-spawn agents that don't need user permission
+            if agent_type == AgentType::General && matches!(tc.action, PermissionAction::Ask) {
+                continue;
+            }
+
+            let _ = event_tx.send(AppEvent::LlmToolCall {
+                call_id: tc.id.clone(),
+                tool_name: tc.tool_name,
+                arguments: tc.args.clone(),
+            });
+
+            let task_str = tc
+                .args
+                .get("task")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no task provided)")
+                .to_string();
+            let context_str = tc
+                .args
+                .get("context")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let spawner = spawner.clone();
+            let parent_tx = event_tx.clone();
+            let call_id = tc.id.clone();
+
+            let handle = tokio::spawn(async move {
+                run_sub_agent(
+                    &spawner,
+                    agent_type,
+                    &task_str,
+                    context_str.as_deref(),
+                    &parent_tx,
+                    &call_id,
+                )
+                .await
+            });
+            agent_handles.insert(tc.id.clone(), handle);
+        }
+        if !agent_handles.is_empty() {
+            tracing::info!(count = agent_handles.len(), "spawned agents in parallel");
+        }
+    }
+
     for tc in tools {
         if cancel_token.is_cancelled() {
             tracing::info!("stream cancelled during tool execution");
@@ -461,35 +521,61 @@ pub(super) async fn execute_sequential_tools(
             continue;
         }
 
-        // Agent tool: spawn a sub-agent with its own conversation context
+        // Agent tool: await pre-spawned handle or run sequentially (General with permission)
         if matches!(tc.tool_name, ToolName::Agent) {
-            let _ = event_tx.send(AppEvent::LlmToolCall {
-                call_id: tc.id.clone(),
-                tool_name: tc.tool_name,
-                arguments: tc.args.clone(),
-            });
-
             let agent_type_str = tc
                 .args
                 .get("agent_type")
                 .and_then(|v| v.as_str())
                 .unwrap_or("explore");
-            let task_str = tc
-                .args
-                .get("task")
-                .and_then(|v| v.as_str())
-                .unwrap_or("(no task provided)")
-                .to_string();
-            let context_str = tc
-                .args
-                .get("context")
-                .and_then(|v| v.as_str())
-                .map(String::from);
 
-            let output = if let Some(spawner) = agent_spawner {
+            let output = if let Some(handle) = agent_handles.remove(&tc.id) {
+                // This agent was pre-spawned in parallel — await its result
                 let agent_type: AgentType = agent_type_str.parse().unwrap_or(AgentType::Explore);
+                match handle.await {
+                    Ok((result, usage)) => {
+                        counters.total_usage += usage;
+                        match result {
+                            Ok(text) => crate::tool::ToolOutput {
+                                title: format!("Agent ({agent_type})"),
+                                output: text,
+                                is_error: false,
+                            },
+                            Err(e) => crate::tool::ToolOutput {
+                                title: format!("Agent ({agent_type})"),
+                                output: format!("Agent error: {e}"),
+                                is_error: true,
+                            },
+                        }
+                    }
+                    Err(e) => crate::tool::ToolOutput {
+                        title: format!("Agent ({agent_type})"),
+                        output: format!("Agent task panicked: {e}"),
+                        is_error: true,
+                    },
+                }
+            } else if let Some(spawner) = agent_spawner {
+                // General agent needing permission — runs sequentially
+                let _ = event_tx.send(AppEvent::LlmToolCall {
+                    call_id: tc.id.clone(),
+                    tool_name: tc.tool_name,
+                    arguments: tc.args.clone(),
+                });
 
-                // For General agents in Ask mode, we still need permission
+                let agent_type: AgentType = agent_type_str.parse().unwrap_or(AgentType::Explore);
+                let task_str = tc
+                    .args
+                    .get("task")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(no task provided)")
+                    .to_string();
+                let context_str = tc
+                    .args
+                    .get("context")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+
+                // General agents in Ask mode need permission
                 if agent_type == AgentType::General && matches!(tc.action, PermissionAction::Ask) {
                     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
                     let summary = build_permission_summary(tc.tool_name, &tc.args);

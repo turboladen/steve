@@ -96,11 +96,14 @@ pub(super) async fn run_sub_agent(
     let mut stream_done = false;
     let mut sub_agent_usage = StreamUsage::default();
 
-    let mut stream_future = Box::pin(sub_request.run());
+    // Spawn as a separate task (not Box::pin) so the sub-agent future remains Send,
+    // enabling parallel agent execution from the parent.
+    let stream_handle = sub_request.spawn();
+    let mut stream_handle = std::pin::pin!(stream_handle);
 
     loop {
         tokio::select! {
-            result = &mut stream_future, if !stream_done => {
+            result = &mut *stream_handle, if !stream_done => {
                 let _ = result;
                 stream_done = true;
             }
