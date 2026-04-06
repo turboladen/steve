@@ -98,22 +98,29 @@ a variant produces compiler errors at every unhandled site.
 `StreamRequest::spawn()` launches the stream task; `StreamRequest::run()` is the main loop.
 Submodules: `agent.rs` (sub-agent spawning), `tools.rs` (tool call helpers), `recovery.rs`
 (length/iteration recovery), `phases.rs` (4 tool execution phases extracted from the loop).
+Sub-agents use `sub_request.spawn()` (not `Box::pin(run())`) to preserve the Send bound —
+`Box::pin` erases Send, preventing `tokio::spawn` for parallel execution.
 
 ### Crate-Level Utilities (`lib.rs`)
 
 `DateTimeExt` trait — `display_short()`, `display_date()`,
 `display_full_utc()` for consistent date formatting. UTF-8-safe truncation uses the stdlib
-`str::floor_char_boundary()` (stable since Rust 1.80).
+`str::floor_char_boundary()`. `truncate_chars(s, max)` — char-aware truncation with "..."
+suffix, used across tool display, export, and session modules.
 
 ### Critical Invariants
 
 - **Tool call detection**: Check for valid data (non-empty `id` + `function_name`), NOT
   `finish_reason` — providers vary
-- **Sequential-only tools**: Write tools, `memory`, `lsp`, `question`, `agent`, and MCP tools must
-  never run in parallel — sequential only
+- **Sequential-only tools**: Write tools, `memory`, `lsp`, `question`, and MCP tools must
+  never run in parallel. `agent` calls for Explore/Plan types are pre-spawned in parallel
+  via `tokio::spawn`; General agents needing permission remain sequential
 - **No `unreachable!()` in stream tasks** — panics crash silently. Use `tracing::error!`
 - **`last_assistant_mut()` during streaming**, NOT `messages.last_mut()` — Permission/System blocks
   interleave
+- **`LlmResponseStart` event**: Emitted by stream when resuming after interjections — UI must
+  push a fresh `Assistant` block and `streaming_message`. Without this, response text appends
+  to the previous assistant block
 - **Token metrics**: `last_prompt_tokens` (per-call, context pressure) vs `total_tokens`
   (cumulative, cost display) — do not confuse. `LlmFinish` must NOT overwrite `last_prompt_tokens`
 - **`/new` resets ALL session state** — when adding session-scoped state, add its reset in
@@ -131,6 +138,10 @@ All must update when adding a `ToolName` variant:
 `tool/mod.rs`, `build_mode_rules()` and `plan_mode_rules()` in `permission/mod.rs`.
 
 `path_arg_keys()` in `tool/mod.rs` is the single source of truth for tool→path-arg-key mapping.
+
+`resolve_path()` in `tool/mod.rs` is the single path resolution helper — do not add private
+copies in individual tool modules. `test_tool_context()` in `tool/mod.rs`'s test block is the
+shared test helper for `ToolContext` construction.
 
 When adding edit operations: update `EditOperation` enum in `tool/mod.rs`,
 `extract_diff_content()` in `app/tool_display.rs`, and `build_permission_summary()` in
@@ -165,16 +176,17 @@ LSP init. URI encoding via `url::Url::from_file_path`/`to_file_path`. Binary dis
 ## Key Dependency Gotchas
 
 - **strum 0.28**: Use `IntoStaticStr` (not `AsRefStr`) for `&'static str`
-- **async-openai 0.33**: Types under `async_openai::types::chat::`, not `async_openai::types::`.
+- **async-openai 0.34**: Types under `async_openai::types::chat::`, not `async_openai::types::`.
   `ChatCompletionRequestAssistantMessage` requires `audio: None` and `function_call: None`. Must set
-  `stream_options` with `include_usage: Some(true)` or token usage never reports
+  `stream_options` with `include_usage: Some(true)` or token usage never reports.
+  `reasoning_content` still NOT exposed on `ChatCompletionStreamResponseDelta` — TODO in stream/mod.rs
 - **mpatch 1.3**: Always appends trailing newline — `apply_unified_diff()` post-processes
 - **html2text v0.16**: `from_read()` returns `Result<String, Error>`, not `String`
 - **`move` is a Rust keyword**: Module is `move_`, variant uses `#[strum(serialize = "move")]` +
   `#[serde(rename = "move")]`
 - **Unicode width**: Box-drawing `─` is 3 bytes UTF-8 but 1 display char — use `.chars().count()`
   not `.len()`
-- **rmcp 1.2**: Many structs are `#[non_exhaustive]` — use builder methods (e.g.,
+- **rmcp 1.3**: Many structs are `#[non_exhaustive]` — use builder methods (e.g.,
   `CallToolRequestParams::new().with_arguments()`). `Content = Annotated<RawContent>`
 - No `dirs` crate — use `std::env::var("HOME")` or `directories::ProjectDirs`
 
