@@ -532,6 +532,12 @@ pub(super) async fn execute_sequential_tools(
             let output = if let Some(handle) = agent_handles.remove(&tc.id) {
                 // This agent was pre-spawned in parallel — await its result
                 let agent_type: AgentType = agent_type_str.parse().unwrap_or(AgentType::Explore);
+                tracing::info!(
+                    call_id = %tc.id,
+                    %agent_type,
+                    finished = handle.is_finished(),
+                    "awaiting pre-spawned agent"
+                );
                 match handle.await {
                     Ok((result, usage)) => {
                         counters.total_usage += usage;

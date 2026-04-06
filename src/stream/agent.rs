@@ -98,6 +98,7 @@ pub(super) async fn run_sub_agent(
 
     // Spawn as a separate task (not Box::pin) so the sub-agent future remains Send,
     // enabling parallel agent execution from the parent.
+    tracing::info!(call_id, %agent_type, %model, "sub-agent starting");
     let stream_handle = sub_request.spawn();
     let mut stream_handle = std::pin::pin!(stream_handle);
 
@@ -180,6 +181,14 @@ pub(super) async fn run_sub_agent(
             break;
         }
     }
+
+    tracing::info!(
+        call_id,
+        %agent_type,
+        tool_count,
+        text_len = final_text.len(),
+        "sub-agent completed"
+    );
 
     let result = if let Some(error) = last_error {
         if !final_text.is_empty() {
