@@ -269,14 +269,19 @@ impl App {
                 self.message_area_state.scroll_to_bottom();
             }
             AppEvent::LlmToolCall {
-                call_id: _,
+                call_id,
                 tool_name,
                 arguments,
             } => {
                 let args_summary = extract_args_summary(tool_name, &arguments);
                 let diff_content = extract_diff_content(tool_name, &arguments);
                 if let Some(last) = self.last_assistant_mut() {
-                    last.add_tool_call(tool_name, args_summary.clone(), diff_content);
+                    last.add_tool_call(
+                        call_id.clone(),
+                        tool_name,
+                        args_summary.clone(),
+                        diff_content,
+                    );
                 }
                 self.status_line_state.set_activity(Activity::RunningTool {
                     tool_name,
@@ -428,20 +433,17 @@ impl App {
                 self.message_area_state.scroll_to_bottom();
             }
             AppEvent::AgentProgress {
-                call_id: _,
+                call_id,
                 tool_name,
                 args_summary,
                 result_summary,
             } => {
-                // Update the agent tool call's inline progress — no new MessageBlock,
-                // so the assistant block stays at the bottom and follow-up text is visible.
+                // Update the specific agent tool call's inline progress by call_id.
                 if let Some(last) = self.last_assistant_mut() {
                     if result_summary.is_some() {
-                        // ToolResult: just update the result on the existing progress
-                        last.update_agent_progress_result(result_summary);
+                        last.update_agent_progress_result(&call_id, result_summary);
                     } else {
-                        // LlmToolCall: new tool call, update with tool_name + args
-                        last.update_agent_progress(tool_name, args_summary);
+                        last.update_agent_progress(&call_id, tool_name, args_summary);
                     }
                 }
             }

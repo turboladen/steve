@@ -1298,6 +1298,7 @@ mod tests {
             thinking: None,
             parts: vec![AssistantPart::ToolGroup(ToolGroup {
                 calls: vec![ToolCall {
+                    call_id: String::new(),
                     tool_name: ToolName::Read,
                     args_summary: "src/main.rs".to_string(),
                     full_output: None,
@@ -1323,6 +1324,7 @@ mod tests {
             thinking: None,
             parts: vec![AssistantPart::ToolGroup(ToolGroup {
                 calls: vec![ToolCall {
+                    call_id: String::new(),
                     tool_name: ToolName::Read,
                     args_summary: "src/main.rs".to_string(),
                     full_output: Some("file content".to_string()),
@@ -1351,6 +1353,7 @@ mod tests {
             thinking: None,
             parts: vec![AssistantPart::ToolGroup(ToolGroup {
                 calls: vec![ToolCall {
+                    call_id: String::new(),
                     tool_name: ToolName::Edit,
                     args_summary: "src/main.rs".to_string(),
                     full_output: None,
@@ -1482,6 +1485,7 @@ mod tests {
             calls: tool_names
                 .iter()
                 .map(|&name| ToolCall {
+                    call_id: String::new(),
                     tool_name: name,
                     args_summary: "test".into(),
                     full_output: None,
@@ -1736,6 +1740,7 @@ mod tests {
             parts: vec![
                 AssistantPart::ToolGroup(ToolGroup {
                     calls: vec![ToolCall {
+                        call_id: String::new(),
                         tool_name: ToolName::Read,
                         args_summary: "src/main.rs".into(),
                         full_output: None,
@@ -1750,6 +1755,7 @@ mod tests {
                 AssistantPart::Text("Let me edit that.".into()),
                 AssistantPart::ToolGroup(ToolGroup {
                     calls: vec![ToolCall {
+                        call_id: String::new(),
                         tool_name: ToolName::Edit,
                         args_summary: "src/main.rs".into(),
                         full_output: None,
@@ -1808,6 +1814,7 @@ mod tests {
             thinking: None,
             parts: vec![AssistantPart::ToolGroup(ToolGroup {
                 calls: vec![ToolCall {
+                    call_id: String::new(),
                     tool_name: ToolName::Question,
                     args_summary: "test".into(),
                     full_output: None,
@@ -1844,6 +1851,7 @@ mod tests {
             parts: vec![
                 AssistantPart::ToolGroup(ToolGroup {
                     calls: vec![ToolCall {
+                        call_id: String::new(),
                         tool_name: ToolName::List,
                         args_summary: ".".into(),
                         full_output: None,
@@ -1857,6 +1865,7 @@ mod tests {
                 }),
                 AssistantPart::ToolGroup(ToolGroup {
                     calls: vec![ToolCall {
+                        call_id: String::new(),
                         tool_name: ToolName::Glob,
                         args_summary: "src/**/*.rs".into(),
                         full_output: None,
@@ -1870,6 +1879,7 @@ mod tests {
                 }),
                 AssistantPart::ToolGroup(ToolGroup {
                     calls: vec![ToolCall {
+                        call_id: String::new(),
                         tool_name: ToolName::Read,
                         args_summary: "src/main.rs".into(),
                         full_output: None,
@@ -1898,6 +1908,7 @@ mod tests {
             parts: vec![
                 AssistantPart::ToolGroup(ToolGroup {
                     calls: vec![ToolCall {
+                        call_id: String::new(),
                         tool_name: ToolName::Read,
                         args_summary: "a.rs".into(),
                         full_output: None,
@@ -1912,6 +1923,7 @@ mod tests {
                 AssistantPart::Text("I see, let me check another file.".into()),
                 AssistantPart::ToolGroup(ToolGroup {
                     calls: vec![ToolCall {
+                        call_id: String::new(),
                         tool_name: ToolName::Read,
                         args_summary: "b.rs".into(),
                         full_output: None,
@@ -1941,6 +1953,7 @@ mod tests {
             parts: vec![
                 AssistantPart::ToolGroup(ToolGroup {
                     calls: vec![ToolCall {
+                        call_id: String::new(),
                         tool_name: ToolName::Read,
                         args_summary: "a.rs".into(),
                         full_output: None,
@@ -1954,6 +1967,7 @@ mod tests {
                 }),
                 AssistantPart::ToolGroup(ToolGroup {
                     calls: vec![ToolCall {
+                        call_id: String::new(),
                         tool_name: ToolName::Edit,
                         args_summary: "a.rs".into(),
                         full_output: None,
@@ -1984,6 +1998,7 @@ mod tests {
             parts: vec![
                 AssistantPart::ToolGroup(ToolGroup {
                     calls: vec![ToolCall {
+                        call_id: String::new(),
                         tool_name: ToolName::Read,
                         args_summary: "a.rs".into(),
                         full_output: None,
@@ -1997,6 +2012,7 @@ mod tests {
                 }),
                 AssistantPart::ToolGroup(ToolGroup {
                     calls: vec![ToolCall {
+                        call_id: String::new(),
                         tool_name: ToolName::Question,
                         args_summary: "proceed?".into(),
                         full_output: None,
@@ -2010,6 +2026,7 @@ mod tests {
                 }),
                 AssistantPart::ToolGroup(ToolGroup {
                     calls: vec![ToolCall {
+                        call_id: String::new(),
                         tool_name: ToolName::Read,
                         args_summary: "b.rs".into(),
                         full_output: None,
@@ -2540,6 +2557,7 @@ mod tests {
             thinking: None,
             parts: vec![AssistantPart::ToolGroup(ToolGroup {
                 calls: vec![ToolCall {
+                    call_id: String::new(),
                     tool_name: ToolName::Read,
                     args_summary: "src/main.rs".to_string(),
                     full_output: Some("content".to_string()),
@@ -2618,6 +2636,7 @@ mod tests {
             thinking: None,
             parts: vec![AssistantPart::ToolGroup(ToolGroup {
                 calls: vec![ToolCall {
+                    call_id: String::new(),
                     tool_name: ToolName::Agent,
                     args_summary: "(explore): analyze codebase".to_string(),
                     full_output: None,
@@ -2667,6 +2686,7 @@ mod tests {
             thinking: None,
             parts: vec![AssistantPart::ToolGroup(ToolGroup {
                 calls: vec![ToolCall {
+                    call_id: String::new(),
                     tool_name: ToolName::Agent,
                     args_summary: "(explore): find usages".to_string(),
                     full_output: None,

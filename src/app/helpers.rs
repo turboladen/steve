@@ -752,6 +752,7 @@ mod tests {
             thinking: None,
             parts: vec![AssistantPart::ToolGroup(ToolGroup {
                 calls: vec![ToolCall {
+                    call_id: String::new(),
                     tool_name: ToolName::Read,
                     args_summary: "src/main.rs".into(),
                     full_output: Some("contents".into()),
@@ -777,6 +778,7 @@ mod tests {
             thinking: None,
             parts: vec![AssistantPart::ToolGroup(ToolGroup {
                 calls: vec![ToolCall {
+                    call_id: String::new(),
                     tool_name: ToolName::Read,
                     args_summary: "src/main.rs".into(),
                     full_output: Some("contents".into()),
@@ -800,6 +802,7 @@ mod tests {
             thinking: None,
             parts: vec![AssistantPart::ToolGroup(ToolGroup {
                 calls: vec![ToolCall {
+                    call_id: String::new(),
                     tool_name: ToolName::Read,
                     args_summary: "src/main.rs".into(),
                     full_output: None,
