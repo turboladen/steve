@@ -208,18 +208,26 @@ fn default_auto_compact() -> bool {
 /// Returns `(Config, Vec<String>)` — the merged config and any non-fatal warnings
 /// (e.g., parse errors from config files that exist but couldn't be loaded).
 pub fn load(project_root: &Path) -> Result<(Config, Vec<String>)> {
+    load_with_global(project_root, None)
+}
+
+/// Load config with an optional global config dir override (for testing).
+fn load_with_global(
+    project_root: &Path,
+    global_dir: Option<&Path>,
+) -> Result<(Config, Vec<String>)> {
     let mut warnings = Vec::new();
-    let global = load_global(&mut warnings);
+    let global = load_global_from(global_dir, &mut warnings);
     let project = load_project(project_root, &mut warnings)?;
 
     Ok((global.merge(project), warnings))
 }
 
-/// Load global config from `~/.config/steve/config.jsonc`.
+/// Load global config from `~/.config/steve/config.jsonc` (or override dir).
 /// Returns `Config::default()` if no global config exists.
 /// Pushes a warning if the file exists but can't be parsed.
-fn load_global(warnings: &mut Vec<String>) -> Config {
-    let Some(path) = global_config_path() else {
+fn load_global_from(dir_override: Option<&Path>, warnings: &mut Vec<String>) -> Config {
+    let Some(path) = find_global_config_in(dir_override) else {
         tracing::debug!(
             dir = ?global_config_dir(),
             "no global config.jsonc found"
@@ -650,7 +658,8 @@ mod tests {
     #[test]
     fn no_config_returns_default() {
         let dir = tempfile::tempdir().unwrap();
-        let (config, _warnings) = load(dir.path()).unwrap();
+        let empty_global = tempfile::tempdir().unwrap();
+        let (config, _warnings) = load_with_global(dir.path(), Some(empty_global.path())).unwrap();
         let default = Config::default();
         assert_eq!(config.model, default.model);
         assert_eq!(config.auto_compact, default.auto_compact);
@@ -659,8 +668,9 @@ mod tests {
     #[test]
     fn invalid_json_returns_warning() {
         let dir = tempfile::tempdir().unwrap();
+        let empty_global = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".steve.jsonc"), "{{invalid").unwrap();
-        let (config, warnings) = load(dir.path()).unwrap();
+        let (config, warnings) = load_with_global(dir.path(), Some(empty_global.path())).unwrap();
         assert!(!warnings.is_empty(), "should have a config warning");
         assert!(
             warnings[0].contains(".steve.jsonc"),
@@ -759,12 +769,13 @@ mod tests {
     #[test]
     fn old_project_filenames_are_ignored() {
         let dir = tempfile::tempdir().unwrap();
+        let empty_global = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("steve.json"),
             r#"{"model": "openai/gpt-4o"}"#,
         )
         .unwrap();
-        let (config, _warnings) = load(dir.path()).unwrap();
+        let (config, _warnings) = load_with_global(dir.path(), Some(empty_global.path())).unwrap();
         assert_eq!(config.model, None, "steve.json should not be loaded");
 
         std::fs::write(
@@ -772,7 +783,7 @@ mod tests {
             r#"{"model": "openai/gpt-4o"}"#,
         )
         .unwrap();
-        let (config, _warnings) = load(dir.path()).unwrap();
+        let (config, _warnings) = load_with_global(dir.path(), Some(empty_global.path())).unwrap();
         assert_eq!(config.model, None, "steve.jsonc should not be loaded");
     }
 
