@@ -171,18 +171,6 @@ pub(super) async fn partition_tool_calls(
         });
     }
 
-    let agent_count = prepared
-        .iter()
-        .filter(|tc| matches!(tc.tool_name, ToolName::Agent))
-        .count();
-    if agent_count > 0 {
-        tracing::info!(
-            total_pending = prepared.len(),
-            agent_count,
-            "partition: agents in this LLM response"
-        );
-    }
-
     // Partition: auto-allowed read-only tools can run in parallel.
     // Write tools (edit, write, patch), memory tool (append action),
     // task tool (writes to storage), and LSP tool (holds mutex across
