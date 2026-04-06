@@ -47,6 +47,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Async utilities
 tokio-util = "0.7"
+futures-util = "0.3"
 
 # Enum derive macros
 strum = { version = "0.28", features = ["derive"] }

@@ -389,74 +389,109 @@ pub(super) async fn execute_sequential_tools(
     messages: &mut Vec<ChatCompletionRequestMessage>,
     counters: &mut IterationCounters,
 ) -> PhaseOutcome {
-    // Pre-spawn auto-allowed agents (Explore/Plan) in parallel.
-    // General agents needing user permission are handled sequentially in the loop.
-    type AgentHandle = tokio::task::JoinHandle<(Result<String, String>, StreamUsage)>;
-    let mut agent_handles: HashMap<String, AgentHandle> = HashMap::new();
-    let agent_count = tools
-        .iter()
-        .filter(|tc| matches!(tc.tool_name, ToolName::Agent))
-        .count();
-    if agent_count > 0 {
-        tracing::info!(
-            total_tools = tools.len(),
-            agent_count,
-            "sequential phase: agents found in tool batch"
-        );
-    }
-    if let Some(spawner) = agent_spawner {
-        for tc in tools {
-            if !matches!(tc.tool_name, ToolName::Agent) {
-                continue;
+    // Pre-spawn auto-allowed agents (Explore/Plan) in parallel, await all in
+    // completion order, and collect results. ToolResult events are sent as each
+    // agent finishes so the UI shows results immediately, not in call order.
+    let mut agent_results: HashMap<String, crate::tool::ToolOutput> = HashMap::new();
+    let mut agent_results_sent: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    {
+        type AgentHandle =
+            tokio::task::JoinHandle<(String, AgentType, Result<String, String>, StreamUsage)>;
+        let mut handles: Vec<AgentHandle> = Vec::new();
+
+        if let Some(spawner) = agent_spawner {
+            for tc in tools {
+                if !matches!(tc.tool_name, ToolName::Agent) {
+                    continue;
+                }
+                let agent_type_str = tc
+                    .args
+                    .get("agent_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("explore");
+                let agent_type: AgentType = agent_type_str.parse().unwrap_or(AgentType::Explore);
+
+                // Only pre-spawn agents that don't need user permission
+                if agent_type == AgentType::General && matches!(tc.action, PermissionAction::Ask) {
+                    continue;
+                }
+
+                let _ = event_tx.send(AppEvent::LlmToolCall {
+                    call_id: tc.id.clone(),
+                    tool_name: tc.tool_name,
+                    arguments: tc.args.clone(),
+                });
+
+                let task_str = tc
+                    .args
+                    .get("task")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(no task provided)")
+                    .to_string();
+                let context_str = tc
+                    .args
+                    .get("context")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let spawner = spawner.clone();
+                let parent_tx = event_tx.clone();
+                let call_id = tc.id.clone();
+
+                let handle = tokio::spawn(async move {
+                    let (result, usage) = run_sub_agent(
+                        &spawner,
+                        agent_type,
+                        &task_str,
+                        context_str.as_deref(),
+                        &parent_tx,
+                        &call_id,
+                    )
+                    .await;
+                    (call_id, agent_type, result, usage)
+                });
+                handles.push(handle);
             }
-            let agent_type_str = tc
-                .args
-                .get("agent_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("explore");
-            let agent_type: AgentType = agent_type_str.parse().unwrap_or(AgentType::Explore);
-
-            // Only pre-spawn agents that don't need user permission
-            if agent_type == AgentType::General && matches!(tc.action, PermissionAction::Ask) {
-                continue;
-            }
-
-            let _ = event_tx.send(AppEvent::LlmToolCall {
-                call_id: tc.id.clone(),
-                tool_name: tc.tool_name,
-                arguments: tc.args.clone(),
-            });
-
-            let task_str = tc
-                .args
-                .get("task")
-                .and_then(|v| v.as_str())
-                .unwrap_or("(no task provided)")
-                .to_string();
-            let context_str = tc
-                .args
-                .get("context")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            let spawner = spawner.clone();
-            let parent_tx = event_tx.clone();
-            let call_id = tc.id.clone();
-
-            let handle = tokio::spawn(async move {
-                run_sub_agent(
-                    &spawner,
-                    agent_type,
-                    &task_str,
-                    context_str.as_deref(),
-                    &parent_tx,
-                    &call_id,
-                )
-                .await
-            });
-            agent_handles.insert(tc.id.clone(), handle);
         }
-        if !agent_handles.is_empty() {
-            tracing::info!(count = agent_handles.len(), "spawned agents in parallel");
+
+        if handles.len() > 1 {
+            tracing::info!(count = handles.len(), "running agents in parallel");
+        }
+
+        // Await in completion order — send ToolResult to UI as each finishes
+        let mut remaining = handles;
+        while !remaining.is_empty() {
+            // select_all resolves to the first completed future + its index + the rest
+            let (completed, _index, rest) = futures_util::future::select_all(remaining).await;
+            remaining = rest;
+
+            match completed {
+                Ok((call_id, agent_type, result, usage)) => {
+                    counters.total_usage += usage;
+                    let output = match result {
+                        Ok(text) => crate::tool::ToolOutput {
+                            title: format!("Agent ({agent_type})"),
+                            output: text,
+                            is_error: false,
+                        },
+                        Err(e) => crate::tool::ToolOutput {
+                            title: format!("Agent ({agent_type})"),
+                            output: format!("Agent error: {e}"),
+                            is_error: true,
+                        },
+                    };
+                    let _ = event_tx.send(AppEvent::ToolResult {
+                        call_id: call_id.clone(),
+                        tool_name: ToolName::Agent,
+                        output: output.clone(),
+                    });
+                    agent_results_sent.insert(call_id.clone());
+                    agent_results.insert(call_id, output);
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "agent task panicked");
+                }
+            }
         }
     }
 
@@ -552,37 +587,9 @@ pub(super) async fn execute_sequential_tools(
                 .and_then(|v| v.as_str())
                 .unwrap_or("explore");
 
-            let output = if let Some(handle) = agent_handles.remove(&tc.id) {
-                // This agent was pre-spawned in parallel — await its result
-                let agent_type: AgentType = agent_type_str.parse().unwrap_or(AgentType::Explore);
-                tracing::info!(
-                    call_id = %tc.id,
-                    %agent_type,
-                    finished = handle.is_finished(),
-                    "awaiting pre-spawned agent"
-                );
-                match handle.await {
-                    Ok((result, usage)) => {
-                        counters.total_usage += usage;
-                        match result {
-                            Ok(text) => crate::tool::ToolOutput {
-                                title: format!("Agent ({agent_type})"),
-                                output: text,
-                                is_error: false,
-                            },
-                            Err(e) => crate::tool::ToolOutput {
-                                title: format!("Agent ({agent_type})"),
-                                output: format!("Agent error: {e}"),
-                                is_error: true,
-                            },
-                        }
-                    }
-                    Err(e) => crate::tool::ToolOutput {
-                        title: format!("Agent ({agent_type})"),
-                        output: format!("Agent task panicked: {e}"),
-                        is_error: true,
-                    },
-                }
+            let output = if let Some(output) = agent_results.remove(&tc.id) {
+                // Already completed in parallel — ToolResult already sent to UI
+                output
             } else if let Some(spawner) = agent_spawner {
                 // General agent needing permission — runs sequentially
                 let _ = event_tx.send(AppEvent::LlmToolCall {
@@ -702,11 +709,15 @@ pub(super) async fn execute_sequential_tools(
                 }
             };
 
-            let _ = event_tx.send(AppEvent::ToolResult {
-                call_id: tc.id.clone(),
-                tool_name: tc.tool_name,
-                output: output.clone(),
-            });
+            // Pre-completed agents already had ToolResult sent in the
+            // completion-order loop above; only send for sequential agents.
+            if !agent_results_sent.contains(&tc.id) {
+                let _ = event_tx.send(AppEvent::ToolResult {
+                    call_id: tc.id.clone(),
+                    tool_name: tc.tool_name,
+                    output: output.clone(),
+                });
+            }
 
             messages.push(ChatCompletionRequestMessage::Tool(
                 ChatCompletionRequestToolMessage {

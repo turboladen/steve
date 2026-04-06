@@ -3573,6 +3573,7 @@ dependencies = [
  "clap",
  "crossterm",
  "directories",
+ "futures-util",
  "gethostname",
  "glob",
  "grep",
