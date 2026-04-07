@@ -290,21 +290,15 @@ impl App {
                 self.message_area_state.scroll_to_bottom();
             }
             AppEvent::ToolResult {
-                call_id: _,
+                call_id,
                 tool_name,
                 output,
             } => {
-                // UTF-8 safe truncation for summary
-                let summary = if output.output.chars().count() > 80 {
-                    let truncated: String = output.output.chars().take(77).collect();
-                    format!("{truncated}...")
-                } else {
-                    output.output.clone()
-                };
+                let summary = crate::truncate_chars(&output.output, 80);
 
                 if let Some(last) = self.last_assistant_mut() {
                     last.complete_tool_call(
-                        tool_name,
+                        &call_id,
                         summary,
                         output.output.clone(),
                         output.is_error,

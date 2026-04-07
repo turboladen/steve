@@ -30,9 +30,10 @@ mod lib_tests {
     }
 }
 
-/// Truncate a string to at most `max` display characters.
+/// Truncate a string to at most `max` Unicode scalar values (chars).
 /// Appends "..." when truncated (requires `max >= 4`).
 /// For `max < 4`, truncates without ellipsis to always enforce the limit.
+/// Note: counts `char`s, not grapheme clusters or display width.
 pub fn truncate_chars(s: &str, max: usize) -> String {
     let len = s.chars().count();
     if len <= max {

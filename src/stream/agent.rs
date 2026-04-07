@@ -105,7 +105,10 @@ pub(super) async fn run_sub_agent(
     loop {
         tokio::select! {
             result = &mut *stream_handle, if !stream_done => {
-                let _ = result;
+                if let Err(error) = result {
+                    tracing::error!(call_id, %error, "sub-agent task failed");
+                    last_error = Some(format!("sub-agent task failed: {error}"));
+                }
                 stream_done = true;
             }
             event = sub_rx.recv() => {

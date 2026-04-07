@@ -446,12 +446,21 @@ pub(super) async fn execute_sequential_tools(
             tracing::info!(count = handles.len(), "running agents in parallel");
         }
 
-        // Await in completion order — send ToolResult to UI as each finishes
+        // Await in completion order — send ToolResult to UI as each finishes.
+        // Observe cancel_token so cancellation doesn't block on slow agents.
         let mut remaining = handles;
         while !remaining.is_empty() {
-            // select_all resolves to the first completed future + its index + the rest
-            let (completed, _index, rest) = futures_util::future::select_all(remaining).await;
-            remaining = rest;
+            let select_future = futures_util::future::select_all(remaining);
+            let completed = tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    // select_all consumed remaining; abort via the returned rest
+                    break;
+                }
+                (result, _index, rest) = select_future => {
+                    remaining = rest;
+                    result
+                }
+            };
 
             match completed {
                 Ok((call_id, agent_type, result, usage)) => {

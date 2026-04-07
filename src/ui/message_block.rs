@@ -222,7 +222,7 @@ impl MessageBlock {
     /// No-op on non-Assistant blocks.
     pub fn complete_tool_call(
         &mut self,
-        tool_name: ToolName,
+        call_id: &str,
         result_summary: String,
         full_output: String,
         is_error: bool,
@@ -235,14 +235,8 @@ impl MessageBlock {
                     _ => None,
                 })
             {
-                // Find the matching call (first pending one with this tool name).
-                // Forward search: results arrive in the same order as calls were added
-                // (stream.rs emits events iterating auto_allowed in original order).
-                if let Some(call) = group
-                    .calls
-                    .iter_mut()
-                    .find(|c| c.tool_name == tool_name && c.result_summary.is_none())
-                {
+                // Match by call_id for correct routing with parallel agents.
+                if let Some(call) = group.calls.iter_mut().find(|c| c.call_id == call_id) {
                     call.result_summary = Some(result_summary);
                     call.full_output = Some(full_output);
                     call.is_error = is_error;
@@ -581,12 +575,7 @@ mod tests {
                 },
             })],
         };
-        block.complete_tool_call(
-            ToolName::Read,
-            "150 lines".into(),
-            "fn main() {}".into(),
-            false,
-        );
+        block.complete_tool_call("", "150 lines".into(), "fn main() {}".into(), false);
         match &block {
             MessageBlock::Assistant { parts, .. } => {
                 let group = match &parts[0] {
@@ -860,7 +849,7 @@ mod tests {
                 AssistantPart::Text("some text".into()),
             ],
         };
-        block.complete_tool_call(ToolName::Read, "ok".into(), "content".into(), false);
+        block.complete_tool_call("", "ok".into(), "content".into(), false);
         match &block {
             MessageBlock::Assistant { parts, .. } => {
                 let group = match &parts[0] {
@@ -884,7 +873,7 @@ mod tests {
             parts: vec![AssistantPart::ToolGroup(ToolGroup {
                 calls: vec![
                     ToolCall {
-                        call_id: String::new(),
+                        call_id: "call_a".into(),
                         tool_name: ToolName::Read,
                         args_summary: "a.rs".into(),
                         full_output: None,
@@ -895,7 +884,7 @@ mod tests {
                         agent_progress: None,
                     },
                     ToolCall {
-                        call_id: String::new(),
+                        call_id: "call_b".into(),
                         tool_name: ToolName::Read,
                         args_summary: "b.rs".into(),
                         full_output: None,
@@ -911,8 +900,8 @@ mod tests {
                 },
             })],
         };
-        block.complete_tool_call(ToolName::Read, "10 lines".into(), "content_a".into(), false);
-        block.complete_tool_call(ToolName::Read, "20 lines".into(), "content_b".into(), false);
+        block.complete_tool_call("call_a", "10 lines".into(), "content_a".into(), false);
+        block.complete_tool_call("call_b", "20 lines".into(), "content_b".into(), false);
         match &block {
             MessageBlock::Assistant { parts, .. } => {
                 let group = match &parts[0] {
@@ -1083,7 +1072,7 @@ mod tests {
                 },
             })],
         };
-        block.complete_tool_call(ToolName::Agent, "done".into(), "full result".into(), false);
+        block.complete_tool_call("call_agent", "done".into(), "full result".into(), false);
         match &block {
             MessageBlock::Assistant { parts, .. } => {
                 let group = match &parts[0] {
