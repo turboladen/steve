@@ -83,11 +83,7 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
     };
 
     // Resolve path relative to project root
-    let path = if Path::new(path_str).is_absolute() {
-        std::path::PathBuf::from(path_str)
-    } else {
-        ctx.project_root.join(path_str)
-    };
+    let path = super::resolve_path(path_str, &ctx.project_root);
 
     if !path.exists() {
         return Ok(ToolOutput {

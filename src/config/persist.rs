@@ -14,8 +14,9 @@ pub fn persist_allow_tool(project_root: &Path, tool_name: &str) -> Result<()> {
     let mut value: serde_json::Value = if config_path.exists() {
         let content = std::fs::read_to_string(&config_path)
             .with_context(|| format!("failed to read {}", config_path.display()))?;
-        let parsed = jsonc_parser::parse_to_serde_value(&content, &Default::default())
-            .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", config_path.display()))?;
+        let parsed: Option<serde_json::Value> =
+            jsonc_parser::parse_to_serde_value(&content, &Default::default())
+                .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", config_path.display()))?;
         parsed.unwrap_or(serde_json::Value::Object(serde_json::Map::new()))
     } else {
         serde_json::Value::Object(serde_json::Map::new())

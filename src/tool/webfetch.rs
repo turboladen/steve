@@ -87,9 +87,9 @@ fn execute(args: Value, _ctx: ToolContext) -> Result<ToolOutput> {
     let output = if content_type.contains("text/html") {
         // Convert HTML to plain text
         let text = html2text::from_read(body.as_bytes(), 100).unwrap_or_else(|_| body.clone());
-        // Truncate very long content (use floor_char_boundary for UTF-8 safety)
+        // Truncate very long content
         if text.len() > 50_000 {
-            let boundary = crate::floor_char_boundary(&text, 50_000);
+            let boundary = text.floor_char_boundary(50_000);
             format!("{}\n\n... (content truncated at 50KB)", &text[..boundary])
         } else {
             text
@@ -97,7 +97,7 @@ fn execute(args: Value, _ctx: ToolContext) -> Result<ToolOutput> {
     } else {
         // Return raw text (JSON, plain text, etc.)
         if body.len() > 50_000 {
-            let boundary = crate::floor_char_boundary(&body, 50_000);
+            let boundary = body.floor_char_boundary(50_000);
             format!("{}\n\n... (content truncated at 50KB)", &body[..boundary])
         } else {
             body
@@ -115,48 +115,6 @@ fn execute(args: Value, _ctx: ToolContext) -> Result<ToolOutput> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn floor_char_boundary_ascii_exact() {
-        let s = "hello world";
-        assert_eq!(crate::floor_char_boundary(s, 5), 5);
-    }
-
-    #[test]
-    fn floor_char_boundary_multibyte_snaps_back() {
-        // '日' is 3 bytes in UTF-8
-        let s = "a日b";
-        // s = [0x61, 0xE6, 0x97, 0xA5, 0x62]
-        // index 2 is mid-character (inside '日'), should snap back to 1
-        assert_eq!(crate::floor_char_boundary(s, 2), 1);
-        assert_eq!(crate::floor_char_boundary(s, 3), 1);
-        // index 4 is exactly at 'b'
-        assert_eq!(crate::floor_char_boundary(s, 4), 4);
-    }
-
-    #[test]
-    fn floor_char_boundary_beyond_length() {
-        let s = "abc";
-        assert_eq!(crate::floor_char_boundary(s, 100), 3);
-    }
-
-    #[test]
-    fn floor_char_boundary_empty_string() {
-        assert_eq!(crate::floor_char_boundary("", 0), 0);
-    }
-
-    #[test]
-    fn floor_char_boundary_four_byte_emoji() {
-        // '🦀' is 4 bytes: F0 9F A6 80
-        let s = "a🦀b";
-        // s = [0x61, 0xF0, 0x9F, 0xA6, 0x80, 0x62]
-        // Indices 2, 3, 4 are mid-emoji, should snap back to 1
-        assert_eq!(crate::floor_char_boundary(s, 2), 1);
-        assert_eq!(crate::floor_char_boundary(s, 3), 1);
-        assert_eq!(crate::floor_char_boundary(s, 4), 1);
-        // index 5 is exactly 'b'
-        assert_eq!(crate::floor_char_boundary(s, 5), 5);
-    }
 
     #[test]
     fn execute_missing_url_returns_error() {

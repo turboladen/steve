@@ -84,6 +84,7 @@ impl App {
         self.pending_permission = None;
         self.pending_question = None;
         self.pending_agents_update = None;
+        self.interjection_tx = None;
         self.model_picker.close();
         self.selection_state.clear();
         self.autocomplete_state.hide();
@@ -246,11 +247,7 @@ impl App {
     /// falling back to the session's saved model_ref. Both paths are
     /// validated against the provider registry.
     pub(super) fn resolve_session_model(&self, session_model_ref: &str) -> String {
-        let preferred = self
-            .config
-            .model
-            .as_deref()
-            .unwrap_or(session_model_ref);
+        let preferred = self.config.model.as_deref().unwrap_or(session_model_ref);
         self.validated_model_ref(preferred)
     }
 
@@ -275,12 +272,7 @@ impl App {
 
 /// Enforce a 60-char cap on a title, appending "..." if truncated.
 pub(super) fn truncate_title(text: &str) -> String {
-    if text.chars().count() > 60 {
-        let truncated: String = text.chars().take(57).collect();
-        format!("{truncated}...")
-    } else {
-        text.to_string()
-    }
+    crate::truncate_chars(text, 60)
 }
 
 /// Truncate the first user message to produce a sync fallback session title.

@@ -2,45 +2,48 @@
 #![warn(clippy::cargo)]
 #![allow(clippy::multiple_crate_versions)]
 
-/// Find the largest valid UTF-8 char boundary at or before `byte_index`.
-/// Polyfill for the unstable `str::floor_char_boundary`.
-pub fn floor_char_boundary(s: &str, byte_index: usize) -> usize {
-    if byte_index >= s.len() {
-        return s.len();
-    }
-    let mut i = byte_index;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
 #[cfg(test)]
 mod lib_tests {
     use super::*;
 
     #[test]
-    fn floor_char_boundary_ascii() {
-        assert_eq!(floor_char_boundary("hello", 3), 3);
-        assert_eq!(floor_char_boundary("hello", 10), 5); // past end → len
-        assert_eq!(floor_char_boundary("hello", 0), 0);
+    fn truncate_chars_short_passthrough() {
+        assert_eq!(truncate_chars("hello", 10), "hello");
     }
 
     #[test]
-    fn floor_char_boundary_multibyte() {
-        // '🦀' is 4 bytes: bytes 0..4
-        let s = "🦀abc";
-        assert_eq!(floor_char_boundary(s, 4), 4); // right after the emoji
-        assert_eq!(floor_char_boundary(s, 3), 0); // mid-emoji → back to 0
-        assert_eq!(floor_char_boundary(s, 2), 0);
-        assert_eq!(floor_char_boundary(s, 1), 0);
+    fn truncate_chars_exact_length() {
+        assert_eq!(truncate_chars("hello", 5), "hello");
     }
 
     #[test]
-    fn floor_char_boundary_empty() {
-        assert_eq!(floor_char_boundary("", 0), 0);
-        assert_eq!(floor_char_boundary("", 5), 0);
+    fn truncate_chars_truncates() {
+        assert_eq!(truncate_chars("hello world", 8), "hello...");
     }
+
+    #[test]
+    fn truncate_chars_unicode() {
+        let s = "🦀".repeat(10);
+        let result = truncate_chars(&s, 7);
+        assert_eq!(result.chars().count(), 7);
+        assert!(result.ends_with("..."));
+    }
+}
+
+/// Truncate a string to at most `max` Unicode scalar values (chars).
+/// Appends "..." when truncated (requires `max >= 4`).
+/// For `max < 4`, truncates without ellipsis to always enforce the limit.
+/// Note: counts `char`s, not grapheme clusters or display width.
+pub fn truncate_chars(s: &str, max: usize) -> String {
+    let len = s.chars().count();
+    if len <= max {
+        return s.to_string();
+    }
+    if max < 4 {
+        return s.chars().take(max).collect();
+    }
+    let truncated: String = s.chars().take(max - 3).collect();
+    format!("{truncated}...")
 }
 
 /// Extension trait for consistent date/time formatting across the codebase.

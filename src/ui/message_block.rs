@@ -102,6 +102,8 @@ pub struct ToolGroup {
 /// A single tool call with its result.
 #[derive(Debug, Clone)]
 pub struct ToolCall {
+    /// Unique identifier for this tool call (from the LLM response).
+    pub call_id: String,
     /// Which tool was called.
     pub tool_name: ToolName,
     /// Compact argument summary (e.g., "src/main.rs" for read).
@@ -190,6 +192,7 @@ impl MessageBlock {
     /// Write tools auto-expand to show inline diffs. No-op on non-Assistant blocks.
     pub fn add_tool_call(
         &mut self,
+        call_id: String,
         tool_name: ToolName,
         args_summary: String,
         diff_content: Option<DiffContent>,
@@ -198,6 +201,7 @@ impl MessageBlock {
             && let Some(AssistantPart::ToolGroup(group)) = parts.last_mut()
         {
             group.calls.push(ToolCall {
+                call_id,
                 tool_name,
                 args_summary,
                 full_output: None,
@@ -218,7 +222,7 @@ impl MessageBlock {
     /// No-op on non-Assistant blocks.
     pub fn complete_tool_call(
         &mut self,
-        tool_name: ToolName,
+        call_id: &str,
         result_summary: String,
         full_output: String,
         is_error: bool,
@@ -231,14 +235,8 @@ impl MessageBlock {
                     _ => None,
                 })
             {
-                // Find the matching call (first pending one with this tool name).
-                // Forward search: results arrive in the same order as calls were added
-                // (stream.rs emits events iterating auto_allowed in original order).
-                if let Some(call) = group
-                    .calls
-                    .iter_mut()
-                    .find(|c| c.tool_name == tool_name && c.result_summary.is_none())
-                {
+                // Match by call_id for correct routing with parallel agents.
+                if let Some(call) = group.calls.iter_mut().find(|c| c.call_id == call_id) {
                     call.result_summary = Some(result_summary);
                     call.full_output = Some(full_output);
                     call.is_error = is_error;
@@ -255,14 +253,16 @@ impl MessageBlock {
     /// Update agent progress with a new sub-agent tool call.
     /// Finds the pending agent tool call in the last tool group and sets its progress.
     /// No-op on non-Assistant blocks.
-    pub fn update_agent_progress(&mut self, tool_name: ToolName, args_summary: String) {
+    pub fn update_agent_progress(
+        &mut self,
+        call_id: &str,
+        tool_name: ToolName,
+        args_summary: String,
+    ) {
         if let MessageBlock::Assistant { parts, .. } = self {
             for part in parts.iter_mut().rev() {
                 if let AssistantPart::ToolGroup(group) = part
-                    && let Some(call) = group
-                        .calls
-                        .iter_mut()
-                        .find(|c| c.tool_name == ToolName::Agent && c.result_summary.is_none())
+                    && let Some(call) = group.calls.iter_mut().find(|c| c.call_id == call_id)
                 {
                     let tool_count = call
                         .agent_progress
@@ -284,14 +284,11 @@ impl MessageBlock {
     /// Update the result summary on the current agent progress entry.
     /// Called when a sub-agent's tool completes, to show the result inline.
     /// No-op on non-Assistant blocks.
-    pub fn update_agent_progress_result(&mut self, result_summary: Option<String>) {
+    pub fn update_agent_progress_result(&mut self, call_id: &str, result_summary: Option<String>) {
         if let MessageBlock::Assistant { parts, .. } = self {
             for part in parts.iter_mut().rev() {
                 if let AssistantPart::ToolGroup(group) = part
-                    && let Some(call) = group
-                        .calls
-                        .iter_mut()
-                        .find(|c| c.tool_name == ToolName::Agent && c.result_summary.is_none())
+                    && let Some(call) = group.calls.iter_mut().find(|c| c.call_id == call_id)
                 {
                     if let Some(ref mut progress) = call.agent_progress {
                         progress.result_summary = result_summary;
@@ -404,6 +401,7 @@ mod tests {
     #[test]
     fn tool_call_defaults_collapsed() {
         let call = ToolCall {
+            call_id: String::new(),
             tool_name: ToolName::Read,
             args_summary: "src/main.rs".into(),
             full_output: Some("fn main() {}".into()),
@@ -537,7 +535,7 @@ mod tests {
                 status: ToolGroupStatus::Preparing,
             })],
         };
-        block.add_tool_call(ToolName::Read, "src/main.rs".into(), None);
+        block.add_tool_call(String::new(), ToolName::Read, "src/main.rs".into(), None);
         match &block {
             MessageBlock::Assistant { parts, .. } => {
                 let group = match &parts[0] {
@@ -562,6 +560,7 @@ mod tests {
             thinking: None,
             parts: vec![AssistantPart::ToolGroup(ToolGroup {
                 calls: vec![ToolCall {
+                    call_id: String::new(),
                     tool_name: ToolName::Read,
                     args_summary: "src/main.rs".into(),
                     full_output: None,
@@ -576,12 +575,7 @@ mod tests {
                 },
             })],
         };
-        block.complete_tool_call(
-            ToolName::Read,
-            "150 lines".into(),
-            "fn main() {}".into(),
-            false,
-        );
+        block.complete_tool_call("", "150 lines".into(), "fn main() {}".into(), false);
         match &block {
             MessageBlock::Assistant { parts, .. } => {
                 let group = match &parts[0] {
@@ -704,7 +698,7 @@ mod tests {
                     status: ToolGroupStatus::Preparing,
                 })],
             };
-            block.add_tool_call(tool, "file.rs".into(), None);
+            block.add_tool_call(String::new(), tool, "file.rs".into(), None);
             match &block {
                 MessageBlock::Assistant { parts, .. } => {
                     let group = match &parts[0] {
@@ -738,7 +732,7 @@ mod tests {
                     status: ToolGroupStatus::Preparing,
                 })],
             };
-            block.add_tool_call(tool, "pattern".into(), None);
+            block.add_tool_call(String::new(), tool, "pattern".into(), None);
             match &block {
                 MessageBlock::Assistant { parts, .. } => {
                     let group = match &parts[0] {
@@ -767,7 +761,12 @@ mod tests {
                 DiffLine::Addition("new line".into()),
             ],
         };
-        block.add_tool_call(ToolName::Edit, "src/main.rs".into(), Some(diff));
+        block.add_tool_call(
+            String::new(),
+            ToolName::Edit,
+            "src/main.rs".into(),
+            Some(diff),
+        );
         match &block {
             MessageBlock::Assistant { parts, .. } => {
                 let group = match &parts[0] {
@@ -833,6 +832,7 @@ mod tests {
             parts: vec![
                 AssistantPart::ToolGroup(ToolGroup {
                     calls: vec![ToolCall {
+                        call_id: String::new(),
                         tool_name: ToolName::Read,
                         args_summary: "f.rs".into(),
                         full_output: None,
@@ -849,7 +849,7 @@ mod tests {
                 AssistantPart::Text("some text".into()),
             ],
         };
-        block.complete_tool_call(ToolName::Read, "ok".into(), "content".into(), false);
+        block.complete_tool_call("", "ok".into(), "content".into(), false);
         match &block {
             MessageBlock::Assistant { parts, .. } => {
                 let group = match &parts[0] {
@@ -873,6 +873,7 @@ mod tests {
             parts: vec![AssistantPart::ToolGroup(ToolGroup {
                 calls: vec![
                     ToolCall {
+                        call_id: "call_a".into(),
                         tool_name: ToolName::Read,
                         args_summary: "a.rs".into(),
                         full_output: None,
@@ -883,6 +884,7 @@ mod tests {
                         agent_progress: None,
                     },
                     ToolCall {
+                        call_id: "call_b".into(),
                         tool_name: ToolName::Read,
                         args_summary: "b.rs".into(),
                         full_output: None,
@@ -898,8 +900,8 @@ mod tests {
                 },
             })],
         };
-        block.complete_tool_call(ToolName::Read, "10 lines".into(), "content_a".into(), false);
-        block.complete_tool_call(ToolName::Read, "20 lines".into(), "content_b".into(), false);
+        block.complete_tool_call("call_a", "10 lines".into(), "content_a".into(), false);
+        block.complete_tool_call("call_b", "20 lines".into(), "content_b".into(), false);
         match &block {
             MessageBlock::Assistant { parts, .. } => {
                 let group = match &parts[0] {
@@ -930,6 +932,7 @@ mod tests {
             thinking: None,
             parts: vec![AssistantPart::ToolGroup(ToolGroup {
                 calls: vec![ToolCall {
+                    call_id: "call_agent".to_string(),
                     tool_name: ToolName::Agent,
                     args_summary: "explore: find usages".into(),
                     full_output: None,
@@ -944,7 +947,7 @@ mod tests {
                 },
             })],
         };
-        block.update_agent_progress(ToolName::Read, "src/main.rs".into());
+        block.update_agent_progress("call_agent", ToolName::Read, "src/main.rs".into());
         match &block {
             MessageBlock::Assistant { parts, .. } => {
                 let group = match &parts[0] {
@@ -967,6 +970,7 @@ mod tests {
             thinking: None,
             parts: vec![AssistantPart::ToolGroup(ToolGroup {
                 calls: vec![ToolCall {
+                    call_id: "call_agent".to_string(),
                     tool_name: ToolName::Agent,
                     args_summary: "explore: search".into(),
                     full_output: None,
@@ -981,8 +985,8 @@ mod tests {
                 },
             })],
         };
-        block.update_agent_progress(ToolName::Read, "a.rs".into());
-        block.update_agent_progress(ToolName::Grep, "pattern".into());
+        block.update_agent_progress("call_agent", ToolName::Read, "a.rs".into());
+        block.update_agent_progress("call_agent", ToolName::Grep, "pattern".into());
         match &block {
             MessageBlock::Assistant { parts, .. } => {
                 let group = match &parts[0] {
@@ -1007,6 +1011,7 @@ mod tests {
             thinking: None,
             parts: vec![AssistantPart::ToolGroup(ToolGroup {
                 calls: vec![ToolCall {
+                    call_id: "call_agent".to_string(),
                     tool_name: ToolName::Agent,
                     args_summary: "explore: check".into(),
                     full_output: None,
@@ -1026,7 +1031,7 @@ mod tests {
                 },
             })],
         };
-        block.update_agent_progress_result(Some("200 lines".into()));
+        block.update_agent_progress_result("call_agent", Some("200 lines".into()));
         match &block {
             MessageBlock::Assistant { parts, .. } => {
                 let group = match &parts[0] {
@@ -1047,6 +1052,7 @@ mod tests {
             thinking: None,
             parts: vec![AssistantPart::ToolGroup(ToolGroup {
                 calls: vec![ToolCall {
+                    call_id: "call_agent".to_string(),
                     tool_name: ToolName::Agent,
                     args_summary: "explore: find".into(),
                     full_output: None,
@@ -1066,7 +1072,7 @@ mod tests {
                 },
             })],
         };
-        block.complete_tool_call(ToolName::Agent, "done".into(), "full result".into(), false);
+        block.complete_tool_call("call_agent", "done".into(), "full result".into(), false);
         match &block {
             MessageBlock::Assistant { parts, .. } => {
                 let group = match &parts[0] {

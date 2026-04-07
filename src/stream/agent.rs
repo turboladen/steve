@@ -13,8 +13,9 @@ use crate::{
 /// Run a sub-agent stream, collecting its final text response.
 ///
 /// Creates a fresh conversation with a focused system prompt and restricted tools.
-/// Sub-agent events are monitored on a private channel — only usage updates and
-/// permission requests are forwarded to the parent.
+/// Sub-agent events are monitored on a private channel — only permission requests
+/// and tool progress are forwarded to the parent. Usage updates are intentionally
+/// suppressed to avoid overwriting the parent's context pressure metrics.
 pub(super) async fn run_sub_agent(
     spawner: &AgentSpawner,
     agent_type: AgentType,
@@ -95,12 +96,19 @@ pub(super) async fn run_sub_agent(
     let mut stream_done = false;
     let mut sub_agent_usage = StreamUsage::default();
 
-    let mut stream_future = Box::pin(sub_request.run());
+    // Spawn as a separate task (not Box::pin) so the sub-agent future remains Send,
+    // enabling parallel agent execution from the parent.
+    tracing::info!(call_id, %agent_type, %model, "sub-agent starting");
+    let stream_handle = sub_request.spawn();
+    let mut stream_handle = std::pin::pin!(stream_handle);
 
     loop {
         tokio::select! {
-            result = &mut stream_future, if !stream_done => {
-                let _ = result;
+            result = &mut *stream_handle, if !stream_done => {
+                if let Err(error) = result {
+                    tracing::error!(call_id, %error, "sub-agent task failed");
+                    last_error = Some(format!("sub-agent task failed: {error}"));
+                }
                 stream_done = true;
             }
             event = sub_rx.recv() => {
@@ -108,8 +116,11 @@ pub(super) async fn run_sub_agent(
                     Some(AppEvent::LlmDelta { text }) => {
                         final_text.push_str(&text);
                     }
-                    Some(AppEvent::LlmUsageUpdate { usage }) => {
-                        let _ = parent_event_tx.send(AppEvent::LlmUsageUpdate { usage });
+                    Some(AppEvent::LlmUsageUpdate { .. }) => {
+                        // Don't forward sub-agent usage to parent — it would overwrite
+                        // parent's last_prompt_tokens with the sub-agent's context size,
+                        // breaking auto-compact thresholds. Sub-agent totals are tracked
+                        // via LlmFinish → sub_agent_usage and returned to the caller.
                     }
                     Some(AppEvent::LlmToolCall { tool_name, arguments, .. }) => {
                         tool_count += 1;
@@ -173,6 +184,14 @@ pub(super) async fn run_sub_agent(
             break;
         }
     }
+
+    tracing::info!(
+        call_id,
+        %agent_type,
+        tool_count,
+        text_len = final_text.len(),
+        "sub-agent completed"
+    );
 
     let result = if let Some(error) = last_error {
         if !final_text.is_empty() {

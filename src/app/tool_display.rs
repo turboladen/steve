@@ -73,24 +73,12 @@ pub fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
             .to_string(),
         ToolName::Bash => {
             let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            if cmd.chars().count() > 40 {
-                let truncated: String = cmd.chars().take(37).collect();
-                format!("{truncated}...")
-            } else {
-                cmd.to_string()
-            }
+            crate::truncate_chars(cmd, 40)
         }
         ToolName::Question => args
             .get("question")
             .and_then(|v| v.as_str())
-            .map(|s| {
-                if s.chars().count() > 30 {
-                    let truncated: String = s.chars().take(27).collect();
-                    format!("{truncated}...")
-                } else {
-                    s.to_string()
-                }
-            })
+            .map(|s| crate::truncate_chars(s, 30))
             .unwrap_or_default(),
         ToolName::Task => args
             .get("action")
@@ -129,12 +117,7 @@ pub fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
                 .and_then(|v| v.as_str())
                 .unwrap_or("explore");
             let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
-            let truncated = if task.chars().count() > 30 {
-                let t: String = task.chars().take(27).collect();
-                format!("{t}...")
-            } else {
-                task.to_string()
-            };
+            let truncated = crate::truncate_chars(task, 30);
             format!("{agent_type}: {truncated}")
         }
     }
@@ -144,12 +127,7 @@ pub fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
 /// Public so `stream.rs` can use it for sub-agent progress updates.
 pub fn extract_result_summary(tool_name: ToolName, output: &crate::tool::ToolOutput) -> String {
     let _ = tool_name; // All tools use the same truncation logic for now
-    if output.output.chars().count() > 80 {
-        let truncated: String = output.output.chars().take(77).collect();
-        format!("{truncated}...")
-    } else {
-        output.output.clone()
-    }
+    crate::truncate_chars(&output.output, 80)
 }
 
 /// Extract inline diff content from tool call arguments for UI rendering.
@@ -435,13 +413,26 @@ mod tests {
 
     #[test]
     fn extract_args_summary_all_variants_covered() {
-        // Ensure every ToolName variant is handled (exhaustive match).
-        // This test will fail to compile if a new variant is added without
-        // updating extract_args_summary.
+        // Every variant with empty args produces a deterministic result.
+        // Verifies the exhaustive match compiles and each branch behaves correctly.
         let args = json!({});
         for tool in ToolName::iter() {
-            // Just ensure it doesn't panic
-            let _ = extract_args_summary(tool, &args);
+            let result = extract_args_summary(tool, &args);
+            if matches!(tool, ToolName::Move | ToolName::Copy) {
+                assert_eq!(
+                    result, " \u{2192} ",
+                    "{tool} empty args should produce arrow"
+                );
+            } else if matches!(tool, ToolName::Lsp) {
+                assert_eq!(result, " diagnostics", "{tool} defaults to diagnostics op");
+            } else if matches!(tool, ToolName::Agent) {
+                assert!(
+                    result.starts_with("explore:"),
+                    "{tool} defaults to explore type"
+                );
+            } else {
+                assert_eq!(result, "", "{tool} empty args should return empty string");
+            }
         }
     }
 
@@ -640,17 +631,10 @@ mod tests {
     #[test]
     fn diff_content_non_write_tools_return_none() {
         let args = json!({"path": "src/main.rs"});
-        for tool in [
-            ToolName::Read,
-            ToolName::Grep,
-            ToolName::Glob,
-            ToolName::List,
-            ToolName::Bash,
-            ToolName::Question,
-            ToolName::Task,
-            ToolName::Webfetch,
-            ToolName::Memory,
-        ] {
+        for tool in ToolName::iter() {
+            if tool.is_write_tool() {
+                continue;
+            }
             assert!(
                 extract_diff_content(tool, &args).is_none(),
                 "{tool} should return None"

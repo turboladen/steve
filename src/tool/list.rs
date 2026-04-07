@@ -147,15 +147,6 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
-    fn make_ctx(dir: &std::path::Path) -> ToolContext {
-        ToolContext {
-            project_root: dir.to_path_buf(),
-            storage_dir: None,
-            task_store: None,
-            lsp_manager: None,
-        }
-    }
-
     /// Initialize a minimal git repo so the `ignore` crate's walker works
     /// without being confused by parent .gitignore files.
     fn init_git(dir: &std::path::Path) {
@@ -174,7 +165,11 @@ mod tests {
         fs::write(dir.path().join("bigger.txt"), "a".repeat(2048)).unwrap();
 
         let args = json!({});
-        let result = execute(args, make_ctx(dir.path())).unwrap();
+        let result = execute(
+            args,
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+        )
+        .unwrap();
         assert!(!result.is_error);
         assert!(
             result.output.contains("small.txt"),
@@ -203,7 +198,11 @@ mod tests {
     fn nonexistent_path_returns_error() {
         let dir = tempdir().unwrap();
         let args = json!({ "path": "does_not_exist" });
-        let result = execute(args, make_ctx(dir.path())).unwrap();
+        let result = execute(
+            args,
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+        )
+        .unwrap();
         assert!(result.is_error);
         assert!(
             result.output.contains("not found"),
@@ -220,7 +219,11 @@ mod tests {
         fs::create_dir_all(&sub).unwrap();
 
         let args = json!({ "path": "empty_sub" });
-        let result = execute(args, make_ctx(dir.path())).unwrap();
+        let result = execute(
+            args,
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+        )
+        .unwrap();
         assert!(!result.is_error);
         assert!(
             result.output.contains("(empty)"),
@@ -242,7 +245,11 @@ mod tests {
         // Increasing depth should reveal progressively deeper files.
         // depth=1 shows immediate children + one level of nesting.
         let args1 = json!({ "depth": 1 });
-        let result1 = execute(args1, make_ctx(dir.path())).unwrap();
+        let result1 = execute(
+            args1,
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+        )
+        .unwrap();
         assert!(!result1.is_error);
         assert!(
             result1.output.contains("root.txt"),
@@ -264,7 +271,11 @@ mod tests {
         // With a smaller depth, fewer entries should be shown.
         // depth=3 should reveal everything including deeper.txt.
         let args3 = json!({ "depth": 3 });
-        let result3 = execute(args3, make_ctx(dir.path())).unwrap();
+        let result3 = execute(
+            args3,
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+        )
+        .unwrap();
         assert!(!result3.is_error);
         assert!(
             result3.output.contains("deeper.txt"),

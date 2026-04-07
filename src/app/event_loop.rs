@@ -210,6 +210,27 @@ impl App {
             }
 
             // -- Streaming events --
+            AppEvent::LlmResponseStart => {
+                if self.streaming_active {
+                    // Save the completed assistant message from the previous response
+                    if let Some(msg) = self.streaming_message.take()
+                        && !msg.text_content().is_empty()
+                    {
+                        let mgr = SessionManager::new(&self.storage, &self.project.id);
+                        let _ = mgr.save_message(&msg);
+                        self.stored_messages.push(msg);
+                    }
+
+                    // Start a fresh assistant block for the interjection response
+                    if let Some(session) = &self.current_session {
+                        self.streaming_message = Some(Message::assistant(&session.id, ""));
+                    }
+                    self.messages.push(MessageBlock::Assistant {
+                        thinking: None,
+                        parts: vec![],
+                    });
+                }
+            }
             AppEvent::LlmDelta { text } => {
                 if self.streaming_active {
                     // Append to the display message
@@ -248,14 +269,19 @@ impl App {
                 self.message_area_state.scroll_to_bottom();
             }
             AppEvent::LlmToolCall {
-                call_id: _,
+                call_id,
                 tool_name,
                 arguments,
             } => {
                 let args_summary = extract_args_summary(tool_name, &arguments);
                 let diff_content = extract_diff_content(tool_name, &arguments);
                 if let Some(last) = self.last_assistant_mut() {
-                    last.add_tool_call(tool_name, args_summary.clone(), diff_content);
+                    last.add_tool_call(
+                        call_id.clone(),
+                        tool_name,
+                        args_summary.clone(),
+                        diff_content,
+                    );
                 }
                 self.status_line_state.set_activity(Activity::RunningTool {
                     tool_name,
@@ -264,21 +290,15 @@ impl App {
                 self.message_area_state.scroll_to_bottom();
             }
             AppEvent::ToolResult {
-                call_id: _,
+                call_id,
                 tool_name,
                 output,
             } => {
-                // UTF-8 safe truncation for summary
-                let summary = if output.output.chars().count() > 80 {
-                    let truncated: String = output.output.chars().take(77).collect();
-                    format!("{truncated}...")
-                } else {
-                    output.output.clone()
-                };
+                let summary = crate::truncate_chars(&output.output, 80);
 
                 if let Some(last) = self.last_assistant_mut() {
                     last.complete_tool_call(
-                        tool_name,
+                        &call_id,
                         summary,
                         output.output.clone(),
                         output.is_error,
@@ -407,20 +427,17 @@ impl App {
                 self.message_area_state.scroll_to_bottom();
             }
             AppEvent::AgentProgress {
-                call_id: _,
+                call_id,
                 tool_name,
                 args_summary,
                 result_summary,
             } => {
-                // Update the agent tool call's inline progress — no new MessageBlock,
-                // so the assistant block stays at the bottom and follow-up text is visible.
+                // Update the specific agent tool call's inline progress by call_id.
                 if let Some(last) = self.last_assistant_mut() {
                     if result_summary.is_some() {
-                        // ToolResult: just update the result on the existing progress
-                        last.update_agent_progress_result(result_summary);
+                        last.update_agent_progress_result(&call_id, result_summary);
                     } else {
-                        // LlmToolCall: new tool call, update with tool_name + args
-                        last.update_agent_progress(tool_name, args_summary);
+                        last.update_agent_progress(&call_id, tool_name, args_summary);
                     }
                 }
             }
@@ -644,6 +661,66 @@ mod tests {
 
         // No new messages, no panic
         assert_eq!(app.messages.len(), msg_count);
+    }
+
+    #[tokio::test]
+    async fn event_llm_response_start_creates_new_assistant_block() {
+        let mut app = make_test_app();
+        start_streaming(&mut app);
+
+        // Simulate first response
+        app.handle_event(AppEvent::LlmDelta {
+            text: "First response".into(),
+        })
+        .await
+        .unwrap();
+
+        let msg_count = app.messages.len();
+
+        // LlmResponseStart should push a new empty Assistant block
+        app.handle_event(AppEvent::LlmResponseStart).await.unwrap();
+
+        assert_eq!(app.messages.len(), msg_count + 1);
+        assert!(app.messages.last().unwrap().is_empty_assistant());
+
+        // New deltas should go to the NEW block, not the first one
+        app.handle_event(AppEvent::LlmDelta {
+            text: "Second response".into(),
+        })
+        .await
+        .unwrap();
+
+        // First assistant block should still have only "First response"
+        let first_text = match &app.messages[msg_count - 1] {
+            MessageBlock::Assistant { parts, .. } => parts
+                .iter()
+                .filter_map(|p| {
+                    if let AssistantPart::Text(t) = p {
+                        Some(t.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<String>(),
+            other => panic!("expected Assistant, got {other:?}"),
+        };
+        assert_eq!(first_text, "First response");
+
+        // Last assistant block should have "Second response"
+        let second_text = match app.messages.last().unwrap() {
+            MessageBlock::Assistant { parts, .. } => parts
+                .iter()
+                .filter_map(|p| {
+                    if let AssistantPart::Text(t) = p {
+                        Some(t.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<String>(),
+            other => panic!("expected Assistant, got {other:?}"),
+        };
+        assert_eq!(second_text, "Second response");
     }
 
     #[tokio::test]

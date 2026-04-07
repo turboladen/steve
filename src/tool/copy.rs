@@ -1,9 +1,6 @@
 //! Copy tool — duplicate files or directories.
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{fs, path::Path};
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -63,8 +60,8 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
         .and_then(|v| v.as_str())
         .context("missing 'to_path' parameter")?;
 
-    let from = resolve_path(from_str, &ctx.project_root);
-    let to = resolve_path(to_str, &ctx.project_root);
+    let from = super::resolve_path(from_str, &ctx.project_root);
+    let to = super::resolve_path(to_str, &ctx.project_root);
 
     if !from.exists() {
         bail!("source does not exist: {}", from.display());
@@ -115,29 +112,11 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-fn resolve_path(path_str: &str, project_root: &Path) -> PathBuf {
-    let path = PathBuf::from(path_str);
-    if path.is_absolute() {
-        path
-    } else {
-        project_root.join(path)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::tempdir;
-
-    fn make_ctx(dir: &std::path::Path) -> ToolContext {
-        ToolContext {
-            project_root: dir.to_path_buf(),
-            storage_dir: None,
-            task_store: None,
-            lsp_manager: None,
-        }
-    }
 
     #[test]
     fn copy_file() {
@@ -146,7 +125,7 @@ mod tests {
 
         let result = execute(
             json!({"from_path": "a.txt", "to_path": "b.txt"}),
-            make_ctx(dir.path()),
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result.is_error);
@@ -167,7 +146,7 @@ mod tests {
 
         let result = execute(
             json!({"from_path": "src", "to_path": "dst"}),
-            make_ctx(dir.path()),
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result.is_error);
@@ -186,7 +165,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let result = execute(
             json!({"from_path": "nope.txt", "to_path": "dest.txt"}),
-            make_ctx(dir.path()),
+            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
         );
         assert!(result.is_err());
     }

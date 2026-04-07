@@ -23,8 +23,8 @@ use async_openai::{
         ChatCompletionRequestSystemMessageContent, ChatCompletionRequestToolMessageContent,
         ChatCompletionRequestUserMessage, ChatCompletionRequestUserMessageContent,
         ChatCompletionResponseStream, ChatCompletionStreamOptions, ChatCompletionTool,
-        ChatCompletionTools, CreateChatCompletionRequest, FinishReason, FunctionCall,
-        FunctionObject,
+        ChatCompletionTools, CompletionUsage, CreateChatCompletionRequest, FinishReason,
+        FunctionCall, FunctionObject,
     },
 };
 use serde_json::Value;
@@ -94,6 +94,7 @@ impl ChatStreamProvider for OpenAIChatStream {
 /// Constructed in `app.rs` alongside the parent `StreamRequest`, then passed
 /// into `run_stream()`. When a sub-agent is spawned, a fresh `StreamRequest`
 /// is built from these fields with `agent_spawner: None` to prevent recursion.
+#[derive(Clone)]
 pub struct AgentSpawner {
     pub stream_provider: Arc<dyn ChatStreamProvider>,
     pub primary_model: String,
@@ -544,6 +545,7 @@ impl StreamRequest {
             let mut assistant_content = String::new();
             let mut first_token_logged = false;
             let mut stream_chunk_error: Option<String> = None;
+            let mut call_usage: Option<CompletionUsage> = None;
 
             // Process chunks — use select! to check cancellation while streaming
             loop {
@@ -571,52 +573,16 @@ impl StreamRequest {
 
                         match result {
                             Ok(response) => {
-                                // Check for usage in the final chunk
-                                if let Some(u) = &response.usage {
-                                    tracing::info!(
-                                        prompt = u.prompt_tokens,
-                                        completion = u.completion_tokens,
-                                        total = u.total_tokens,
-                                        "usage data received in stream chunk"
-                                    );
-                                    total_usage.prompt_tokens += u.prompt_tokens;
-                                    total_usage.completion_tokens += u.completion_tokens;
-                                    total_usage.total_tokens += u.total_tokens;
-
-                                    // Send current-call usage to UI for live token counter updates
-                                    let _ = event_tx.send(AppEvent::LlmUsageUpdate {
-                                        usage: StreamUsage {
-                                            prompt_tokens: u.prompt_tokens,
-                                            completion_tokens: u.completion_tokens,
-                                            total_tokens: u.total_tokens,
-                                        },
-                                    });
-
-                                    // Record per-call usage to SQLite
-                                    let cost = usage_model_cost.as_ref().map(|mc| {
-                                        u.prompt_tokens as f64 * mc.input_per_million / 1_000_000.0
-                                            + u.completion_tokens as f64 * mc.output_per_million
-                                                / 1_000_000.0
-                                    });
-                                    usage_writer.record_api_call(ApiCallRecord {
-                                        timestamp: chrono::Utc::now(),
-                                        project_id: usage_project_id.clone(),
-                                        session_id: usage_session_id.clone(),
-                                        model_ref: model.clone(),
-                                        prompt_tokens: u.prompt_tokens,
-                                        completion_tokens: u.completion_tokens,
-                                        total_tokens: u.total_tokens,
-                                        cost,
-                                        duration_ms: call_start.elapsed().as_millis() as u64,
-                                        iteration: total_iteration_count.saturating_sub(1),
-                                    });
+                                // Capture usage (last-wins — some providers emit multiple chunks)
+                                if let Some(u) = response.usage {
+                                    call_usage = Some(u);
                                 }
 
                                 // Process each choice's delta
                                 for choice in &response.choices {
                                     // TODO: Emit AppEvent::LlmReasoning for reasoning/thinking tokens.
                                     // OpenAI o1/o3 models send reasoning content via a `reasoning_content`
-                                    // field on the stream delta, but async-openai 0.32 does not expose this
+                                    // field on the stream delta, but async-openai 0.34 does not expose this
                                     // field on ChatCompletionStreamResponseDelta. When async-openai adds
                                     // support (or if we switch to raw JSON parsing), add:
                                     //
@@ -688,6 +654,48 @@ impl StreamRequest {
                         }
                     }
                 }
+            }
+
+            // Process usage once after a successful stream ends (last-wins avoids
+            // double-counting when providers emit usage in multiple chunks).
+            // Skip on mid-stream errors — the call may be retried.
+            if stream_chunk_error.is_none()
+                && let Some(u) = &call_usage
+            {
+                tracing::info!(
+                    prompt = u.prompt_tokens,
+                    completion = u.completion_tokens,
+                    total = u.total_tokens,
+                    "usage data received"
+                );
+                total_usage.prompt_tokens += u.prompt_tokens;
+                total_usage.completion_tokens += u.completion_tokens;
+                total_usage.total_tokens += u.total_tokens;
+
+                let _ = event_tx.send(AppEvent::LlmUsageUpdate {
+                    usage: StreamUsage {
+                        prompt_tokens: u.prompt_tokens,
+                        completion_tokens: u.completion_tokens,
+                        total_tokens: u.total_tokens,
+                    },
+                });
+
+                let cost = usage_model_cost.as_ref().map(|mc| {
+                    u.prompt_tokens as f64 * mc.input_per_million / 1_000_000.0
+                        + u.completion_tokens as f64 * mc.output_per_million / 1_000_000.0
+                });
+                usage_writer.record_api_call(ApiCallRecord {
+                    timestamp: chrono::Utc::now(),
+                    project_id: usage_project_id.clone(),
+                    session_id: usage_session_id.clone(),
+                    model_ref: model.clone(),
+                    prompt_tokens: u.prompt_tokens,
+                    completion_tokens: u.completion_tokens,
+                    total_tokens: u.total_tokens,
+                    cost,
+                    duration_ms: call_start.elapsed().as_millis() as u64,
+                    iteration: total_iteration_count.saturating_sub(1),
+                });
             }
 
             // Mid-stream error — retry the LLM call if retries remain.
@@ -842,6 +850,8 @@ impl StreamRequest {
                     }
                 }
                 if has_interjection {
+                    // Tell the UI to start a fresh Assistant block for the new response
+                    let _ = event_tx.send(AppEvent::LlmResponseStart);
                     continue;
                 }
 
@@ -2830,6 +2840,184 @@ mod tests {
         assert!(
             content.contains("println!(\"world\")"),
             "file should be updated"
+        );
+    }
+
+    #[tokio::test]
+    async fn parallel_agents_all_execute_and_accumulate_usage() {
+        // LLM returns 3 agent (explore) tool calls in a single response.
+        // Each sub-agent gets its own mock response (simple text).
+        // The final parent response is text.
+        //
+        // Mock stream queue: [parent call 1, sub-agent 1, sub-agent 2, sub-agent 3, parent call 2]
+        // The sub-agents are spawned concurrently, so consumption order from the mock
+        // is non-deterministic — but each pops from the same VecDeque.
+        let mock = Arc::new(MockChatStream::new(vec![
+            // Parent call 1: return 3 agent tool calls
+            vec![
+                Ok(tool_call_chunk(
+                    0,
+                    Some("call_agent_1"),
+                    Some("agent"),
+                    Some(r#"{"agent_type":"explore","task":"find permissions"}"#),
+                )),
+                Ok(tool_call_chunk(
+                    1,
+                    Some("call_agent_2"),
+                    Some("agent"),
+                    Some(r#"{"agent_type":"explore","task":"find caching"}"#),
+                )),
+                Ok(tool_call_chunk(
+                    2,
+                    Some("call_agent_3"),
+                    Some("agent"),
+                    Some(r#"{"agent_type":"explore","task":"find sessions"}"#),
+                )),
+                Ok(finish_chunk(FinishReason::ToolCalls, 200, 50)),
+            ],
+            // Sub-agent 1 response
+            vec![
+                Ok(text_delta("Agent 1 result.")),
+                Ok(finish_chunk(FinishReason::Stop, 100, 20)),
+            ],
+            // Sub-agent 2 response
+            vec![
+                Ok(text_delta("Agent 2 result.")),
+                Ok(finish_chunk(FinishReason::Stop, 100, 25)),
+            ],
+            // Sub-agent 3 response
+            vec![
+                Ok(text_delta("Agent 3 result.")),
+                Ok(finish_chunk(FinishReason::Stop, 100, 30)),
+            ],
+            // Parent call 2: final text response
+            vec![
+                Ok(text_delta("All agents done.")),
+                Ok(finish_chunk(FinishReason::Stop, 300, 15)),
+            ],
+        ]));
+
+        let root = std::path::PathBuf::from("/tmp/test-parallel-agents");
+        let cancel_token = CancellationToken::new();
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (_interjection_tx, interjection_rx) = mpsc::unbounded_channel();
+
+        let spawner = AgentSpawner {
+            stream_provider: mock.clone(),
+            primary_model: "test-model".to_string(),
+            small_model: None,
+            project_root: root.clone(),
+            tool_context: ToolContext {
+                project_root: root.clone(),
+                storage_dir: None,
+                task_store: None,
+                lsp_manager: None,
+            },
+            permission_engine: None,
+            context_window: None,
+            usage_writer: crate::usage::test_usage_writer(),
+            usage_project_id: "test-project".to_string(),
+            usage_session_id: "test-session".to_string(),
+            cancel_token: cancel_token.clone(),
+            mcp_manager: None,
+        };
+
+        let req = StreamRequest {
+            stream_provider: mock,
+            model: "test-model".to_string(),
+            system_prompt: None,
+            history: vec![],
+            user_message: "test parallel agents".to_string(),
+            event_tx: tx,
+            tool_registry: Some(Arc::new(ToolRegistry::new(root.clone()))),
+            tool_context: Some(ToolContext {
+                project_root: root.clone(),
+                storage_dir: None,
+                task_store: None,
+                lsp_manager: None,
+            }),
+            permission_engine: Some(Arc::new(tokio::sync::Mutex::new(
+                crate::permission::PermissionEngine::new(crate::permission::build_mode_rules()),
+            ))),
+            tool_cache: Arc::new(std::sync::Mutex::new(ToolResultCache::new(root))),
+            cancel_token,
+            context_window: None,
+            interjection_rx,
+            usage_writer: crate::usage::test_usage_writer(),
+            usage_project_id: "test-project".to_string(),
+            usage_session_id: "test-session".to_string(),
+            usage_model_cost: None,
+            is_plan_mode: false,
+            agent_spawner: Some(spawner),
+            mcp_manager: None,
+        };
+
+        req.run()
+            .await
+            .expect("parallel agent stream should succeed");
+        let events = collect_events(rx).await;
+
+        // Should complete with LlmFinish
+        let finishes: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmFinish { .. }))
+            .collect();
+        assert_eq!(finishes.len(), 1, "should get exactly one LlmFinish");
+
+        // Should have tool results for all 3 agents
+        let tool_results: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    AppEvent::ToolResult {
+                        tool_name: ToolName::Agent,
+                        ..
+                    }
+                )
+            })
+            .collect();
+        assert_eq!(tool_results.len(), 3, "should have 3 agent tool results");
+
+        // Verify none errored
+        for result in &tool_results {
+            let AppEvent::ToolResult { output, .. } = result else {
+                unreachable!();
+            };
+            assert!(
+                !output.is_error,
+                "agent should not error: {}",
+                output.output
+            );
+        }
+
+        // Should have text deltas from the final parent response
+        let deltas: Vec<&AppEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AppEvent::LlmDelta { .. }))
+            .collect();
+        assert!(
+            !deltas.is_empty(),
+            "should have text deltas from final response"
+        );
+
+        // Verify usage was accumulated from sub-agents
+        let AppEvent::LlmFinish { usage: Some(usage) } = finishes[0] else {
+            panic!("LlmFinish should have usage");
+        };
+        // Parent: 200+300=500 prompt, 50+15=65 completion
+        // Sub-agents: 3×100=300 prompt, 20+25+30=75 completion
+        // Total: 800 prompt, 140 completion
+        assert!(
+            usage.prompt_tokens >= 500,
+            "usage should include sub-agent prompt tokens, got {}",
+            usage.prompt_tokens
+        );
+        assert!(
+            usage.completion_tokens >= 65,
+            "usage should include sub-agent completion tokens, got {}",
+            usage.completion_tokens
         );
     }
 }

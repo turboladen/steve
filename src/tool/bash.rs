@@ -119,12 +119,7 @@ pub fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
 
     // Reject simple commands that duplicate native tools
     if let Some(redirect) = check_native_tool_redirect(command) {
-        let title = if command.chars().count() > 60 {
-            let truncated: String = command.chars().take(57).collect();
-            format!("$ {truncated}...")
-        } else {
-            format!("$ {command}")
-        };
+        let title = format!("$ {}", crate::truncate_chars(command, 60));
         return Ok(ToolOutput {
             title,
             output: redirect,
@@ -136,12 +131,7 @@ pub fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
 
     let result = run_command(command, &ctx.project_root, timeout_secs)?;
 
-    let title = if command.chars().count() > 60 {
-        let truncated: String = command.chars().take(57).collect();
-        format!("$ {truncated}...")
-    } else {
-        format!("$ {command}")
-    };
+    let title = format!("$ {}", crate::truncate_chars(command, 60));
 
     Ok(ToolOutput {
         title,
@@ -237,7 +227,7 @@ fn run_command(command: &str, cwd: &Path, timeout_secs: u64) -> Result<CommandRe
     if result.len() > max_len {
         let total_len = result.len();
         // Find safe char boundaries first to avoid panicking on multi-byte UTF-8
-        let safe_head_boundary = crate::floor_char_boundary(&result, 15_000.min(total_len));
+        let safe_head_boundary = result.floor_char_boundary(15_000.min(total_len));
         let safe_tail_boundary = {
             // ceil_char_boundary: advance to the next valid boundary
             let mut start = total_len.saturating_sub(4_000);

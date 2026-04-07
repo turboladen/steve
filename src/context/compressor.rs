@@ -147,9 +147,9 @@ fn compress_tool_output(
         ToolName::Glob => compress_glob(content),
         ToolName::List => compress_list(content),
         ToolName::Bash => compress_bash(content),
-        ToolName::Edit => compress_edit(content),
-        ToolName::Write => compress_write(content),
-        ToolName::Patch => compress_patch(content),
+        ToolName::Edit => compress_write_op(content, "edited"),
+        ToolName::Write => compress_write_op(content, "wrote"),
+        ToolName::Patch => compress_write_op(content, "patched"),
         ToolName::Move
         | ToolName::Copy
         | ToolName::Delete
@@ -345,28 +345,12 @@ fn compress_bash(content: &str) -> String {
 }
 
 /// Compress edit tool output (already short, but standardize format).
-fn compress_edit(content: &str) -> String {
-    // Edit outputs are already minimal: "Successfully edited {path}..."
-    if content.len() < 200 {
-        return content.to_string(); // Don't compress short outputs
-    }
-    "[Previously edited file.]".to_string()
-}
-
-/// Compress write tool output.
-fn compress_write(content: &str) -> String {
+/// Compress a write-tool (edit/write/patch) output.
+fn compress_write_op(content: &str, verb: &str) -> String {
     if content.len() < 200 {
         return content.to_string();
     }
-    "[Previously wrote file.]".to_string()
-}
-
-/// Compress patch tool output.
-fn compress_patch(content: &str) -> String {
-    if content.len() < 200 {
-        return content.to_string();
-    }
-    "[Previously patched file.]".to_string()
+    format!("[Previously {verb} file.]")
 }
 
 /// Generic compression for unknown tools.

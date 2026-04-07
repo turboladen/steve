@@ -32,6 +32,9 @@ pub enum AppEvent {
     Tick,
 
     // -- LLM streaming events --
+    /// The LLM is starting a new response (e.g., after an interjection).
+    /// The UI should push a fresh Assistant block and persistence message.
+    LlmResponseStart,
     /// A text delta from the LLM stream (token-by-token).
     LlmDelta { text: String },
     /// Reasoning/thinking tokens from the LLM.

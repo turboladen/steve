@@ -83,6 +83,7 @@ pub(super) enum PhaseOutcome {
 /// Unknown tool names get an error tool-result message pushed to `messages`.
 /// Valid calls are split into auto-allowed (parallel-eligible), needs-interaction
 /// (sequential), and MCP calls.
+// Structural — all parameters are distinct coordination concerns (tools, permissions, state, events)
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn partition_tool_calls(
     pending_tool_calls: &HashMap<u32, PendingToolCall>,
@@ -208,6 +209,7 @@ pub(super) async fn partition_tool_calls(
 /// Execute auto-allowed (read-only, pre-permitted) tools in parallel.
 ///
 /// Returns `PhaseOutcome::Cancelled` if the cancel token fires during result processing.
+// Structural — each parameter is a distinct resource (registry, cache, events, cancellation, counters)
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_parallel_tools(
     tools: &[PreparedToolCall],
@@ -361,6 +363,7 @@ pub(super) async fn execute_parallel_tools(
 /// cache checking, and cache invalidation for write tools.
 ///
 /// Returns `PhaseOutcome::Cancelled` if the cancel token fires.
+// Structural — sequential execution requires all coordination handles (registry, permissions, cache, events, agents)
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_sequential_tools(
     tools: &[PreparedToolCall],
@@ -374,6 +377,121 @@ pub(super) async fn execute_sequential_tools(
     messages: &mut Vec<ChatCompletionRequestMessage>,
     counters: &mut IterationCounters,
 ) -> PhaseOutcome {
+    // Pre-spawn auto-allowed agents (Explore/Plan) in parallel, await all in
+    // completion order, and collect results. ToolResult events are sent as each
+    // agent finishes so the UI shows results immediately, not in call order.
+    let mut agent_results: HashMap<String, crate::tool::ToolOutput> = HashMap::new();
+    let mut agent_results_sent: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    {
+        type AgentHandle =
+            tokio::task::JoinHandle<(String, AgentType, Result<String, String>, StreamUsage)>;
+        let mut handles: Vec<AgentHandle> = Vec::new();
+
+        if let Some(spawner) = agent_spawner {
+            for tc in tools {
+                if !matches!(tc.tool_name, ToolName::Agent) {
+                    continue;
+                }
+                let agent_type_str = tc
+                    .args
+                    .get("agent_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("explore");
+                let agent_type: AgentType = agent_type_str.parse().unwrap_or(AgentType::Explore);
+
+                // Only pre-spawn agents that don't need user permission
+                if agent_type == AgentType::General && matches!(tc.action, PermissionAction::Ask) {
+                    continue;
+                }
+
+                let _ = event_tx.send(AppEvent::LlmToolCall {
+                    call_id: tc.id.clone(),
+                    tool_name: tc.tool_name,
+                    arguments: tc.args.clone(),
+                });
+
+                let task_str = tc
+                    .args
+                    .get("task")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(no task provided)")
+                    .to_string();
+                let context_str = tc
+                    .args
+                    .get("context")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let spawner = spawner.clone();
+                let parent_tx = event_tx.clone();
+                let call_id = tc.id.clone();
+
+                let handle = tokio::spawn(async move {
+                    let (result, usage) = run_sub_agent(
+                        &spawner,
+                        agent_type,
+                        &task_str,
+                        context_str.as_deref(),
+                        &parent_tx,
+                        &call_id,
+                    )
+                    .await;
+                    (call_id, agent_type, result, usage)
+                });
+                handles.push(handle);
+            }
+        }
+
+        if handles.len() > 1 {
+            tracing::info!(count = handles.len(), "running agents in parallel");
+        }
+
+        // Await in completion order — send ToolResult to UI as each finishes.
+        // Observe cancel_token so cancellation doesn't block on slow agents.
+        let mut remaining = handles;
+        while !remaining.is_empty() {
+            let select_future = futures_util::future::select_all(remaining);
+            let completed = tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    // select_all consumed remaining; abort via the returned rest
+                    break;
+                }
+                (result, _index, rest) = select_future => {
+                    remaining = rest;
+                    result
+                }
+            };
+
+            match completed {
+                Ok((call_id, agent_type, result, usage)) => {
+                    counters.total_usage += usage;
+                    let output = match result {
+                        Ok(text) => crate::tool::ToolOutput {
+                            title: format!("Agent ({agent_type})"),
+                            output: text,
+                            is_error: false,
+                        },
+                        Err(e) => crate::tool::ToolOutput {
+                            title: format!("Agent ({agent_type})"),
+                            output: format!("Agent error: {e}"),
+                            is_error: true,
+                        },
+                    };
+                    let _ = event_tx.send(AppEvent::ToolResult {
+                        call_id: call_id.clone(),
+                        tool_name: ToolName::Agent,
+                        output: output.clone(),
+                    });
+                    agent_results_sent.insert(call_id.clone());
+                    agent_results.insert(call_id, output);
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "agent task panicked");
+                }
+            }
+        }
+    }
+
     for tc in tools {
         if cancel_token.is_cancelled() {
             tracing::info!("stream cancelled during tool execution");
@@ -458,35 +576,39 @@ pub(super) async fn execute_sequential_tools(
             continue;
         }
 
-        // Agent tool: spawn a sub-agent with its own conversation context
+        // Agent tool: await pre-spawned handle or run sequentially (General with permission)
         if matches!(tc.tool_name, ToolName::Agent) {
-            let _ = event_tx.send(AppEvent::LlmToolCall {
-                call_id: tc.id.clone(),
-                tool_name: tc.tool_name,
-                arguments: tc.args.clone(),
-            });
-
             let agent_type_str = tc
                 .args
                 .get("agent_type")
                 .and_then(|v| v.as_str())
                 .unwrap_or("explore");
-            let task_str = tc
-                .args
-                .get("task")
-                .and_then(|v| v.as_str())
-                .unwrap_or("(no task provided)")
-                .to_string();
-            let context_str = tc
-                .args
-                .get("context")
-                .and_then(|v| v.as_str())
-                .map(String::from);
 
-            let output = if let Some(spawner) = agent_spawner {
+            let output = if let Some(output) = agent_results.remove(&tc.id) {
+                // Already completed in parallel — ToolResult already sent to UI
+                output
+            } else if let Some(spawner) = agent_spawner {
+                // General agent needing permission — runs sequentially
+                let _ = event_tx.send(AppEvent::LlmToolCall {
+                    call_id: tc.id.clone(),
+                    tool_name: tc.tool_name,
+                    arguments: tc.args.clone(),
+                });
+
                 let agent_type: AgentType = agent_type_str.parse().unwrap_or(AgentType::Explore);
+                let task_str = tc
+                    .args
+                    .get("task")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("(no task provided)")
+                    .to_string();
+                let context_str = tc
+                    .args
+                    .get("context")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
 
-                // For General agents in Ask mode, we still need permission
+                // General agents in Ask mode need permission
                 if agent_type == AgentType::General && matches!(tc.action, PermissionAction::Ask) {
                     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
                     let summary = build_permission_summary(tc.tool_name, &tc.args);
@@ -584,11 +706,15 @@ pub(super) async fn execute_sequential_tools(
                 }
             };
 
-            let _ = event_tx.send(AppEvent::ToolResult {
-                call_id: tc.id.clone(),
-                tool_name: tc.tool_name,
-                output: output.clone(),
-            });
+            // Pre-completed agents already had ToolResult sent in the
+            // completion-order loop above; only send for sequential agents.
+            if !agent_results_sent.contains(&tc.id) {
+                let _ = event_tx.send(AppEvent::ToolResult {
+                    call_id: tc.id.clone(),
+                    tool_name: tc.tool_name,
+                    output: output.clone(),
+                });
+            }
 
             messages.push(ChatCompletionRequestMessage::Tool(
                 ChatCompletionRequestToolMessage {
@@ -817,6 +943,7 @@ pub(super) async fn execute_sequential_tools(
 /// Execute MCP tool calls sequentially (external IPC, always sequential).
 ///
 /// Returns `PhaseOutcome::Cancelled` if the cancel token fires.
+// Structural — MCP execution needs all coordination handles (manager, permissions, events, counters)
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_mcp_tools(
     tools: &[McpPreparedToolCall],

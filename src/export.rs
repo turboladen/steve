@@ -169,149 +169,34 @@ fn write_message_part(out: &mut String, part: &MessagePart) {
 // ---------------------------------------------------------------------------
 
 /// Extract a short summary from tool call arguments (similar to `extract_args_summary` in app.rs).
+/// Delegate to the shared args summary, but use "(no ...)" fallbacks for export readability.
 fn extract_tool_summary(tool_name: ToolName, input: &serde_json::Value) -> String {
-    match tool_name {
-        ToolName::Read => {
-            if let Some(paths) = input.get("paths").and_then(|v| v.as_array()) {
-                format!("{} files", paths.len())
-            } else {
-                let path = input
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("(no path)");
-                let is_count = input
-                    .get("count")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let tail_n = input.get("tail").and_then(|v| v.as_u64());
-                if is_count {
-                    format!("{path} (count)")
-                } else if let Some(n) = tail_n {
-                    format!("{path} (tail {n})")
-                } else {
-                    path.to_string()
-                }
-            }
+    let summary = crate::app::extract_args_summary(tool_name, input);
+    let trimmed = summary.trim();
+    let needs_fallback = trimmed.is_empty()
+        || matches!(tool_name, ToolName::Move | ToolName::Copy) && trimmed == "\u{2192}"
+        || matches!(tool_name, ToolName::Agent) && trimmed.ends_with(':');
+    if needs_fallback {
+        // Provide a readable fallback for export context
+        match tool_name {
+            ToolName::Read
+            | ToolName::List
+            | ToolName::Delete
+            | ToolName::Mkdir
+            | ToolName::Edit
+            | ToolName::Write
+            | ToolName::Patch
+            | ToolName::Symbols
+            | ToolName::Lsp => "(no path)".to_string(),
+            ToolName::Grep | ToolName::Glob => "(no pattern)".to_string(),
+            ToolName::Bash => "(no command)".to_string(),
+            ToolName::Webfetch => "(no url)".to_string(),
+            ToolName::Move | ToolName::Copy => "(no path) \u{2192} (no path)".to_string(),
+            ToolName::Agent => "(no task)".to_string(),
+            ToolName::Question | ToolName::Task | ToolName::Memory => String::new(),
         }
-        ToolName::List => input
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("(no path)")
-            .to_string(),
-        ToolName::Symbols => {
-            let path = input
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("(no path)");
-            let op = input
-                .get("operation")
-                .and_then(|v| v.as_str())
-                .unwrap_or("list_symbols");
-            match op {
-                "find_scope" => {
-                    let line = input.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
-                    format!("{path} scope@{line}")
-                }
-                "find_definition" => {
-                    let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                    format!("{path} def:{name}")
-                }
-                _ => path.to_string(),
-            }
-        }
-        ToolName::Grep | ToolName::Glob => input
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .unwrap_or("(no pattern)")
-            .to_string(),
-        ToolName::Edit | ToolName::Write | ToolName::Patch => input
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("(no path)")
-            .to_string(),
-        ToolName::Move | ToolName::Copy => {
-            let from = input
-                .get("from_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("(no path)");
-            let to = input
-                .get("to_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("(no path)");
-            format!("{from} \u{2192} {to}")
-        }
-        ToolName::Delete | ToolName::Mkdir => input
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("(no path)")
-            .to_string(),
-        ToolName::Bash => {
-            let cmd = input
-                .get("command")
-                .and_then(|v| v.as_str())
-                .unwrap_or("(no command)");
-            if cmd.chars().count() > 60 {
-                let truncated: String = cmd.chars().take(57).collect();
-                format!("{truncated}...")
-            } else {
-                cmd.to_string()
-            }
-        }
-        ToolName::Question => input
-            .get("question")
-            .and_then(|v| v.as_str())
-            .map(|s| {
-                if s.chars().count() > 40 {
-                    let t: String = s.chars().take(37).collect();
-                    format!("{t}...")
-                } else {
-                    s.to_string()
-                }
-            })
-            .unwrap_or_default(),
-        ToolName::Task => input
-            .get("action")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        ToolName::Webfetch => input
-            .get("url")
-            .and_then(|v| v.as_str())
-            .unwrap_or("(no url)")
-            .to_string(),
-        ToolName::Memory => input
-            .get("action")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        ToolName::Lsp => {
-            let path = input
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("(no path)");
-            let op = input
-                .get("operation")
-                .and_then(|v| v.as_str())
-                .unwrap_or("diagnostics");
-            match op {
-                "diagnostics" => format!("{path} diagnostics"),
-                _ => {
-                    let line = input.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
-                    format!("{path} {op}@{line}")
-                }
-            }
-        }
-        ToolName::Agent => {
-            let agent_type = input
-                .get("agent_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("explore");
-            let task = input
-                .get("task")
-                .and_then(|v| v.as_str())
-                .unwrap_or("(no task)");
-            format!("{agent_type}: {task}")
-        }
+    } else {
+        summary
     }
 }
 
@@ -512,12 +397,22 @@ mod tests {
 
     #[test]
     fn extract_tool_summary_all_tools() {
-        // Every ToolName variant must be handled (compile-time + runtime exhaustiveness).
+        // Every ToolName variant with empty args: tools with required string fields
+        // return a fallback like "(no path)"; tools keyed on optional fields return "".
         let args = json!({});
         for tool in ToolName::iter() {
             let result = extract_tool_summary(tool, &args);
-            // All variants should produce a non-panicking result
-            let _ = result;
+            if matches!(tool, ToolName::Question | ToolName::Task | ToolName::Memory) {
+                assert_eq!(
+                    result, "",
+                    "{tool} with empty args should return empty string"
+                );
+            } else {
+                assert!(
+                    !result.is_empty(),
+                    "{tool} with empty args should return a non-empty fallback"
+                );
+            }
         }
     }
 
@@ -727,7 +622,7 @@ mod tests {
         let long_cmd = "a".repeat(80);
         let result = extract_tool_summary(ToolName::Bash, &json!({"command": long_cmd}));
         assert!(result.ends_with("..."));
-        assert_eq!(result.chars().count(), 60); // 57 + "..."
+        assert!(result.chars().count() <= 40); // Truncated via extract_args_summary
     }
 
     #[test]

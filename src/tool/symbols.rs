@@ -307,11 +307,7 @@ fn extract_name<'a>(node: Node<'a>, source: &'a [u8]) -> Option<String> {
     {
         let text = node_text(node, source);
         // Truncate long imports
-        if text.chars().count() > 60 {
-            let truncated: String = text.chars().take(57).collect();
-            return Some(format!("{truncated}..."));
-        }
-        return Some(text);
+        return Some(crate::truncate_chars(&text, 60));
     }
 
     // Try field `name` first (works for most languages)
@@ -706,11 +702,7 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
         })?;
 
     // Resolve path relative to project root
-    let path = if Path::new(path_str).is_absolute() {
-        std::path::PathBuf::from(path_str)
-    } else {
-        ctx.project_root.join(path_str)
-    };
+    let path = super::resolve_path(path_str, &ctx.project_root);
 
     if !path.exists() {
         return Ok(ToolOutput {

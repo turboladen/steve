@@ -128,12 +128,9 @@ impl ToolName {
         )
     }
 
-    /// Whether this tool's results can be cached.
+    /// Whether this tool's results can be cached (currently same set as read-only).
     pub fn is_cacheable(self) -> bool {
-        matches!(
-            self,
-            ToolName::Read | ToolName::Grep | ToolName::Glob | ToolName::List | ToolName::Symbols
-        )
+        self.is_read_only()
     }
 
     /// Whether this is the memory tool.
@@ -370,6 +367,17 @@ pub struct ToolContext {
     pub lsp_manager: Option<Arc<std::sync::Mutex<LspManager>>>,
 }
 
+/// Resolve a path string relative to the project root.
+/// Absolute paths are returned as-is; relative paths are joined with `project_root`.
+pub fn resolve_path(path_str: &str, project_root: &std::path::Path) -> PathBuf {
+    let p = std::path::Path::new(path_str);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        project_root.join(p)
+    }
+}
+
 /// Definition of a tool (for sending to the LLM as a function schema).
 pub struct ToolDef {
     pub name: ToolName,
@@ -522,6 +530,30 @@ mod tests {
     use super::*;
     use strum::IntoEnumIterator;
 
+    #[test]
+    fn resolve_path_absolute_passthrough() {
+        let root = std::path::Path::new("/project");
+        let result = resolve_path("/absolute/file.rs", root);
+        assert_eq!(result, std::path::PathBuf::from("/absolute/file.rs"));
+    }
+
+    #[test]
+    fn resolve_path_relative_joins() {
+        let root = std::path::Path::new("/project");
+        let result = resolve_path("src/main.rs", root);
+        assert_eq!(result, std::path::PathBuf::from("/project/src/main.rs"));
+    }
+
+    /// Create a minimal ToolContext for unit tests.
+    pub(crate) fn test_tool_context(project_root: std::path::PathBuf) -> ToolContext {
+        ToolContext {
+            project_root,
+            storage_dir: None,
+            task_store: None,
+            lsp_manager: None,
+        }
+    }
+
     /// Every variant round-trips through as_str -> FromStr.
     #[test]
     fn tool_name_round_trip_all_variants() {
@@ -559,100 +591,57 @@ mod tests {
 
     #[test]
     fn is_write_tool_correct() {
-        let write_tools = [
-            ToolName::Edit,
-            ToolName::Write,
-            ToolName::Patch,
-            ToolName::Move,
-            ToolName::Copy,
-            ToolName::Delete,
-            ToolName::Mkdir,
-        ];
-        let non_write = [
-            ToolName::Read,
-            ToolName::Grep,
-            ToolName::Glob,
-            ToolName::List,
-            ToolName::Bash,
-            ToolName::Question,
-            ToolName::Task,
-            ToolName::Webfetch,
-            ToolName::Memory,
-            ToolName::Symbols,
-            ToolName::Lsp,
-            ToolName::Agent,
-        ];
-        for t in write_tools {
-            assert!(t.is_write_tool(), "{t} should be a write tool");
-        }
-        for t in non_write {
-            assert!(!t.is_write_tool(), "{t} should not be a write tool");
+        for t in ToolName::iter() {
+            if matches!(
+                t,
+                ToolName::Edit
+                    | ToolName::Write
+                    | ToolName::Patch
+                    | ToolName::Move
+                    | ToolName::Copy
+                    | ToolName::Delete
+                    | ToolName::Mkdir
+            ) {
+                assert!(t.is_write_tool(), "{t} should be a write tool");
+            } else {
+                assert!(!t.is_write_tool(), "{t} should not be a write tool");
+            }
         }
     }
 
     #[test]
     fn is_read_only_correct() {
-        let read_only = [
-            ToolName::Read,
-            ToolName::Grep,
-            ToolName::Glob,
-            ToolName::List,
-            ToolName::Symbols,
-        ];
-        let not_read_only = [
-            ToolName::Edit,
-            ToolName::Write,
-            ToolName::Patch,
-            ToolName::Move,
-            ToolName::Copy,
-            ToolName::Delete,
-            ToolName::Mkdir,
-            ToolName::Bash,
-            ToolName::Question,
-            ToolName::Task,
-            ToolName::Webfetch,
-            ToolName::Memory,
-            ToolName::Lsp,
-            ToolName::Agent,
-        ];
-        for t in read_only {
-            assert!(t.is_read_only(), "{t} should be read-only");
-        }
-        for t in not_read_only {
-            assert!(!t.is_read_only(), "{t} should not be read-only");
+        for t in ToolName::iter() {
+            if matches!(
+                t,
+                ToolName::Read
+                    | ToolName::Grep
+                    | ToolName::Glob
+                    | ToolName::List
+                    | ToolName::Symbols
+            ) {
+                assert!(t.is_read_only(), "{t} should be read-only");
+            } else {
+                assert!(!t.is_read_only(), "{t} should not be read-only");
+            }
         }
     }
 
     #[test]
     fn is_cacheable_correct() {
-        let cacheable = [
-            ToolName::Read,
-            ToolName::Grep,
-            ToolName::Glob,
-            ToolName::List,
-            ToolName::Symbols,
-        ];
-        let not_cacheable = [
-            ToolName::Edit,
-            ToolName::Write,
-            ToolName::Patch,
-            ToolName::Move,
-            ToolName::Copy,
-            ToolName::Delete,
-            ToolName::Mkdir,
-            ToolName::Bash,
-            ToolName::Question,
-            ToolName::Task,
-            ToolName::Webfetch,
-            ToolName::Memory,
-            ToolName::Lsp,
-            ToolName::Agent,
-        ];
-        for t in cacheable {
-            assert!(t.is_cacheable(), "{t} should be cacheable");
-        }
-        for t in not_cacheable {
-            assert!(!t.is_cacheable(), "{t} should not be cacheable");
+        for t in ToolName::iter() {
+            if matches!(
+                t,
+                ToolName::Read
+                    | ToolName::Grep
+                    | ToolName::Glob
+                    | ToolName::List
+                    | ToolName::Symbols
+            ) {
+                assert!(t.is_cacheable(), "{t} should be cacheable");
+            } else {
+                assert!(!t.is_cacheable(), "{t} should not be cacheable");
+            }
         }
     }
 

@@ -1,9 +1,6 @@
 //! Read tool — reads file contents with optional line range, tail, count, or multi-file support.
 
-use std::{
-    io::Read as _,
-    path::{Path, PathBuf},
-};
+use std::{io::Read as _, path::Path};
 
 use serde_json::Value;
 
@@ -164,7 +161,7 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
         let mut output = String::new();
         let mut error_count = 0;
         for path_str in &paths {
-            let resolved = resolve_path(path_str, &ctx.project_root);
+            let resolved = super::resolve_path(path_str, &ctx.project_root);
             if !output.is_empty() {
                 output.push('\n');
             }
@@ -191,7 +188,7 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing 'path' argument"))?;
-        let resolved = resolve_path(path_str, &ctx.project_root);
+        let resolved = super::resolve_path(path_str, &ctx.project_root);
 
         match read_single_file(path_str, &resolved, &mode, max_lines) {
             Ok(content) => Ok(ToolOutput {
@@ -205,16 +202,6 @@ fn execute(args: Value, ctx: ToolContext) -> anyhow::Result<ToolOutput> {
                 is_error: true,
             }),
         }
-    }
-}
-
-/// Resolve a path string relative to the project root.
-fn resolve_path(path_str: &str, project_root: &Path) -> PathBuf {
-    let p = Path::new(path_str);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        project_root.join(p)
     }
 }
 
