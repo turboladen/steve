@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-04-06
+
+### Added
+
+- MCP client support with remote server OAuth2 authentication
+- `/mcp` tabbed overlay for browsing MCP servers, tools, resources, and prompts
+- Parallel sub-agent execution (Explore/Plan types run concurrently via `tokio::spawn`)
+- Parallel agent results stream as they complete, not in call order
+- Tree-sitter parsers for bash, fish, yaml, hcl, lua, and css
+- Clickable URLs in message area (cmd-click)
+- Colorblind-safe theme palette (photo-derived)
+- Model picker at startup when no model is configured
+- OSC 7 CWD reporting on startup
+- CI pipeline with cargo check, nextest, clippy, and fmt
+- Branded OAuth callback pages and README with Steve logo
+- 80+ new unit tests across app, stream, and tool modules
+
+### Changed
+
+- Replaced compressor heuristics with tree-sitter for smarter output compression
+- Replaced language name strings with `TreeSitterLang` enum
+- Replaced action/operation strings with typed enums (`EditOperation`, `MemoryAction`, `TaskAction`, `SymbolsOperation`, `LspOperation`)
+- Split `app.rs` into focused submodules (event_loop, key_handling, input, commands, session, prompt, context, helpers, tool_display)
+- Split `stream.rs` into submodules (agent, tools, recovery, phases) with extracted tool execution phases
+- Split `message_area` and `sidebar` into mod.rs + render.rs submodules
+- Restructured `mcp/`, `lsp/`, `config/`, `cli/` — inlined types, extracted server/manager modules
+- Compact sidebar layout (saves ~5 vertical lines), merged Changes into Git section
+- Replaced `which` shell-out with `which` crate for binary discovery
+- Used `workspace_folders` instead of deprecated `root_uri` for LSP init
+- Enabled `clippy::cargo` lint, fixed all 105 clippy warnings
+- Added `rustfmt.toml` with `imports_granularity = "Crate"`
+- Updated jsonc-parser 0.32.3, ratatui-textarea 0.8 → 0.9, rmcp to 1.3
+- Updated actions/checkout from v4 to v6
+
+### Fixed
+
+- Interjection response appended to previous assistant message instead of new block
+- Agent progress routed to wrong tool call (now matched by `call_id`)
+- Config model ignored when resuming session (used stale session model)
+- MCP tool identity shown as 'bash' placeholder in permission prompts
+- Mtime-less cache entries not invalidated between user turns
+- OAuth retry when stored credentials are rejected
+- Tab completed commands but also executed them
+- Raw markdown preserved when copying mouse-selected text
+- Synchronous log writer to prevent empty log files
+- Percent-encoded OSC 7 path with edge-case handling
+- Badge contrast for light theme, explicit dark text on Build/Plan mode badge
+- Interjection channel drained before exiting text-only stream responses
+- Config tests isolated from real global config
+- Scroll clamp, overlay mutual exclusion
+- Unsafe unwraps replaced with proper error handling
+- Localhost fallback when `set_host` fails
+
 ## [0.2.0] - 2026-03-21
 
 ### Added
@@ -71,5 +124,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scroll direction, scroll overflow
 - Truncated tool calls on `finish_reason=Length`
 
+[0.3.0]: https://github.com/turboladen/steve/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/turboladen/steve/compare/0.1.0...v0.2.0
 [0.1.0]: https://github.com/turboladen/steve/releases/tag/0.1.0
