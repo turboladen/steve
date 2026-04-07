@@ -315,7 +315,7 @@ impl InputState {
         // line that exactly fills the available width, the cursor wraps to a new
         // visual row. Reserve that extra row so the input box doesn't scroll.
         if width > 0 {
-            let (cursor_row, cursor_col) = self.textarea.cursor();
+            let ratatui_textarea::DataCursor(cursor_row, cursor_col) = self.textarea.cursor();
             if let Some(cursor_line) = lines.get(cursor_row) {
                 let char_count = cursor_line.chars().count();
                 if cursor_col >= char_count {
@@ -441,7 +441,7 @@ pub fn abbreviate_path(path: &Path) -> String {
 fn render_wrapped_textarea(frame: &mut Frame, area: Rect, state: &mut InputState, theme: &Theme) {
     let width = area.width as usize;
     let lines = state.textarea.lines();
-    let (cursor_row, cursor_col) = state.textarea.cursor();
+    let ratatui_textarea::DataCursor(cursor_row, cursor_col) = state.textarea.cursor();
 
     let normal_style = if state.is_collapsed() {
         Style::default().fg(theme.dim)

@@ -1888,9 +1888,9 @@ dependencies = [
 
 [[package]]
 name = "jsonc-parser"
-version = "0.32.2"
+version = "0.32.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22e174964e77ea79b784f1e1dfffec4f77f61a453a36efc7c36838c917706777"
+checksum = "8c2e5dea04f54739ca5694ee06e4448ffda065a55b3427d2b131bd5ea697ea2c"
 dependencies = [
  "serde",
 ]
@@ -2794,13 +2794,14 @@ dependencies = [
 
 [[package]]
 name = "ratatui-textarea"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de236b7cc74b3f7dea227b3fbad97bf459cddf552b6503d888fb9a106eda59ab"
+checksum = "d2f109a42d924f1fe4f4d521a1f473161f6c08eb53a2d9b862ca6efd14f6e51c"
 dependencies = [
  "ratatui-core",
  "ratatui-crossterm",
  "ratatui-widgets",
+ "unicode-segmentation",
  "unicode-width",
 ]
 
