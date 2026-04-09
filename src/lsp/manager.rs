@@ -44,7 +44,7 @@ impl LspManager {
                     self.servers.insert(lang, server);
                 }
                 Err(e) => {
-                    tracing::debug!("LSP: {lang} server not available: {e}");
+                    tracing::debug!("LSP: {lang} server not available: {e:#}");
                 }
             }
         }
@@ -72,16 +72,19 @@ impl LspManager {
         let stdin = child.stdin.take().context("no stdin")?;
         let stdout = child.stdout.take().context("no stdout")?;
 
+        let binary_for_log = binary.clone();
         let diagnostics: SharedDiagnostics =
             std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
         let (mainloop, server_socket) = create_client(diagnostics.clone());
 
         let mainloop_handle = self.handle.spawn(async move {
-            if let Err(e) = mainloop
+            tracing::debug!("LSP MainLoop starting for {binary_for_log}");
+            match mainloop
                 .run_buffered(stdout.compat(), stdin.compat_write())
                 .await
             {
-                tracing::debug!("LSP MainLoop exited: {e}");
+                Ok(()) => tracing::debug!("LSP MainLoop exited cleanly"),
+                Err(e) => tracing::debug!("LSP MainLoop exited with error: {e:#}"),
             }
         });
 
@@ -113,7 +116,7 @@ impl LspManager {
         let init_result: InitializeResult = self
             .handle
             .block_on(server_socket.request::<request::Initialize>(init_params))
-            .map_err(|e| anyhow::anyhow!("initialize request failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("initialize request failed: {e:?}"))?;
 
         server_socket
             .notify::<notification::Initialized>(InitializedParams {})
