@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "rustfmt \"$TOOL_INPUT_file_path\" 2>/dev/null || true"
+            "command": "rustfmt +nightly \"$TOOL_INPUT_file_path\" 2>/dev/null || true"
           },
           {
             "type": "command",

@@ -676,9 +676,7 @@ fn find_symbol_node_recursive<'a>(
             }
         }
 
-        if let Some(found) =
-            find_symbol_node_recursive(child, source, target_name, symbol_types)
-        {
+        if let Some(found) = find_symbol_node_recursive(child, source, target_name, symbol_types) {
             return Some(found);
         }
     }
