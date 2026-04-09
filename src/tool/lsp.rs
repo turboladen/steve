@@ -311,48 +311,49 @@ fn execute_rename(
     // Format the workspace edit as a readable plan.
     // Servers may return changes in `changes` (simple) or `document_changes` (rich).
     // Normalize to a common (uri, edits) list.
-    let file_edits: Vec<(String, Vec<async_lsp::lsp_types::TextEdit>)> = if let Some(changes) = edit.changes {
-        changes
-            .into_iter()
-            .map(|(uri, edits)| (uri.as_str().to_string(), edits))
-            .collect()
-    } else if let Some(doc_changes) = edit.document_changes {
-        match doc_changes {
-            async_lsp::lsp_types::DocumentChanges::Edits(edits) => edits
+    let file_edits: Vec<(String, Vec<async_lsp::lsp_types::TextEdit>)> =
+        if let Some(changes) = edit.changes {
+            changes
                 .into_iter()
-                .map(|e| {
-                    (
-                        e.text_document.uri.as_str().to_string(),
-                        e.edits
-                            .into_iter()
-                            .map(|edit| match edit {
-                                async_lsp::lsp_types::OneOf::Left(te) => te,
-                                async_lsp::lsp_types::OneOf::Right(ate) => ate.text_edit,
-                            })
-                            .collect(),
-                    )
-                })
-                .collect(),
-            async_lsp::lsp_types::DocumentChanges::Operations(ops) => ops
-                .into_iter()
-                .filter_map(|op| match op {
-                    async_lsp::lsp_types::DocumentChangeOperation::Edit(e) => Some((
-                        e.text_document.uri.as_str().to_string(),
-                        e.edits
-                            .into_iter()
-                            .map(|edit| match edit {
-                                async_lsp::lsp_types::OneOf::Left(te) => te,
-                                async_lsp::lsp_types::OneOf::Right(ate) => ate.text_edit,
-                            })
-                            .collect(),
-                    )),
-                    async_lsp::lsp_types::DocumentChangeOperation::Op(_) => None, // file create/rename/delete
-                })
-                .collect(),
-        }
-    } else {
-        Vec::new()
-    };
+                .map(|(uri, edits)| (uri.as_str().to_string(), edits))
+                .collect()
+        } else if let Some(doc_changes) = edit.document_changes {
+            match doc_changes {
+                async_lsp::lsp_types::DocumentChanges::Edits(edits) => edits
+                    .into_iter()
+                    .map(|e| {
+                        (
+                            e.text_document.uri.as_str().to_string(),
+                            e.edits
+                                .into_iter()
+                                .map(|edit| match edit {
+                                    async_lsp::lsp_types::OneOf::Left(te) => te,
+                                    async_lsp::lsp_types::OneOf::Right(ate) => ate.text_edit,
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+                async_lsp::lsp_types::DocumentChanges::Operations(ops) => ops
+                    .into_iter()
+                    .filter_map(|op| match op {
+                        async_lsp::lsp_types::DocumentChangeOperation::Edit(e) => Some((
+                            e.text_document.uri.as_str().to_string(),
+                            e.edits
+                                .into_iter()
+                                .map(|edit| match edit {
+                                    async_lsp::lsp_types::OneOf::Left(te) => te,
+                                    async_lsp::lsp_types::OneOf::Right(ate) => ate.text_edit,
+                                })
+                                .collect(),
+                        )),
+                        async_lsp::lsp_types::DocumentChangeOperation::Op(_) => None, // file create/rename/delete
+                    })
+                    .collect(),
+            }
+        } else {
+            Vec::new()
+        };
 
     if file_edits.is_empty() {
         return Ok(ToolOutput {

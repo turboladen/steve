@@ -46,11 +46,8 @@ pub(crate) fn create_client(
 
         // Handle workspace/configuration — respond with empty config per item
         router.request::<request::WorkspaceConfiguration, _>(|_state, params| {
-            let items: Vec<serde_json::Value> = params
-                .items
-                .iter()
-                .map(|_| serde_json::json!({}))
-                .collect();
+            let items: Vec<serde_json::Value> =
+                params.items.iter().map(|_| serde_json::json!({})).collect();
             futures_util::future::ready(Ok(items))
         });
 
@@ -71,9 +68,7 @@ pub(crate) fn create_client(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_lsp::lsp_types::{
-        Diagnostic, DiagnosticSeverity, Range, Position,
-    };
+    use async_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
     #[test]
     fn shared_diagnostics_insert_and_read() {

@@ -213,8 +213,7 @@ mod tests {
             "[package]\nname = \"test\"\n",
         )
         .unwrap();
-        let mut mgr =
-            LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+        let mut mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
         mgr.detected_languages = Language::detect_from_project(dir.path());
         let status = mgr.language_status();
         assert!(status.len() >= 2, "expected at least 2 detected languages");

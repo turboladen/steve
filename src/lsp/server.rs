@@ -4,10 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use async_lsp::{
-    ServerSocket,
-    lsp_types::*,
-};
+use async_lsp::{ServerSocket, lsp_types::*};
 use tokio::task::JoinHandle;
 
 use super::Language;
@@ -209,9 +206,7 @@ pub fn uri_to_path(uri_str: &str) -> Option<PathBuf> {
         .and_then(|u| u.to_file_path().ok())
 }
 
-fn parse_goto_definition_response(
-    result: Option<GotoDefinitionResponse>,
-) -> Result<Vec<Location>> {
+fn parse_goto_definition_response(result: Option<GotoDefinitionResponse>) -> Result<Vec<Location>> {
     match result {
         None => Ok(Vec::new()),
         Some(GotoDefinitionResponse::Scalar(loc)) => Ok(vec![loc]),
@@ -281,8 +276,7 @@ mod tests {
     fn shared_diagnostics_from_publish_params() {
         use crate::lsp::client::SharedDiagnostics;
 
-        let diags: SharedDiagnostics =
-            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let diags: SharedDiagnostics = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
         let params = PublishDiagnosticsParams {
             uri: Url::parse("file:///test.rs").unwrap(),
             diagnostics: vec![Diagnostic {
@@ -300,9 +294,7 @@ mod tests {
             .insert(params.uri.clone(), params.diagnostics);
 
         let locked = diags.lock().unwrap();
-        let result = locked
-            .get(&Url::parse("file:///test.rs").unwrap())
-            .unwrap();
+        let result = locked.get(&Url::parse("file:///test.rs").unwrap()).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].message, "test error");
     }
