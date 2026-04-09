@@ -26,7 +26,9 @@ pub fn tool() -> ToolEntry {
                 or plan safe renames using language servers. Use `diagnostics` after editing \
                 code to catch compile errors. Use `definition` instead of grep to find where \
                 a symbol is actually defined. Use `references` to find all usages of a \
-                function, type, or variable across the entire project."
+                function, type, or variable across the entire project. For position-based \
+                operations, you can pass `symbol_name` instead of `line`/`character` — the \
+                tool resolves the position automatically."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -42,15 +44,22 @@ pub fn tool() -> ToolEntry {
                     },
                     "line": {
                         "type": "integer",
-                        "description": "1-indexed line number (required for definition/references/rename)"
+                        "description": "1-indexed line number (required with character for definition/references/rename, unless symbol_name is used)"
                     },
                     "character": {
                         "type": "integer",
-                        "description": "0-indexed column (required for definition/references/rename)"
+                        "description": "0-indexed column (required with line for definition/references/rename, unless symbol_name is used)"
                     },
                     "new_name": {
                         "type": "string",
                         "description": "New name for rename operation (required for rename)"
+                    },
+                    "symbol_name": {
+                        "type": "string",
+                        "description": "Symbol name to look up (alternative to line/character \
+                            for definition/references/rename). The tool resolves the symbol's \
+                            position automatically via tree-sitter. If both symbol_name and \
+                            line/character are provided, line/character takes precedence."
                     }
                 },
                 "required": ["path"]
@@ -102,15 +111,15 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
     match operation {
         super::LspOperation::Diagnostics => execute_diagnostics(lsp_manager, &path, path_str),
         super::LspOperation::Definition => {
-            let (line, character) = extract_position(&args)?;
+            let (line, character) = resolve_position(&args, &path)?;
             execute_definition(lsp_manager, &path, path_str, line, character)
         }
         super::LspOperation::References => {
-            let (line, character) = extract_position(&args)?;
+            let (line, character) = resolve_position(&args, &path)?;
             execute_references(lsp_manager, &path, path_str, line, character)
         }
         super::LspOperation::Rename => {
-            let (line, character) = extract_position(&args)?;
+            let (line, character) = resolve_position(&args, &path)?;
             let new_name = args
                 .get("new_name")
                 .and_then(|v| v.as_str())
@@ -118,6 +127,41 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
             execute_rename(lsp_manager, &path, path_str, line, character, new_name)
         }
     }
+}
+
+/// Resolve position from args: prefer explicit line/character, fall back to symbol_name.
+/// Errors if only one of line/character is provided (incomplete position).
+fn resolve_position(args: &Value, path: &Path) -> Result<(u32, u32)> {
+    let has_line = args.get("line").and_then(|v| v.as_u64()).is_some();
+    let has_character = args.get("character").and_then(|v| v.as_u64()).is_some();
+
+    // If both line and character are present, use them (existing behavior)
+    if has_line && has_character {
+        return extract_position(args);
+    }
+
+    // Reject partial position — one without the other is an error
+    if has_line && !has_character {
+        return Err(anyhow::anyhow!(
+            "line provided without character — provide both line and character, or use symbol_name"
+        ));
+    }
+    if has_character && !has_line {
+        return Err(anyhow::anyhow!(
+            "character provided without line — provide both line and character, or use symbol_name"
+        ));
+    }
+
+    // Try symbol_name resolution via tree-sitter
+    if let Some(symbol_name) = args.get("symbol_name").and_then(|v| v.as_str()) {
+        return super::symbols::resolve_symbol_position(path, symbol_name)
+            .map_err(|e| anyhow::anyhow!("{e}"));
+    }
+
+    // Nothing provided
+    Err(anyhow::anyhow!(
+        "this operation requires either line/character or symbol_name"
+    ))
 }
 
 /// Extract line and character from tool arguments.
@@ -541,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn definition_missing_line() {
+    fn definition_missing_position() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("test.rs");
         std::fs::write(&file, "fn main() {}").unwrap();
@@ -551,11 +595,16 @@ mod tests {
         });
         let result = execute(args, test_ctx_with_lsp(dir.path()));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("line"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("line/character or symbol_name")
+        );
     }
 
     #[test]
-    fn definition_missing_character() {
+    fn definition_line_without_character() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("test.rs");
         std::fs::write(&file, "fn main() {}").unwrap();
@@ -566,7 +615,12 @@ mod tests {
         });
         let result = execute(args, test_ctx_with_lsp(dir.path()));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("character"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("line provided without character")
+        );
     }
 
     #[test]
@@ -660,5 +714,100 @@ mod tests {
         let (line, char) = extract_position(&args).unwrap();
         assert_eq!(line, 9); // 1-indexed → 0-indexed
         assert_eq!(char, 5); // 0-indexed stays
+    }
+
+    // ── resolve_position ────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_position_prefers_line_character() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "fn hello() {}\nfn world() {}\n").unwrap();
+
+        // Both line/character and symbol_name present — line/character wins
+        let args = serde_json::json!({
+            "line": 2,
+            "character": 3,
+            "symbol_name": "hello"
+        });
+        let (line, char) = resolve_position(&args, &file).unwrap();
+        assert_eq!(line, 1); // line 2 → 0-indexed 1
+        assert_eq!(char, 3);
+    }
+
+    #[test]
+    fn resolve_position_uses_symbol_name() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "fn hello() {}\n").unwrap();
+
+        let args = serde_json::json!({"symbol_name": "hello"});
+        let (line, char) = resolve_position(&args, &file).unwrap();
+        assert_eq!(line, 0);
+        assert_eq!(char, 3); // "hello" starts at column 3
+    }
+
+    #[test]
+    fn resolve_position_neither_provided() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "fn hello() {}\n").unwrap();
+
+        let args = serde_json::json!({});
+        let result = resolve_position(&args, &file);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("line/character or symbol_name")
+        );
+    }
+
+    #[test]
+    fn resolve_position_symbol_not_found() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "fn hello() {}\n").unwrap();
+
+        let args = serde_json::json!({"symbol_name": "nonexistent"});
+        let result = resolve_position(&args, &file);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn resolve_position_line_without_character_errors() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "fn hello() {}\n").unwrap();
+
+        // line without character, even with symbol_name — should error about incomplete position
+        let args = serde_json::json!({"line": 1, "symbol_name": "hello"});
+        let result = resolve_position(&args, &file);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("line provided without character")
+        );
+    }
+
+    #[test]
+    fn resolve_position_character_without_line_errors() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "fn hello() {}\n").unwrap();
+
+        let args = serde_json::json!({"character": 3, "symbol_name": "hello"});
+        let result = resolve_position(&args, &file);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("character provided without line")
+        );
     }
 }
