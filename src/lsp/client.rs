@@ -18,6 +18,10 @@ use async_lsp::{
 };
 
 /// Shared diagnostics cache — written by the MainLoop service, read by LspServer.
+///
+/// Uses `std::sync::Mutex` (not `tokio::sync::Mutex`) because the critical section
+/// is trivial (a single HashMap insert/lookup) and holding it never blocks the async
+/// runtime. This also allows access from both async (MainLoop) and sync (LspServer) contexts.
 pub type SharedDiagnostics = Arc<Mutex<HashMap<Url, Vec<Diagnostic>>>>;
 
 /// State held by the Router service.

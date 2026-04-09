@@ -440,7 +440,7 @@ fn lsp_tool_file_not_found() {
     let (_dir, root) = create_test_project();
     let registry = ToolRegistry::new(root.clone());
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let lsp_mgr = std::sync::Arc::new(std::sync::Mutex::new(steve::lsp::LspManager::new(
+    let lsp_mgr = std::sync::Arc::new(std::sync::RwLock::new(steve::lsp::LspManager::new(
         root.clone(),
         rt.handle().clone(),
     )));
@@ -468,7 +468,7 @@ fn lsp_tool_unknown_operation() {
     let (_dir, root) = create_test_project();
     let registry = ToolRegistry::new(root.clone());
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let lsp_mgr = std::sync::Arc::new(std::sync::Mutex::new(steve::lsp::LspManager::new(
+    let lsp_mgr = std::sync::Arc::new(std::sync::RwLock::new(steve::lsp::LspManager::new(
         root.clone(),
         rt.handle().clone(),
     )));
@@ -503,7 +503,7 @@ fn lsp_tool_definition_missing_position() {
     let (_dir, root) = create_test_project();
     let registry = ToolRegistry::new(root.clone());
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let lsp_mgr = std::sync::Arc::new(std::sync::Mutex::new(steve::lsp::LspManager::new(
+    let lsp_mgr = std::sync::Arc::new(std::sync::RwLock::new(steve::lsp::LspManager::new(
         root.clone(),
         rt.handle().clone(),
     )));
@@ -546,7 +546,7 @@ fn lsp_diagnostics_with_rust_analyzer() {
 
     let registry = ToolRegistry::new(root.clone());
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let lsp_mgr = std::sync::Arc::new(std::sync::Mutex::new(steve::lsp::LspManager::new(
+    let lsp_mgr = std::sync::Arc::new(std::sync::RwLock::new(steve::lsp::LspManager::new(
         root.clone(),
         rt.handle().clone(),
     )));
@@ -593,7 +593,7 @@ fn lsp_definition_with_rust_analyzer() {
     let (_dir, root) = create_cargo_project();
     let registry = ToolRegistry::new(root.clone());
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let lsp_mgr = std::sync::Arc::new(std::sync::Mutex::new(steve::lsp::LspManager::new(
+    let lsp_mgr = std::sync::Arc::new(std::sync::RwLock::new(steve::lsp::LspManager::new(
         root.clone(),
         rt.handle().clone(),
     )));

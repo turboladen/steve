@@ -8,7 +8,7 @@
 
 use std::{
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{Arc, RwLock},
 };
 
 use anyhow::Result;
@@ -144,16 +144,26 @@ fn extract_position(args: &Value) -> Result<(u32, u32)> {
 }
 
 fn execute_diagnostics(
-    lsp_manager: &Arc<Mutex<LspManager>>,
+    lsp_manager: &Arc<RwLock<LspManager>>,
     path: &Path,
     path_str: &str,
 ) -> Result<ToolOutput> {
-    let mut mgr = lsp_manager
-        .lock()
-        .map_err(|_| anyhow::anyhow!("LSP manager lock poisoned"))?;
-
-    let server = mgr.server_for_file(path)?;
-    let diagnostics = server.diagnostics(path)?;
+    // Try read lock (common path — server already running)
+    let diagnostics = match lsp_manager.read() {
+        Ok(mgr) => match mgr.server_for_file(path) {
+            Ok(server) => server.diagnostics(path)?,
+            Err(_) => {
+                // Server not running, need write lock to start it
+                drop(mgr);
+                let mut mgr = lsp_manager
+                    .write()
+                    .map_err(|_| anyhow::anyhow!("LSP manager lock poisoned"))?;
+                let server = mgr.server_for_file_or_start(path)?;
+                server.diagnostics(path)?
+            }
+        },
+        Err(_) => return Err(anyhow::anyhow!("LSP manager lock poisoned")),
+    };
 
     if diagnostics.is_empty() {
         return Ok(ToolOutput {
@@ -188,18 +198,27 @@ fn execute_diagnostics(
 }
 
 fn execute_definition(
-    lsp_manager: &Arc<Mutex<LspManager>>,
+    lsp_manager: &Arc<RwLock<LspManager>>,
     path: &Path,
     path_str: &str,
     line: u32,
     character: u32,
 ) -> Result<ToolOutput> {
-    let mut mgr = lsp_manager
-        .lock()
-        .map_err(|_| anyhow::anyhow!("LSP manager lock poisoned"))?;
-
-    let server = mgr.server_for_file(path)?;
-    let locations = server.definition(path, line, character)?;
+    // Try read lock (common path — server already running)
+    let locations = match lsp_manager.read() {
+        Ok(mgr) => match mgr.server_for_file(path) {
+            Ok(server) => server.definition(path, line, character)?,
+            Err(_) => {
+                drop(mgr);
+                let mut mgr = lsp_manager
+                    .write()
+                    .map_err(|_| anyhow::anyhow!("LSP manager lock poisoned"))?;
+                let server = mgr.server_for_file_or_start(path)?;
+                server.definition(path, line, character)?
+            }
+        },
+        Err(_) => return Err(anyhow::anyhow!("LSP manager lock poisoned")),
+    };
 
     if locations.is_empty() {
         return Ok(ToolOutput {
@@ -241,18 +260,27 @@ fn execute_definition(
 }
 
 fn execute_references(
-    lsp_manager: &Arc<Mutex<LspManager>>,
+    lsp_manager: &Arc<RwLock<LspManager>>,
     path: &Path,
     path_str: &str,
     line: u32,
     character: u32,
 ) -> Result<ToolOutput> {
-    let mut mgr = lsp_manager
-        .lock()
-        .map_err(|_| anyhow::anyhow!("LSP manager lock poisoned"))?;
-
-    let server = mgr.server_for_file(path)?;
-    let locations = server.references(path, line, character)?;
+    // Try read lock (common path — server already running)
+    let locations = match lsp_manager.read() {
+        Ok(mgr) => match mgr.server_for_file(path) {
+            Ok(server) => server.references(path, line, character)?,
+            Err(_) => {
+                drop(mgr);
+                let mut mgr = lsp_manager
+                    .write()
+                    .map_err(|_| anyhow::anyhow!("LSP manager lock poisoned"))?;
+                let server = mgr.server_for_file_or_start(path)?;
+                server.references(path, line, character)?
+            }
+        },
+        Err(_) => return Err(anyhow::anyhow!("LSP manager lock poisoned")),
+    };
 
     if locations.is_empty() {
         return Ok(ToolOutput {
@@ -294,19 +322,28 @@ fn execute_references(
 }
 
 fn execute_rename(
-    lsp_manager: &Arc<Mutex<LspManager>>,
+    lsp_manager: &Arc<RwLock<LspManager>>,
     path: &Path,
     path_str: &str,
     line: u32,
     character: u32,
     new_name: &str,
 ) -> Result<ToolOutput> {
-    let mut mgr = lsp_manager
-        .lock()
-        .map_err(|_| anyhow::anyhow!("LSP manager lock poisoned"))?;
-
-    let server = mgr.server_for_file(path)?;
-    let edit = server.rename(path, line, character, new_name)?;
+    // Try read lock (common path — server already running)
+    let edit = match lsp_manager.read() {
+        Ok(mgr) => match mgr.server_for_file(path) {
+            Ok(server) => server.rename(path, line, character, new_name)?,
+            Err(_) => {
+                drop(mgr);
+                let mut mgr = lsp_manager
+                    .write()
+                    .map_err(|_| anyhow::anyhow!("LSP manager lock poisoned"))?;
+                let server = mgr.server_for_file_or_start(path)?;
+                server.rename(path, line, character, new_name)?
+            }
+        },
+        Err(_) => return Err(anyhow::anyhow!("LSP manager lock poisoned")),
+    };
 
     // Format the workspace edit as a readable plan.
     // Servers may return changes in `changes` (simple) or `document_changes` (rich).
@@ -445,7 +482,7 @@ mod tests {
             project_root: dir.to_path_buf(),
             storage_dir: None,
             task_store: None,
-            lsp_manager: Some(Arc::new(Mutex::new(LspManager::new(
+            lsp_manager: Some(Arc::new(RwLock::new(LspManager::new(
                 dir.to_path_buf(),
                 test_runtime_handle(),
             )))),

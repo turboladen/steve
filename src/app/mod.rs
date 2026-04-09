@@ -192,7 +192,7 @@ pub struct App {
     pub last_message_area: ratatui::layout::Rect,
 
     /// LSP manager (shared with tool handlers via ToolContext).
-    lsp_manager: Arc<std::sync::Mutex<crate::lsp::LspManager>>,
+    lsp_manager: Arc<std::sync::RwLock<crate::lsp::LspManager>>,
 
     /// MCP manager for dynamic tool/resource servers.
     mcp_manager: Arc<tokio::sync::Mutex<crate::mcp::McpManager>>,
@@ -256,7 +256,7 @@ impl App {
         let task_store = crate::task::TaskStore::new(storage.clone(), repo_name);
 
         // Build LSP manager (servers started in background after app init)
-        let lsp_manager = Arc::new(std::sync::Mutex::new(crate::lsp::LspManager::new(
+        let lsp_manager = Arc::new(std::sync::RwLock::new(crate::lsp::LspManager::new(
             project.root.clone(),
             tokio::runtime::Handle::current(),
         )));

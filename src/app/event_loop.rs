@@ -15,7 +15,7 @@ impl App {
             let lsp = self.lsp_manager.clone();
             let tx = self.event_tx.clone();
             tokio::task::spawn_blocking(move || {
-                if let Ok(mut mgr) = lsp.lock() {
+                if let Ok(mut mgr) = lsp.write() {
                     mgr.start_servers();
                     let status = mgr.language_status();
                     if !status.is_empty() {

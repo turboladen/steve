@@ -1,8 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-    process::Stdio,
-};
+use std::{collections::HashMap, path::PathBuf, process::Stdio};
 
 use anyhow::{Context, Result};
 use async_lsp::lsp_types::*;
@@ -119,19 +115,33 @@ impl LspManager {
             .map_err(|e| anyhow::anyhow!("initialized notification failed: {e}"))?;
 
         Ok(LspServer {
-            _process: child,
-            _mainloop_handle: mainloop_handle,
+            process: child,
+            mainloop_handle,
             server_socket,
             handle: self.handle.clone(),
             language: lang,
             binary: binary.clone(),
             capabilities: init_result.capabilities,
-            open_files: HashSet::new(),
+            open_files: std::sync::Mutex::new(std::collections::HashSet::new()),
             diagnostics,
         })
     }
 
-    pub fn server_for_file(&mut self, path: &std::path::Path) -> Result<&mut LspServer> {
+    pub fn server_for_file(&self, path: &std::path::Path) -> Result<&LspServer> {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .ok_or_else(|| anyhow::anyhow!("file has no extension"))?;
+
+        let lang = Language::from_extension(ext)
+            .ok_or_else(|| anyhow::anyhow!("unsupported language for .{ext}"))?;
+
+        self.servers
+            .get(&lang)
+            .ok_or_else(|| anyhow::anyhow!("no {lang} server running"))
+    }
+
+    pub fn server_for_file_or_start(&mut self, path: &std::path::Path) -> Result<&LspServer> {
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
@@ -143,12 +153,12 @@ impl LspManager {
         self.ensure_server(lang)
     }
 
-    fn ensure_server(&mut self, lang: Language) -> Result<&mut LspServer> {
+    fn ensure_server(&mut self, lang: Language) -> Result<&LspServer> {
         if !self.servers.contains_key(&lang) {
             let server = self.start_server(lang)?;
             self.servers.insert(lang, server);
         }
-        Ok(self.servers.get_mut(&lang).expect("just inserted"))
+        Ok(self.servers.get(&lang).expect("just inserted"))
     }
 
     pub fn shutdown(&mut self) {

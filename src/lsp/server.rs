@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    sync::Mutex,
     time::Duration,
 };
 
@@ -15,22 +16,26 @@ use crate::lsp::client::SharedDiagnostics;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct LspServer {
-    pub(super) _process: tokio::process::Child,
-    pub(super) _mainloop_handle: JoinHandle<()>,
+    pub(super) process: tokio::process::Child,
+    pub(super) mainloop_handle: JoinHandle<()>,
     pub(super) server_socket: ServerSocket,
     pub(super) handle: tokio::runtime::Handle,
     pub(super) language: Language,
     pub binary: String,
     pub(super) capabilities: ServerCapabilities,
-    pub(super) open_files: HashSet<Url>,
+    pub(super) open_files: Mutex<HashSet<Url>>,
     pub(super) diagnostics: SharedDiagnostics,
 }
 
 impl LspServer {
-    fn ensure_open(&mut self, path: &Path) -> Result<Url> {
+    fn ensure_open(&self, path: &Path) -> Result<Url> {
         let uri = path_to_uri(path)?;
 
-        if !self.open_files.contains(&uri) {
+        let mut open = self
+            .open_files
+            .lock()
+            .map_err(|_| anyhow::anyhow!("open_files lock poisoned"))?;
+        if !open.contains(&uri) {
             let content = std::fs::read_to_string(path)
                 .with_context(|| format!("failed to read {}", path.display()))?;
 
@@ -45,13 +50,13 @@ impl LspServer {
             self.server_socket
                 .notify::<notification::DidOpenTextDocument>(params)
                 .map_err(|e| anyhow::anyhow!("failed to send didOpen: {e}"))?;
-            self.open_files.insert(uri.clone());
+            open.insert(uri.clone());
         }
 
         Ok(uri)
     }
 
-    pub fn diagnostics(&mut self, path: &Path) -> Result<Vec<Diagnostic>> {
+    pub fn diagnostics(&self, path: &Path) -> Result<Vec<Diagnostic>> {
         let uri = self.ensure_open(path)?;
 
         let params = DocumentSymbolParams {
@@ -84,7 +89,7 @@ impl LspServer {
         Ok(locked.get(&uri).cloned().unwrap_or_default())
     }
 
-    pub fn definition(&mut self, path: &Path, line: u32, character: u32) -> Result<Vec<Location>> {
+    pub fn definition(&self, path: &Path, line: u32, character: u32) -> Result<Vec<Location>> {
         let uri = self.ensure_open(path)?;
 
         if !self
@@ -129,7 +134,7 @@ impl LspServer {
         parse_goto_definition_response(result)
     }
 
-    pub fn references(&mut self, path: &Path, line: u32, character: u32) -> Result<Vec<Location>> {
+    pub fn references(&self, path: &Path, line: u32, character: u32) -> Result<Vec<Location>> {
         let uri = self.ensure_open(path)?;
 
         if self.capabilities.references_provider.is_none() {
@@ -169,7 +174,7 @@ impl LspServer {
     }
 
     pub fn rename(
-        &mut self,
+        &self,
         path: &Path,
         line: u32,
         character: u32,
@@ -207,7 +212,7 @@ impl LspServer {
             })?
             .map_err(|e| anyhow::anyhow!("rename request failed: {e}"))?;
 
-        Ok(result.unwrap_or_default())
+        result.ok_or_else(|| anyhow::anyhow!("server could not rename at this position"))
     }
 
     pub(super) fn transport_shutdown(mut self) -> Result<()> {
@@ -222,16 +227,16 @@ impl LspServer {
             });
         }));
         let _ = self.server_socket.notify::<notification::Exit>(());
-        self._mainloop_handle.abort();
+        self.mainloop_handle.abort();
 
-        match self._process.try_wait() {
+        match self.process.try_wait() {
             Ok(Some(_status)) => {}
             _ => {
                 std::thread::sleep(Duration::from_millis(500));
-                match self._process.try_wait() {
+                match self.process.try_wait() {
                     Ok(Some(_)) => {}
                     _ => {
-                        let _ = self._process.start_kill();
+                        let _ = self.process.start_kill();
                         // Don't await — process is being killed, cleanup happens on drop
                     }
                 }
