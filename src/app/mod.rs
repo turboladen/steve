@@ -258,6 +258,7 @@ impl App {
         // Build LSP manager (servers started in background after app init)
         let lsp_manager = Arc::new(std::sync::Mutex::new(crate::lsp::LspManager::new(
             project.root.clone(),
+            tokio::runtime::Handle::current(),
         )));
 
         // Build MCP manager (servers started in background after app init)
@@ -366,10 +367,30 @@ pub(crate) mod tests {
     /// Note: uses `Storage::new` which writes to the real app data dir. This is
     /// acceptable because UI rendering tests don't perform storage writes. A
     /// temp-dir approach would require returning `TempDir` to keep it alive.
+    /// Lazily-initialized tokio runtime for sync test helpers.
+    ///
+    /// `App::new` calls `tokio::runtime::Handle::current()` for the LSP manager,
+    /// but most unit tests run outside a tokio context. This provides a shared
+    /// runtime whose handle satisfies that requirement. The runtime is leaked so
+    /// the handle remains valid for the entire test process.
+    fn test_runtime_handle() -> tokio::runtime::Handle {
+        use std::sync::OnceLock;
+        static RT: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+        RT.get_or_init(|| {
+            let rt = tokio::runtime::Runtime::new().expect("test tokio runtime");
+            let handle = rt.handle().clone();
+            // Leak the runtime so the handle stays valid for all tests
+            std::mem::forget(rt);
+            handle
+        })
+        .clone()
+    }
+
     pub(crate) fn make_test_app() -> App {
         use crate::{config::Config, project::ProjectInfo, storage::Storage};
         use std::path::PathBuf;
 
+        let _guard = test_runtime_handle().enter();
         let root = PathBuf::from("/tmp/test");
         let project = ProjectInfo {
             root: root.clone(),
@@ -396,6 +417,7 @@ pub(crate) mod tests {
         use crate::{config::Config, project::ProjectInfo, storage::Storage};
         use std::path::PathBuf;
 
+        let _guard = test_runtime_handle().enter();
         let dir = tempfile::tempdir().expect("temp dir");
         let storage = Storage::with_base(dir.path().to_path_buf()).expect("storage");
         let root = PathBuf::from("/tmp/test");

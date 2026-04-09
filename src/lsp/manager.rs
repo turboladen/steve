@@ -5,9 +5,12 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use async_lsp::lsp_types::*;
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use super::{
     Language,
+    client::{SharedDiagnostics, create_client},
     server::{LspServer, path_to_uri},
 };
 
@@ -15,14 +18,16 @@ pub struct LspManager {
     servers: HashMap<Language, LspServer>,
     detected_languages: Vec<Language>,
     project_root: PathBuf,
+    handle: tokio::runtime::Handle,
 }
 
 impl LspManager {
-    pub fn new(project_root: PathBuf) -> Self {
+    pub fn new(project_root: PathBuf, handle: tokio::runtime::Handle) -> Self {
         Self {
             servers: HashMap::new(),
             detected_languages: Vec::new(),
             project_root,
+            handle,
         }
     }
 
@@ -52,22 +57,38 @@ impl LspManager {
 
         tracing::debug!(binary = %binary, ?args, "spawning LSP server for {lang}");
 
-        let mut child = std::process::Command::new(&binary)
-            .args(&args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
+        let mut child = self
+            .handle
+            .block_on(async {
+                tokio::process::Command::new(&binary)
+                    .args(&args)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+            })
             .with_context(|| format!("failed to spawn {binary}"))?;
 
         let stdin = child.stdin.take().context("no stdin")?;
         let stdout = child.stdout.take().context("no stdout")?;
-        let mut transport = super::client::JsonRpcTransport::new(stdin, stdout);
+
+        let diagnostics: SharedDiagnostics =
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let (mainloop, server_socket) = create_client(diagnostics.clone());
+
+        let mainloop_handle = self.handle.spawn(async move {
+            if let Err(e) = mainloop
+                .run_buffered(stdout.compat(), stdin.compat_write())
+                .await
+            {
+                tracing::debug!("LSP MainLoop exited: {e}");
+            }
+        });
 
         let root_uri = path_to_uri(&self.project_root)?;
-        let init_params = async_lsp::lsp_types::InitializeParams {
+        let init_params = InitializeParams {
             process_id: Some(std::process::id()),
-            workspace_folders: Some(vec![async_lsp::lsp_types::WorkspaceFolder {
+            workspace_folders: Some(vec![WorkspaceFolder {
                 uri: root_uri,
                 name: self
                     .project_root
@@ -76,9 +97,9 @@ impl LspManager {
                     .unwrap_or("project")
                     .to_string(),
             }]),
-            capabilities: async_lsp::lsp_types::ClientCapabilities {
-                text_document: Some(async_lsp::lsp_types::TextDocumentClientCapabilities {
-                    publish_diagnostics: Some(async_lsp::lsp_types::PublishDiagnosticsClientCapabilities {
+            capabilities: ClientCapabilities {
+                text_document: Some(TextDocumentClientCapabilities {
+                    publish_diagnostics: Some(PublishDiagnosticsClientCapabilities {
                         related_information: Some(true),
                         ..Default::default()
                     }),
@@ -89,23 +110,25 @@ impl LspManager {
             ..Default::default()
         };
 
-        let (result, _notifications) = transport
-            .send_request("initialize", &init_params)
-            .context("initialize request failed")?;
+        let init_result: InitializeResult = self
+            .handle
+            .block_on(server_socket.request::<request::Initialize>(init_params))
+            .map_err(|e| anyhow::anyhow!("initialize request failed: {e}"))?;
 
-        let init_result: async_lsp::lsp_types::InitializeResult =
-            serde_json::from_value(result).context("failed to parse InitializeResult")?;
-
-        transport.send_notification("initialized", serde_json::json!({}))?;
+        server_socket
+            .notify::<notification::Initialized>(InitializedParams {})
+            .map_err(|e| anyhow::anyhow!("initialized notification failed: {e}"))?;
 
         Ok(LspServer {
             _process: child,
-            transport,
+            _mainloop_handle: mainloop_handle,
+            server_socket,
+            handle: self.handle.clone(),
             language: lang,
             binary: binary.clone(),
             capabilities: init_result.capabilities,
             open_files: HashSet::new(),
-            diagnostics: HashMap::new(),
+            diagnostics,
         })
     }
 
@@ -173,24 +196,25 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[test]
-    fn lsp_manager_new() {
+    #[tokio::test]
+    async fn lsp_manager_new() {
         let dir = tempdir().unwrap();
-        let mgr = LspManager::new(dir.path().to_path_buf());
+        let mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
         assert!(!mgr.has_servers());
         assert!(mgr.running_languages().is_empty());
         assert!(mgr.language_status().is_empty());
     }
 
-    #[test]
-    fn language_status_detected_but_not_running() {
+    #[tokio::test]
+    async fn language_status_detected_but_not_running() {
         let dir = tempdir().unwrap();
         std::fs::write(
             dir.path().join("Cargo.toml"),
             "[package]\nname = \"test\"\n",
         )
         .unwrap();
-        let mut mgr = LspManager::new(dir.path().to_path_buf());
+        let mut mgr =
+            LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
         mgr.detected_languages = Language::detect_from_project(dir.path());
         let status = mgr.language_status();
         assert!(status.len() >= 2, "expected at least 2 detected languages");

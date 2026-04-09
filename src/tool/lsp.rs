@@ -431,12 +431,27 @@ mod tests {
         }
     }
 
+    fn test_runtime_handle() -> tokio::runtime::Handle {
+        use std::sync::OnceLock;
+        static RT: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+        RT.get_or_init(|| {
+            let rt = tokio::runtime::Runtime::new().expect("test tokio runtime");
+            let handle = rt.handle().clone();
+            std::mem::forget(rt);
+            handle
+        })
+        .clone()
+    }
+
     fn test_ctx_with_lsp(dir: &Path) -> ToolContext {
         ToolContext {
             project_root: dir.to_path_buf(),
             storage_dir: None,
             task_store: None,
-            lsp_manager: Some(Arc::new(Mutex::new(LspManager::new(dir.to_path_buf())))),
+            lsp_manager: Some(Arc::new(Mutex::new(LspManager::new(
+                dir.to_path_buf(),
+                test_runtime_handle(),
+            )))),
         }
     }
 

@@ -1,26 +1,28 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     path::{Path, PathBuf},
-    process::Child,
 };
 
 use anyhow::{Context, Result};
-use async_lsp::lsp_types::*;
-use serde_json::Value;
-
-use super::{
-    Language,
-    client::{JsonRpcNotification, JsonRpcTransport},
+use async_lsp::{
+    ServerSocket,
+    lsp_types::*,
 };
+use tokio::task::JoinHandle;
+
+use super::Language;
+use crate::lsp::client::SharedDiagnostics;
 
 pub struct LspServer {
-    pub(super) _process: Child,
-    pub(super) transport: JsonRpcTransport,
+    pub(super) _process: tokio::process::Child,
+    pub(super) _mainloop_handle: JoinHandle<()>,
+    pub(super) server_socket: ServerSocket,
+    pub(super) handle: tokio::runtime::Handle,
     pub(super) language: Language,
     pub binary: String,
     pub(super) capabilities: ServerCapabilities,
     pub(super) open_files: HashSet<Url>,
-    pub(super) diagnostics: HashMap<Url, Vec<Diagnostic>>,
+    pub(super) diagnostics: SharedDiagnostics,
 }
 
 impl LspServer {
@@ -39,24 +41,13 @@ impl LspServer {
                     text: content,
                 },
             };
-            self.transport
-                .send_notification("textDocument/didOpen", &params)?;
+            self.server_socket
+                .notify::<notification::DidOpenTextDocument>(params)
+                .map_err(|e| anyhow::anyhow!("failed to send didOpen: {e}"))?;
             self.open_files.insert(uri.clone());
         }
 
         Ok(uri)
-    }
-
-    fn process_notifications(&mut self, notifications: Vec<JsonRpcNotification>) {
-        for notif in notifications {
-            if notif.method == "textDocument/publishDiagnostics"
-                && let Some(params) = notif.params
-                && let Ok(diag_params) = serde_json::from_value::<PublishDiagnosticsParams>(params)
-            {
-                self.diagnostics
-                    .insert(diag_params.uri, diag_params.diagnostics);
-            }
-        }
     }
 
     pub fn diagnostics(&mut self, path: &Path) -> Result<Vec<Diagnostic>> {
@@ -68,19 +59,21 @@ impl LspServer {
             partial_result_params: Default::default(),
         };
 
-        match self
-            .transport
-            .send_request("textDocument/documentSymbol", &params)
-        {
-            Ok((_result, notifications)) => {
-                self.process_notifications(notifications);
-            }
+        match self.handle.block_on(
+            self.server_socket
+                .request::<request::DocumentSymbolRequest>(params),
+        ) {
+            Ok(_result) => {}
             Err(e) => {
                 tracing::debug!("documentSymbol request failed (ok, just for diagnostics): {e}");
             }
         }
 
-        Ok(self.diagnostics.get(&uri).cloned().unwrap_or_default())
+        let locked = self
+            .diagnostics
+            .lock()
+            .map_err(|_| anyhow::anyhow!("diagnostics lock poisoned"))?;
+        Ok(locked.get(&uri).cloned().unwrap_or_default())
     }
 
     pub fn definition(&mut self, path: &Path, line: u32, character: u32) -> Result<Vec<Location>> {
@@ -107,12 +100,15 @@ impl LspServer {
             partial_result_params: Default::default(),
         };
 
-        let (result, notifications) = self
-            .transport
-            .send_request("textDocument/definition", &params)?;
-        self.process_notifications(notifications);
+        let result = self
+            .handle
+            .block_on(
+                self.server_socket
+                    .request::<request::GotoDefinition>(params),
+            )
+            .map_err(|e| anyhow::anyhow!("definition request failed: {e}"))?;
 
-        parse_locations(result)
+        parse_goto_definition_response(result)
     }
 
     pub fn references(&mut self, path: &Path, line: u32, character: u32) -> Result<Vec<Location>> {
@@ -134,12 +130,12 @@ impl LspServer {
             partial_result_params: Default::default(),
         };
 
-        let (result, notifications) = self
-            .transport
-            .send_request("textDocument/references", &params)?;
-        self.process_notifications(notifications);
+        let result = self
+            .handle
+            .block_on(self.server_socket.request::<request::References>(params))
+            .map_err(|e| anyhow::anyhow!("references request failed: {e}"))?;
 
-        parse_locations(result)
+        Ok(result.unwrap_or_default())
     }
 
     pub fn rename(
@@ -164,19 +160,20 @@ impl LspServer {
             work_done_progress_params: Default::default(),
         };
 
-        let (result, notifications) = self
-            .transport
-            .send_request("textDocument/rename", &params)?;
-        self.process_notifications(notifications);
+        let result = self
+            .handle
+            .block_on(self.server_socket.request::<request::Rename>(params))
+            .map_err(|e| anyhow::anyhow!("rename request failed: {e}"))?;
 
-        serde_json::from_value(result).context("failed to parse WorkspaceEdit")
+        Ok(result.unwrap_or_default())
     }
 
     pub(super) fn transport_shutdown(mut self) -> Result<()> {
-        let _ = self.transport.send_request("shutdown", Value::Null);
-        let _ = self.transport.send_notification("exit", Value::Null);
-
-        drop(self.transport);
+        let _ = self
+            .handle
+            .block_on(self.server_socket.request::<request::Shutdown>(()));
+        let _ = self.server_socket.notify::<notification::Exit>(());
+        self._mainloop_handle.abort();
 
         match self._process.try_wait() {
             Ok(Some(_status)) => {}
@@ -185,8 +182,8 @@ impl LspServer {
                 match self._process.try_wait() {
                     Ok(Some(_)) => {}
                     _ => {
-                        let _ = self._process.kill();
-                        let _ = self._process.wait();
+                        let _ = self._process.start_kill();
+                        let _ = self.handle.block_on(self._process.wait());
                     }
                 }
             }
@@ -212,30 +209,21 @@ pub fn uri_to_path(uri_str: &str) -> Option<PathBuf> {
         .and_then(|u| u.to_file_path().ok())
 }
 
-fn parse_locations(value: Value) -> Result<Vec<Location>> {
-    if value.is_null() {
-        return Ok(Vec::new());
-    }
-
-    if let Ok(loc) = serde_json::from_value::<Location>(value.clone()) {
-        return Ok(vec![loc]);
-    }
-
-    if let Ok(locs) = serde_json::from_value::<Vec<Location>>(value.clone()) {
-        return Ok(locs);
-    }
-
-    if let Ok(links) = serde_json::from_value::<Vec<LocationLink>>(value) {
-        return Ok(links
+fn parse_goto_definition_response(
+    result: Option<GotoDefinitionResponse>,
+) -> Result<Vec<Location>> {
+    match result {
+        None => Ok(Vec::new()),
+        Some(GotoDefinitionResponse::Scalar(loc)) => Ok(vec![loc]),
+        Some(GotoDefinitionResponse::Array(locs)) => Ok(locs),
+        Some(GotoDefinitionResponse::Link(links)) => Ok(links
             .into_iter()
             .map(|link| Location {
                 uri: link.target_uri,
                 range: link.target_selection_range,
             })
-            .collect());
+            .collect()),
     }
-
-    Ok(Vec::new())
 }
 
 #[cfg(test)]
@@ -267,57 +255,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_locations_null() {
-        let result = parse_locations(Value::Null).unwrap();
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn parse_locations_single() {
-        let json = serde_json::json!({
-            "uri": "file:///test.rs",
-            "range": {
-                "start": {"line": 10, "character": 5},
-                "end": {"line": 10, "character": 15}
-            }
-        });
-        let result = parse_locations(json).unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].range.start.line, 10);
-    }
-
-    #[test]
-    fn parse_locations_array() {
-        let json = serde_json::json!([
-            {
-                "uri": "file:///a.rs",
-                "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 5}}
-            },
-            {
-                "uri": "file:///b.rs",
-                "range": {"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 5}}
-            }
-        ]);
-        let result = parse_locations(json).unwrap();
-        assert_eq!(result.len(), 2);
-    }
-
-    #[test]
-    fn parse_locations_link_array() {
-        let json = serde_json::json!([
-            {
-                "targetUri": "file:///target.rs",
-                "targetRange": {"start": {"line": 5, "character": 0}, "end": {"line": 10, "character": 0}},
-                "targetSelectionRange": {"start": {"line": 5, "character": 4}, "end": {"line": 5, "character": 15}}
-            }
-        ]);
-        let result = parse_locations(json).unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].range.start.line, 5);
-        assert_eq!(result[0].range.start.character, 4);
-    }
-
-    #[test]
     fn uri_to_path_percent_encoded_hash() {
         let path = uri_to_path("file:///home/user/C%23/test.cs").unwrap();
         assert_eq!(path, PathBuf::from("/home/user/C#/test.cs"));
@@ -341,38 +278,82 @@ mod tests {
     }
 
     #[test]
-    fn process_notifications_buffers_diagnostics() {
-        use crate::lsp::client::JsonRpcNotification;
+    fn shared_diagnostics_from_publish_params() {
+        use crate::lsp::client::SharedDiagnostics;
 
-        let notif = JsonRpcNotification {
-            method: "textDocument/publishDiagnostics".to_string(),
-            params: Some(serde_json::json!({
-                "uri": "file:///test.rs",
-                "diagnostics": [
-                    {
-                        "range": {
-                            "start": {"line": 0, "character": 0},
-                            "end": {"line": 0, "character": 5}
-                        },
-                        "severity": 1,
-                        "message": "test error"
-                    }
-                ]
-            })),
+        let diags: SharedDiagnostics =
+            std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let params = PublishDiagnosticsParams {
+            uri: Url::parse("file:///test.rs").unwrap(),
+            diagnostics: vec![Diagnostic {
+                range: Range::new(Position::new(0, 0), Position::new(0, 5)),
+                severity: Some(DiagnosticSeverity::ERROR),
+                message: "test error".to_string(),
+                ..Default::default()
+            }],
+            version: None,
         };
 
-        let mut diagnostics: HashMap<Url, Vec<Diagnostic>> = HashMap::new();
-        if notif.method == "textDocument/publishDiagnostics"
-            && let Some(params) = notif.params
-            && let Ok(diag_params) = serde_json::from_value::<PublishDiagnosticsParams>(params)
-        {
-            diagnostics.insert(diag_params.uri, diag_params.diagnostics);
-        }
+        diags
+            .lock()
+            .unwrap()
+            .insert(params.uri.clone(), params.diagnostics);
 
-        assert_eq!(diagnostics.len(), 1);
-        let uri: Url = Url::parse("file:///test.rs").unwrap();
-        let diags = diagnostics.get(&uri).unwrap();
-        assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].message, "test error");
+        let locked = diags.lock().unwrap();
+        let result = locked
+            .get(&Url::parse("file:///test.rs").unwrap())
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].message, "test error");
+    }
+
+    #[test]
+    fn parse_goto_definition_response_none() {
+        let result = parse_goto_definition_response(None).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_goto_definition_response_scalar() {
+        let loc = Location {
+            uri: Url::parse("file:///test.rs").unwrap(),
+            range: Range::new(Position::new(10, 5), Position::new(10, 15)),
+        };
+        let result =
+            parse_goto_definition_response(Some(GotoDefinitionResponse::Scalar(loc))).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].range.start.line, 10);
+    }
+
+    #[test]
+    fn parse_goto_definition_response_array() {
+        let locs = vec![
+            Location {
+                uri: Url::parse("file:///a.rs").unwrap(),
+                range: Range::new(Position::new(1, 0), Position::new(1, 5)),
+            },
+            Location {
+                uri: Url::parse("file:///b.rs").unwrap(),
+                range: Range::new(Position::new(2, 0), Position::new(2, 5)),
+            },
+        ];
+        let result =
+            parse_goto_definition_response(Some(GotoDefinitionResponse::Array(locs))).unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn parse_goto_definition_response_links() {
+        let links = vec![LocationLink {
+            origin_selection_range: None,
+            target_uri: Url::parse("file:///target.rs").unwrap(),
+            target_range: Range::new(Position::new(5, 0), Position::new(10, 0)),
+            target_selection_range: Range::new(Position::new(5, 4), Position::new(5, 15)),
+        }];
+        let result =
+            parse_goto_definition_response(Some(GotoDefinitionResponse::Link(links))).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].range.start.line, 5);
+        assert_eq!(result[0].range.start.character, 4);
     }
 }
