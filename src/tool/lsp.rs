@@ -44,11 +44,11 @@ pub fn tool() -> ToolEntry {
                     },
                     "line": {
                         "type": "integer",
-                        "description": "1-indexed line number (required for definition/references/rename)"
+                        "description": "1-indexed line number (required with character for definition/references/rename, unless symbol_name is used)"
                     },
                     "character": {
                         "type": "integer",
-                        "description": "0-indexed column (required for definition/references/rename)"
+                        "description": "0-indexed column (required with line for definition/references/rename, unless symbol_name is used)"
                     },
                     "new_name": {
                         "type": "string",

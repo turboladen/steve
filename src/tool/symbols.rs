@@ -531,7 +531,10 @@ fn find_scope_recursive(
 // ── Symbol position resolution (for LSP integration) ────────────────────
 
 /// Like `extract_name`, but returns the name *node* (not just its text).
-/// Used to get precise (row, column) position for LSP integration.
+/// Used by both `extract_name` (for text) and `find_symbol_node_recursive` (for position).
+/// Does NOT skip imports — `extract_name` handles import-specific display logic before
+/// calling this, and `find_symbol_node_recursive` should match the same entries that
+/// `list_symbols` displays.
 fn extract_name_node<'a>(node: Node<'a>) -> Option<Node<'a>> {
     // Special case: impl blocks in Rust — look for a type child
     if node.kind() == "impl_item" {
@@ -544,16 +547,6 @@ fn extract_name_node<'a>(node: Node<'a>) -> Option<Node<'a>> {
                 return Some(child);
             }
         }
-    }
-
-    // Skip use/import declarations — not meaningful LSP targets by symbol name
-    if node.kind() == "use_declaration"
-        || node.kind() == "import_statement"
-        || node.kind() == "import_from_statement"
-        || node.kind() == "import_declaration"
-        || node.kind() == "preproc_include"
-    {
-        return None;
     }
 
     // Try field `name` first (works for most languages)
