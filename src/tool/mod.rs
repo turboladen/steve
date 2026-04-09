@@ -128,9 +128,12 @@ impl ToolName {
         )
     }
 
-    /// Whether this tool's results can be cached (currently same set as read-only).
+    /// Whether this tool's results can be cached.
+    ///
+    /// Read-only tools and LSP are cacheable. LSP results are invalidated
+    /// by path when write tools modify files, same as read-only tools.
     pub fn is_cacheable(self) -> bool {
-        self.is_read_only()
+        self.is_read_only() || matches!(self, ToolName::Lsp)
     }
 
     /// Whether this is the memory tool.
@@ -637,6 +640,7 @@ mod tests {
                     | ToolName::Glob
                     | ToolName::List
                     | ToolName::Symbols
+                    | ToolName::Lsp
             ) {
                 assert!(t.is_cacheable(), "{t} should be cacheable");
             } else {

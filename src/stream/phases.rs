@@ -23,7 +23,7 @@ use crate::{
         PermissionEngine,
         types::{PermissionAction, PermissionReply, PermissionRequest},
     },
-    tool::{ToolContext, ToolName, ToolRegistry, agent::AgentType},
+    tool::{LspOperation, ToolContext, ToolName, ToolRegistry, agent::AgentType},
 };
 
 use super::{
@@ -74,6 +74,23 @@ pub(super) enum PhaseOutcome {
     Continue,
     /// Stream was cancelled — caller should `return Ok(())`.
     Cancelled,
+}
+
+/// Whether an LSP tool call's `operation` arg is a read-only operation.
+///
+/// `diagnostics`, `definition`, and `references` are pure reads safe for
+/// parallel execution. `rename` is heavier and stays sequential.
+fn is_lsp_read_op(args: &Value) -> bool {
+    let op: LspOperation = args
+        .get("operation")
+        .and_then(|v| v.as_str())
+        .unwrap_or("diagnostics")
+        .parse()
+        .unwrap_or(LspOperation::Diagnostics);
+    matches!(
+        op,
+        LspOperation::Diagnostics | LspOperation::Definition | LspOperation::References
+    )
 }
 
 // ── Phase 1: Partition tool calls ──────────────────────────────────────────
@@ -173,18 +190,17 @@ pub(super) async fn partition_tool_calls(
 
     // Partition: auto-allowed read-only tools can run in parallel.
     // Write tools (edit, write, patch), memory tool (append action),
-    // task tool (writes to storage), and LSP tool (holds mutex across
-    // blocking I/O) always go to sequential phase.
+    // task tool (writes to storage), and LSP rename (heavier mutex hold)
+    // always go to sequential phase. LSP read operations (diagnostics,
+    // definition, references) are safe for parallel execution.
     let (auto_allowed, needs_interaction): (Vec<_>, Vec<_>) =
         prepared.into_iter().partition(|tc| {
             matches!(tc.action, PermissionAction::Allow)
                 && !tc.tool_name.is_write_tool()
                 && !tc.tool_name.is_memory()
                 && !tc.tool_name.is_task()
-                && !matches!(
-                    tc.tool_name,
-                    ToolName::Question | ToolName::Lsp | ToolName::Agent
-                )
+                && !matches!(tc.tool_name, ToolName::Question | ToolName::Agent)
+                && (tc.tool_name != ToolName::Lsp || is_lsp_read_op(&tc.args))
         });
 
     // Log partition results for diagnostics
@@ -1140,9 +1156,14 @@ mod tests {
 
     #[tokio::test]
     async fn partition_sequential_tools_need_interaction() {
+        // question, lsp rename, and agent should all go to sequential phase
         let calls: HashMap<u32, PendingToolCall> = [
             make_pending(0, "question", r#"{"question":"?"}"#),
-            make_pending(1, "lsp", r#"{"path":"f.rs"}"#),
+            make_pending(
+                1,
+                "lsp",
+                r#"{"path":"f.rs","operation":"rename","new_name":"foo"}"#,
+            ),
             make_pending(2, "agent", r#"{"task":"explore"}"#),
         ]
         .into();
@@ -1163,6 +1184,74 @@ mod tests {
 
         assert!(result.auto_allowed.is_empty());
         assert_eq!(result.needs_interaction.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn partition_lsp_read_ops_go_to_parallel() {
+        // LSP diagnostics/definition/references are read-only and go to parallel
+        let calls: HashMap<u32, PendingToolCall> = [
+            make_pending(0, "lsp", r#"{"path":"f.rs"}"#), // defaults to diagnostics
+            make_pending(
+                1,
+                "lsp",
+                r#"{"path":"f.rs","operation":"definition","line":10,"character":5}"#,
+            ),
+            make_pending(
+                2,
+                "lsp",
+                r#"{"path":"f.rs","operation":"references","line":10,"character":5}"#,
+            ),
+        ]
+        .into();
+        let indices = vec![0, 1, 2];
+        let mut messages = Vec::new();
+        let mut counters = make_counters();
+
+        let result = partition_tool_calls(
+            &calls,
+            &indices,
+            &None,
+            &None,
+            &None,
+            &mut messages,
+            &mut counters,
+        )
+        .await;
+
+        assert_eq!(
+            result.auto_allowed.len(),
+            3,
+            "all LSP read ops should go to parallel"
+        );
+        assert!(result.needs_interaction.is_empty());
+    }
+
+    #[test]
+    fn is_lsp_read_op_exhaustive() {
+        use crate::tool::LspOperation;
+
+        // Explicit variant list — adding a variant forces a decision here
+        let cases: &[(LspOperation, bool)] = &[
+            (LspOperation::Diagnostics, true),
+            (LspOperation::Definition, true),
+            (LspOperation::References, true),
+            (LspOperation::Rename, false),
+        ];
+        for (op, expected) in cases {
+            let args = serde_json::json!({ "path": "f.rs", "operation": op.to_string() });
+            assert_eq!(
+                is_lsp_read_op(&args),
+                *expected,
+                "{op} read_op should be {expected}"
+            );
+        }
+
+        // Missing operation defaults to diagnostics (read)
+        let no_op = serde_json::json!({ "path": "f.rs" });
+        assert!(
+            is_lsp_read_op(&no_op),
+            "missing operation should default to read"
+        );
     }
 
     #[tokio::test]

@@ -92,6 +92,22 @@ impl App {
             identity.push_str(&format!("\n- **Git branch**: {branch}"));
         }
 
+        // Surface running LSP servers so the LLM knows which languages have code intelligence
+        if let Ok(mgr) = self.lsp_manager.try_lock() {
+            let status = mgr.language_status();
+            let running: Vec<&str> = status
+                .iter()
+                .filter(|(_, is_running)| *is_running)
+                .map(|(name, _)| name.as_str())
+                .collect();
+            if !running.is_empty() {
+                identity.push_str(&format!(
+                    "\n- **LSP servers**: {} (use `lsp` tool for diagnostics, definitions, references)",
+                    running.join(", ")
+                ));
+            }
+        }
+
         identity.push_str("\n\n\
             ## How You Work\n\
             - You can only access files within the project root. All paths are resolved relative to it.\n\
