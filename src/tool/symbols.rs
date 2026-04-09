@@ -563,6 +563,100 @@ fn find_scope_recursive(
     }
 }
 
+// ── Symbol position resolution (for LSP integration) ────────────────────
+
+/// Like `extract_name`, but returns the name *node* (not just its text).
+/// Used to get precise (row, column) position for LSP integration.
+fn extract_name_node<'a>(node: Node<'a>) -> Option<Node<'a>> {
+    // Special case: impl blocks in Rust — look for a type child
+    if node.kind() == "impl_item" {
+        if let Some(type_node) = node.child_by_field_name("type") {
+            return Some(type_node);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "type_identifier" || child.kind() == "generic_type" {
+                return Some(child);
+            }
+        }
+    }
+
+    // Skip use/import declarations — not meaningful LSP targets by symbol name
+    if node.kind() == "use_declaration"
+        || node.kind() == "import_statement"
+        || node.kind() == "import_from_statement"
+        || node.kind() == "import_declaration"
+        || node.kind() == "preproc_include"
+    {
+        return None;
+    }
+
+    // Try field `name` first (works for most languages)
+    if let Some(name_node) = node.child_by_field_name("name") {
+        return Some(name_node);
+    }
+
+    // Fallback: scan direct children for identifier-like nodes
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        let kind = child.kind();
+        if kind == "identifier"
+            || kind == "type_identifier"
+            || kind == "property_identifier"
+            || kind == "constant"
+        {
+            return Some(child);
+        }
+    }
+
+    None
+}
+
+fn find_symbol_position_recursive(
+    node: Node,
+    source: &[u8],
+    target_name: &str,
+    symbol_types: &[&str],
+) -> Option<(u32, u32)> {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if symbol_types.contains(&child.kind())
+            && let Some(name_node) = extract_name_node(child)
+        {
+            let name_text = node_text(name_node, source);
+            if name_text == target_name {
+                let pos = name_node.start_position();
+                return Some((pos.row as u32, pos.column as u32));
+            }
+        }
+
+        if let Some(found) =
+            find_symbol_position_recursive(child, source, target_name, symbol_types)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Resolve a symbol name to its (line_0indexed, column_0indexed) position in a file.
+/// Returns the position of the name identifier node, suitable for LSP operations.
+pub(crate) fn resolve_symbol_position(
+    path: &Path,
+    symbol_name: &str,
+) -> Result<(u32, u32), String> {
+    let lang_info = detect_language(path)
+        .ok_or_else(|| format!("unsupported language for {}", path.display()))?;
+    let source =
+        std::fs::read(path).map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let tree = parse_file(&source, lang_info.language)
+        .ok_or_else(|| format!("failed to parse {}", path.display()))?;
+    let root = tree.root_node();
+
+    find_symbol_position_recursive(root, &source, symbol_name, symbol_node_types(lang_info.lang))
+        .ok_or_else(|| format!("symbol '{}' not found in {}", symbol_name, path.display()))
+}
+
 // ── Definition finding ───────────────────────────────────────────────────
 
 /// Information about a found definition.
@@ -1387,5 +1481,67 @@ fn bar() -> bool {
 
         assert!(!result.is_error);
         assert!(result.output.contains("fn greet"));
+    }
+
+    // ── resolve_symbol_position ─────────────────────────────────────────
+
+    #[test]
+    fn resolve_symbol_position_finds_function() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "fn hello() {}\n").unwrap();
+
+        let (row, col) = resolve_symbol_position(&file, "hello").unwrap();
+        // "hello" starts at column 3 (after "fn ")
+        assert_eq!(row, 0);
+        assert_eq!(col, 3);
+    }
+
+    #[test]
+    fn resolve_symbol_position_finds_struct() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "\nstruct Foo {}\n").unwrap();
+
+        let (row, col) = resolve_symbol_position(&file, "Foo").unwrap();
+        // "Foo" is on row 1 (second line), column 7 (after "struct ")
+        assert_eq!(row, 1);
+        assert_eq!(col, 7);
+    }
+
+    #[test]
+    fn resolve_symbol_position_finds_nested_method() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(
+            &file,
+            "struct Bar;\nimpl Bar {\n    fn do_thing(&self) {}\n}\n",
+        )
+        .unwrap();
+
+        let (row, col) = resolve_symbol_position(&file, "do_thing").unwrap();
+        // "do_thing" on row 2, column 7 (after "    fn ")
+        assert_eq!(row, 2);
+        assert_eq!(col, 7);
+    }
+
+    #[test]
+    fn resolve_symbol_position_not_found() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "fn hello() {}\n").unwrap();
+
+        let err = resolve_symbol_position(&file, "nonexistent").unwrap_err();
+        assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn resolve_symbol_position_unsupported_language() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("test.xyz");
+        std::fs::write(&file, "hello world\n").unwrap();
+
+        let err = resolve_symbol_position(&file, "hello").unwrap_err();
+        assert!(err.contains("unsupported"));
     }
 }
