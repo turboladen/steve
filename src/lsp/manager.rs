@@ -65,9 +65,9 @@ impl LspManager {
         let mut transport = super::client::JsonRpcTransport::new(stdin, stdout);
 
         let root_uri = path_to_uri(&self.project_root)?;
-        let init_params = lsp_types::InitializeParams {
+        let init_params = async_lsp::lsp_types::InitializeParams {
             process_id: Some(std::process::id()),
-            workspace_folders: Some(vec![lsp_types::WorkspaceFolder {
+            workspace_folders: Some(vec![async_lsp::lsp_types::WorkspaceFolder {
                 uri: root_uri,
                 name: self
                     .project_root
@@ -76,9 +76,9 @@ impl LspManager {
                     .unwrap_or("project")
                     .to_string(),
             }]),
-            capabilities: lsp_types::ClientCapabilities {
-                text_document: Some(lsp_types::TextDocumentClientCapabilities {
-                    publish_diagnostics: Some(lsp_types::PublishDiagnosticsClientCapabilities {
+            capabilities: async_lsp::lsp_types::ClientCapabilities {
+                text_document: Some(async_lsp::lsp_types::TextDocumentClientCapabilities {
+                    publish_diagnostics: Some(async_lsp::lsp_types::PublishDiagnosticsClientCapabilities {
                         related_information: Some(true),
                         ..Default::default()
                     }),
@@ -93,7 +93,7 @@ impl LspManager {
             .send_request("initialize", &init_params)
             .context("initialize request failed")?;
 
-        let init_result: lsp_types::InitializeResult =
+        let init_result: async_lsp::lsp_types::InitializeResult =
             serde_json::from_value(result).context("failed to parse InitializeResult")?;
 
         transport.send_notification("initialized", serde_json::json!({}))?;

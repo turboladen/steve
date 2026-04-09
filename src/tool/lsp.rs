@@ -166,10 +166,10 @@ fn execute_diagnostics(
     let mut output = format!("{} diagnostic(s) in {path_str}:\n\n", diagnostics.len());
     for diag in &diagnostics {
         let severity = match diag.severity {
-            Some(lsp_types::DiagnosticSeverity::ERROR) => "error",
-            Some(lsp_types::DiagnosticSeverity::WARNING) => "warning",
-            Some(lsp_types::DiagnosticSeverity::INFORMATION) => "info",
-            Some(lsp_types::DiagnosticSeverity::HINT) => "hint",
+            Some(async_lsp::lsp_types::DiagnosticSeverity::ERROR) => "error",
+            Some(async_lsp::lsp_types::DiagnosticSeverity::WARNING) => "warning",
+            Some(async_lsp::lsp_types::DiagnosticSeverity::INFORMATION) => "info",
+            Some(async_lsp::lsp_types::DiagnosticSeverity::HINT) => "hint",
             _ => "note",
         };
         let line = diag.range.start.line + 1; // back to 1-indexed
@@ -311,14 +311,14 @@ fn execute_rename(
     // Format the workspace edit as a readable plan.
     // Servers may return changes in `changes` (simple) or `document_changes` (rich).
     // Normalize to a common (uri, edits) list.
-    let file_edits: Vec<(String, Vec<lsp_types::TextEdit>)> = if let Some(changes) = edit.changes {
+    let file_edits: Vec<(String, Vec<async_lsp::lsp_types::TextEdit>)> = if let Some(changes) = edit.changes {
         changes
             .into_iter()
             .map(|(uri, edits)| (uri.as_str().to_string(), edits))
             .collect()
     } else if let Some(doc_changes) = edit.document_changes {
         match doc_changes {
-            lsp_types::DocumentChanges::Edits(edits) => edits
+            async_lsp::lsp_types::DocumentChanges::Edits(edits) => edits
                 .into_iter()
                 .map(|e| {
                     (
@@ -326,27 +326,27 @@ fn execute_rename(
                         e.edits
                             .into_iter()
                             .map(|edit| match edit {
-                                lsp_types::OneOf::Left(te) => te,
-                                lsp_types::OneOf::Right(ate) => ate.text_edit,
+                                async_lsp::lsp_types::OneOf::Left(te) => te,
+                                async_lsp::lsp_types::OneOf::Right(ate) => ate.text_edit,
                             })
                             .collect(),
                     )
                 })
                 .collect(),
-            lsp_types::DocumentChanges::Operations(ops) => ops
+            async_lsp::lsp_types::DocumentChanges::Operations(ops) => ops
                 .into_iter()
                 .filter_map(|op| match op {
-                    lsp_types::DocumentChangeOperation::Edit(e) => Some((
+                    async_lsp::lsp_types::DocumentChangeOperation::Edit(e) => Some((
                         e.text_document.uri.as_str().to_string(),
                         e.edits
                             .into_iter()
                             .map(|edit| match edit {
-                                lsp_types::OneOf::Left(te) => te,
-                                lsp_types::OneOf::Right(ate) => ate.text_edit,
+                                async_lsp::lsp_types::OneOf::Left(te) => te,
+                                async_lsp::lsp_types::OneOf::Right(ate) => ate.text_edit,
                             })
                             .collect(),
                     )),
-                    lsp_types::DocumentChangeOperation::Op(_) => None, // file create/rename/delete
+                    async_lsp::lsp_types::DocumentChangeOperation::Op(_) => None, // file create/rename/delete
                 })
                 .collect(),
         }

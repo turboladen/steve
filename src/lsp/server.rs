@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use lsp_types::*;
+use async_lsp::lsp_types::*;
 use serde_json::Value;
 
 use super::{
@@ -19,12 +19,12 @@ pub struct LspServer {
     pub(super) language: Language,
     pub binary: String,
     pub(super) capabilities: ServerCapabilities,
-    pub(super) open_files: HashSet<Uri>,
-    pub(super) diagnostics: HashMap<Uri, Vec<Diagnostic>>,
+    pub(super) open_files: HashSet<Url>,
+    pub(super) diagnostics: HashMap<Url, Vec<Diagnostic>>,
 }
 
 impl LspServer {
-    fn ensure_open(&mut self, path: &Path) -> Result<Uri> {
+    fn ensure_open(&mut self, path: &Path) -> Result<Url> {
         let uri = path_to_uri(path)?;
 
         if !self.open_files.contains(&uri) {
@@ -195,19 +195,15 @@ impl LspServer {
     }
 }
 
-pub(crate) fn path_to_uri(path: &Path) -> Result<Uri> {
+pub(crate) fn path_to_uri(path: &Path) -> Result<Url> {
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()?.join(path)
     };
     let canonical = std::fs::canonicalize(&abs).unwrap_or(abs);
-    let file_url = url::Url::from_file_path(&canonical)
-        .map_err(|()| anyhow::anyhow!("invalid file path for URI: {}", canonical.display()))?;
-    file_url
-        .as_str()
-        .parse()
-        .map_err(|e| anyhow::anyhow!("invalid URI for path {}: {e}", canonical.display()))
+    url::Url::from_file_path(&canonical)
+        .map_err(|()| anyhow::anyhow!("invalid file path for URI: {}", canonical.display()))
 }
 
 pub fn uri_to_path(uri_str: &str) -> Option<PathBuf> {
@@ -365,9 +361,7 @@ mod tests {
             })),
         };
 
-        #[allow(clippy::mutable_key_type)]
-        // Uri has interior mutability but we only use it as a lookup key
-        let mut diagnostics: HashMap<Uri, Vec<Diagnostic>> = HashMap::new();
+        let mut diagnostics: HashMap<Url, Vec<Diagnostic>> = HashMap::new();
         if notif.method == "textDocument/publishDiagnostics"
             && let Some(params) = notif.params
             && let Ok(diag_params) = serde_json::from_value::<PublishDiagnosticsParams>(params)
@@ -376,7 +370,7 @@ mod tests {
         }
 
         assert_eq!(diagnostics.len(), 1);
-        let uri: Uri = "file:///test.rs".parse().unwrap();
+        let uri: Url = Url::parse("file:///test.rs").unwrap();
         let diags = diagnostics.get(&uri).unwrap();
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].message, "test error");
