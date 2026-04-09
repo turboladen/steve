@@ -8,7 +8,7 @@
 
 use std::{
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{Arc, RwLock},
 };
 
 use anyhow::Result;
@@ -144,16 +144,26 @@ fn extract_position(args: &Value) -> Result<(u32, u32)> {
 }
 
 fn execute_diagnostics(
-    lsp_manager: &Arc<Mutex<LspManager>>,
+    lsp_manager: &Arc<RwLock<LspManager>>,
     path: &Path,
     path_str: &str,
 ) -> Result<ToolOutput> {
-    let mut mgr = lsp_manager
-        .lock()
-        .map_err(|_| anyhow::anyhow!("LSP manager lock poisoned"))?;
-
-    let server = mgr.server_for_file(path)?;
-    let diagnostics = server.diagnostics(path)?;
+    // Try read lock (common path — server already running)
+    let diagnostics = match lsp_manager.read() {
+        Ok(mgr) => match mgr.server_for_file(path) {
+            Ok(server) => server.diagnostics(path)?,
+            Err(_) => {
+                // Server not running, need write lock to start it
+                drop(mgr);
+                let mut mgr = lsp_manager
+                    .write()
+                    .map_err(|_| anyhow::anyhow!("LSP manager lock poisoned"))?;
+                let server = mgr.server_for_file_or_start(path)?;
+                server.diagnostics(path)?
+            }
+        },
+        Err(_) => return Err(anyhow::anyhow!("LSP manager lock poisoned")),
+    };
 
     if diagnostics.is_empty() {
         return Ok(ToolOutput {
@@ -166,10 +176,10 @@ fn execute_diagnostics(
     let mut output = format!("{} diagnostic(s) in {path_str}:\n\n", diagnostics.len());
     for diag in &diagnostics {
         let severity = match diag.severity {
-            Some(lsp_types::DiagnosticSeverity::ERROR) => "error",
-            Some(lsp_types::DiagnosticSeverity::WARNING) => "warning",
-            Some(lsp_types::DiagnosticSeverity::INFORMATION) => "info",
-            Some(lsp_types::DiagnosticSeverity::HINT) => "hint",
+            Some(async_lsp::lsp_types::DiagnosticSeverity::ERROR) => "error",
+            Some(async_lsp::lsp_types::DiagnosticSeverity::WARNING) => "warning",
+            Some(async_lsp::lsp_types::DiagnosticSeverity::INFORMATION) => "info",
+            Some(async_lsp::lsp_types::DiagnosticSeverity::HINT) => "hint",
             _ => "note",
         };
         let line = diag.range.start.line + 1; // back to 1-indexed
@@ -188,18 +198,27 @@ fn execute_diagnostics(
 }
 
 fn execute_definition(
-    lsp_manager: &Arc<Mutex<LspManager>>,
+    lsp_manager: &Arc<RwLock<LspManager>>,
     path: &Path,
     path_str: &str,
     line: u32,
     character: u32,
 ) -> Result<ToolOutput> {
-    let mut mgr = lsp_manager
-        .lock()
-        .map_err(|_| anyhow::anyhow!("LSP manager lock poisoned"))?;
-
-    let server = mgr.server_for_file(path)?;
-    let locations = server.definition(path, line, character)?;
+    // Try read lock (common path — server already running)
+    let locations = match lsp_manager.read() {
+        Ok(mgr) => match mgr.server_for_file(path) {
+            Ok(server) => server.definition(path, line, character)?,
+            Err(_) => {
+                drop(mgr);
+                let mut mgr = lsp_manager
+                    .write()
+                    .map_err(|_| anyhow::anyhow!("LSP manager lock poisoned"))?;
+                let server = mgr.server_for_file_or_start(path)?;
+                server.definition(path, line, character)?
+            }
+        },
+        Err(_) => return Err(anyhow::anyhow!("LSP manager lock poisoned")),
+    };
 
     if locations.is_empty() {
         return Ok(ToolOutput {
@@ -241,18 +260,27 @@ fn execute_definition(
 }
 
 fn execute_references(
-    lsp_manager: &Arc<Mutex<LspManager>>,
+    lsp_manager: &Arc<RwLock<LspManager>>,
     path: &Path,
     path_str: &str,
     line: u32,
     character: u32,
 ) -> Result<ToolOutput> {
-    let mut mgr = lsp_manager
-        .lock()
-        .map_err(|_| anyhow::anyhow!("LSP manager lock poisoned"))?;
-
-    let server = mgr.server_for_file(path)?;
-    let locations = server.references(path, line, character)?;
+    // Try read lock (common path — server already running)
+    let locations = match lsp_manager.read() {
+        Ok(mgr) => match mgr.server_for_file(path) {
+            Ok(server) => server.references(path, line, character)?,
+            Err(_) => {
+                drop(mgr);
+                let mut mgr = lsp_manager
+                    .write()
+                    .map_err(|_| anyhow::anyhow!("LSP manager lock poisoned"))?;
+                let server = mgr.server_for_file_or_start(path)?;
+                server.references(path, line, character)?
+            }
+        },
+        Err(_) => return Err(anyhow::anyhow!("LSP manager lock poisoned")),
+    };
 
     if locations.is_empty() {
         return Ok(ToolOutput {
@@ -294,65 +322,75 @@ fn execute_references(
 }
 
 fn execute_rename(
-    lsp_manager: &Arc<Mutex<LspManager>>,
+    lsp_manager: &Arc<RwLock<LspManager>>,
     path: &Path,
     path_str: &str,
     line: u32,
     character: u32,
     new_name: &str,
 ) -> Result<ToolOutput> {
-    let mut mgr = lsp_manager
-        .lock()
-        .map_err(|_| anyhow::anyhow!("LSP manager lock poisoned"))?;
-
-    let server = mgr.server_for_file(path)?;
-    let edit = server.rename(path, line, character, new_name)?;
+    // Try read lock (common path — server already running)
+    let edit = match lsp_manager.read() {
+        Ok(mgr) => match mgr.server_for_file(path) {
+            Ok(server) => server.rename(path, line, character, new_name)?,
+            Err(_) => {
+                drop(mgr);
+                let mut mgr = lsp_manager
+                    .write()
+                    .map_err(|_| anyhow::anyhow!("LSP manager lock poisoned"))?;
+                let server = mgr.server_for_file_or_start(path)?;
+                server.rename(path, line, character, new_name)?
+            }
+        },
+        Err(_) => return Err(anyhow::anyhow!("LSP manager lock poisoned")),
+    };
 
     // Format the workspace edit as a readable plan.
     // Servers may return changes in `changes` (simple) or `document_changes` (rich).
     // Normalize to a common (uri, edits) list.
-    let file_edits: Vec<(String, Vec<lsp_types::TextEdit>)> = if let Some(changes) = edit.changes {
-        changes
-            .into_iter()
-            .map(|(uri, edits)| (uri.as_str().to_string(), edits))
-            .collect()
-    } else if let Some(doc_changes) = edit.document_changes {
-        match doc_changes {
-            lsp_types::DocumentChanges::Edits(edits) => edits
+    let file_edits: Vec<(String, Vec<async_lsp::lsp_types::TextEdit>)> =
+        if let Some(changes) = edit.changes {
+            changes
                 .into_iter()
-                .map(|e| {
-                    (
-                        e.text_document.uri.as_str().to_string(),
-                        e.edits
-                            .into_iter()
-                            .map(|edit| match edit {
-                                lsp_types::OneOf::Left(te) => te,
-                                lsp_types::OneOf::Right(ate) => ate.text_edit,
-                            })
-                            .collect(),
-                    )
-                })
-                .collect(),
-            lsp_types::DocumentChanges::Operations(ops) => ops
-                .into_iter()
-                .filter_map(|op| match op {
-                    lsp_types::DocumentChangeOperation::Edit(e) => Some((
-                        e.text_document.uri.as_str().to_string(),
-                        e.edits
-                            .into_iter()
-                            .map(|edit| match edit {
-                                lsp_types::OneOf::Left(te) => te,
-                                lsp_types::OneOf::Right(ate) => ate.text_edit,
-                            })
-                            .collect(),
-                    )),
-                    lsp_types::DocumentChangeOperation::Op(_) => None, // file create/rename/delete
-                })
-                .collect(),
-        }
-    } else {
-        Vec::new()
-    };
+                .map(|(uri, edits)| (uri.as_str().to_string(), edits))
+                .collect()
+        } else if let Some(doc_changes) = edit.document_changes {
+            match doc_changes {
+                async_lsp::lsp_types::DocumentChanges::Edits(edits) => edits
+                    .into_iter()
+                    .map(|e| {
+                        (
+                            e.text_document.uri.as_str().to_string(),
+                            e.edits
+                                .into_iter()
+                                .map(|edit| match edit {
+                                    async_lsp::lsp_types::OneOf::Left(te) => te,
+                                    async_lsp::lsp_types::OneOf::Right(ate) => ate.text_edit,
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+                async_lsp::lsp_types::DocumentChanges::Operations(ops) => ops
+                    .into_iter()
+                    .filter_map(|op| match op {
+                        async_lsp::lsp_types::DocumentChangeOperation::Edit(e) => Some((
+                            e.text_document.uri.as_str().to_string(),
+                            e.edits
+                                .into_iter()
+                                .map(|edit| match edit {
+                                    async_lsp::lsp_types::OneOf::Left(te) => te,
+                                    async_lsp::lsp_types::OneOf::Right(ate) => ate.text_edit,
+                                })
+                                .collect(),
+                        )),
+                        async_lsp::lsp_types::DocumentChangeOperation::Op(_) => None, // file create/rename/delete
+                    })
+                    .collect(),
+            }
+        } else {
+            Vec::new()
+        };
 
     if file_edits.is_empty() {
         return Ok(ToolOutput {
@@ -431,12 +469,23 @@ mod tests {
         }
     }
 
+    fn test_runtime_handle() -> tokio::runtime::Handle {
+        use std::sync::OnceLock;
+        static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+        RT.get_or_init(|| tokio::runtime::Runtime::new().expect("test tokio runtime"))
+            .handle()
+            .clone()
+    }
+
     fn test_ctx_with_lsp(dir: &Path) -> ToolContext {
         ToolContext {
             project_root: dir.to_path_buf(),
             storage_dir: None,
             task_store: None,
-            lsp_manager: Some(Arc::new(Mutex::new(LspManager::new(dir.to_path_buf())))),
+            lsp_manager: Some(Arc::new(RwLock::new(LspManager::new(
+                dir.to_path_buf(),
+                test_runtime_handle(),
+            )))),
         }
     }
 

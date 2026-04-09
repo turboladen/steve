@@ -1,33 +1,41 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     path::{Path, PathBuf},
-    process::Child,
+    sync::Mutex,
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
-use lsp_types::*;
-use serde_json::Value;
+use async_lsp::{ServerSocket, lsp_types::*};
+use tokio::task::JoinHandle;
 
-use super::{
-    Language,
-    client::{JsonRpcNotification, JsonRpcTransport},
-};
+use super::Language;
+use crate::lsp::client::SharedDiagnostics;
+
+/// Timeout for LSP requests (matches the old JsonRpcTransport timeout).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct LspServer {
-    pub(super) _process: Child,
-    pub(super) transport: JsonRpcTransport,
+    pub(super) process: tokio::process::Child,
+    pub(super) mainloop_handle: JoinHandle<()>,
+    pub(super) server_socket: ServerSocket,
+    pub(super) handle: tokio::runtime::Handle,
     pub(super) language: Language,
     pub binary: String,
     pub(super) capabilities: ServerCapabilities,
-    pub(super) open_files: HashSet<Uri>,
-    pub(super) diagnostics: HashMap<Uri, Vec<Diagnostic>>,
+    pub(super) open_files: Mutex<HashSet<Url>>,
+    pub(super) diagnostics: SharedDiagnostics,
 }
 
 impl LspServer {
-    fn ensure_open(&mut self, path: &Path) -> Result<Uri> {
+    fn ensure_open(&self, path: &Path) -> Result<Url> {
         let uri = path_to_uri(path)?;
 
-        if !self.open_files.contains(&uri) {
+        let mut open = self
+            .open_files
+            .lock()
+            .map_err(|_| anyhow::anyhow!("open_files lock poisoned"))?;
+        if !open.contains(&uri) {
             let content = std::fs::read_to_string(path)
                 .with_context(|| format!("failed to read {}", path.display()))?;
 
@@ -39,27 +47,16 @@ impl LspServer {
                     text: content,
                 },
             };
-            self.transport
-                .send_notification("textDocument/didOpen", &params)?;
-            self.open_files.insert(uri.clone());
+            self.server_socket
+                .notify::<notification::DidOpenTextDocument>(params)
+                .map_err(|e| anyhow::anyhow!("failed to send didOpen: {e}"))?;
+            open.insert(uri.clone());
         }
 
         Ok(uri)
     }
 
-    fn process_notifications(&mut self, notifications: Vec<JsonRpcNotification>) {
-        for notif in notifications {
-            if notif.method == "textDocument/publishDiagnostics"
-                && let Some(params) = notif.params
-                && let Ok(diag_params) = serde_json::from_value::<PublishDiagnosticsParams>(params)
-            {
-                self.diagnostics
-                    .insert(diag_params.uri, diag_params.diagnostics);
-            }
-        }
-    }
-
-    pub fn diagnostics(&mut self, path: &Path) -> Result<Vec<Diagnostic>> {
+    pub fn diagnostics(&self, path: &Path) -> Result<Vec<Diagnostic>> {
         let uri = self.ensure_open(path)?;
 
         let params = DocumentSymbolParams {
@@ -68,22 +65,34 @@ impl LspServer {
             partial_result_params: Default::default(),
         };
 
-        match self
-            .transport
-            .send_request("textDocument/documentSymbol", &params)
-        {
-            Ok((_result, notifications)) => {
-                self.process_notifications(notifications);
-            }
-            Err(e) => {
+        match self.handle.block_on(async {
+            tokio::time::timeout(
+                REQUEST_TIMEOUT,
+                self.server_socket
+                    .request::<request::DocumentSymbolRequest>(params),
+            )
+            .await
+        }) {
+            Ok(Ok(_result)) => {}
+            Ok(Err(e)) => {
                 tracing::debug!("documentSymbol request failed (ok, just for diagnostics): {e}");
+            }
+            Err(_) => {
+                tracing::debug!("documentSymbol request timed out (ok, just for diagnostics)");
             }
         }
 
-        Ok(self.diagnostics.get(&uri).cloned().unwrap_or_default())
+        let locked = match self.diagnostics.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("diagnostics mutex poisoned in reader, recovering");
+                poisoned.into_inner()
+            }
+        };
+        Ok(locked.get(&uri).cloned().unwrap_or_default())
     }
 
-    pub fn definition(&mut self, path: &Path, line: u32, character: u32) -> Result<Vec<Location>> {
+    pub fn definition(&self, path: &Path, line: u32, character: u32) -> Result<Vec<Location>> {
         let uri = self.ensure_open(path)?;
 
         if !self
@@ -107,15 +116,28 @@ impl LspServer {
             partial_result_params: Default::default(),
         };
 
-        let (result, notifications) = self
-            .transport
-            .send_request("textDocument/definition", &params)?;
-        self.process_notifications(notifications);
+        let result = self
+            .handle
+            .block_on(async {
+                tokio::time::timeout(
+                    REQUEST_TIMEOUT,
+                    self.server_socket
+                        .request::<request::GotoDefinition>(params),
+                )
+                .await
+            })
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "definition request timed out after {}s",
+                    REQUEST_TIMEOUT.as_secs()
+                )
+            })?
+            .map_err(|e| anyhow::anyhow!("definition request failed: {e}"))?;
 
-        parse_locations(result)
+        parse_goto_definition_response(result)
     }
 
-    pub fn references(&mut self, path: &Path, line: u32, character: u32) -> Result<Vec<Location>> {
+    pub fn references(&self, path: &Path, line: u32, character: u32) -> Result<Vec<Location>> {
         let uri = self.ensure_open(path)?;
 
         if self.capabilities.references_provider.is_none() {
@@ -134,16 +156,28 @@ impl LspServer {
             partial_result_params: Default::default(),
         };
 
-        let (result, notifications) = self
-            .transport
-            .send_request("textDocument/references", &params)?;
-        self.process_notifications(notifications);
+        let result = self
+            .handle
+            .block_on(async {
+                tokio::time::timeout(
+                    REQUEST_TIMEOUT,
+                    self.server_socket.request::<request::References>(params),
+                )
+                .await
+            })
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "references request timed out after {}s",
+                    REQUEST_TIMEOUT.as_secs()
+                )
+            })?
+            .map_err(|e| anyhow::anyhow!("references request failed: {e}"))?;
 
-        parse_locations(result)
+        Ok(result.unwrap_or_default())
     }
 
     pub fn rename(
-        &mut self,
+        &self,
         path: &Path,
         line: u32,
         character: u32,
@@ -164,29 +198,49 @@ impl LspServer {
             work_done_progress_params: Default::default(),
         };
 
-        let (result, notifications) = self
-            .transport
-            .send_request("textDocument/rename", &params)?;
-        self.process_notifications(notifications);
+        let result = self
+            .handle
+            .block_on(async {
+                tokio::time::timeout(
+                    REQUEST_TIMEOUT,
+                    self.server_socket.request::<request::Rename>(params),
+                )
+                .await
+            })
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "rename request timed out after {}s",
+                    REQUEST_TIMEOUT.as_secs()
+                )
+            })?
+            .map_err(|e| anyhow::anyhow!("rename request failed: {e}"))?;
 
-        serde_json::from_value(result).context("failed to parse WorkspaceEdit")
+        result.ok_or_else(|| anyhow::anyhow!("server could not rename at this position"))
     }
 
     pub(super) fn transport_shutdown(mut self) -> Result<()> {
-        let _ = self.transport.send_request("shutdown", Value::Null);
-        let _ = self.transport.send_notification("exit", Value::Null);
+        // Send shutdown request (best-effort — may fail if called from tokio worker thread)
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = self.handle.block_on(async {
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    self.server_socket.request::<request::Shutdown>(()),
+                )
+                .await
+            });
+        }));
+        let _ = self.server_socket.notify::<notification::Exit>(());
+        self.mainloop_handle.abort();
 
-        drop(self.transport);
-
-        match self._process.try_wait() {
+        match self.process.try_wait() {
             Ok(Some(_status)) => {}
             _ => {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                match self._process.try_wait() {
+                std::thread::sleep(Duration::from_millis(500));
+                match self.process.try_wait() {
                     Ok(Some(_)) => {}
                     _ => {
-                        let _ = self._process.kill();
-                        let _ = self._process.wait();
+                        let _ = self.process.start_kill();
+                        // Don't await — process is being killed, cleanup happens on drop
                     }
                 }
             }
@@ -195,19 +249,15 @@ impl LspServer {
     }
 }
 
-pub(crate) fn path_to_uri(path: &Path) -> Result<Uri> {
+pub(crate) fn path_to_uri(path: &Path) -> Result<Url> {
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()?.join(path)
     };
     let canonical = std::fs::canonicalize(&abs).unwrap_or(abs);
-    let file_url = url::Url::from_file_path(&canonical)
-        .map_err(|()| anyhow::anyhow!("invalid file path for URI: {}", canonical.display()))?;
-    file_url
-        .as_str()
-        .parse()
-        .map_err(|e| anyhow::anyhow!("invalid URI for path {}: {e}", canonical.display()))
+    url::Url::from_file_path(&canonical)
+        .map_err(|()| anyhow::anyhow!("invalid file path for URI: {}", canonical.display()))
 }
 
 pub fn uri_to_path(uri_str: &str) -> Option<PathBuf> {
@@ -216,30 +266,19 @@ pub fn uri_to_path(uri_str: &str) -> Option<PathBuf> {
         .and_then(|u| u.to_file_path().ok())
 }
 
-fn parse_locations(value: Value) -> Result<Vec<Location>> {
-    if value.is_null() {
-        return Ok(Vec::new());
-    }
-
-    if let Ok(loc) = serde_json::from_value::<Location>(value.clone()) {
-        return Ok(vec![loc]);
-    }
-
-    if let Ok(locs) = serde_json::from_value::<Vec<Location>>(value.clone()) {
-        return Ok(locs);
-    }
-
-    if let Ok(links) = serde_json::from_value::<Vec<LocationLink>>(value) {
-        return Ok(links
+fn parse_goto_definition_response(result: Option<GotoDefinitionResponse>) -> Result<Vec<Location>> {
+    match result {
+        None => Ok(Vec::new()),
+        Some(GotoDefinitionResponse::Scalar(loc)) => Ok(vec![loc]),
+        Some(GotoDefinitionResponse::Array(locs)) => Ok(locs),
+        Some(GotoDefinitionResponse::Link(links)) => Ok(links
             .into_iter()
             .map(|link| Location {
                 uri: link.target_uri,
                 range: link.target_selection_range,
             })
-            .collect());
+            .collect()),
     }
-
-    Ok(Vec::new())
 }
 
 #[cfg(test)]
@@ -271,57 +310,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_locations_null() {
-        let result = parse_locations(Value::Null).unwrap();
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn parse_locations_single() {
-        let json = serde_json::json!({
-            "uri": "file:///test.rs",
-            "range": {
-                "start": {"line": 10, "character": 5},
-                "end": {"line": 10, "character": 15}
-            }
-        });
-        let result = parse_locations(json).unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].range.start.line, 10);
-    }
-
-    #[test]
-    fn parse_locations_array() {
-        let json = serde_json::json!([
-            {
-                "uri": "file:///a.rs",
-                "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 5}}
-            },
-            {
-                "uri": "file:///b.rs",
-                "range": {"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 5}}
-            }
-        ]);
-        let result = parse_locations(json).unwrap();
-        assert_eq!(result.len(), 2);
-    }
-
-    #[test]
-    fn parse_locations_link_array() {
-        let json = serde_json::json!([
-            {
-                "targetUri": "file:///target.rs",
-                "targetRange": {"start": {"line": 5, "character": 0}, "end": {"line": 10, "character": 0}},
-                "targetSelectionRange": {"start": {"line": 5, "character": 4}, "end": {"line": 5, "character": 15}}
-            }
-        ]);
-        let result = parse_locations(json).unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].range.start.line, 5);
-        assert_eq!(result[0].range.start.character, 4);
-    }
-
-    #[test]
     fn uri_to_path_percent_encoded_hash() {
         let path = uri_to_path("file:///home/user/C%23/test.cs").unwrap();
         assert_eq!(path, PathBuf::from("/home/user/C#/test.cs"));
@@ -345,40 +333,79 @@ mod tests {
     }
 
     #[test]
-    fn process_notifications_buffers_diagnostics() {
-        use crate::lsp::client::JsonRpcNotification;
+    fn shared_diagnostics_from_publish_params() {
+        use crate::lsp::client::SharedDiagnostics;
 
-        let notif = JsonRpcNotification {
-            method: "textDocument/publishDiagnostics".to_string(),
-            params: Some(serde_json::json!({
-                "uri": "file:///test.rs",
-                "diagnostics": [
-                    {
-                        "range": {
-                            "start": {"line": 0, "character": 0},
-                            "end": {"line": 0, "character": 5}
-                        },
-                        "severity": 1,
-                        "message": "test error"
-                    }
-                ]
-            })),
+        let diags: SharedDiagnostics = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let params = PublishDiagnosticsParams {
+            uri: Url::parse("file:///test.rs").unwrap(),
+            diagnostics: vec![Diagnostic {
+                range: Range::new(Position::new(0, 0), Position::new(0, 5)),
+                severity: Some(DiagnosticSeverity::ERROR),
+                message: "test error".to_string(),
+                ..Default::default()
+            }],
+            version: None,
         };
 
-        #[allow(clippy::mutable_key_type)]
-        // Uri has interior mutability but we only use it as a lookup key
-        let mut diagnostics: HashMap<Uri, Vec<Diagnostic>> = HashMap::new();
-        if notif.method == "textDocument/publishDiagnostics"
-            && let Some(params) = notif.params
-            && let Ok(diag_params) = serde_json::from_value::<PublishDiagnosticsParams>(params)
-        {
-            diagnostics.insert(diag_params.uri, diag_params.diagnostics);
-        }
+        diags
+            .lock()
+            .unwrap()
+            .insert(params.uri.clone(), params.diagnostics);
 
-        assert_eq!(diagnostics.len(), 1);
-        let uri: Uri = "file:///test.rs".parse().unwrap();
-        let diags = diagnostics.get(&uri).unwrap();
-        assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].message, "test error");
+        let locked = diags.lock().unwrap();
+        let result = locked.get(&Url::parse("file:///test.rs").unwrap()).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].message, "test error");
+    }
+
+    #[test]
+    fn parse_goto_definition_response_none() {
+        let result = parse_goto_definition_response(None).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_goto_definition_response_scalar() {
+        let loc = Location {
+            uri: Url::parse("file:///test.rs").unwrap(),
+            range: Range::new(Position::new(10, 5), Position::new(10, 15)),
+        };
+        let result =
+            parse_goto_definition_response(Some(GotoDefinitionResponse::Scalar(loc))).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].range.start.line, 10);
+    }
+
+    #[test]
+    fn parse_goto_definition_response_array() {
+        let locs = vec![
+            Location {
+                uri: Url::parse("file:///a.rs").unwrap(),
+                range: Range::new(Position::new(1, 0), Position::new(1, 5)),
+            },
+            Location {
+                uri: Url::parse("file:///b.rs").unwrap(),
+                range: Range::new(Position::new(2, 0), Position::new(2, 5)),
+            },
+        ];
+        let result =
+            parse_goto_definition_response(Some(GotoDefinitionResponse::Array(locs))).unwrap();
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn parse_goto_definition_response_links() {
+        let links = vec![LocationLink {
+            origin_selection_range: None,
+            target_uri: Url::parse("file:///target.rs").unwrap(),
+            target_range: Range::new(Position::new(5, 0), Position::new(10, 0)),
+            target_selection_range: Range::new(Position::new(5, 4), Position::new(5, 15)),
+        }];
+        let result =
+            parse_goto_definition_response(Some(GotoDefinitionResponse::Link(links))).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].range.start.line, 5);
+        assert_eq!(result[0].range.start.character, 4);
     }
 }

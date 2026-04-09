@@ -367,7 +367,7 @@ pub struct ToolContext {
     /// The task store for persistent task management.
     pub task_store: Option<Arc<TaskStore>>,
     /// The LSP manager for language server queries.
-    pub lsp_manager: Option<Arc<std::sync::Mutex<LspManager>>>,
+    pub lsp_manager: Option<Arc<std::sync::RwLock<LspManager>>>,
 }
 
 /// Resolve a path string relative to the project root.

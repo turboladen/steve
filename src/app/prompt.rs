@@ -93,7 +93,7 @@ impl App {
         }
 
         // Surface running LSP servers so the LLM knows which languages have code intelligence
-        if let Ok(mgr) = self.lsp_manager.try_lock() {
+        if let Ok(mgr) = self.lsp_manager.try_read() {
             let status = mgr.language_status();
             let running: Vec<&str> = status
                 .iter()
