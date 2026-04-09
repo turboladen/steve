@@ -82,10 +82,13 @@ impl LspServer {
             }
         }
 
-        let locked = self
-            .diagnostics
-            .lock()
-            .map_err(|_| anyhow::anyhow!("diagnostics lock poisoned"))?;
+        let locked = match self.diagnostics.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("diagnostics mutex poisoned in reader, recovering");
+                poisoned.into_inner()
+            }
+        };
         Ok(locked.get(&uri).cloned().unwrap_or_default())
     }
 
