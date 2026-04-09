@@ -57,16 +57,12 @@ impl LspManager {
 
         tracing::debug!(binary = %binary, ?args, "spawning LSP server for {lang}");
 
-        let mut child = self
-            .handle
-            .block_on(async {
-                tokio::process::Command::new(&binary)
-                    .args(&args)
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
-                    .spawn()
-            })
+        let mut child = tokio::process::Command::new(&binary)
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
             .with_context(|| format!("failed to spawn {binary}"))?;
 
         let stdin = child.stdin.take().context("no stdin")?;

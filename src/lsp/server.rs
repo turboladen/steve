@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -9,6 +10,9 @@ use tokio::task::JoinHandle;
 
 use super::Language;
 use crate::lsp::client::SharedDiagnostics;
+
+/// Timeout for LSP requests (matches the old JsonRpcTransport timeout).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct LspServer {
     pub(super) _process: tokio::process::Child,
@@ -56,13 +60,20 @@ impl LspServer {
             partial_result_params: Default::default(),
         };
 
-        match self.handle.block_on(
-            self.server_socket
-                .request::<request::DocumentSymbolRequest>(params),
-        ) {
-            Ok(_result) => {}
-            Err(e) => {
+        match self.handle.block_on(async {
+            tokio::time::timeout(
+                REQUEST_TIMEOUT,
+                self.server_socket
+                    .request::<request::DocumentSymbolRequest>(params),
+            )
+            .await
+        }) {
+            Ok(Ok(_result)) => {}
+            Ok(Err(e)) => {
                 tracing::debug!("documentSymbol request failed (ok, just for diagnostics): {e}");
+            }
+            Err(_) => {
+                tracing::debug!("documentSymbol request timed out (ok, just for diagnostics)");
             }
         }
 
@@ -99,10 +110,20 @@ impl LspServer {
 
         let result = self
             .handle
-            .block_on(
-                self.server_socket
-                    .request::<request::GotoDefinition>(params),
-            )
+            .block_on(async {
+                tokio::time::timeout(
+                    REQUEST_TIMEOUT,
+                    self.server_socket
+                        .request::<request::GotoDefinition>(params),
+                )
+                .await
+            })
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "definition request timed out after {}s",
+                    REQUEST_TIMEOUT.as_secs()
+                )
+            })?
             .map_err(|e| anyhow::anyhow!("definition request failed: {e}"))?;
 
         parse_goto_definition_response(result)
@@ -129,7 +150,19 @@ impl LspServer {
 
         let result = self
             .handle
-            .block_on(self.server_socket.request::<request::References>(params))
+            .block_on(async {
+                tokio::time::timeout(
+                    REQUEST_TIMEOUT,
+                    self.server_socket.request::<request::References>(params),
+                )
+                .await
+            })
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "references request timed out after {}s",
+                    REQUEST_TIMEOUT.as_secs()
+                )
+            })?
             .map_err(|e| anyhow::anyhow!("references request failed: {e}"))?;
 
         Ok(result.unwrap_or_default())
@@ -159,22 +192,42 @@ impl LspServer {
 
         let result = self
             .handle
-            .block_on(self.server_socket.request::<request::Rename>(params))
+            .block_on(async {
+                tokio::time::timeout(
+                    REQUEST_TIMEOUT,
+                    self.server_socket.request::<request::Rename>(params),
+                )
+                .await
+            })
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "rename request timed out after {}s",
+                    REQUEST_TIMEOUT.as_secs()
+                )
+            })?
             .map_err(|e| anyhow::anyhow!("rename request failed: {e}"))?;
 
         Ok(result.unwrap_or_default())
     }
 
     pub(super) fn transport_shutdown(mut self) -> Result<()> {
-        // Shutdown is best-effort — don't block_on since this may run from Drop on a tokio worker thread.
-        // Send exit notification directly; the server should exit on receiving it.
+        // Send shutdown request (best-effort — may fail if called from tokio worker thread)
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = self.handle.block_on(async {
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    self.server_socket.request::<request::Shutdown>(()),
+                )
+                .await
+            });
+        }));
         let _ = self.server_socket.notify::<notification::Exit>(());
         self._mainloop_handle.abort();
 
         match self._process.try_wait() {
             Ok(Some(_status)) => {}
             _ => {
-                std::thread::sleep(std::time::Duration::from_millis(500));
+                std::thread::sleep(Duration::from_millis(500));
                 match self._process.try_wait() {
                     Ok(Some(_)) => {}
                     _ => {
