@@ -282,23 +282,7 @@ pub(crate) struct Symbol {
 /// We try `name` first (most common), then fall back to searching for an
 /// `identifier`/`type_identifier` child.
 fn extract_name<'a>(node: Node<'a>, source: &'a [u8]) -> Option<String> {
-    // Special case: impl blocks in Rust — look for a type child
-    if node.kind() == "impl_item" {
-        // Try to find the type being implemented
-        // Pattern: impl [Trait for] Type { ... }
-        if let Some(type_node) = node.child_by_field_name("type") {
-            return Some(node_text(type_node, source));
-        }
-        // Fallback: find first type_identifier child
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            if child.kind() == "type_identifier" || child.kind() == "generic_type" {
-                return Some(node_text(child, source));
-            }
-        }
-    }
-
-    // Special case: use declarations — show the whole text (trimmed)
+    // Use declarations get special handling — show the full text, not just the name node
     if node.kind() == "use_declaration"
         || node.kind() == "import_statement"
         || node.kind() == "import_from_statement"
@@ -306,29 +290,10 @@ fn extract_name<'a>(node: Node<'a>, source: &'a [u8]) -> Option<String> {
         || node.kind() == "preproc_include"
     {
         let text = node_text(node, source);
-        // Truncate long imports
         return Some(crate::truncate_chars(&text, 60));
     }
 
-    // Try field `name` first (works for most languages)
-    if let Some(name_node) = node.child_by_field_name("name") {
-        return Some(node_text(name_node, source));
-    }
-
-    // Fallback: scan direct children for identifier-like nodes
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        let kind = child.kind();
-        if kind == "identifier"
-            || kind == "type_identifier"
-            || kind == "property_identifier"
-            || kind == "constant"
-        {
-            return Some(node_text(child, source));
-        }
-    }
-
-    None
+    extract_name_node(node).map(|n| node_text(n, source))
 }
 
 /// Get the text content of a node.
@@ -612,35 +577,11 @@ fn extract_name_node<'a>(node: Node<'a>) -> Option<Node<'a>> {
     None
 }
 
-fn find_symbol_position_recursive(
-    node: Node,
-    source: &[u8],
-    target_name: &str,
-    symbol_types: &[&str],
-) -> Option<(u32, u32)> {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if symbol_types.contains(&child.kind())
-            && let Some(name_node) = extract_name_node(child)
-        {
-            let name_text = node_text(name_node, source);
-            if name_text == target_name {
-                let pos = name_node.start_position();
-                return Some((pos.row as u32, pos.column as u32));
-            }
-        }
-
-        if let Some(found) =
-            find_symbol_position_recursive(child, source, target_name, symbol_types)
-        {
-            return Some(found);
-        }
-    }
-    None
-}
-
 /// Resolve a symbol name to its (line_0indexed, column_0indexed) position in a file.
 /// Returns the position of the name identifier node, suitable for LSP operations.
+/// Note: column is a byte offset within the line (from tree-sitter), which equals
+/// the character offset for ASCII identifiers. This matches the existing `character`
+/// parameter convention in the LSP tool.
 pub(crate) fn resolve_symbol_position(
     path: &Path,
     symbol_name: &str,
@@ -652,9 +593,12 @@ pub(crate) fn resolve_symbol_position(
     let tree = parse_file(&source, lang_info.language)
         .ok_or_else(|| format!("failed to parse {}", path.display()))?;
     let root = tree.root_node();
+    let symbol_types = symbol_node_types(lang_info.lang);
 
-    find_symbol_position_recursive(root, &source, symbol_name, symbol_node_types(lang_info.lang))
-        .ok_or_else(|| format!("symbol '{}' not found in {}", symbol_name, path.display()))
+    let (_, name_node) = find_symbol_node_recursive(root, &source, symbol_name, symbol_types)
+        .ok_or_else(|| format!("symbol '{}' not found in {}", symbol_name, path.display()))?;
+    let pos = name_node.start_position();
+    Ok((pos.row as u32, pos.column as u32))
 }
 
 // ── Definition finding ───────────────────────────────────────────────────
@@ -677,54 +621,64 @@ fn find_symbol_by_name(
     lang: TreeSitterLang,
 ) -> Option<DefinitionInfo> {
     let symbol_types = symbol_node_types(lang);
-    find_def_recursive(node, source, target_name, symbol_types)
+    let (decl_node, name_node) =
+        find_symbol_node_recursive(node, source, target_name, symbol_types)?;
+    let name = node_text(name_node, source);
+
+    let start_line = decl_node.start_position().row + 1;
+    let end_line = decl_node.end_position().row + 1;
+
+    // Extract source preview (first ~20 lines)
+    let source_str = std::str::from_utf8(source).unwrap_or("");
+    let lines: Vec<&str> = source_str.lines().collect();
+    let preview_end = std::cmp::min(start_line - 1 + 20, end_line);
+    let preview_end = std::cmp::min(preview_end, lines.len());
+    let preview_start = start_line - 1;
+
+    let mut preview = String::new();
+    for (i, line) in lines[preview_start..preview_end].iter().enumerate() {
+        let line_num = preview_start + i + 1;
+        preview.push_str(&format!("{line_num:>4} | {line}\n"));
+    }
+    if preview_end < end_line {
+        preview.push_str(&format!(
+            "     ... ({} more lines)\n",
+            end_line - preview_end
+        ));
+    }
+
+    Some(DefinitionInfo {
+        kind: kind_label(decl_node.kind()).to_string(),
+        name,
+        start_line,
+        end_line,
+        source_preview: preview,
+    })
 }
 
-fn find_def_recursive(
-    node: Node,
+/// Shared recursive walk: find a named symbol in the AST by name.
+/// Returns the (declaration_node, name_node) pair so callers can extract
+/// either position info or full definition info.
+fn find_symbol_node_recursive<'a>(
+    node: Node<'a>,
     source: &[u8],
     target_name: &str,
     symbol_types: &[&str],
-) -> Option<DefinitionInfo> {
+) -> Option<(Node<'a>, Node<'a>)> {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if symbol_types.contains(&child.kind())
-            && let Some(name) = extract_name(child, source)
-            && name == target_name
+            && let Some(name_node) = extract_name_node(child)
         {
-            let start_line = child.start_position().row + 1;
-            let end_line = child.end_position().row + 1;
-
-            // Extract source preview (first ~20 lines)
-            let source_str = std::str::from_utf8(source).unwrap_or("");
-            let lines: Vec<&str> = source_str.lines().collect();
-            let preview_end = std::cmp::min(start_line - 1 + 20, end_line);
-            let preview_end = std::cmp::min(preview_end, lines.len());
-            let preview_start = start_line - 1;
-
-            let mut preview = String::new();
-            for (i, line) in lines[preview_start..preview_end].iter().enumerate() {
-                let line_num = preview_start + i + 1;
-                preview.push_str(&format!("{line_num:>4} | {line}\n"));
+            let name_text = node_text(name_node, source);
+            if name_text == target_name {
+                return Some((child, name_node));
             }
-            if preview_end < end_line {
-                preview.push_str(&format!(
-                    "     ... ({} more lines)\n",
-                    end_line - preview_end
-                ));
-            }
-
-            return Some(DefinitionInfo {
-                kind: kind_label(child.kind()).to_string(),
-                name,
-                start_line,
-                end_line,
-                source_preview: preview,
-            });
         }
 
-        // Recurse
-        if let Some(found) = find_def_recursive(child, source, target_name, symbol_types) {
+        if let Some(found) =
+            find_symbol_node_recursive(child, source, target_name, symbol_types)
+        {
             return Some(found);
         }
     }
@@ -1543,5 +1497,33 @@ fn bar() -> bool {
 
         let err = resolve_symbol_position(&file, "hello").unwrap_err();
         assert!(err.contains("unsupported"));
+    }
+
+    #[test]
+    fn resolve_symbol_position_python() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("test.py");
+        std::fs::write(&file, "def greet(name):\n    return f'hi {name}'\n").unwrap();
+
+        let (row, col) = resolve_symbol_position(&file, "greet").unwrap();
+        // "greet" starts at column 4 (after "def ")
+        assert_eq!(row, 0);
+        assert_eq!(col, 4);
+    }
+
+    #[test]
+    fn resolve_symbol_position_typescript() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("test.ts");
+        std::fs::write(
+            &file,
+            "interface Foo {\n  bar: string;\n}\n\nfunction hello() {}\n",
+        )
+        .unwrap();
+
+        let (row, col) = resolve_symbol_position(&file, "hello").unwrap();
+        // "hello" on row 4, column 9 (after "function ")
+        assert_eq!(row, 4);
+        assert_eq!(col, 9);
     }
 }
