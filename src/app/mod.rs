@@ -371,19 +371,14 @@ pub(crate) mod tests {
     ///
     /// `App::new` calls `tokio::runtime::Handle::current()` for the LSP manager,
     /// but most unit tests run outside a tokio context. This provides a shared
-    /// runtime whose handle satisfies that requirement. The runtime is leaked so
-    /// the handle remains valid for the entire test process.
+    /// runtime whose handle satisfies that requirement. The runtime is stored in
+    /// a `OnceLock` so the handle remains valid for the entire test process.
     fn test_runtime_handle() -> tokio::runtime::Handle {
         use std::sync::OnceLock;
-        static RT: OnceLock<tokio::runtime::Handle> = OnceLock::new();
-        RT.get_or_init(|| {
-            let rt = tokio::runtime::Runtime::new().expect("test tokio runtime");
-            let handle = rt.handle().clone();
-            // Leak the runtime so the handle stays valid for all tests
-            std::mem::forget(rt);
-            handle
-        })
-        .clone()
+        static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+        RT.get_or_init(|| tokio::runtime::Runtime::new().expect("test tokio runtime"))
+            .handle()
+            .clone()
     }
 
     pub(crate) fn make_test_app() -> App {

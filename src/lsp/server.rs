@@ -166,9 +166,8 @@ impl LspServer {
     }
 
     pub(super) fn transport_shutdown(mut self) -> Result<()> {
-        let _ = self
-            .handle
-            .block_on(self.server_socket.request::<request::Shutdown>(()));
+        // Shutdown is best-effort — don't block_on since this may run from Drop on a tokio worker thread.
+        // Send exit notification directly; the server should exit on receiving it.
         let _ = self.server_socket.notify::<notification::Exit>(());
         self._mainloop_handle.abort();
 
@@ -180,7 +179,7 @@ impl LspServer {
                     Ok(Some(_)) => {}
                     _ => {
                         let _ = self._process.start_kill();
-                        let _ = self.handle.block_on(self._process.wait());
+                        // Don't await — process is being killed, cleanup happens on drop
                     }
                 }
             }

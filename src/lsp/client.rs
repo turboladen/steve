@@ -38,9 +38,14 @@ pub(crate) fn create_client(
 
         // Handle textDocument/publishDiagnostics — buffer into shared cache
         router.notification::<notification::PublishDiagnostics>(|state, params| {
-            if let Ok(mut diags) = state.diagnostics.lock() {
-                diags.insert(params.uri, params.diagnostics);
-            }
+            let mut diags = match state.diagnostics.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    tracing::warn!("diagnostics mutex poisoned, recovering");
+                    poisoned.into_inner()
+                }
+            };
+            diags.insert(params.uri, params.diagnostics);
             ControlFlow::Continue(())
         });
 

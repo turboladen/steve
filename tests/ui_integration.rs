@@ -37,14 +37,10 @@ fn build_plain(line_texts: Vec<String>, full_width: usize) -> ContentMap {
 /// Mirror of `make_test_app()` from `app.rs` using only public APIs.
 fn test_runtime_handle() -> tokio::runtime::Handle {
     use std::sync::OnceLock;
-    static RT: OnceLock<tokio::runtime::Handle> = OnceLock::new();
-    RT.get_or_init(|| {
-        let rt = tokio::runtime::Runtime::new().expect("test tokio runtime");
-        let handle = rt.handle().clone();
-        std::mem::forget(rt);
-        handle
-    })
-    .clone()
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| tokio::runtime::Runtime::new().expect("test tokio runtime"))
+        .handle()
+        .clone()
 }
 
 fn make_test_app() -> App {
