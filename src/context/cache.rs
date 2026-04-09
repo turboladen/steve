@@ -353,10 +353,7 @@ impl ToolResultCache {
                     .and_then(|v| v.as_str())
                     .unwrap_or("diagnostics");
                 let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
-                let character = args
-                    .get("character")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
+                let character = args.get("character").and_then(|v| v.as_u64()).unwrap_or(0);
                 Some(format!(
                     "lsp:{}:{}:{}:{}",
                     normalized.display(),
@@ -783,16 +780,26 @@ mod tests {
             key.starts_with("lsp:"),
             "LSP key should start with 'lsp:', got: {key}"
         );
-        assert!(key.contains("diagnostics"), "default op should be diagnostics, got: {key}");
+        assert!(
+            key.contains("diagnostics"),
+            "default op should be diagnostics, got: {key}"
+        );
     }
 
     #[test]
     fn test_cache_key_lsp_definition() {
         let cache = test_cache();
-        let args = json!({"path": "src/main.rs", "operation": "definition", "line": 10, "character": 5});
+        let args =
+            json!({"path": "src/main.rs", "operation": "definition", "line": 10, "character": 5});
         let key = cache.cache_key(ToolName::Lsp, &args).unwrap();
-        assert!(key.contains("definition"), "key should contain operation, got: {key}");
-        assert!(key.contains(":10:5"), "key should contain line:character, got: {key}");
+        assert!(
+            key.contains("definition"),
+            "key should contain operation, got: {key}"
+        );
+        assert!(
+            key.contains(":10:5"),
+            "key should contain line:character, got: {key}"
+        );
     }
 
     #[test]

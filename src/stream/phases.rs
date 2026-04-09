@@ -1248,7 +1248,10 @@ mod tests {
 
         // Missing operation defaults to diagnostics (read)
         let no_op = serde_json::json!({ "path": "f.rs" });
-        assert!(is_lsp_read_op(&no_op), "missing operation should default to read");
+        assert!(
+            is_lsp_read_op(&no_op),
+            "missing operation should default to read"
+        );
     }
 
     #[tokio::test]
