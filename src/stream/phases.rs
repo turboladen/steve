@@ -23,7 +23,7 @@ use crate::{
         PermissionEngine,
         types::{PermissionAction, PermissionReply, PermissionRequest},
     },
-    tool::{ToolContext, ToolName, ToolRegistry, agent::AgentType},
+    tool::{LspOperation, ToolContext, ToolName, ToolRegistry, agent::AgentType},
 };
 
 use super::{
@@ -81,11 +81,16 @@ pub(super) enum PhaseOutcome {
 /// `diagnostics`, `definition`, and `references` are pure reads safe for
 /// parallel execution. `rename` is heavier and stays sequential.
 fn is_lsp_read_op(args: &Value) -> bool {
-    let op = args
+    let op: LspOperation = args
         .get("operation")
         .and_then(|v| v.as_str())
-        .unwrap_or("diagnostics");
-    matches!(op, "diagnostics" | "definition" | "references")
+        .unwrap_or("diagnostics")
+        .parse()
+        .unwrap_or(LspOperation::Diagnostics);
+    matches!(
+        op,
+        LspOperation::Diagnostics | LspOperation::Definition | LspOperation::References
+    )
 }
 
 // ── Phase 1: Partition tool calls ──────────────────────────────────────────
@@ -1219,6 +1224,31 @@ mod tests {
             "all LSP read ops should go to parallel"
         );
         assert!(result.needs_interaction.is_empty());
+    }
+
+    #[test]
+    fn is_lsp_read_op_exhaustive() {
+        use crate::tool::LspOperation;
+
+        // Explicit variant list — adding a variant forces a decision here
+        let cases: &[(LspOperation, bool)] = &[
+            (LspOperation::Diagnostics, true),
+            (LspOperation::Definition, true),
+            (LspOperation::References, true),
+            (LspOperation::Rename, false),
+        ];
+        for (op, expected) in cases {
+            let args = serde_json::json!({ "path": "f.rs", "operation": op.to_string() });
+            assert_eq!(
+                is_lsp_read_op(&args),
+                *expected,
+                "{op} read_op should be {expected}"
+            );
+        }
+
+        // Missing operation defaults to diagnostics (read)
+        let no_op = serde_json::json!({ "path": "f.rs" });
+        assert!(is_lsp_read_op(&no_op), "missing operation should default to read");
     }
 
     #[tokio::test]
