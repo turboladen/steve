@@ -352,6 +352,11 @@ impl ToolResultCache {
                     .get("operation")
                     .and_then(|v| v.as_str())
                     .unwrap_or("diagnostics");
+                // Don't cache rename — result depends on new_name and is
+                // inherently one-shot (applied immediately via edit).
+                if op == "rename" {
+                    return None;
+                }
                 let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
                 let character = args.get("character").and_then(|v| v.as_u64()).unwrap_or(0);
                 Some(format!(
@@ -390,7 +395,7 @@ impl ToolResultCache {
                 let path = args.get("path")?.as_str()?;
                 Some(self.normalize_path(path))
             }
-            ToolName::List | ToolName::Symbols => {
+            ToolName::List | ToolName::Symbols | ToolName::Lsp => {
                 let path = args.get("path")?.as_str()?;
                 Some(self.normalize_path(path))
             }
@@ -408,7 +413,6 @@ impl ToolResultCache {
             | ToolName::Task
             | ToolName::Webfetch
             | ToolName::Memory
-            | ToolName::Lsp
             | ToolName::Agent => None,
         }
     }
@@ -809,6 +813,41 @@ mod tests {
         assert!(
             cache.cache_key(ToolName::Lsp, &args).is_none(),
             "LSP without path should return None"
+        );
+    }
+
+    #[test]
+    fn test_cache_key_lsp_rename_returns_none() {
+        let cache = test_cache();
+        let args = json!({
+            "path": "src/main.rs",
+            "operation": "rename",
+            "line": 10,
+            "character": 5,
+            "new_name": "foo"
+        });
+        assert!(
+            cache.cache_key(ToolName::Lsp, &args).is_none(),
+            "LSP rename should not be cached"
+        );
+    }
+
+    #[test]
+    fn test_invalidate_path_removes_lsp_entries() {
+        let mut cache = test_cache();
+        let args = json!({"path": "src/main.rs", "operation": "diagnostics"});
+        cache.put(ToolName::Lsp, &args, &test_output("no errors"));
+
+        // Verify it's cached
+        assert!(cache.get(ToolName::Lsp, &args).is_some());
+
+        // Invalidate the path (simulates a write to src/main.rs)
+        cache.invalidate_path("src/main.rs");
+
+        // Should be gone
+        assert!(
+            cache.get(ToolName::Lsp, &args).is_none(),
+            "LSP cache should be invalidated when file is written"
         );
     }
 
