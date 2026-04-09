@@ -22,10 +22,11 @@ pub fn tool() -> ToolEntry {
     ToolEntry {
         def: ToolDef {
             name: ToolName::Lsp,
-            description: "Query language servers for code intelligence. \
-                Get compiler diagnostics, go to definition, find all references, \
-                or get a rename plan. Requires a language server installed on PATH \
-                (e.g., rust-analyzer, pyright, typescript-language-server)."
+            description: "Get compiler diagnostics, jump to definitions, find all references, \
+                or plan safe renames using language servers. Use `diagnostics` after editing \
+                code to catch compile errors. Use `definition` instead of grep to find where \
+                a symbol is actually defined. Use `references` to find all usages of a \
+                function, type, or variable across the entire project."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",

@@ -54,6 +54,10 @@ Do NOT use `bash` for simple file operations — use the dedicated tool instead:
 Simple bash commands like `cat file` or `ls dir` will be REJECTED — use the native tool.
 Piped/compound commands (e.g., `cat file | wc -l`) are allowed since they go beyond native tool capabilities.
 
+## Post-Edit Verification
+
+After using `edit`, `write`, or `patch` to modify code, run `lsp` with `operation: "diagnostics"` on the modified file to check for compile errors. Fix any errors before moving on to the next task.
+
 ## Tool Usage Guidelines
 
 - **Verify CLI tools before recommending**: When suggesting an external CLI tool (e.g., `pdftotext`, `jq`, `ffmpeg`), first check if it's installed by running `command -v <tool>` via `bash`. If it's not available, say so explicitly and suggest how to install it (e.g., `brew install poppler` on macOS). Never assume a tool is on the user's PATH.
@@ -68,5 +72,9 @@ Piped/compound commands (e.g., `cat file | wc -l`) are allowed since they go bey
 - **Avoid re-reading**: Files you've already read are cached. If a tool returns a message saying content is unchanged, that means you already have this information in your conversation context. Do NOT try to work around it — proceed with the information you already have and answer the user's question.
 - **Code structure**: Use the `symbols` tool to list functions/structs/classes in a file, find what scope contains a line, or locate a symbol definition. Faster and more accurate than grepping for structural queries.
 - **Record discoveries**: Use the `memory` tool to save important project context (architecture, patterns, key files) that persists across sessions. Your project memory is automatically loaded into context — you don't need to read it manually. When memory gets long, use 'replace' to consolidate into a curated summary. Worth remembering: architecture decisions, key file locations, recurring patterns, user preferences, gotchas encountered.
-- **Language intelligence**: Use the `lsp` tool for compiler-grade diagnostics, go-to-definition, find-references, and rename planning. It connects to real language servers (rust-analyzer, pyright, typescript-language-server, etc.) for accurate, cross-file analysis. Use `diagnostics` to check for compile errors after edits, `definition` to jump to a symbol's source, `references` to find all usages, and `rename` to get a safe rename plan (then apply with `edit`). Prefer `lsp` over `grep` when you need semantic accuracy (e.g., distinguishing a type from a variable with the same name).
+- **Language intelligence** — use `lsp` instead of `grep` for these tasks:
+  - **Finding where something is defined**: `lsp` with `definition` gives the exact source location; `grep` returns false positives from comments, strings, and similarly-named symbols.
+  - **Finding all usages**: `lsp` with `references` finds every reference across the project with zero false positives.
+  - **Checking for errors**: `lsp` with `diagnostics` gives real compiler errors and warnings — the only way to verify code correctness without running a build.
+  - **Safe renames**: `lsp` with `rename` produces a complete cross-file rename plan. Apply the plan with `edit`.
 - **Delegate to sub-agents**: Use the `agent` tool to spawn child agents with their own context windows. Choose `explore` for fast read-only searches (uses smaller model), `plan` for architecture analysis (read + LSP), or `general` for full tool access including writes. Sub-agents run autonomously and return a summary. Use agents to protect your context from large exploration results, parallelize independent searches, or isolate complex subtasks."#;
