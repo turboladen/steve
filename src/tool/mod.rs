@@ -528,6 +528,17 @@ impl ToolRegistry {
     }
 }
 
+/// Create a minimal `ToolContext` for unit tests.
+#[cfg(test)]
+pub(crate) fn test_tool_context(project_root: std::path::PathBuf) -> ToolContext {
+    ToolContext {
+        project_root,
+        storage_dir: None,
+        task_store: None,
+        lsp_manager: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,16 +556,6 @@ mod tests {
         let root = std::path::Path::new("/project");
         let result = resolve_path("src/main.rs", root);
         assert_eq!(result, std::path::PathBuf::from("/project/src/main.rs"));
-    }
-
-    /// Create a minimal ToolContext for unit tests.
-    pub(crate) fn test_tool_context(project_root: std::path::PathBuf) -> ToolContext {
-        ToolContext {
-            project_root,
-            storage_dir: None,
-            task_store: None,
-            lsp_manager: None,
-        }
     }
 
     /// Every variant round-trips through as_str -> FromStr.

@@ -83,7 +83,7 @@ mod tests {
     fn stub_handler_returns_not_error() {
         let result = execute(
             serde_json::json!({"question": "Pick a color?"}),
-            crate::tool::tests::test_tool_context(std::path::PathBuf::from("/tmp")),
+            crate::tool::test_tool_context(std::path::PathBuf::from("/tmp")),
         )
         .unwrap();
         assert!(!result.is_error, "question stub should not be an error");
@@ -93,7 +93,7 @@ mod tests {
     fn stub_handler_output_contains_question_text() {
         let result = execute(
             serde_json::json!({"question": "What is your name?"}),
-            crate::tool::tests::test_tool_context(std::path::PathBuf::from("/tmp")),
+            crate::tool::test_tool_context(std::path::PathBuf::from("/tmp")),
         )
         .unwrap();
         assert!(
@@ -107,7 +107,7 @@ mod tests {
     fn stub_handler_missing_question_uses_fallback() {
         let result = execute(
             serde_json::json!({}),
-            crate::tool::tests::test_tool_context(std::path::PathBuf::from("/tmp")),
+            crate::tool::test_tool_context(std::path::PathBuf::from("/tmp")),
         )
         .unwrap();
         assert!(

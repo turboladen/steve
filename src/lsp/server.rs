@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::Mutex,
     time::Duration,
@@ -23,7 +23,7 @@ pub struct LspServer {
     pub(super) language: Language,
     pub binary: String,
     pub(super) capabilities: ServerCapabilities,
-    pub(super) open_files: Mutex<HashSet<Url>>,
+    pub(super) open_files: Mutex<HashMap<Url, i32>>,
     pub(super) diagnostics: SharedDiagnostics,
 }
 
@@ -31,11 +31,16 @@ impl LspServer {
     fn ensure_open(&self, path: &Path) -> Result<Url> {
         let uri = path_to_uri(path)?;
 
-        let mut open = self
-            .open_files
-            .lock()
-            .map_err(|_| anyhow::anyhow!("open_files lock poisoned"))?;
-        if !open.contains(&uri) {
+        // Check under lock, then drop before I/O
+        let already_open = {
+            let open = self
+                .open_files
+                .lock()
+                .map_err(|_| anyhow::anyhow!("open_files lock poisoned"))?;
+            open.contains_key(&uri)
+        };
+
+        if !already_open {
             let content = std::fs::read_to_string(path)
                 .with_context(|| format!("failed to read {}", path.display()))?;
 
@@ -50,10 +55,114 @@ impl LspServer {
             self.server_socket
                 .notify::<notification::DidOpenTextDocument>(params)
                 .map_err(|e| anyhow::anyhow!("failed to send didOpen: {e}"))?;
-            open.insert(uri.clone());
+
+            // Re-acquire to insert (race-safe: duplicate insert is harmless)
+            let mut open = self
+                .open_files
+                .lock()
+                .map_err(|_| anyhow::anyhow!("open_files lock poisoned"))?;
+            open.insert(uri.clone(), 0);
         }
 
         Ok(uri)
+    }
+
+    /// Notify the language server that a file's content has changed (full sync).
+    /// Reads the file once, opens it if needed, increments the version, and
+    /// sends `textDocument/didChange`. Returns the URI for use by `notify_did_save`.
+    pub fn notify_did_change(&self, path: &Path) -> Result<Url> {
+        let uri = path_to_uri(path)?;
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+
+        // Determine action under lock, then drop before sending notifications.
+        // Mutations are deferred until after successful notify to avoid stale
+        // version state if the notification fails.
+        let next_version = {
+            let open = self
+                .open_files
+                .lock()
+                .map_err(|_| anyhow::anyhow!("open_files lock poisoned"))?;
+            open.get(&uri).map(|v| v + 1)
+        };
+
+        if let Some(version) = next_version {
+            // File already open — send didChange with incremented version
+            let params = DidChangeTextDocumentParams {
+                text_document: VersionedTextDocumentIdentifier {
+                    uri: uri.clone(),
+                    version,
+                },
+                content_changes: vec![TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: content,
+                }],
+            };
+            self.server_socket
+                .notify::<notification::DidChangeTextDocument>(params)
+                .map_err(|e| anyhow::anyhow!("failed to send didChange: {e}"))?;
+
+            // Commit version bump only after successful notify
+            let mut open = self
+                .open_files
+                .lock()
+                .map_err(|_| anyhow::anyhow!("open_files lock poisoned"))?;
+            if let Some(v) = open.get_mut(&uri) {
+                *v = version;
+            }
+        } else {
+            // File not yet open — didOpen sets the content
+            let params = DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: self.language.language_id().to_string(),
+                    version: 0,
+                    text: content,
+                },
+            };
+            self.server_socket
+                .notify::<notification::DidOpenTextDocument>(params)
+                .map_err(|e| anyhow::anyhow!("failed to send didOpen: {e}"))?;
+
+            // Insert only after successful notify
+            let mut open = self
+                .open_files
+                .lock()
+                .map_err(|_| anyhow::anyhow!("open_files lock poisoned"))?;
+            open.insert(uri.clone(), 0);
+        }
+
+        Ok(uri)
+    }
+
+    /// Notify the language server that a file has been saved.
+    /// Takes a pre-resolved URI to avoid redundant `ensure_open` calls when
+    /// used after `notify_did_change`.
+    pub fn notify_did_save(&self, uri: &Url) -> Result<()> {
+        let params = DidSaveTextDocumentParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            text: None,
+        };
+        self.server_socket
+            .notify::<notification::DidSaveTextDocument>(params)
+            .map_err(|e| anyhow::anyhow!("failed to send didSave: {e}"))?;
+        Ok(())
+    }
+
+    /// Read cached diagnostics without sending any LSP requests.
+    /// Safe to call from within the tokio runtime (no `block_on`).
+    /// Returns whatever the server has last pushed via `publishDiagnostics`.
+    pub fn cached_diagnostics(&self, path: &Path) -> Result<Vec<Diagnostic>> {
+        let uri = path_to_uri(path)?;
+        let locked = match self.diagnostics.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("diagnostics mutex poisoned in reader, recovering");
+                poisoned.into_inner()
+            }
+        };
+        Ok(locked.get(&uri).cloned().unwrap_or_default())
     }
 
     pub fn diagnostics(&self, path: &Path) -> Result<Vec<Diagnostic>> {
@@ -219,16 +328,41 @@ impl LspServer {
     }
 
     pub(super) fn transport_shutdown(mut self) -> Result<()> {
-        // Send shutdown request (best-effort — may fail if called from tokio worker thread)
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = self.handle.block_on(async {
-                tokio::time::timeout(
+        // Send LSP shutdown request. If we're inside the tokio runtime (e.g.,
+        // Drop during app exit), we can't block_on — spawn a fire-and-forget
+        // task instead. Either way, this is best-effort.
+        let socket = self.server_socket.clone();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            // Inside runtime — spawn the entire shutdown sequence so the
+            // mainloop stays alive long enough for Shutdown+Exit to be sent.
+            let mainloop = self.mainloop_handle;
+            let mut process = self.process;
+            tokio::spawn(async move {
+                let _ = tokio::time::timeout(
                     Duration::from_secs(5),
-                    self.server_socket.request::<request::Shutdown>(()),
+                    socket.request::<request::Shutdown>(()),
                 )
-                .await
+                .await;
+                let _ = socket.notify::<notification::Exit>(());
+                mainloop.abort();
+                // Brief wait for process exit, then force-kill
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if matches!(process.try_wait(), Ok(Some(_))) {
+                    return;
+                }
+                let _ = process.start_kill();
             });
-        }));
+            return Ok(());
+        }
+
+        // Outside runtime — safe to block
+        let _ = self.handle.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                socket.request::<request::Shutdown>(()),
+            )
+            .await
+        });
         let _ = self.server_socket.notify::<notification::Exit>(());
         self.mainloop_handle.abort();
 
@@ -240,7 +374,6 @@ impl LspServer {
                     Ok(Some(_)) => {}
                     _ => {
                         let _ = self.process.start_kill();
-                        // Don't await — process is being killed, cleanup happens on drop
                     }
                 }
             }

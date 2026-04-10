@@ -104,7 +104,7 @@ mod tests {
         });
         let result = execute(
             args,
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result.is_error);
@@ -127,7 +127,7 @@ mod tests {
         });
         let result = execute(
             args,
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result.is_error);
@@ -147,7 +147,7 @@ mod tests {
         });
         let result = execute(
             args,
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result.is_error);
@@ -166,7 +166,7 @@ mod tests {
         });
         let result = execute(
             args,
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         );
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -184,7 +184,7 @@ mod tests {
         });
         let result = execute(
             args,
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         );
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -203,7 +203,7 @@ mod tests {
         });
         let result = execute(
             args,
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result.is_error);

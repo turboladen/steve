@@ -125,7 +125,7 @@ mod tests {
 
         let result = execute(
             json!({"from_path": "a.txt", "to_path": "b.txt"}),
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result.is_error);
@@ -146,7 +146,7 @@ mod tests {
 
         let result = execute(
             json!({"from_path": "src", "to_path": "dst"}),
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result.is_error);
@@ -165,7 +165,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let result = execute(
             json!({"from_path": "nope.txt", "to_path": "dest.txt"}),
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         );
         assert!(result.is_err());
     }

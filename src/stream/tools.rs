@@ -206,6 +206,163 @@ pub(super) fn invalidate_write_tool_cache(
     }
 }
 
+/// Path arg keys to notify LSP about for a write tool.
+/// For move, only the destination matters (source no longer exists).
+/// For copy, the source is unchanged so only the destination needs notification.
+fn write_tool_notify_keys(tool_name: ToolName) -> &'static [&'static str] {
+    let keys = tool_name.path_arg_keys();
+    if matches!(tool_name, ToolName::Move | ToolName::Copy) {
+        keys.last().map(std::slice::from_ref).unwrap_or(&[])
+    } else {
+        keys
+    }
+}
+
+/// Send LSP notifications and collect diagnostics after a write tool executes.
+/// Returns `(error_count, summary_string)` or `None` if no new errors.
+pub(super) fn notify_and_diagnose_write_tool(
+    tool_name: ToolName,
+    args: &Value,
+    ctx: &crate::tool::ToolContext,
+) -> Option<(usize, String)> {
+    use async_lsp::lsp_types::DiagnosticSeverity;
+
+    if !tool_name.is_write_tool() || matches!(tool_name, ToolName::Delete | ToolName::Mkdir) {
+        return None;
+    }
+
+    let lsp_manager = ctx.lsp_manager.as_ref()?;
+    let notify_keys = write_tool_notify_keys(tool_name);
+
+    let mgr = match lsp_manager.read() {
+        Ok(mgr) => mgr,
+        Err(_) => return None,
+    };
+
+    let mut all_errors: Vec<String> = Vec::new();
+
+    for key in notify_keys {
+        let Some(path_str) = args.get(*key).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let path = crate::tool::resolve_path(path_str, &ctx.project_root);
+
+        // Snapshot errors before sending didChange so we can detect NEW errors.
+        // The file is already written to disk but the server hasn't been notified
+        // yet. Stale diagnostics from in-flight analysis can arrive after didChange,
+        // so we only report errors that weren't already in the cache.
+        let pre_notify_errors: std::collections::HashSet<String> =
+            if let Ok(server) = mgr.server_for_file(&path) {
+                server
+                    .cached_diagnostics(&path)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
+                    .map(|d| {
+                        format!(
+                            "{}:{}:{}",
+                            d.range.start.line, d.range.start.character, d.message
+                        )
+                    })
+                    .collect()
+            } else {
+                std::collections::HashSet::new()
+            };
+
+        match mgr.notify_file_changed(&path) {
+            Ok(()) => {
+                tracing::debug!(path = %path.display(), "LSP didChange/didSave sent");
+            }
+            Err(e) => {
+                tracing::debug!(path = %path.display(), error = %e, "LSP notify_file_changed failed");
+                continue;
+            }
+        }
+
+        // Poll cached diagnostics — the server pushes publishDiagnostics
+        // asynchronously after processing didChange. We poll a few times
+        // with short delays to catch errors without excessive blocking.
+        // block_in_place tells tokio to move other tasks off this thread
+        // while we sleep.
+        match mgr.server_for_file(&path) {
+            Ok(server) => {
+                let mut diags = Vec::new();
+                let mut found_at: Option<usize> = None;
+                for attempt in 0..4 {
+                    tokio::task::block_in_place(|| {
+                        std::thread::sleep(std::time::Duration::from_millis(150));
+                    });
+                    match server.cached_diagnostics(&path) {
+                        Ok(d) => {
+                            if !d.is_empty() {
+                                diags = d;
+                                if found_at.is_none() {
+                                    found_at = Some(attempt);
+                                } else {
+                                    tracing::debug!(
+                                        path = %path.display(),
+                                        count = diags.len(),
+                                        attempt,
+                                        "LSP diagnostics settled after edit"
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                path = %path.display(),
+                                error = %e,
+                                "LSP cached_diagnostics failed"
+                            );
+                            break;
+                        }
+                    }
+                }
+                let file_name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown");
+                for diag in &diags {
+                    if diag.severity == Some(DiagnosticSeverity::ERROR) {
+                        let key = format!("{}:{}", diag.range.start.line, diag.message);
+                        if !pre_notify_errors.contains(&key) {
+                            let line = diag.range.start.line + 1;
+                            all_errors.push(format!("  {}:{}: {}", file_name, line, diag.message));
+                        }
+                    }
+                }
+                tracing::debug!(
+                    path = %path.display(),
+                    total_diags = diags.len(),
+                    pre_edit = pre_notify_errors.len(),
+                    new_errors = all_errors.len(),
+                    "LSP post-edit diagnostic comparison"
+                );
+            }
+            Err(e) => {
+                tracing::debug!(path = %path.display(), error = %e, "no LSP server for file");
+            }
+        }
+    }
+
+    if all_errors.is_empty() {
+        None
+    } else {
+        const MAX_SHOWN: usize = 10;
+        let total = all_errors.len();
+        let mut summary = String::from("\n\n[LSP Errors]\n");
+        for error in all_errors.iter().take(MAX_SHOWN) {
+            summary.push_str(error);
+            summary.push('\n');
+        }
+        if total > MAX_SHOWN {
+            summary.push_str(&format!("  ... and {} more errors\n", total - MAX_SHOWN));
+        }
+        Some((total, summary))
+    }
+}
+
 /// Estimate the character count of a message for token approximation.
 pub(super) fn estimate_message_chars(msg: &ChatCompletionRequestMessage) -> usize {
     match msg {
@@ -250,6 +407,7 @@ pub(super) fn estimate_message_chars(msg: &ChatCompletionRequestMessage) -> usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+    use strum::IntoEnumIterator;
 
     // -- accumulate_tool_call tests --
 
@@ -347,5 +505,66 @@ mod tests {
             arguments: String::new(),
         };
         assert!(!is_valid_tool_call(&tc));
+    }
+
+    // -- notify_and_diagnose_write_tool tests --
+
+    fn test_ctx() -> crate::tool::ToolContext {
+        crate::tool::test_tool_context(std::path::PathBuf::from("/tmp/test-project"))
+    }
+
+    #[test]
+    fn notify_diagnose_skips_non_write_tools() {
+        let ctx = test_ctx();
+        let args = serde_json::json!({"file_path": "src/main.rs"});
+        for tool in ToolName::iter() {
+            if !tool.is_write_tool() {
+                assert!(
+                    notify_and_diagnose_write_tool(tool, &args, &ctx).is_none(),
+                    "{tool} is not a write tool, should return None"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn notify_diagnose_skips_delete_and_mkdir() {
+        let ctx = test_ctx();
+        let args = serde_json::json!({"path": "/tmp/test-project/foo"});
+        assert!(notify_and_diagnose_write_tool(ToolName::Delete, &args, &ctx).is_none());
+        assert!(notify_and_diagnose_write_tool(ToolName::Mkdir, &args, &ctx).is_none());
+    }
+
+    #[test]
+    fn write_tool_notify_keys_uses_destination_for_move_copy() {
+        // Move/Copy have ["from_path", "to_path"] — only destination should be notified
+        let move_keys = write_tool_notify_keys(ToolName::Move);
+        assert_eq!(
+            move_keys,
+            &["to_path"],
+            "Move should only notify destination"
+        );
+
+        let copy_keys = write_tool_notify_keys(ToolName::Copy);
+        assert_eq!(
+            copy_keys,
+            &["to_path"],
+            "Copy should only notify destination"
+        );
+
+        // Edit/Write/Patch should use all their keys
+        assert_eq!(write_tool_notify_keys(ToolName::Edit), &["file_path"]);
+        assert_eq!(write_tool_notify_keys(ToolName::Write), &["file_path"]);
+        assert_eq!(write_tool_notify_keys(ToolName::Patch), &["file_path"]);
+    }
+
+    #[test]
+    fn notify_diagnose_returns_none_without_lsp_manager() {
+        let ctx = test_ctx();
+        assert!(ctx.lsp_manager.is_none());
+        let args = serde_json::json!({"file_path": "src/main.rs"});
+        assert!(notify_and_diagnose_write_tool(ToolName::Edit, &args, &ctx).is_none());
+        assert!(notify_and_diagnose_write_tool(ToolName::Write, &args, &ctx).is_none());
+        assert!(notify_and_diagnose_write_tool(ToolName::Patch, &args, &ctx).is_none());
     }
 }

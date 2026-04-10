@@ -94,6 +94,11 @@ impl LspManager {
             }]),
             capabilities: ClientCapabilities {
                 text_document: Some(TextDocumentClientCapabilities {
+                    synchronization: Some(TextDocumentSyncClientCapabilities {
+                        dynamic_registration: Some(false),
+                        did_save: Some(true),
+                        ..Default::default()
+                    }),
                     publish_diagnostics: Some(PublishDiagnosticsClientCapabilities {
                         related_information: Some(true),
                         ..Default::default()
@@ -122,7 +127,7 @@ impl LspManager {
             language: lang,
             binary: binary.clone(),
             capabilities: init_result.capabilities,
-            open_files: std::sync::Mutex::new(std::collections::HashSet::new()),
+            open_files: std::sync::Mutex::new(std::collections::HashMap::new()),
             diagnostics,
         })
     }
@@ -139,6 +144,19 @@ impl LspManager {
         self.servers
             .get(&lang)
             .ok_or_else(|| anyhow::anyhow!("no {lang} server running"))
+    }
+
+    /// Notify the appropriate LSP server that a file was modified and saved.
+    /// Returns `Ok(())` if no server handles this file type (graceful skip).
+    pub fn notify_file_changed(&self, path: &std::path::Path) -> Result<()> {
+        match self.server_for_file(path) {
+            Ok(server) => {
+                let uri = server.notify_did_change(path)?;
+                server.notify_did_save(&uri)?;
+                Ok(())
+            }
+            Err(_) => Ok(()),
+        }
     }
 
     pub fn server_for_file_or_start(&mut self, path: &std::path::Path) -> Result<&LspServer> {

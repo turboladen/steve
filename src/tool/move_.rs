@@ -96,7 +96,7 @@ mod tests {
 
         let result = execute(
             json!({"from_path": "a.txt", "to_path": "b.txt"}),
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result.is_error);
@@ -114,7 +114,7 @@ mod tests {
 
         let result = execute(
             json!({"from_path": "a.txt", "to_path": "sub/dir/b.txt"}),
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result.is_error);
@@ -126,7 +126,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let result = execute(
             json!({"from_path": "nope.txt", "to_path": "dest.txt"}),
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("does not exist"));
@@ -138,14 +138,14 @@ mod tests {
         assert!(
             execute(
                 json!({"from_path": "a.txt"}),
-                crate::tool::tests::test_tool_context(dir.path().to_path_buf())
+                crate::tool::test_tool_context(dir.path().to_path_buf())
             )
             .is_err()
         );
         assert!(
             execute(
                 json!({"to_path": "b.txt"}),
-                crate::tool::tests::test_tool_context(dir.path().to_path_buf())
+                crate::tool::test_tool_context(dir.path().to_path_buf())
             )
             .is_err()
         );
