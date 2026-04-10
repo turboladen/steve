@@ -156,6 +156,12 @@ When adding tree-sitter languages: update `TreeSitterLang` enum and `detect_lang
 `tool/symbols.rs`, add `symbol_node_types()` and `container_node_types()` entries (exhaustive
 match — compiler enforces), and add `kind_label()` mappings.
 
+`extract_name_node()` in `tool/symbols.rs` is the single source of truth for finding a
+declaration's name node — `extract_name()` delegates to it (with import-specific display
+handled before delegation). `find_symbol_node_recursive()` is the shared recursive walk
+returning `(decl_node, name_node)` — used by both `find_symbol_by_name()` and
+`resolve_symbol_position()`.
+
 ### MCP Client Integration (`mcp/`)
 
 MCP tools bypass `ToolName` entirely — own registry with `McpToolSnapshot` (lock-free `Arc`) for
@@ -167,6 +173,11 @@ Submodules: `server.rs` (McpServer connection), `manager.rs` (McpManager orchest
 `AllowAlways` for MCP tools is session-only (not persisted) — MCP tool names are runtime-dynamic.
 
 ### LSP Integration (`lsp/`)
+
+The LSP tool accepts `symbol_name` as an alternative to `line`/`character` for
+position-based operations — `resolve_symbol_position()` in `tool/symbols.rs`
+bridges tree-sitter symbol lookup to LSP positions. Column values are byte
+offsets (tree-sitter convention), not UTF-16 code units (LSP spec default).
 
 Submodules: `server.rs` (LspServer + URI helpers), `manager.rs` (LspManager lifecycle),
 `client.rs` (JSON-RPC transport). Uses `workspace_folders` (not deprecated `root_uri`) for
@@ -184,7 +195,9 @@ Compare pre/post-notification snapshots to filter stale errors.
 ## Formatting
 
 `rustfmt.toml` configures `imports_granularity = "Crate"` (nightly-only). Run
-`cargo +nightly fmt` to apply. Imports group by crate with nested paths.
+`cargo +nightly fmt` to apply. Imports group by crate with nested paths. The
+PostToolUse hook runs `rustfmt +nightly` — must be nightly to match CI, since
+stable silently ignores nightly-only config options.
 
 ## Key Dependency Gotchas
 
