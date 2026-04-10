@@ -856,21 +856,32 @@ pub(super) async fn execute_sequential_tools(
                     }
                     cached
                 } else {
-                    let mut result = match registry.execute(
-                        tc.tool_name,
-                        tc.args.clone(),
-                        ctx.clone(),
-                    ) {
-                        Ok(output) => output,
-                        Err(e) => {
-                            tracing::error!(tool = %tc.tool_name, error = %e, "tool execution failed");
-                            crate::tool::ToolOutput {
-                                title: tc.tool_name.to_string(),
-                                output: format!("Error: {e}"),
-                                is_error: true,
+                    // Use spawn_blocking so tools that call block_on() (e.g.
+                    // LSP) don't panic from within the tokio runtime.
+                    let reg = registry.clone();
+                    let name = tc.tool_name;
+                    let a = tc.args.clone();
+                    let c = ctx.clone();
+                    let mut result =
+                        match tokio::task::spawn_blocking(move || reg.execute(name, a, c)).await {
+                            Ok(Ok(output)) => output,
+                            Ok(Err(e)) => {
+                                tracing::error!(tool = %tc.tool_name, error = %e, "tool execution failed");
+                                crate::tool::ToolOutput {
+                                    title: tc.tool_name.to_string(),
+                                    output: format!("Error: {e}"),
+                                    is_error: true,
+                                }
                             }
-                        }
-                    };
+                            Err(e) => {
+                                tracing::error!(tool = %tc.tool_name, error = %e, "tool task panicked");
+                                crate::tool::ToolOutput {
+                                    title: tc.tool_name.to_string(),
+                                    output: format!("Error: tool task panicked: {e}"),
+                                    is_error: true,
+                                }
+                            }
+                        };
 
                     let mut cache = tool_cache.lock().expect("lock poisoned");
                     cache.put(tc.tool_name, &tc.args, &result);
@@ -920,21 +931,32 @@ pub(super) async fn execute_sequential_tools(
                     }
                     cached
                 } else {
-                    let mut result = match registry.execute(
-                        tc.tool_name,
-                        tc.args.clone(),
-                        ctx.clone(),
-                    ) {
-                        Ok(output) => output,
-                        Err(e) => {
-                            tracing::error!(tool = %tc.tool_name, error = %e, "tool execution failed");
-                            crate::tool::ToolOutput {
-                                title: tc.tool_name.to_string(),
-                                output: format!("Error: {e}"),
-                                is_error: true,
+                    // Use spawn_blocking so tools that call block_on() (e.g.
+                    // LSP) don't panic from within the tokio runtime.
+                    let reg = registry.clone();
+                    let name = tc.tool_name;
+                    let a = tc.args.clone();
+                    let c = ctx.clone();
+                    let mut result =
+                        match tokio::task::spawn_blocking(move || reg.execute(name, a, c)).await {
+                            Ok(Ok(output)) => output,
+                            Ok(Err(e)) => {
+                                tracing::error!(tool = %tc.tool_name, error = %e, "tool execution failed");
+                                crate::tool::ToolOutput {
+                                    title: tc.tool_name.to_string(),
+                                    output: format!("Error: {e}"),
+                                    is_error: true,
+                                }
                             }
-                        }
-                    };
+                            Err(e) => {
+                                tracing::error!(tool = %tc.tool_name, error = %e, "tool task panicked");
+                                crate::tool::ToolOutput {
+                                    title: tc.tool_name.to_string(),
+                                    output: format!("Error: tool task panicked: {e}"),
+                                    is_error: true,
+                                }
+                            }
+                        };
 
                     let mut cache = tool_cache.lock().expect("lock poisoned");
                     cache.put(tc.tool_name, &tc.args, &result);
