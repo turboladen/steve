@@ -167,7 +167,7 @@ mod tests {
         let args = json!({});
         let result = execute(
             args,
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result.is_error);
@@ -200,7 +200,7 @@ mod tests {
         let args = json!({ "path": "does_not_exist" });
         let result = execute(
             args,
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(result.is_error);
@@ -221,7 +221,7 @@ mod tests {
         let args = json!({ "path": "empty_sub" });
         let result = execute(
             args,
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result.is_error);
@@ -247,7 +247,7 @@ mod tests {
         let args1 = json!({ "depth": 1 });
         let result1 = execute(
             args1,
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result1.is_error);
@@ -273,7 +273,7 @@ mod tests {
         let args3 = json!({ "depth": 3 });
         let result3 = execute(
             args3,
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result3.is_error);

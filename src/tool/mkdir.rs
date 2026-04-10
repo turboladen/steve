@@ -82,7 +82,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let result = execute(
             json!({"path": "new_dir"}),
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result.is_error);
@@ -95,7 +95,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let result = execute(
             json!({"path": "a/b/c"}),
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result.is_error);
@@ -108,7 +108,7 @@ mod tests {
         fs::create_dir(dir.path().join("existing")).unwrap();
         let result = execute(
             json!({"path": "existing"}),
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result.is_error);
@@ -121,7 +121,7 @@ mod tests {
         assert!(
             execute(
                 json!({}),
-                crate::tool::tests::test_tool_context(dir.path().to_path_buf())
+                crate::tool::test_tool_context(dir.path().to_path_buf())
             )
             .is_err()
         );

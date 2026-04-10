@@ -31,6 +31,7 @@ use super::{
     agent::run_sub_agent,
     tools::{
         PendingToolCall, build_permission_summary, extract_tool_path, invalidate_write_tool_cache,
+        notify_and_diagnose_write_tool,
     },
 };
 
@@ -855,8 +856,11 @@ pub(super) async fn execute_sequential_tools(
                     }
                     cached
                 } else {
-                    let result = match registry.execute(tc.tool_name, tc.args.clone(), ctx.clone())
-                    {
+                    let mut result = match registry.execute(
+                        tc.tool_name,
+                        tc.args.clone(),
+                        ctx.clone(),
+                    ) {
                         Ok(output) => output,
                         Err(e) => {
                             tracing::error!(tool = %tc.tool_name, error = %e, "tool execution failed");
@@ -873,6 +877,10 @@ pub(super) async fn execute_sequential_tools(
 
                     // Invalidate cache entries when write operations modify files
                     invalidate_write_tool_cache(tc.tool_name, &tc.args, &mut cache);
+                    drop(cache);
+
+                    // Notify LSP and append diagnostics for write tools
+                    append_lsp_diagnostics(&mut result, tc.tool_name, &tc.args, ctx, event_tx);
 
                     result
                 };
@@ -912,8 +920,11 @@ pub(super) async fn execute_sequential_tools(
                     }
                     cached
                 } else {
-                    let result = match registry.execute(tc.tool_name, tc.args.clone(), ctx.clone())
-                    {
+                    let mut result = match registry.execute(
+                        tc.tool_name,
+                        tc.args.clone(),
+                        ctx.clone(),
+                    ) {
                         Ok(output) => output,
                         Err(e) => {
                             tracing::error!(tool = %tc.tool_name, error = %e, "tool execution failed");
@@ -930,6 +941,10 @@ pub(super) async fn execute_sequential_tools(
 
                     // Invalidate cache entries when write operations modify files
                     invalidate_write_tool_cache(tc.tool_name, &tc.args, &mut cache);
+                    drop(cache);
+
+                    // Notify LSP and append diagnostics for write tools
+                    append_lsp_diagnostics(&mut result, tc.tool_name, &tc.args, ctx, event_tx);
 
                     result
                 };
@@ -952,6 +967,33 @@ pub(super) async fn execute_sequential_tools(
     }
 
     PhaseOutcome::Continue
+}
+
+/// Notify LSP of file changes after a write tool and append diagnostics.
+/// Skips when the tool itself errored (file may not have been written).
+fn append_lsp_diagnostics(
+    result: &mut crate::tool::ToolOutput,
+    tool_name: ToolName,
+    args: &Value,
+    ctx: &crate::tool::ToolContext,
+    event_tx: &mpsc::UnboundedSender<AppEvent>,
+) {
+    if result.is_error {
+        return;
+    }
+    if let Some((error_count, diag_summary)) = notify_and_diagnose_write_tool(tool_name, args, ctx)
+    {
+        result.output.push_str(&diag_summary);
+        let path = args
+            .get("file_path")
+            .or_else(|| args.get("to_path"))
+            .or_else(|| args.get("path"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("file");
+        let _ = event_tx.send(AppEvent::StreamNotice {
+            text: format!("⚠ LSP: {error_count} new error(s) in {path}"),
+        });
+    }
 }
 
 // ── Phase 4: Execute MCP tool calls sequentially ───────────────────────────

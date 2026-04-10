@@ -99,7 +99,7 @@ mod tests {
 
         let result = execute(
             json!({"path": "doomed.txt"}),
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result.is_error);
@@ -115,7 +115,7 @@ mod tests {
 
         let result = execute(
             json!({"path": "sub"}),
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result.is_error);
@@ -128,7 +128,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let result = execute(
             json!({"path": "nope.txt"}),
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("does not exist"));
@@ -140,7 +140,7 @@ mod tests {
         let root = dir.path().canonicalize().unwrap();
         let result = execute(
             json!({"path": root.to_string_lossy()}),
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("project root"));

@@ -135,7 +135,7 @@ mod tests {
         let args = json!({ "pattern": "*.rs" });
         let result = execute(
             args,
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result.is_error);
@@ -162,7 +162,7 @@ mod tests {
         let args = json!({ "pattern": "*.rs" });
         let result = execute(
             args,
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result.is_error);
@@ -176,7 +176,7 @@ mod tests {
         let args = json!({ "pattern": "[invalid" });
         let result = execute(
             args,
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(result.is_error);
@@ -195,7 +195,7 @@ mod tests {
         let args = json!({ "pattern": "*.xyz" });
         let result = execute(
             args,
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result.is_error);
@@ -217,7 +217,7 @@ mod tests {
         let args = json!({ "pattern": "*.rs", "path": "sub" });
         let result = execute(
             args,
-            crate::tool::tests::test_tool_context(dir.path().to_path_buf()),
+            crate::tool::test_tool_context(dir.path().to_path_buf()),
         )
         .unwrap();
         assert!(!result.is_error);
