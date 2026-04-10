@@ -147,19 +147,8 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
 const MAX_GREP_RESULTS: usize = 200;
 
 fn grep_for_symbol(symbol: &str, scope: &Path, project_root: &Path) -> Result<Vec<GrepMatch>> {
-    // Use word-boundary regex for precise matching
-    // Escape regex metacharacters in the symbol name, then wrap in word boundaries
-    let escaped: String = symbol
-        .chars()
-        .flat_map(|c| {
-            if r"\.+*?()|[]{}^$".contains(c) {
-                vec!['\\', c]
-            } else {
-                vec![c]
-            }
-        })
-        .collect();
-    let pattern = format!(r"\b{escaped}\b");
+    // Escape regex metacharacters, then wrap in word boundaries for precise matching
+    let pattern = format!(r"\b{}\b", regex::escape(symbol));
     let matcher = RegexMatcher::new(&pattern)
         .map_err(|e| anyhow::anyhow!("invalid symbol name for search: {e}"))?;
 
@@ -463,13 +452,24 @@ fn format_output(
         }
 
         let refs: Vec<String> = if !lsp_references.is_empty() {
-            // LSP authoritative references — read context for each
+            // LSP authoritative references — batch reads by file to avoid re-reading
+            let mut file_cache: HashMap<&Path, Vec<String>> = HashMap::new();
             lsp_references
                 .iter()
                 .map(|(path, line)| {
-                    let abs = project_root.join(path);
-                    let line_content = read_line_content(&abs, *line as usize);
-                    format!("{}:{}: {}", path.display(), line, line_content.trim())
+                    let lines = file_cache.entry(path.as_path()).or_insert_with(|| {
+                        let abs = project_root.join(path);
+                        std::fs::read_to_string(&abs)
+                            .unwrap_or_default()
+                            .lines()
+                            .map(String::from)
+                            .collect()
+                    });
+                    let content = lines
+                        .get((*line as usize).saturating_sub(1))
+                        .map(|s| s.trim())
+                        .unwrap_or("");
+                    format!("{}:{}: {}", path.display(), line, content)
                 })
                 .collect()
         } else {
@@ -491,19 +491,6 @@ fn format_output(
     output
 }
 
-/// Read a single line from a file (1-indexed).
-fn read_line_content(path: &Path, line_1indexed: usize) -> String {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return String::new(),
-    };
-    content
-        .lines()
-        .nth(line_1indexed.saturating_sub(1))
-        .unwrap_or("")
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,6 +508,34 @@ mod tests {
             assert_eq!(parsed, expected);
             assert_eq!(parsed.to_string(), s);
         }
+    }
+
+    #[test]
+    fn find_symbol_operation_serde_round_trip() {
+        for op in [
+            FindSymbolOperation::Definition,
+            FindSymbolOperation::References,
+            FindSymbolOperation::Overview,
+        ] {
+            let json = serde_json::to_string(&op).unwrap();
+            let parsed: FindSymbolOperation = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, op, "serde round-trip failed for {op}");
+        }
+    }
+
+    #[test]
+    fn grep_scan_escapes_regex_metacharacters() {
+        let dir = tempdir().unwrap();
+        // File containing a C++ operator+ symbol (has regex metachar)
+        std::fs::write(
+            dir.path().join("ops.cpp"),
+            "int operator+(int a, int b) { return a + b; }\n",
+        )
+        .unwrap();
+
+        // Should not panic or produce regex error
+        let result = grep_for_symbol("operator+", dir.path(), dir.path());
+        assert!(result.is_ok(), "regex metacharacters should be escaped");
     }
 
     #[test]

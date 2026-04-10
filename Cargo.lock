@@ -3595,6 +3595,7 @@ dependencies = [
  "rand 0.10.0",
  "ratatui",
  "ratatui-textarea",
+ "regex",
  "reqwest 0.13.2",
  "rmcp",
  "ropey",

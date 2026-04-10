@@ -367,6 +367,8 @@ impl ToolResultCache {
                     character
                 ))
             }
+            // FindSymbol is cached but has no single-path invalidation (multi-file search).
+            // Entries are evicted by generation turnover, same as grep/glob.
             ToolName::FindSymbol => {
                 let symbol = args.get("symbol")?.as_str()?;
                 let op = args

@@ -124,11 +124,16 @@ impl ToolName {
         )
     }
 
-    /// Whether this is a read-only tool (read, grep, glob, list, symbols).
+    /// Whether this is a read-only tool with no side effects.
     pub fn is_read_only(self) -> bool {
         matches!(
             self,
-            ToolName::Read | ToolName::Grep | ToolName::Glob | ToolName::List | ToolName::Symbols
+            ToolName::Read
+                | ToolName::Grep
+                | ToolName::Glob
+                | ToolName::List
+                | ToolName::Symbols
+                | ToolName::FindSymbol
         )
     }
 
@@ -137,7 +142,7 @@ impl ToolName {
     /// Read-only tools and LSP are cacheable. LSP results are invalidated
     /// by path when write tools modify files, same as read-only tools.
     pub fn is_cacheable(self) -> bool {
-        self.is_read_only() || matches!(self, ToolName::Lsp | ToolName::FindSymbol)
+        self.is_read_only() || matches!(self, ToolName::Lsp)
     }
 
     /// Whether this is the memory tool.
@@ -644,6 +649,7 @@ mod tests {
                     | ToolName::Glob
                     | ToolName::List
                     | ToolName::Symbols
+                    | ToolName::FindSymbol
             ) {
                 assert!(t.is_read_only(), "{t} should be read-only");
             } else {
@@ -772,9 +778,7 @@ mod tests {
     fn intent_category_exhaustive() {
         for t in ToolName::iter() {
             let cat = t.intent_category();
-            if t.is_read_only()
-                || matches!(t, ToolName::Webfetch | ToolName::Lsp | ToolName::FindSymbol)
-            {
+            if t.is_read_only() || matches!(t, ToolName::Webfetch | ToolName::Lsp) {
                 assert_eq!(cat, IntentCategory::Exploring, "{t} should be Exploring");
             } else if t.is_write_tool() || t.is_memory() {
                 assert_eq!(cat, IntentCategory::Editing, "{t} should be Editing");
@@ -805,9 +809,7 @@ mod tests {
     fn visual_category_exhaustive() {
         for t in ToolName::iter() {
             let cat = t.visual_category();
-            if t.is_read_only()
-                || matches!(t, ToolName::Webfetch | ToolName::Lsp | ToolName::FindSymbol)
-            {
+            if t.is_read_only() || matches!(t, ToolName::Webfetch | ToolName::Lsp) {
                 assert_eq!(cat, ToolVisualCategory::Read, "{t} should be Read");
             } else if t.is_write_tool() || t.is_memory() {
                 assert_eq!(cat, ToolVisualCategory::Write, "{t} should be Write");
@@ -864,7 +866,7 @@ mod tests {
     fn path_arg_keys_exhaustive() {
         for t in ToolName::iter() {
             let keys = t.path_arg_keys();
-            if t.is_read_only()
+            if (t.is_read_only() && t != ToolName::FindSymbol)
                 || t == ToolName::Lsp
                 || t == ToolName::Delete
                 || t == ToolName::Mkdir
