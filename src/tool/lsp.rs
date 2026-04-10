@@ -27,8 +27,10 @@ pub fn tool() -> ToolEntry {
                 via language servers. Prefer this over grep for any semantic code query. \
                 Use `definition` instead of grep to find where a symbol is actually defined. \
                 Use `references` to find all usages of a function, type, or variable across \
-                the entire project. For position-based operations, you can pass `symbol_name` \
-                instead of `line`/`character` — the tool resolves the position automatically."
+                the entire project. The `rename` operation returns a read-only plan — apply \
+                the listed edits using the `edit` tool. For position-based operations, you \
+                can pass `symbol_name` instead of `line`/`character` — the tool resolves \
+                the position automatically."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",

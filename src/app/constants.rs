@@ -65,13 +65,13 @@ When LSP servers are running (shown in Environment above), ALWAYS prefer `lsp` o
 | Task | Use | NOT |
 |---|---|---|
 | Find where a symbol is **defined** | `lsp` (definition + symbol_name) | `grep` (false positives from comments, strings) |
-| Find all **usages/callers** | `lsp` (references + symbol_name) | `grep` (misses re-exports, hits false positives) |
+| Find all **usages/callers** | `lsp` (references + symbol_name) | `grep` (matches unrelated same-named symbols, misses aliased callsites) |
 | **Rename** across project | `lsp` (rename) then `edit` | find-and-replace (over/under-matches) |
-| Check for **compile errors** | `lsp` (diagnostics) | `bash` cargo check (slower, noisier) |
+| Check **open file** for compile errors | `lsp` (diagnostics) | `bash` cargo check (slower, noisier) |
 | Search for **text pattern** | `grep` | `lsp` (not for text search) |
 | List **symbols/structure** in one file | `symbols` | `grep` (fragile for structural queries) |
 
-`grep` is for text patterns. `lsp` is for code meaning. If you catch yourself grepping for a function name to find its definition or callers, stop and use `lsp` instead.
+`grep` is for text patterns. `lsp` is for code meaning. If you catch yourself grepping for a function name to find its definition or callers, stop and use `lsp` instead. If no LSP server is shown in Environment above, fall back to `grep` and `symbols`.
 
 ## Tool Usage Guidelines
 
