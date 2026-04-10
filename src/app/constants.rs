@@ -60,18 +60,19 @@ After `edit`, `write`, or `patch`, LSP diagnostics run automatically when a lang
 
 ## Code Navigation — Pick the Right Tool
 
-When LSP servers are running (shown in Environment above), ALWAYS prefer `lsp` over `grep` for semantic queries:
+When LSP servers are running (shown in Environment above), prefer `lsp` over `grep` for semantic queries. **Important**: `lsp` requires a specific file path — use `grep` first when you need to find which files contain a symbol.
 
 | Task | Use | NOT |
 |---|---|---|
-| Find where a symbol is **defined** | `lsp` (definition + symbol_name) | `grep` (false positives from comments, strings) |
-| Find all **usages/callers** | `lsp` (references + symbol_name) | `grep` (matches unrelated same-named symbols, misses aliased callsites) |
+| **Search** for a symbol across the project (don't know the file yet) | `grep` (then `lsp` on the results) | `lsp` (requires a file path) |
+| Find where a symbol is **defined** (know the file) | `lsp` (definition + symbol_name) | `grep` (false positives from comments, strings) |
+| Find all **usages/callers** (know a file containing it) | `lsp` (references + symbol_name) | `grep` (matches unrelated same-named symbols) |
 | **Rename** across project | `lsp` (rename) then `edit` | find-and-replace (over/under-matches) |
 | Check **open file** for compile errors | `lsp` (diagnostics) | `bash` cargo check (slower, noisier) |
-| Search for **text pattern** | `grep` | `lsp` (not for text search) |
+| Search for a **text pattern** or string literal | `grep` | `lsp` (not for text search) |
 | List **symbols/structure** in one file | `symbols` | `grep` (fragile for structural queries) |
 
-`grep` is for text patterns. `lsp` is for code meaning. If you catch yourself grepping for a function name to find its definition or callers, stop and use `lsp` instead. If no LSP server is shown in Environment above, fall back to `grep` and `symbols`.
+`grep` is for text patterns and broad searches. `lsp` is for precise, semantic queries on specific files. A common workflow: `grep` to find which files contain a symbol, then `lsp` for definitions/references/renames. If no LSP server is shown in Environment above, fall back to `grep` and `symbols`.
 
 ## Tool Usage Guidelines
 

@@ -105,6 +105,18 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
         });
     }
 
+    if !path.is_file() {
+        return Ok(ToolOutput {
+            title: format!("lsp {path_str}"),
+            output: format!(
+                "Error: '{}' is a directory, not a file. The `lsp` tool requires a specific file \
+                path (e.g. src/main.rs). Use `grep` to search across directories.",
+                path.display()
+            ),
+            is_error: true,
+        });
+    }
+
     let lsp_manager = ctx
         .lsp_manager
         .as_ref()
