@@ -102,9 +102,9 @@ Submodules: `agent.rs` (sub-agent spawning), `tools.rs` (tool call helpers), `re
 Sub-agents use `sub_request.spawn()` (not `Box::pin(run())`) to preserve the Send bound —
 `Box::pin` erases Send, preventing `tokio::spawn` for parallel execution.
 
-Phase 2 uses `spawn_blocking` (safe for `block_on` inside). Phase 3 runs
-directly on the tokio worker thread — `block_on` panics. Use `block_in_place`
-or sync-only APIs (like `cached_diagnostics`) in Phase 3 code paths.
+Both Phase 2 (parallel) and Phase 3 (sequential) use `spawn_blocking` for
+tool execution, so `block_on` is safe in any tool handler. Phase 3 also
+handles `JoinError` (task panics) gracefully in the UI.
 
 ### Crate-Level Utilities (`lib.rs`)
 
@@ -191,6 +191,8 @@ from `spawn_blocking`. Narrow mutex scope in `ensure_open`/`notify_did_change`:
 check state under lock, drop before I/O or notifications, re-acquire to commit.
 `publishDiagnostics` is async — stale results can arrive after `didChange`.
 Compare pre/post-notification snapshots to filter stale errors.
+`lsp` tool validates `path.is_file()` — directories are rejected early with
+a message redirecting to `grep`.
 
 ## Formatting
 
