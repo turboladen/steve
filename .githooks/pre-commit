@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -e
+
+# Require nightly rustfmt (imports_granularity = "Crate" is nightly-only)
+if ! cargo +nightly fmt -- --check 2>/dev/null; then
+    echo ""
+    echo "error: code is not formatted"
+    echo "  run: cargo +nightly fmt"
+    echo ""
+    exit 1
+fi
