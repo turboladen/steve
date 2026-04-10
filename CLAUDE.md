@@ -84,7 +84,8 @@ Each major module follows a consistent pattern: `mod.rs` owns types and public A
 submodules split by concern (e.g., `server.rs`/`manager.rs` for LSP and MCP). No `types.rs`
 files — types belong in `mod.rs` alongside the code that uses them. Tests live in each
 submodule's `#[cfg(test)] mod tests {}` block, not in a separate `tests.rs`. Shared test
-helpers go in `mod.rs`'s test module with `pub(crate)` visibility.
+helpers go in `mod.rs` with `#[cfg(test)] pub(crate)` at module level (not
+inside `mod tests`, which is private and inaccessible from other modules).
 
 ### Enums over Strings
 
@@ -100,6 +101,10 @@ Submodules: `agent.rs` (sub-agent spawning), `tools.rs` (tool call helpers), `re
 (length/iteration recovery), `phases.rs` (4 tool execution phases extracted from the loop).
 Sub-agents use `sub_request.spawn()` (not `Box::pin(run())`) to preserve the Send bound —
 `Box::pin` erases Send, preventing `tokio::spawn` for parallel execution.
+
+Phase 2 uses `spawn_blocking` (safe for `block_on` inside). Phase 3 runs
+directly on the tokio worker thread — `block_on` panics. Use `block_in_place`
+or sync-only APIs (like `cached_diagnostics`) in Phase 3 code paths.
 
 ### Crate-Level Utilities (`lib.rs`)
 
@@ -167,6 +172,14 @@ Submodules: `server.rs` (LspServer + URI helpers), `manager.rs` (LspManager life
 `client.rs` (JSON-RPC transport). Uses `workspace_folders` (not deprecated `root_uri`) for
 LSP init. URI encoding via `url::Url::from_file_path`/`to_file_path`. Binary discovery via
 `which` crate (no shell-out).
+
+`notify_did_change`/`notify_did_save` send file changes after write tools.
+`cached_diagnostics` reads the `SharedDiagnostics` cache (no `block_on`).
+`diagnostics()` uses `block_on` for a `documentSymbol` round-trip — only safe
+from `spawn_blocking`. Narrow mutex scope in `ensure_open`/`notify_did_change`:
+check state under lock, drop before I/O or notifications, re-acquire to commit.
+`publishDiagnostics` is async — stale results can arrive after `didChange`.
+Compare pre/post-notification snapshots to filter stale errors.
 
 ## Formatting
 
