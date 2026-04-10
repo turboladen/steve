@@ -148,7 +148,7 @@ const MAX_GREP_RESULTS: usize = 200;
 
 fn grep_for_symbol(symbol: &str, scope: &Path, project_root: &Path) -> Result<Vec<GrepMatch>> {
     // Escape regex metacharacters, then wrap in word boundaries for precise matching
-    let pattern = format!(r"\b{}\b", regex::escape(symbol));
+    let pattern = format!(r"\b{}\b", regex_syntax::escape(symbol));
     let matcher = RegexMatcher::new(&pattern)
         .map_err(|e| anyhow::anyhow!("invalid symbol name for search: {e}"))?;
 
