@@ -102,7 +102,7 @@ impl App {
                 .collect();
             if !running.is_empty() {
                 identity.push_str(&format!(
-                    "\n- **LSP servers**: {} — **use `lsp` (not grep) for definitions, references, and diagnostics; use `symbols` for single-file structure**",
+                    "\n- **LSP servers**: {} — **use `lsp` (not `grep`) for definitions, references, and diagnostics; use `symbols` for single-file structure**",
                     running.join(", ")
                 ));
             }

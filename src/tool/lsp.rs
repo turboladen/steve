@@ -24,8 +24,8 @@ pub fn tool() -> ToolEntry {
             name: ToolName::Lsp,
             description: "Primary tool for code navigation and verification. Get compiler \
                 diagnostics, jump to definitions, find all references, or plan safe renames \
-                via language servers. Prefer this over grep for any semantic code query. \
-                Use `definition` instead of grep to find where a symbol is actually defined. \
+                via language servers. Prefer this over `grep` for any semantic code query. \
+                Use `definition` instead of `grep` to find where a symbol is actually defined. \
                 Use `references` to find all usages of a function, type, or variable across \
                 the entire project. The `rename` operation returns a read-only plan — apply \
                 the listed edits using the `edit` tool. For position-based operations, you \

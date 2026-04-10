@@ -56,7 +56,7 @@ Piped/compound commands (e.g., `cat file | wc -l`) are allowed since they go bey
 
 ## Post-Edit Verification
 
-After `edit`, `write`, or `patch`, LSP diagnostics run automatically and errors appear in the tool output. If you see "[LSP Errors]", fix them before moving on. To manually check a file you didn't just edit, use `lsp` with `operation: "diagnostics"`.
+After `edit`, `write`, or `patch`, LSP diagnostics run automatically when a language server is available — errors appear as "[LSP Errors]" in the tool output. Fix them before moving on. When no LSP server covers the file, use `bash` to run the project's build/check command instead. To manually check a file you didn't just edit, use `lsp` with `operation: "diagnostics"`.
 
 ## Code Navigation — Pick the Right Tool
 

@@ -16,8 +16,8 @@ pub fn tool() -> ToolEntry {
             name: ToolName::Grep,
             description: "Search for a text/regex pattern across files. Returns matching lines \
                 with file paths and line numbers. For finding where a symbol is defined or \
-                finding all usages, use `lsp` instead — it gives semantically accurate \
-                results."
+                finding all usages, prefer `lsp` when available for the file's language — \
+                it gives semantically accurate results."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
