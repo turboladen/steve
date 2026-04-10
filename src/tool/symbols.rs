@@ -156,7 +156,7 @@ pub(crate) fn detect_language(path: &Path) -> Option<LangInfo> {
 // ── AST node type lists per language ─────────────────────────────────────
 
 /// Return the set of AST node types that represent "symbols" for a given language.
-fn symbol_node_types(lang: TreeSitterLang) -> &'static [&'static str] {
+pub(crate) fn symbol_node_types(lang: TreeSitterLang) -> &'static [&'static str] {
     match lang {
         TreeSitterLang::Rust => &[
             "function_item",
@@ -598,16 +598,16 @@ pub(crate) fn resolve_symbol_position(
 
 /// Information about a found definition.
 #[derive(Debug)]
-struct DefinitionInfo {
-    kind: String,
-    name: String,
-    start_line: usize,
-    end_line: usize,
-    source_preview: String,
+pub(crate) struct DefinitionInfo {
+    pub(crate) kind: String,
+    pub(crate) name: String,
+    pub(crate) start_line: usize,
+    pub(crate) end_line: usize,
+    pub(crate) source_preview: String,
 }
 
 /// Find a symbol by name in the AST.
-fn find_symbol_by_name(
+pub(crate) fn find_symbol_by_name(
     node: Node,
     source: &[u8],
     target_name: &str,
@@ -678,7 +678,7 @@ fn find_symbol_node_recursive<'a>(
 
 // ── Parsing helper ───────────────────────────────────────────────────────
 
-fn parse_file(source: &[u8], language: Language) -> Option<Tree> {
+pub(crate) fn parse_file(source: &[u8], language: Language) -> Option<Tree> {
     let mut parser = Parser::new();
     parser.set_language(&language).ok()?;
     parser.parse(source, None)

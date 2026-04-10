@@ -400,6 +400,7 @@ fn always_allowed_rules() -> Vec<PermissionRule> {
         rule(ToolName::List, Allow),
         rule(ToolName::Symbols, Allow),
         rule(ToolName::Lsp, Allow),
+        rule(ToolName::FindSymbol, Allow),
         // Utility tools (no filesystem side effects)
         rule(ToolName::Memory, Allow),
         rule(ToolName::Task, Allow),

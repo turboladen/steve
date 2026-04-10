@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::{
-    tool::{EditOperation, LspOperation, SymbolsOperation, ToolName},
+    tool::{EditOperation, FindSymbolOperation, LspOperation, SymbolsOperation, ToolName},
     ui::message_block::{DiffContent, DiffLine},
 };
 
@@ -110,6 +110,16 @@ pub fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
                     format!("{path} {other}@{line}")
                 }
             }
+        }
+        ToolName::FindSymbol => {
+            let symbol = args.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
+            let op: FindSymbolOperation = args
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .unwrap_or("overview")
+                .parse()
+                .unwrap_or(FindSymbolOperation::Overview);
+            format!("{op}:{symbol}")
         }
         ToolName::Agent => {
             let agent_type = args
@@ -263,6 +273,7 @@ pub(super) fn extract_diff_content(tool_name: ToolName, args: &Value) -> Option<
         | ToolName::Mkdir
         | ToolName::Symbols
         | ToolName::Lsp
+        | ToolName::FindSymbol
         | ToolName::Agent => None,
     }
 }
@@ -425,6 +436,11 @@ mod tests {
                 );
             } else if matches!(tool, ToolName::Lsp) {
                 assert_eq!(result, " diagnostics", "{tool} defaults to diagnostics op");
+            } else if matches!(tool, ToolName::FindSymbol) {
+                assert!(
+                    result.starts_with("overview:"),
+                    "{tool} defaults to overview op"
+                );
             } else if matches!(tool, ToolName::Agent) {
                 assert!(
                     result.starts_with("explore:"),

@@ -1440,7 +1440,10 @@ fn explore_agent_has_only_read_tools() {
     // Note: Webfetch is categorized as Exploring (UI) but is_read_only() == false,
     // so it is deliberately excluded from the Explore agent's tool set.
     for t in &tools {
-        assert!(t.is_read_only(), "Explore tool {t} should be read-only");
+        assert!(
+            t.is_read_only() || *t == ToolName::FindSymbol,
+            "Explore tool {t} should be read-only or find_symbol"
+        );
     }
 
     // Every non-allowed variant must be absent from the filtered registry
@@ -1470,8 +1473,8 @@ fn plan_agent_includes_lsp_no_writes() {
     // Every allowed tool must be read-only or LSP
     for t in &tools {
         assert!(
-            t.is_read_only() || *t == ToolName::Lsp,
-            "Plan tool {t} should be read-only or LSP"
+            t.is_read_only() || matches!(*t, ToolName::Lsp | ToolName::FindSymbol),
+            "Plan tool {t} should be read-only, LSP, or find_symbol"
         );
     }
 

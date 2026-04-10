@@ -201,6 +201,7 @@ fn all_profiles_exhaustive_build_mode() {
                 PermissionProfile::Standard => {
                     if tool.is_read_only()
                         || tool == ToolName::Lsp
+                        || tool == ToolName::FindSymbol
                         || tool == ToolName::Memory
                         || tool == ToolName::Task
                         || tool == ToolName::Question
@@ -270,6 +271,7 @@ fn plan_mode_denies_writes_regardless_of_profile() {
                 );
             } else if tool.is_read_only()
                 || tool == ToolName::Lsp
+                || tool == ToolName::FindSymbol
                 || tool == ToolName::Memory
                 || tool == ToolName::Task
                 || tool == ToolName::Question

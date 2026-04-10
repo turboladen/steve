@@ -160,6 +160,7 @@ fn compress_tool_output(
         | ToolName::Memory
         | ToolName::Symbols
         | ToolName::Lsp
+        | ToolName::FindSymbol
         | ToolName::Agent => compress_generic(content),
     }
 }

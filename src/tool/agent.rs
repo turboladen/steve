@@ -49,6 +49,7 @@ impl AgentType {
                 ToolName::Glob,
                 ToolName::List,
                 ToolName::Symbols,
+                ToolName::FindSymbol,
             ],
             AgentType::Plan => vec![
                 ToolName::Read,
@@ -57,6 +58,7 @@ impl AgentType {
                 ToolName::List,
                 ToolName::Symbols,
                 ToolName::Lsp,
+                ToolName::FindSymbol,
             ],
             AgentType::General => vec![
                 ToolName::Read,
@@ -65,6 +67,7 @@ impl AgentType {
                 ToolName::List,
                 ToolName::Symbols,
                 ToolName::Lsp,
+                ToolName::FindSymbol,
                 ToolName::Edit,
                 ToolName::Write,
                 ToolName::Patch,
@@ -229,8 +232,8 @@ mod tests {
         let tools = AgentType::Explore.allowed_tools();
         for t in &tools {
             assert!(
-                t.is_read_only(),
-                "Explore agent should only have read-only tools, but has {t}"
+                t.is_read_only() || *t == ToolName::FindSymbol,
+                "Explore agent should only have read-only + find_symbol tools, but has {t}"
             );
         }
     }
@@ -240,8 +243,8 @@ mod tests {
         let tools = AgentType::Plan.allowed_tools();
         for t in &tools {
             assert!(
-                t.is_read_only() || *t == ToolName::Lsp,
-                "Plan agent should only have read-only + LSP tools, but has {t}"
+                t.is_read_only() || matches!(*t, ToolName::Lsp | ToolName::FindSymbol),
+                "Plan agent should only have read-only + LSP + find_symbol tools, but has {t}"
             );
         }
     }
