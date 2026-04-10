@@ -199,6 +199,9 @@ Compare pre/post-notification snapshots to filter stale errors.
 PostToolUse hook runs `rustfmt +nightly` — must be nightly to match CI, since
 stable silently ignores nightly-only config options.
 
+A checked-in pre-commit hook in `.githooks/pre-commit` runs `cargo +nightly fmt --check`
+before every commit. First-time setup: `git config core.hooksPath .githooks`.
+
 ## Key Dependency Gotchas
 
 - **strum 0.28**: Use `IntoStaticStr` (not `AsRefStr`) for `&'static str`
