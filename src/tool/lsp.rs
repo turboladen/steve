@@ -22,13 +22,13 @@ pub fn tool() -> ToolEntry {
     ToolEntry {
         def: ToolDef {
             name: ToolName::Lsp,
-            description: "Get compiler diagnostics, jump to definitions, find all references, \
-                or plan safe renames using language servers. Use `diagnostics` after editing \
-                code to catch compile errors. Use `definition` instead of grep to find where \
-                a symbol is actually defined. Use `references` to find all usages of a \
-                function, type, or variable across the entire project. For position-based \
-                operations, you can pass `symbol_name` instead of `line`/`character` — the \
-                tool resolves the position automatically."
+            description: "Primary tool for code navigation and verification. Get compiler \
+                diagnostics, jump to definitions, find all references, or plan safe renames \
+                via language servers. Prefer this over grep for any semantic code query. \
+                Use `definition` instead of grep to find where a symbol is actually defined. \
+                Use `references` to find all usages of a function, type, or variable across \
+                the entire project. For position-based operations, you can pass `symbol_name` \
+                instead of `line`/`character` — the tool resolves the position automatically."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
