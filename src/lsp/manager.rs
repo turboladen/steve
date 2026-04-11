@@ -188,6 +188,10 @@ impl LspManager {
         }
     }
 
+    pub fn running_servers(&self) -> impl Iterator<Item = &LspServer> {
+        self.servers.values()
+    }
+
     pub fn has_servers(&self) -> bool {
         !self.servers.is_empty()
     }
@@ -230,6 +234,13 @@ mod tests {
         assert!(!mgr.has_servers());
         assert!(mgr.running_languages().is_empty());
         assert!(mgr.language_status().is_empty());
+    }
+
+    #[tokio::test]
+    async fn running_servers_empty() {
+        let dir = tempdir().unwrap();
+        let mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+        assert_eq!(mgr.running_servers().count(), 0);
     }
 
     #[tokio::test]

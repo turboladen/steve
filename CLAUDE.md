@@ -173,8 +173,15 @@ body interior where references (e.g., recursive calls) live.
 
 ### Find Symbol Tool (`tool/find_symbol.rs`)
 
-`find_symbol` orchestrates grep → tree-sitter → LSP in a single tool call.
+`find_symbol` orchestrates workspace/symbol → grep → tree-sitter → LSP in a single tool call.
 Classified as `is_read_only()` (no side effects, always-allowed, parallel-eligible).
+When LSP servers are running, Phase B tries `workspace/symbol` first for semantic results
+(exact name match filtering), falling back to grep when unavailable or empty.
+`LspManager::running_servers()` iterates all active servers for workspace-level queries.
+`WorkspaceSymbolResult` in `lsp/server.rs` normalizes both `Flat` (`SymbolInformation`)
+and `Nested` (`WorkspaceSymbol`) LSP response formats. `convert_workspace_results()`
+bridges workspace/symbol output into the `(definitions, classified)` types used by
+Phases D and E.
 `is_identifier()` gates `\b` word-boundary wrapping — non-identifier symbols
 (e.g., `operator+`) use plain escaped matching. LSP enrichment requires a
 tree-sitter definition site; falls back to grep+tree-sitter when LSP unavailable.
@@ -222,6 +229,21 @@ stable silently ignores nightly-only config options.
 
 A checked-in pre-commit hook in `.githooks/pre-commit` runs `cargo +nightly fmt --check`
 before every commit. First-time setup: `git config core.hooksPath .githooks`.
+
+## CI Configuration
+
+CI runs `cargo clippy --all-targets -- -D warnings` — all warnings are errors.
+Deprecated field usage (e.g., `SymbolInformation.deprecated`) must use
+`#[allow(deprecated)]` in tests. Local `cargo clippy` without `-D warnings`
+won't catch these.
+
+## System Prompt Sensitivity (`app/constants.rs`)
+
+Smaller models (e.g., qwen3-coder) are extremely sensitive to system prompt
+wording. Adding emphasis (CRITICAL, ALWAYS, REQUIRED) or changing phrasing
+can break tool-calling entirely — the model emits tool calls as text instead
+of structured calls. When modifying prompt text: keep original wording where
+possible, prefer reordering over rewriting, and test with local models.
 
 ## Key Dependency Gotchas
 

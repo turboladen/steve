@@ -327,6 +327,41 @@ impl LspServer {
         result.ok_or_else(|| anyhow::anyhow!("server could not rename at this position"))
     }
 
+    pub fn workspace_symbols(&self, query: &str) -> Result<Vec<WorkspaceSymbolResult>> {
+        if !matches!(
+            self.capabilities.workspace_symbol_provider,
+            Some(OneOf::Left(true)) | Some(OneOf::Right(_))
+        ) {
+            return Err(anyhow::anyhow!("server does not support workspace/symbol"));
+        }
+
+        let params = WorkspaceSymbolParams {
+            query: query.to_string(),
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        let result = self
+            .handle
+            .block_on(async {
+                tokio::time::timeout(
+                    REQUEST_TIMEOUT,
+                    self.server_socket
+                        .request::<request::WorkspaceSymbolRequest>(params),
+                )
+                .await
+            })
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "workspace/symbol request timed out after {}s",
+                    REQUEST_TIMEOUT.as_secs()
+                )
+            })?
+            .map_err(|e| anyhow::anyhow!("workspace/symbol request failed: {e}"))?;
+
+        Ok(parse_workspace_symbol_response(result))
+    }
+
     pub(super) fn transport_shutdown(mut self) -> Result<()> {
         // Send LSP shutdown request. If we're inside the tokio runtime (e.g.,
         // Drop during app exit), we can't block_on — spawn a fire-and-forget
@@ -397,6 +432,54 @@ pub fn uri_to_path(uri_str: &str) -> Option<PathBuf> {
     url::Url::parse(uri_str)
         .ok()
         .and_then(|u| u.to_file_path().ok())
+}
+
+/// A normalized workspace symbol result, usable regardless of whether the server
+/// returned the older `SymbolInformation` or the newer `WorkspaceSymbol` format.
+#[derive(Debug, Clone)]
+pub struct WorkspaceSymbolResult {
+    pub name: String,
+    pub kind: SymbolKind,
+    pub location: Location,
+    pub container_name: Option<String>,
+}
+
+fn parse_workspace_symbol_response(
+    result: Option<WorkspaceSymbolResponse>,
+) -> Vec<WorkspaceSymbolResult> {
+    let Some(response) = result else {
+        return Vec::new();
+    };
+    match response {
+        WorkspaceSymbolResponse::Flat(symbols) => symbols
+            .into_iter()
+            .map(|si| WorkspaceSymbolResult {
+                name: si.name,
+                kind: si.kind,
+                location: si.location,
+                container_name: si.container_name,
+            })
+            .collect(),
+        WorkspaceSymbolResponse::Nested(symbols) => symbols
+            .into_iter()
+            .filter_map(|ws| {
+                // WorkspaceLocation (URI only, no range) would produce a bogus
+                // line 1 and unrelated source preview — skip these results rather
+                // than fabricating a position. A future workspaceSymbol/resolve
+                // call could recover the full location if needed.
+                let location = match ws.location {
+                    OneOf::Left(loc) => loc,
+                    OneOf::Right(_) => return None,
+                };
+                Some(WorkspaceSymbolResult {
+                    name: ws.name,
+                    kind: ws.kind,
+                    location,
+                    container_name: ws.container_name,
+                })
+            })
+            .collect(),
+    }
 }
 
 fn parse_goto_definition_response(result: Option<GotoDefinitionResponse>) -> Result<Vec<Location>> {
@@ -540,5 +623,75 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].range.start.line, 5);
         assert_eq!(result[0].range.start.character, 4);
+    }
+
+    #[test]
+    fn parse_workspace_symbol_response_none() {
+        let result = parse_workspace_symbol_response(None);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    #[allow(deprecated)] // SymbolInformation.deprecated field is deprecated in favor of tags
+    fn parse_workspace_symbol_response_flat() {
+        let symbols = vec![SymbolInformation {
+            name: "MyStruct".to_string(),
+            kind: SymbolKind::STRUCT,
+            tags: None,
+            deprecated: None,
+            location: Location {
+                uri: Url::parse("file:///src/lib.rs").unwrap(),
+                range: Range::new(Position::new(10, 0), Position::new(10, 15)),
+            },
+            container_name: Some("my_module".to_string()),
+        }];
+        let result = parse_workspace_symbol_response(Some(WorkspaceSymbolResponse::Flat(symbols)));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "MyStruct");
+        assert_eq!(result[0].kind, SymbolKind::STRUCT);
+        assert_eq!(result[0].location.range.start.line, 10);
+        assert_eq!(result[0].container_name.as_deref(), Some("my_module"));
+    }
+
+    #[test]
+    fn parse_workspace_symbol_response_nested_with_location() {
+        let symbols = vec![async_lsp::lsp_types::WorkspaceSymbol {
+            name: "my_fn".to_string(),
+            kind: SymbolKind::FUNCTION,
+            tags: None,
+            container_name: None,
+            location: OneOf::Left(Location {
+                uri: Url::parse("file:///src/main.rs").unwrap(),
+                range: Range::new(Position::new(5, 3), Position::new(5, 8)),
+            }),
+            data: None,
+        }];
+        let result =
+            parse_workspace_symbol_response(Some(WorkspaceSymbolResponse::Nested(symbols)));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "my_fn");
+        assert_eq!(result[0].location.range.start.line, 5);
+        assert_eq!(result[0].location.range.start.character, 3);
+    }
+
+    #[test]
+    fn parse_workspace_symbol_response_nested_workspace_location_filtered() {
+        // WorkspaceLocation (URI only, no range) should be filtered out
+        let symbols = vec![async_lsp::lsp_types::WorkspaceSymbol {
+            name: "Config".to_string(),
+            kind: SymbolKind::STRUCT,
+            tags: None,
+            container_name: Some("config".to_string()),
+            location: OneOf::Right(async_lsp::lsp_types::WorkspaceLocation {
+                uri: Url::parse("file:///src/config.rs").unwrap(),
+            }),
+            data: None,
+        }];
+        let result =
+            parse_workspace_symbol_response(Some(WorkspaceSymbolResponse::Nested(symbols)));
+        assert!(
+            result.is_empty(),
+            "WorkspaceLocation results (no range) should be filtered out"
+        );
     }
 }
