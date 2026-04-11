@@ -115,10 +115,13 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
         .unwrap_or_else(|| ctx.project_root.clone());
 
     // Phase B: Try workspace/symbol (LSP) first, fall back to grep
-    let ws_results = try_workspace_symbols(symbol, &ctx);
+    let ws_results = try_workspace_symbols(symbol, &scope_path, &ctx);
 
     let (definitions, classified) = if !ws_results.is_empty() {
-        // Workspace/symbol gave us semantic results — convert to our types
+        // Workspace/symbol gave us semantic results — convert to our types.
+        // Phase D still runs for references via position-based LSP; workspace/symbol
+        // only provides definition locations, so definitions may be shadowed by
+        // Phase D's authoritative LSP results in format_output.
         convert_workspace_results(&ws_results, &ctx.project_root)
     } else {
         // Fall back to grep → tree-sitter
@@ -169,8 +172,13 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
 // ── Phase B: Workspace/symbol (LSP) ────────────────────────────────────────
 
 /// Try LSP workspace/symbol search across all running servers.
-/// Returns results filtered to exact name matches (workspace/symbol is fuzzy).
-fn try_workspace_symbols(symbol: &str, ctx: &ToolContext) -> Vec<WorkspaceSymbolResult> {
+/// Returns results filtered to exact name matches (workspace/symbol is fuzzy)
+/// and scoped to `scope_path` (workspace/symbol is project-wide).
+fn try_workspace_symbols(
+    symbol: &str,
+    scope_path: &Path,
+    ctx: &ToolContext,
+) -> Vec<WorkspaceSymbolResult> {
     let lsp_manager = match &ctx.lsp_manager {
         Some(mgr) => mgr,
         None => return Vec::new(),
@@ -185,7 +193,14 @@ fn try_workspace_symbols(symbol: &str, ctx: &ToolContext) -> Vec<WorkspaceSymbol
     for server in mgr.running_servers() {
         if let Ok(symbols) = server.workspace_symbols(symbol) {
             for ws in symbols {
-                if ws.name == symbol {
+                if ws.name != symbol {
+                    continue;
+                }
+                // Filter by scope: workspace/symbol returns project-wide results,
+                // but the user may have narrowed with `scope`.
+                if let Some(abs_path) = uri_to_path(ws.location.uri.as_str())
+                    && abs_path.starts_with(scope_path)
+                {
                     results.push(ws);
                 }
             }
@@ -194,14 +209,45 @@ fn try_workspace_symbols(symbol: &str, ctx: &ToolContext) -> Vec<WorkspaceSymbol
     results
 }
 
+/// Map LSP `SymbolKind` to labels consistent with tree-sitter's `kind_label()`.
+/// Uses the same short labels (fn, struct, enum, etc.) so output is uniform
+/// regardless of whether the workspace/symbol or grep+tree-sitter path ran.
+fn symbol_kind_label(kind: async_lsp::lsp_types::SymbolKind) -> &'static str {
+    use async_lsp::lsp_types::SymbolKind;
+    match kind {
+        SymbolKind::FUNCTION => "fn",
+        SymbolKind::METHOD => "method",
+        SymbolKind::CONSTRUCTOR => "constructor",
+        SymbolKind::STRUCT => "struct",
+        SymbolKind::CLASS => "class",
+        SymbolKind::ENUM => "enum",
+        SymbolKind::ENUM_MEMBER => "variant",
+        SymbolKind::INTERFACE => "interface",
+        SymbolKind::MODULE => "mod",
+        SymbolKind::NAMESPACE => "namespace",
+        SymbolKind::CONSTANT => "const",
+        SymbolKind::VARIABLE => "var",
+        SymbolKind::FIELD => "field",
+        SymbolKind::PROPERTY => "property",
+        SymbolKind::TYPE_PARAMETER => "type",
+        SymbolKind::KEY => "key",
+        SymbolKind::OBJECT => "object",
+        // SymbolKind is non_exhaustive — fall back to Debug format for unknowns
+        _ => "symbol",
+    }
+}
+
 /// Convert workspace/symbol results into the `(definitions, classified)` format
-/// that the rest of the pipeline expects.
+/// that the rest of the pipeline expects. All results are classified as definitions
+/// since workspace/symbol returns declaration sites. Phase D handles references
+/// separately via position-based LSP queries.
 fn convert_workspace_results(
     ws_results: &[WorkspaceSymbolResult],
     project_root: &Path,
 ) -> (Vec<(PathBuf, DefinitionInfo)>, Vec<ClassifiedMatch>) {
     let mut definitions = Vec::new();
     let mut classified = Vec::new();
+    let mut file_cache: HashMap<PathBuf, Vec<String>> = HashMap::new();
 
     for ws in ws_results {
         let abs_path = match uri_to_path(ws.location.uri.as_str()) {
@@ -212,34 +258,36 @@ fn convert_workspace_results(
             .strip_prefix(project_root)
             .unwrap_or(&abs_path)
             .to_path_buf();
-        let line_1indexed = ws.location.range.start.line + 1;
+        let start_line_1indexed = (ws.location.range.start.line + 1) as usize;
+        let end_line_1indexed = (ws.location.range.end.line + 1) as usize;
 
-        // Read the source line for display
-        let content = std::fs::read_to_string(&abs_path)
-            .ok()
-            .and_then(|src| {
-                src.lines()
-                    .nth(ws.location.range.start.line as usize)
-                    .map(|l| l.trim().to_string())
-            })
+        // Read source line from cache to avoid re-reading the same file
+        let lines = file_cache.entry(abs_path).or_insert_with_key(|p| {
+            std::fs::read_to_string(p)
+                .unwrap_or_default()
+                .lines()
+                .map(String::from)
+                .collect()
+        });
+        let content = lines
+            .get(ws.location.range.start.line as usize)
+            .map(|l| l.trim().to_string())
             .unwrap_or_default();
-
-        let kind_label = format!("{:?}", ws.kind).to_lowercase();
 
         definitions.push((
             rel_path.clone(),
             DefinitionInfo {
                 name: ws.name.clone(),
-                kind: kind_label.clone(),
-                start_line: line_1indexed as usize,
-                end_line: line_1indexed as usize,
+                kind: symbol_kind_label(ws.kind).to_string(),
+                start_line: start_line_1indexed,
+                end_line: end_line_1indexed,
                 source_preview: content.clone(),
             },
         ));
 
         classified.push(ClassifiedMatch {
             path: rel_path,
-            line: line_1indexed,
+            line: start_line_1indexed as u32,
             content,
             kind: MatchKind::Definition,
         });
@@ -890,8 +938,9 @@ mod tests {
 
         assert_eq!(definitions.len(), 1);
         assert_eq!(definitions[0].1.name, "my_func");
-        assert_eq!(definitions[0].1.kind, "function");
+        assert_eq!(definitions[0].1.kind, "fn");
         assert_eq!(definitions[0].1.start_line, 1); // 0-indexed line 0 → 1-indexed line 1
+        assert_eq!(definitions[0].1.end_line, 1); // range end line 0 → 1-indexed 1
         assert!(definitions[0].1.source_preview.contains("fn my_func"));
 
         assert_eq!(classified.len(), 1);
@@ -924,8 +973,26 @@ mod tests {
 
     #[test]
     fn try_workspace_symbols_no_lsp_returns_empty() {
-        let ctx = test_tool_context(tempdir().unwrap().path().to_path_buf());
-        let results = try_workspace_symbols("anything", &ctx);
+        let dir = tempdir().unwrap();
+        let ctx = test_tool_context(dir.path().to_path_buf());
+        let results = try_workspace_symbols("anything", dir.path(), &ctx);
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn symbol_kind_label_consistency() {
+        use async_lsp::lsp_types::SymbolKind;
+        // Key kinds produce labels matching tree-sitter's kind_label()
+        assert_eq!(symbol_kind_label(SymbolKind::FUNCTION), "fn");
+        assert_eq!(symbol_kind_label(SymbolKind::STRUCT), "struct");
+        assert_eq!(symbol_kind_label(SymbolKind::ENUM), "enum");
+        assert_eq!(symbol_kind_label(SymbolKind::MODULE), "mod");
+        assert_eq!(symbol_kind_label(SymbolKind::INTERFACE), "interface");
+        assert_eq!(symbol_kind_label(SymbolKind::CONSTANT), "const");
+        assert_eq!(symbol_kind_label(SymbolKind::VARIABLE), "var");
+        assert_eq!(symbol_kind_label(SymbolKind::CLASS), "class");
+        assert_eq!(symbol_kind_label(SymbolKind::METHOD), "method");
+        // Unknown/uncommon kinds get a generic label
+        assert_eq!(symbol_kind_label(SymbolKind::BOOLEAN), "symbol");
     }
 }
