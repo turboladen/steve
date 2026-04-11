@@ -93,12 +93,19 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing 'symbol' argument"))?;
 
-    let operation: FindSymbolOperation = args
-        .get("operation")
-        .and_then(|v| v.as_str())
-        .unwrap_or("overview")
-        .parse()
-        .unwrap_or(FindSymbolOperation::Overview);
+    let operation: FindSymbolOperation = match args.get("operation") {
+        Some(v) => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("'operation' must be a string"))?;
+            s.parse().map_err(|_| {
+                anyhow::anyhow!(
+                    "unknown operation '{s}'. Expected: definition, references, overview"
+                )
+            })?
+        }
+        None => FindSymbolOperation::Overview,
+    };
 
     let scope_path = args
         .get("scope")
@@ -146,9 +153,24 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
 
 const MAX_GREP_RESULTS: usize = 200;
 
+/// Whether a symbol name consists entirely of identifier characters (letters, digits, underscore).
+/// Word-boundary `\b` anchors only work reliably for such symbols.
+fn is_identifier(symbol: &str) -> bool {
+    let mut chars = symbol.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
 fn grep_for_symbol(symbol: &str, scope: &Path, project_root: &Path) -> Result<Vec<GrepMatch>> {
-    // Escape regex metacharacters, then wrap in word boundaries for precise matching
-    let pattern = format!(r"\b{}\b", regex_syntax::escape(symbol));
+    let escaped = regex_syntax::escape(symbol);
+    let pattern = if is_identifier(symbol) {
+        format!(r"\b{escaped}\b")
+    } else {
+        escaped
+    };
     let matcher = RegexMatcher::new(&pattern)
         .map_err(|e| anyhow::anyhow!("invalid symbol name for search: {e}"))?;
 
@@ -244,14 +266,12 @@ fn classify_matches(
             }
         }
 
-        // Classify each match
+        // Classify each match — only the declaration line itself is a definition,
+        // not the entire function/struct body (avoids mislabeling recursive calls).
         for m in file_matches {
             let kind = if def_files.contains(*rel_path) {
-                // Check if this specific line is near the definition
                 if let Some((_, def_info)) = definitions.iter().find(|(p, _)| p == *rel_path) {
-                    if m.line as usize >= def_info.start_line
-                        && m.line as usize <= def_info.end_line
-                    {
+                    if m.line as usize == def_info.start_line {
                         MatchKind::Definition
                     } else {
                         MatchKind::Reference
@@ -589,6 +609,50 @@ mod tests {
 
         assert!(!def_matches.is_empty(), "should have definition matches");
         assert!(!ref_matches.is_empty(), "should have reference matches");
+    }
+
+    #[test]
+    fn recursive_call_classified_as_reference() {
+        let dir = tempdir().unwrap();
+        // Function with a recursive call inside its own body
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "fn recurse(n: u32) {\n    if n > 0 {\n        recurse(n - 1);\n    }\n}\n",
+        )
+        .unwrap();
+
+        let matches = grep_for_symbol("recurse", dir.path(), dir.path()).unwrap();
+        let (_, classified) = classify_matches("recurse", &matches, dir.path());
+
+        let def_count = classified
+            .iter()
+            .filter(|m| m.kind == MatchKind::Definition)
+            .count();
+        let ref_count = classified
+            .iter()
+            .filter(|m| m.kind == MatchKind::Reference)
+            .count();
+
+        assert_eq!(
+            def_count, 1,
+            "only the declaration line should be Definition"
+        );
+        assert!(
+            ref_count >= 1,
+            "recursive call should be classified as Reference"
+        );
+    }
+
+    #[test]
+    fn is_identifier_classification() {
+        assert!(is_identifier("foo_bar"));
+        assert!(is_identifier("_private"));
+        assert!(is_identifier("MyType123"));
+        assert!(!is_identifier("operator+"));
+        assert!(!is_identifier("foo.bar"));
+        assert!(!is_identifier("Type::method"));
+        assert!(!is_identifier(""));
+        assert!(!is_identifier("123abc"));
     }
 
     #[test]
