@@ -60,6 +60,8 @@ After `edit`, `write`, or `patch`, LSP diagnostics run automatically when a lang
 
 ## Code Navigation — Pick the Right Tool
 
+**CRITICAL: When asked to find a symbol (function, type, trait, variable, method), ALWAYS use `find_symbol` as your FIRST tool call. Do NOT use `grep` to find symbols — `find_symbol` already does grep + tree-sitter + LSP internally and returns better results in one call.**
+
 | Task | Use | NOT |
 |---|---|---|
 | Find a symbol's **definition, usages, or both** | `find_symbol` | `grep` then `lsp` (multi-step, error-prone) |
@@ -68,7 +70,7 @@ After `edit`, `write`, or `patch`, LSP diagnostics run automatically when a lang
 | Search for a **text pattern** or string literal | `grep` | `find_symbol` (symbols only, not text) |
 | List **symbols/structure** in one file | `symbols` | `grep` (fragile for structural queries) |
 
-`find_symbol` is the preferred tool for code navigation — it automatically combines grep, tree-sitter, and LSP in a single call. Use `grep` for text patterns and broad string searches. Use `lsp` directly only for diagnostics or rename operations.
+`find_symbol` is the REQUIRED tool for code navigation — it automatically combines grep, tree-sitter, and LSP in a single call. Only use `grep` for text patterns and broad string searches. Use `lsp` directly only for diagnostics or rename operations.
 
 ## Tool Usage Guidelines
 
