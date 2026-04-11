@@ -1,9 +1,10 @@
-//! find_symbol tool — orchestrates grep + tree-sitter + LSP for symbol navigation.
+//! find_symbol tool — orchestrates workspace/symbol + grep + tree-sitter + LSP for symbol navigation.
 //!
 //! The LLM rarely chains grep→lsp manually. This tool does it in one call:
-//! 1. Grep for the symbol name across the project
-//! 2. Tree-sitter to classify matches as definitions vs references
-//! 3. LSP enrichment (when available) for authoritative results
+//! 1. Try LSP workspace/symbol for semantic results (when available)
+//! 2. Fall back to grep scan across the project
+//! 3. Tree-sitter to classify matches as definitions vs references
+//! 4. LSP enrichment for authoritative definition/reference results
 //!
 //! Falls back gracefully at each layer.
 
@@ -20,7 +21,7 @@ use grep::{
 use ignore::WalkBuilder;
 use serde_json::Value;
 
-use crate::lsp::uri_to_path;
+use crate::lsp::{WorkspaceSymbolResult, uri_to_path};
 
 use super::{
     FindSymbolOperation, ToolContext, ToolDef, ToolEntry, ToolName, ToolOutput,
@@ -113,10 +114,29 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
         .map(|p| super::resolve_path(p, &ctx.project_root))
         .unwrap_or_else(|| ctx.project_root.clone());
 
-    // Phase B: Grep scan
-    let grep_matches = grep_for_symbol(symbol, &scope_path, &ctx.project_root)?;
+    // Phase B: Try workspace/symbol (LSP) first, fall back to grep
+    let ws_results = try_workspace_symbols(symbol, &ctx);
 
-    if grep_matches.is_empty() {
+    let (definitions, classified) = if !ws_results.is_empty() {
+        // Workspace/symbol gave us semantic results — convert to our types
+        convert_workspace_results(&ws_results, &ctx.project_root)
+    } else {
+        // Fall back to grep → tree-sitter
+        let grep_matches = grep_for_symbol(symbol, &scope_path, &ctx.project_root)?;
+
+        if grep_matches.is_empty() {
+            return Ok(ToolOutput {
+                title: format!("find_symbol {operation}:{symbol}"),
+                output: format!("No matches found for symbol '{symbol}'."),
+                is_error: false,
+            });
+        }
+
+        // Phase C: Tree-sitter classification
+        classify_matches(symbol, &grep_matches, &ctx.project_root)
+    };
+
+    if definitions.is_empty() && classified.is_empty() {
         return Ok(ToolOutput {
             title: format!("find_symbol {operation}:{symbol}"),
             output: format!("No matches found for symbol '{symbol}'."),
@@ -124,10 +144,7 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
         });
     }
 
-    // Phase C: Tree-sitter classification
-    let (definitions, classified) = classify_matches(symbol, &grep_matches, &ctx.project_root);
-
-    // Phase D: LSP enrichment
+    // Phase D: LSP enrichment (definition/references via position)
     let (lsp_definitions, lsp_references) =
         try_lsp_enrichment(symbol, operation, &definitions, &ctx);
 
@@ -149,7 +166,89 @@ fn execute(args: Value, ctx: ToolContext) -> Result<ToolOutput> {
     })
 }
 
-// ── Phase B: Grep scan ──────────────────────────────────────────────────────
+// ── Phase B: Workspace/symbol (LSP) ────────────────────────────────────────
+
+/// Try LSP workspace/symbol search across all running servers.
+/// Returns results filtered to exact name matches (workspace/symbol is fuzzy).
+fn try_workspace_symbols(symbol: &str, ctx: &ToolContext) -> Vec<WorkspaceSymbolResult> {
+    let lsp_manager = match &ctx.lsp_manager {
+        Some(mgr) => mgr,
+        None => return Vec::new(),
+    };
+
+    let mgr = match lsp_manager.read() {
+        Ok(mgr) => mgr,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut results = Vec::new();
+    for server in mgr.running_servers() {
+        if let Ok(symbols) = server.workspace_symbols(symbol) {
+            for ws in symbols {
+                if ws.name == symbol {
+                    results.push(ws);
+                }
+            }
+        }
+    }
+    results
+}
+
+/// Convert workspace/symbol results into the `(definitions, classified)` format
+/// that the rest of the pipeline expects.
+fn convert_workspace_results(
+    ws_results: &[WorkspaceSymbolResult],
+    project_root: &Path,
+) -> (Vec<(PathBuf, DefinitionInfo)>, Vec<ClassifiedMatch>) {
+    let mut definitions = Vec::new();
+    let mut classified = Vec::new();
+
+    for ws in ws_results {
+        let abs_path = match uri_to_path(ws.location.uri.as_str()) {
+            Some(p) => p,
+            None => continue,
+        };
+        let rel_path = abs_path
+            .strip_prefix(project_root)
+            .unwrap_or(&abs_path)
+            .to_path_buf();
+        let line_1indexed = ws.location.range.start.line + 1;
+
+        // Read the source line for display
+        let content = std::fs::read_to_string(&abs_path)
+            .ok()
+            .and_then(|src| {
+                src.lines()
+                    .nth(ws.location.range.start.line as usize)
+                    .map(|l| l.trim().to_string())
+            })
+            .unwrap_or_default();
+
+        let kind_label = format!("{:?}", ws.kind).to_lowercase();
+
+        definitions.push((
+            rel_path.clone(),
+            DefinitionInfo {
+                name: ws.name.clone(),
+                kind: kind_label.clone(),
+                start_line: line_1indexed as usize,
+                end_line: line_1indexed as usize,
+                source_preview: content.clone(),
+            },
+        ));
+
+        classified.push(ClassifiedMatch {
+            path: rel_path,
+            line: line_1indexed,
+            content,
+            kind: MatchKind::Definition,
+        });
+    }
+
+    (definitions, classified)
+}
+
+// ── Phase B fallback: Grep scan ────────────────────────────────────────────
 
 const MAX_GREP_RESULTS: usize = 200;
 
@@ -765,5 +864,68 @@ mod tests {
         assert!(!result.is_error);
         assert!(result.output.contains("## Definition"));
         assert!(result.output.contains("fallback_fn"));
+    }
+
+    #[test]
+    fn convert_workspace_results_to_classified() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("lib.rs");
+        std::fs::write(&file, "fn my_func() {}\nfn other() {}\n").unwrap();
+
+        let uri = url::Url::from_file_path(&file).unwrap();
+        let ws_results = vec![WorkspaceSymbolResult {
+            name: "my_func".to_string(),
+            kind: async_lsp::lsp_types::SymbolKind::FUNCTION,
+            location: async_lsp::lsp_types::Location {
+                uri,
+                range: async_lsp::lsp_types::Range::new(
+                    async_lsp::lsp_types::Position::new(0, 3),
+                    async_lsp::lsp_types::Position::new(0, 10),
+                ),
+            },
+            container_name: None,
+        }];
+
+        let (definitions, classified) = convert_workspace_results(&ws_results, dir.path());
+
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].1.name, "my_func");
+        assert_eq!(definitions[0].1.kind, "function");
+        assert_eq!(definitions[0].1.start_line, 1); // 0-indexed line 0 → 1-indexed line 1
+        assert!(definitions[0].1.source_preview.contains("fn my_func"));
+
+        assert_eq!(classified.len(), 1);
+        assert_eq!(classified[0].kind, MatchKind::Definition);
+        assert_eq!(classified[0].line, 1);
+    }
+
+    #[test]
+    fn convert_workspace_results_missing_file() {
+        let dir = tempdir().unwrap();
+        let uri = url::Url::from_file_path(dir.path().join("nonexistent.rs")).unwrap();
+        let ws_results = vec![WorkspaceSymbolResult {
+            name: "ghost".to_string(),
+            kind: async_lsp::lsp_types::SymbolKind::FUNCTION,
+            location: async_lsp::lsp_types::Location {
+                uri,
+                range: async_lsp::lsp_types::Range::default(),
+            },
+            container_name: None,
+        }];
+
+        let (definitions, classified) = convert_workspace_results(&ws_results, dir.path());
+
+        // Should still produce results (with empty content) — file not existing
+        // is not an error, just means no source preview
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(classified.len(), 1);
+        assert!(definitions[0].1.source_preview.is_empty());
+    }
+
+    #[test]
+    fn try_workspace_symbols_no_lsp_returns_empty() {
+        let ctx = test_tool_context(tempdir().unwrap().path().to_path_buf());
+        let results = try_workspace_symbols("anything", &ctx);
+        assert!(results.is_empty());
     }
 }

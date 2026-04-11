@@ -8,7 +8,7 @@ mod manager;
 mod server;
 
 pub use manager::LspManager;
-pub use server::{LspServer, uri_to_path};
+pub use server::{LspServer, WorkspaceSymbolResult, uri_to_path};
 
 use std::path::Path;
 
