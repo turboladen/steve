@@ -328,7 +328,10 @@ impl LspServer {
     }
 
     pub fn workspace_symbols(&self, query: &str) -> Result<Vec<WorkspaceSymbolResult>> {
-        if self.capabilities.workspace_symbol_provider.is_none() {
+        if !matches!(
+            self.capabilities.workspace_symbol_provider,
+            Some(OneOf::Left(true)) | Some(OneOf::Right(_))
+        ) {
             return Err(anyhow::anyhow!("server does not support workspace/symbol"));
         }
 
@@ -459,20 +462,21 @@ fn parse_workspace_symbol_response(
             .collect(),
         WorkspaceSymbolResponse::Nested(symbols) => symbols
             .into_iter()
-            .map(|ws| {
+            .filter_map(|ws| {
+                // WorkspaceLocation (URI only, no range) would produce a bogus
+                // line 1 and unrelated source preview — skip these results rather
+                // than fabricating a position. A future workspaceSymbol/resolve
+                // call could recover the full location if needed.
                 let location = match ws.location {
                     OneOf::Left(loc) => loc,
-                    OneOf::Right(wl) => Location {
-                        uri: wl.uri,
-                        range: Range::default(),
-                    },
+                    OneOf::Right(_) => return None,
                 };
-                WorkspaceSymbolResult {
+                Some(WorkspaceSymbolResult {
                     name: ws.name,
                     kind: ws.kind,
                     location,
                     container_name: ws.container_name,
-                }
+                })
             })
             .collect(),
     }
@@ -628,6 +632,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // SymbolInformation.deprecated field is deprecated in favor of tags
     fn parse_workspace_symbol_response_flat() {
         let symbols = vec![SymbolInformation {
             name: "MyStruct".to_string(),
@@ -670,7 +675,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_workspace_symbol_response_nested_with_workspace_location() {
+    fn parse_workspace_symbol_response_nested_workspace_location_filtered() {
+        // WorkspaceLocation (URI only, no range) should be filtered out
         let symbols = vec![async_lsp::lsp_types::WorkspaceSymbol {
             name: "Config".to_string(),
             kind: SymbolKind::STRUCT,
@@ -683,11 +689,9 @@ mod tests {
         }];
         let result =
             parse_workspace_symbol_response(Some(WorkspaceSymbolResponse::Nested(symbols)));
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].name, "Config");
-        // WorkspaceLocation has no range — should default to 0,0
-        assert_eq!(result[0].location.range.start.line, 0);
-        assert_eq!(result[0].location.range.start.character, 0);
-        assert_eq!(result[0].location.uri.as_str(), "file:///src/config.rs");
+        assert!(
+            result.is_empty(),
+            "WorkspaceLocation results (no range) should be filtered out"
+        );
     }
 }

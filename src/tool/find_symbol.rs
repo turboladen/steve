@@ -232,7 +232,7 @@ fn symbol_kind_label(kind: async_lsp::lsp_types::SymbolKind) -> &'static str {
         SymbolKind::TYPE_PARAMETER => "type",
         SymbolKind::KEY => "key",
         SymbolKind::OBJECT => "object",
-        // SymbolKind is non_exhaustive — fall back to Debug format for unknowns
+        // SymbolKind is non_exhaustive — use generic "symbol" label for unknowns
         _ => "symbol",
     }
 }
