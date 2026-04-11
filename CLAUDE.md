@@ -230,6 +230,21 @@ stable silently ignores nightly-only config options.
 A checked-in pre-commit hook in `.githooks/pre-commit` runs `cargo +nightly fmt --check`
 before every commit. First-time setup: `git config core.hooksPath .githooks`.
 
+## CI Configuration
+
+CI runs `cargo clippy --all-targets -- -D warnings` — all warnings are errors.
+Deprecated field usage (e.g., `SymbolInformation.deprecated`) must use
+`#[allow(deprecated)]` in tests. Local `cargo clippy` without `-D warnings`
+won't catch these.
+
+## System Prompt Sensitivity (`app/constants.rs`)
+
+Smaller models (e.g., qwen3-coder) are extremely sensitive to system prompt
+wording. Adding emphasis (CRITICAL, ALWAYS, REQUIRED) or changing phrasing
+can break tool-calling entirely — the model emits tool calls as text instead
+of structured calls. When modifying prompt text: keep original wording where
+possible, prefer reordering over rewriting, and test with local models.
+
 ## Key Dependency Gotchas
 
 - **strum 0.28**: Use `IntoStaticStr` (not `AsRefStr`) for `&'static str`
