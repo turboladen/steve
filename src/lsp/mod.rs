@@ -10,9 +10,72 @@ mod server;
 pub use manager::LspManager;
 pub use server::{LspServer, WorkspaceSymbolResult, uri_to_path};
 
-use std::path::Path;
+use std::{path::Path, time::Instant};
 
 use strum::{Display, EnumIter, EnumString, IntoStaticStr};
+
+/// Lifecycle state of a single language server as tracked by `LspManager`.
+///
+/// The Error variant is terminal within a session — Steve does not auto-restart
+/// crashed servers. Users must restart Steve to recover. This keeps crash
+/// detection simple (mark-only, no restart loop).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LspServerState {
+    /// Process spawned; Initialize request in flight or queued.
+    Starting,
+    /// Initialize returned; at least one active `$/progress` work-done token.
+    Indexing,
+    /// Initialize returned; no active progress tokens.
+    Ready,
+    /// Initialize failed, or the mainloop exited unexpectedly. Terminal.
+    Error { reason: String },
+}
+
+impl LspServerState {
+    /// Human-readable label shown next to the binary name in the sidebar.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Starting => "Starting",
+            Self::Indexing => "Indexing",
+            Self::Ready => "Ready",
+            Self::Error { .. } => "Error",
+        }
+    }
+
+    /// Whether this state should render an animated spinner (vs a static glyph).
+    pub fn is_animated(&self) -> bool {
+        match self {
+            Self::Starting | Self::Indexing => true,
+            Self::Ready | Self::Error { .. } => false,
+        }
+    }
+}
+
+/// A single entry in the shared LSP status cache, keyed by `Language`.
+///
+/// Written by `LspManager::start_server` (Starting → Ready/Indexing/Error),
+/// the `$/progress` notification handler in `client::create_client`, and the
+/// per-server crash watcher task. Read by `LspManager::status_snapshot` for
+/// the sidebar and by `LspManager::language_status` for the LLM system prompt.
+#[derive(Debug, Clone)]
+pub struct LspStatusEntry {
+    /// The resolved binary name (e.g., `"rust-analyzer"`). May start as a
+    /// best-guess candidate and get overwritten once `resolve_server` picks
+    /// the actual binary.
+    pub binary: String,
+    /// Current lifecycle state.
+    pub state: LspServerState,
+    /// Number of outstanding `$/progress` work-done tokens. State is
+    /// `Indexing` iff this is nonzero (and Initialize has returned).
+    pub active_progress: usize,
+    /// Latest `$/progress` title or Report message. Stored for a future
+    /// tooltip/overflow surface — not rendered in v1 to keep the narrow
+    /// sidebar readable.
+    pub progress_message: Option<String>,
+    /// When the entry was last mutated. Not currently rendered; enables
+    /// future "indexing for Ns" UX without a schema change.
+    pub updated_at: Instant,
+}
 
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, EnumIter, EnumString, Display, IntoStaticStr)]
 #[strum(serialize_all = "lowercase")]
@@ -360,5 +423,49 @@ mod tests {
                 "{lang} language_id should be lowercase"
             );
         }
+    }
+
+    #[test]
+    fn lsp_server_state_label_all_variants() {
+        assert_eq!(LspServerState::Starting.label(), "Starting");
+        assert_eq!(LspServerState::Indexing.label(), "Indexing");
+        assert_eq!(LspServerState::Ready.label(), "Ready");
+        assert_eq!(
+            LspServerState::Error {
+                reason: "boom".into()
+            }
+            .label(),
+            "Error"
+        );
+    }
+
+    #[test]
+    fn lsp_server_state_is_animated_matrix() {
+        assert!(LspServerState::Starting.is_animated());
+        assert!(LspServerState::Indexing.is_animated());
+        assert!(!LspServerState::Ready.is_animated());
+        assert!(
+            !LspServerState::Error {
+                reason: "nope".into()
+            }
+            .is_animated()
+        );
+    }
+
+    #[test]
+    fn lsp_status_entry_clone_preserves_fields() {
+        let original = LspStatusEntry {
+            binary: "rust-analyzer".into(),
+            state: LspServerState::Indexing,
+            active_progress: 3,
+            progress_message: Some("Building crate graph".into()),
+            updated_at: std::time::Instant::now(),
+        };
+        let cloned = original.clone();
+        assert_eq!(cloned.binary, original.binary);
+        assert_eq!(cloned.state, original.state);
+        assert_eq!(cloned.active_progress, original.active_progress);
+        assert_eq!(cloned.progress_message, original.progress_message);
+        assert_eq!(cloned.updated_at, original.updated_at);
     }
 }

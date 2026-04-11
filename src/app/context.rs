@@ -101,7 +101,13 @@ impl App {
             .sidebar_state
             .lsp_servers
             .iter()
-            .map(|s| (s.binary.as_str(), s.running))
+            .map(|s| {
+                let running = matches!(
+                    s.state,
+                    crate::lsp::LspServerState::Ready | crate::lsp::LspServerState::Indexing
+                );
+                (s.binary.as_str(), running)
+            })
             .collect();
         let system_prompt_len = self.build_system_prompt().map(|s| s.len()).unwrap_or(0);
         let total_tokens = self

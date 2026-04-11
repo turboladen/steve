@@ -1,13 +1,16 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
 use anyhow::{Context, Result};
 use async_lsp::{ServerSocket, lsp_types::*};
-use tokio::task::JoinHandle;
+use tokio::task::AbortHandle;
 
 use super::Language;
 use crate::lsp::client::SharedDiagnostics;
@@ -17,7 +20,12 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct LspServer {
     pub(super) process: tokio::process::Child,
-    pub(super) mainloop_handle: JoinHandle<()>,
+    /// Abort handle for the MainLoop task. The actual `JoinHandle<()>` is
+    /// owned by a per-server crash-watcher task spawned in `LspManager::start_server`.
+    pub(super) mainloop_abort: AbortHandle,
+    /// Set to `true` by `transport_shutdown` before aborting, so the crash
+    /// watcher can distinguish an intentional shutdown from a genuine crash.
+    pub(super) shutdown_flag: Arc<AtomicBool>,
     pub(super) server_socket: ServerSocket,
     pub(super) handle: tokio::runtime::Handle,
     pub(super) language: Language,
@@ -363,6 +371,10 @@ impl LspServer {
     }
 
     pub(super) fn transport_shutdown(mut self) -> Result<()> {
+        // Flag the shutdown as intentional BEFORE aborting the mainloop so
+        // the crash-watcher task skips writing an Error entry to the status cache.
+        self.shutdown_flag.store(true, Ordering::SeqCst);
+
         // Send LSP shutdown request. If we're inside the tokio runtime (e.g.,
         // Drop during app exit), we can't block_on — spawn a fire-and-forget
         // task instead. Either way, this is best-effort.
@@ -370,7 +382,7 @@ impl LspServer {
         if tokio::runtime::Handle::try_current().is_ok() {
             // Inside runtime — spawn the entire shutdown sequence so the
             // mainloop stays alive long enough for Shutdown+Exit to be sent.
-            let mainloop = self.mainloop_handle;
+            let mainloop_abort = self.mainloop_abort.clone();
             let mut process = self.process;
             tokio::spawn(async move {
                 let _ = tokio::time::timeout(
@@ -379,7 +391,7 @@ impl LspServer {
                 )
                 .await;
                 let _ = socket.notify::<notification::Exit>(());
-                mainloop.abort();
+                mainloop_abort.abort();
                 // Brief wait for process exit, then force-kill
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 if matches!(process.try_wait(), Ok(Some(_))) {
@@ -399,7 +411,7 @@ impl LspServer {
             .await
         });
         let _ = self.server_socket.notify::<notification::Exit>(());
-        self.mainloop_handle.abort();
+        self.mainloop_abort.abort();
 
         match self.process.try_wait() {
             Ok(Some(_status)) => {}

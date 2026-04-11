@@ -220,16 +220,22 @@ fn render_servers_section<'a>(
 ) {
     // -- LSP section (if any servers detected) --
     if !state.lsp_servers.is_empty() {
+        use crate::{lsp::LspServerState, ui::status_line::SPINNER_FRAMES};
         lines.push(primitives::section_header("LSP", header_color));
+        let spinner_glyph = SPINNER_FRAMES[state.spinner_frame % SPINNER_FRAMES.len()].to_string();
         for server in &state.lsp_servers {
-            let (icon, icon_color) = if server.running {
-                ("\u{25cf}", theme.success) // ● green — running
-            } else {
-                ("\u{25cb}", theme.dim) // ○ dim — detected but not running
+            // Exhaustive match — a new LspServerState variant will force an
+            // update here per CLAUDE.md convention (no `_ =>` wildcard).
+            let (glyph, color) = match &server.state {
+                LspServerState::Starting => (spinner_glyph.clone(), theme.warning),
+                LspServerState::Indexing => (spinner_glyph.clone(), theme.success),
+                LspServerState::Ready => ("\u{25cf}".to_string(), theme.success),
+                LspServerState::Error { .. } => ("\u{2715}".to_string(), theme.error),
             };
+            let label = format!("{} ({})", server.binary, server.state.label());
             lines.push(Line::from(vec![
-                Span::styled(format!(" {icon} "), Style::default().fg(icon_color)),
-                Span::styled(server.binary.clone(), Style::default().fg(theme.fg)),
+                Span::styled(format!(" {glyph} "), Style::default().fg(color)),
+                Span::styled(label, Style::default().fg(theme.fg)),
             ]));
         }
         lines.push(primitives::section_separator(sidebar_width, theme));
@@ -838,58 +844,77 @@ mod tests {
         assert!(!text.contains("LSP"), "no LSP servers = no 'LSP' header");
     }
 
+    fn ready_lsp(binary: &str) -> SidebarLsp {
+        SidebarLsp {
+            binary: binary.to_string(),
+            state: crate::lsp::LspServerState::Ready,
+            progress_message: None,
+        }
+    }
+
     #[test]
     fn buffer_sidebar_lsp_section_shows_running_servers() {
         let state = SidebarState {
-            lsp_servers: vec![
-                SidebarLsp {
-                    binary: "rust-analyzer".to_string(),
-                    running: true,
-                },
-                SidebarLsp {
-                    binary: "ty".to_string(),
-                    running: true,
-                },
-            ],
+            lsp_servers: vec![ready_lsp("rust-analyzer"), ready_lsp("ty")],
             ..Default::default()
         };
         let text = render_sidebar_to_string(40, 20, &state);
         assert!(text.contains("LSP"), "should show 'LSP' header");
         assert!(text.contains("rust-analyzer"), "should show rust-analyzer");
         assert!(text.contains("ty"), "should show ty");
-        // Running servers get filled circle
-        assert!(
-            text.contains("\u{25cf}"),
-            "running server should show ● icon"
-        );
+        assert!(text.contains("Ready"), "should show Ready label");
+        // Ready servers get filled circle
+        assert!(text.contains("\u{25cf}"), "Ready server should show ● icon");
     }
 
     #[test]
-    fn buffer_sidebar_lsp_section_shows_not_running() {
+    fn buffer_sidebar_lsp_section_shows_starting_and_indexing_with_spinner() {
+        use crate::ui::status_line::SPINNER_FRAMES;
         let state = SidebarState {
             lsp_servers: vec![
                 SidebarLsp {
                     binary: "rust-analyzer".to_string(),
-                    running: true,
+                    state: crate::lsp::LspServerState::Starting,
+                    progress_message: None,
                 },
                 SidebarLsp {
-                    binary: "solargraph".to_string(),
-                    running: false,
+                    binary: "pyright-langserver".to_string(),
+                    state: crate::lsp::LspServerState::Indexing,
+                    progress_message: None,
                 },
             ],
+            spinner_frame: 0,
             ..Default::default()
         };
-        let text = render_sidebar_to_string(40, 20, &state);
+        let text = render_sidebar_to_string(60, 20, &state);
+        assert!(text.contains("Starting"), "should show Starting label");
+        assert!(text.contains("Indexing"), "should show Indexing label");
+        // Spinner glyph is in the rendered output for both states
+        let spinner = SPINNER_FRAMES[0].to_string();
         assert!(
-            text.contains("\u{25cf}"),
-            "running server should show ● icon"
+            text.contains(&spinner),
+            "should show spinner glyph for animated states"
         );
+    }
+
+    #[test]
+    fn buffer_sidebar_lsp_section_shows_error_glyph_for_error_state() {
+        let state = SidebarState {
+            lsp_servers: vec![SidebarLsp {
+                binary: "rust-analyzer".to_string(),
+                state: crate::lsp::LspServerState::Error {
+                    reason: "not found on PATH".to_string(),
+                },
+                progress_message: None,
+            }],
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(50, 20, &state);
+        assert!(text.contains("Error"), "should show Error label");
         assert!(
-            text.contains("\u{25cb}"),
-            "not-running server should show ○ icon"
+            text.contains("\u{2715}"),
+            "Error state should show ✕ glyph, got: {text}"
         );
-        assert!(text.contains("rust-analyzer"), "should show rust-analyzer");
-        assert!(text.contains("solargraph"), "should show solargraph");
     }
 
     #[test]
@@ -897,10 +922,7 @@ mod tests {
         let mut state = SidebarState {
             git_branch: Some("main".to_string()),
             git_dirty: Some(true),
-            lsp_servers: vec![SidebarLsp {
-                binary: "rust-analyzer".to_string(),
-                running: true,
-            }],
+            lsp_servers: vec![ready_lsp("rust-analyzer")],
             ..Default::default()
         };
         state.record_file_change("file.rs".into(), 1, 0);
@@ -919,10 +941,7 @@ mod tests {
         let state = SidebarState {
             git_branch: Some("main".to_string()),
             git_dirty: Some(false),
-            lsp_servers: vec![SidebarLsp {
-                binary: "typescript-language-server".to_string(),
-                running: true,
-            }],
+            lsp_servers: vec![ready_lsp("typescript-language-server")],
             ..Default::default()
         };
         let text = render_sidebar_to_string(40, 25, &state);
@@ -1039,10 +1058,7 @@ mod tests {
     #[test]
     fn buffer_sidebar_mcp_renders_below_lsp() {
         let state = SidebarState {
-            lsp_servers: vec![SidebarLsp {
-                binary: "rust-analyzer".to_string(),
-                running: true,
-            }],
+            lsp_servers: vec![ready_lsp("rust-analyzer")],
             mcp_servers: vec![SidebarMcp {
                 server_id: "github".to_string(),
                 tool_count: 3,

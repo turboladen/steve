@@ -58,12 +58,19 @@ pub struct FileChange {
 }
 
 /// LSP server status for sidebar display.
+///
+/// Backed by `LspStatusEntry` in `src/lsp/mod.rs`, which is the single source
+/// of truth. The sidebar refreshes this on each `AppEvent::Tick` by polling
+/// `LspManager::status_snapshot()`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SidebarLsp {
     /// Binary name of the LSP server (e.g., "rust-analyzer", "ty", "ruff").
     pub binary: String,
-    /// Whether the server is currently running.
-    pub running: bool,
+    /// Current lifecycle state: Starting / Indexing / Ready / Error.
+    pub state: crate::lsp::LspServerState,
+    /// Latest `$/progress` message. Stored for a future tooltip/overflow
+    /// surface — not rendered in v1 to keep the narrow sidebar readable.
+    pub progress_message: Option<String>,
 }
 
 /// MCP server status for sidebar display.
@@ -185,6 +192,18 @@ pub struct SidebarState {
     pub git_repo_name: Option<String>,
     /// Diagnostics summary for sidebar indicator.
     pub diagnostics_summary: DiagnosticSummary,
+    /// Current frame index for animated sidebar spinners (LSP Starting/Indexing).
+    /// Advanced on every `AppEvent::Tick`; all animated entries share this index
+    /// so they blink in lockstep.
+    pub spinner_frame: usize,
+}
+
+impl SidebarState {
+    /// Advance the shared sidebar spinner one frame. Called on each `AppEvent::Tick`.
+    pub fn advance_spinner(&mut self) {
+        use crate::ui::status_line::SPINNER_FRAMES;
+        self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+    }
 }
 
 /// Count addition and removal lines from a `DiffContent`.
@@ -645,5 +664,45 @@ mod tests {
             result.ends_with('\u{2026}'),
             "should end with ellipsis, got: {result}"
         );
+    }
+
+    // -- spinner frame advancement --
+
+    #[test]
+    fn advance_spinner_wraps_at_end() {
+        use crate::ui::status_line::SPINNER_FRAMES;
+        let mut state = SidebarState {
+            spinner_frame: SPINNER_FRAMES.len() - 1,
+            ..Default::default()
+        };
+        state.advance_spinner();
+        assert_eq!(state.spinner_frame, 0, "spinner should wrap to 0");
+    }
+
+    #[test]
+    fn advance_spinner_from_zero_increments() {
+        let mut state = SidebarState::default();
+        assert_eq!(state.spinner_frame, 0);
+        state.advance_spinner();
+        assert_eq!(state.spinner_frame, 1);
+        state.advance_spinner();
+        assert_eq!(state.spinner_frame, 2);
+    }
+
+    // -- SidebarLsp equality considers state --
+
+    #[test]
+    fn sidebar_lsp_equality_considers_state() {
+        let ready = SidebarLsp {
+            binary: "rust-analyzer".into(),
+            state: crate::lsp::LspServerState::Ready,
+            progress_message: None,
+        };
+        let starting = SidebarLsp {
+            binary: "rust-analyzer".into(),
+            state: crate::lsp::LspServerState::Starting,
+            progress_message: None,
+        };
+        assert_ne!(ready, starting, "state change must affect equality");
     }
 }

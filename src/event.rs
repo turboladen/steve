@@ -83,8 +83,6 @@ pub enum AppEvent {
         args_summary: String,
         result_summary: Option<String>,
     },
-    /// LSP servers have been initialized; carries detected server binaries with running status.
-    LspStatus { servers: Vec<(String, bool)> },
     /// MCP servers have been initialized; carries status for all configured servers
     /// (both connected and failed).
     McpStatus {

@@ -10,7 +10,10 @@ impl App {
         let mut crossterm_events = crossterm::event::EventStream::new();
         let mut tick_interval = tokio::time::interval(Duration::from_millis(100));
 
-        // Start LSP servers in background (non-blocking)
+        // Start LSP servers in background (non-blocking). The sidebar picks up
+        // state transitions via Tick polling of the shared status cache, so we
+        // don't need to push an event here — the first Tick after init flips
+        // entries from Starting → Ready/Indexing/Error.
         {
             let lsp = self.lsp_manager.clone();
             let tx = self.event_tx.clone();
@@ -18,18 +21,15 @@ impl App {
                 if let Ok(mut mgr) = lsp.write() {
                     mgr.start_servers();
                     let status = mgr.language_status();
-                    if !status.is_empty() {
-                        let running: Vec<&str> = status
-                            .iter()
-                            .filter(|(_, r)| *r)
-                            .map(|(l, _)| l.as_str())
-                            .collect();
-                        if !running.is_empty() {
-                            let _ = tx.send(AppEvent::StreamNotice {
-                                text: format!("LSP servers started: {}", running.join(", ")),
-                            });
-                        }
-                        let _ = tx.send(AppEvent::LspStatus { servers: status });
+                    let running: Vec<&str> = status
+                        .iter()
+                        .filter(|(_, r)| *r)
+                        .map(|(l, _)| l.as_str())
+                        .collect();
+                    if !running.is_empty() {
+                        let _ = tx.send(AppEvent::StreamNotice {
+                            text: format!("LSP servers started: {}", running.join(", ")),
+                        });
                     }
                 }
             });
@@ -201,6 +201,24 @@ impl App {
             AppEvent::Input(Event::Resize(_, _)) => {}
             AppEvent::Tick => {
                 self.status_line_state.tick();
+                self.sidebar_state.advance_spinner();
+                // Poll the shared LSP status cache (single source of truth).
+                // Diff-apply into sidebar_state so the render path sees changes
+                // without locking the LspManager on every draw.
+                if let Ok(mgr) = self.lsp_manager.try_read() {
+                    let next: Vec<SidebarLsp> = mgr
+                        .status_snapshot()
+                        .into_iter()
+                        .map(|(_, entry)| SidebarLsp {
+                            binary: entry.binary,
+                            state: entry.state,
+                            progress_message: entry.progress_message,
+                        })
+                        .collect();
+                    if next != self.sidebar_state.lsp_servers {
+                        self.sidebar_state.lsp_servers = next;
+                    }
+                }
                 // Clear expired "Copied!" flash
                 if let Some(t) = self.selection_state.copied_flash
                     && t.elapsed().as_secs() >= 1
@@ -440,12 +458,6 @@ impl App {
                         last.update_agent_progress(&call_id, tool_name, args_summary);
                     }
                 }
-            }
-            AppEvent::LspStatus { servers } => {
-                self.sidebar_state.lsp_servers = servers
-                    .into_iter()
-                    .map(|(binary, running)| SidebarLsp { binary, running })
-                    .collect();
             }
             AppEvent::McpStatus { servers } => {
                 self.sidebar_state.mcp_servers = servers;

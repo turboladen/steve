@@ -9,13 +9,16 @@ use std::{
     collections::HashMap,
     ops::ControlFlow,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use async_lsp::{
     MainLoop, ServerSocket,
-    lsp_types::{Diagnostic, Url, notification, request},
+    lsp_types::{Diagnostic, ProgressParamsValue, Url, WorkDoneProgress, notification, request},
     router::Router,
 };
+
+use super::{Language, LspServerState, LspStatusEntry};
 
 /// Shared diagnostics cache — written by the MainLoop service, read by LspServer.
 ///
@@ -24,9 +27,61 @@ use async_lsp::{
 /// runtime. This also allows access from both async (MainLoop) and sync (LspServer) contexts.
 pub type SharedDiagnostics = Arc<Mutex<HashMap<Url, Vec<Diagnostic>>>>;
 
+/// Shared per-language LSP status cache — written by `LspManager::start_server`,
+/// the `$/progress` notification handler, and the crash watcher task; read by
+/// `LspManager::status_snapshot` (for the sidebar) and `language_status` (for
+/// the system prompt). Mirrors the `SharedDiagnostics` pattern.
+pub type SharedLspStatus = Arc<Mutex<HashMap<Language, LspStatusEntry>>>;
+
 /// State held by the Router service.
 pub(crate) struct ClientState {
     pub diagnostics: SharedDiagnostics,
+    pub status: SharedLspStatus,
+    pub language: Language,
+}
+
+/// Apply a `$/progress` notification to a status entry.
+///
+/// Extracted as a free function so the transition rules can be unit-tested
+/// without standing up a full async-lsp Router. The rules:
+///
+/// - **Begin**: increment `active_progress`; flip `Ready → Indexing`
+///   (but not `Starting → Indexing` — Initialize return handles that flip
+///   to avoid clobbering the startup state).
+/// - **Report**: update `progress_message` only.
+/// - **End**: decrement `active_progress` (saturating — tolerates stray End
+///   without matching Begin); flip `Indexing → Ready` only when the counter
+///   reaches zero.
+///
+/// Leaked End notifications keep the server in `Indexing` until the next Begin
+/// cycle completes — annoying but not lethal. Counter-based tracking tolerates
+/// this gracefully.
+pub(crate) fn apply_progress_update(entry: &mut LspStatusEntry, value: ProgressParamsValue) {
+    let ProgressParamsValue::WorkDone(wd) = value;
+    match wd {
+        WorkDoneProgress::Begin(begin) => {
+            entry.active_progress = entry.active_progress.saturating_add(1);
+            entry.progress_message = Some(begin.title.clone());
+            if matches!(entry.state, LspServerState::Ready) {
+                entry.state = LspServerState::Indexing;
+            }
+            entry.updated_at = Instant::now();
+        }
+        WorkDoneProgress::Report(report) => {
+            if let Some(msg) = report.message {
+                entry.progress_message = Some(msg);
+                entry.updated_at = Instant::now();
+            }
+        }
+        WorkDoneProgress::End(end) => {
+            entry.active_progress = entry.active_progress.saturating_sub(1);
+            entry.progress_message = end.message;
+            if entry.active_progress == 0 && matches!(entry.state, LspServerState::Indexing) {
+                entry.state = LspServerState::Ready;
+            }
+            entry.updated_at = Instant::now();
+        }
+    }
 }
 
 /// Create an async-lsp client MainLoop + ServerSocket pair.
@@ -36,9 +91,15 @@ pub(crate) struct ClientState {
 /// to send requests and notifications to the language server.
 pub(crate) fn create_client(
     diagnostics: SharedDiagnostics,
+    status: SharedLspStatus,
+    language: Language,
 ) -> (MainLoop<Router<ClientState>>, ServerSocket) {
-    MainLoop::new_client(|_server_socket| {
-        let mut router = Router::new(ClientState { diagnostics });
+    MainLoop::new_client(move |_server_socket| {
+        let mut router = Router::new(ClientState {
+            diagnostics,
+            status,
+            language,
+        });
 
         // Handle textDocument/publishDiagnostics — buffer into shared cache
         router.notification::<notification::PublishDiagnostics>(|state, params| {
@@ -50,6 +111,26 @@ pub(crate) fn create_client(
                 }
             };
             diags.insert(params.uri, params.diagnostics);
+            ControlFlow::Continue(())
+        });
+
+        // Handle $/progress — track active workDone tokens for Indexing state
+        router.notification::<notification::Progress>(|state, params| {
+            let mut map = match state.status.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    tracing::warn!("lsp status mutex poisoned in progress handler, recovering");
+                    poisoned.into_inner()
+                }
+            };
+            let Some(entry) = map.get_mut(&state.language) else {
+                tracing::debug!(
+                    language = ?state.language,
+                    "progress notification for language not in status cache"
+                );
+                return ControlFlow::Continue(());
+            };
+            apply_progress_update(entry, params.value);
             ControlFlow::Continue(())
         });
 
@@ -77,7 +158,43 @@ pub(crate) fn create_client(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+    use async_lsp::lsp_types::{
+        Diagnostic, DiagnosticSeverity, Position, Range, WorkDoneProgressBegin,
+        WorkDoneProgressEnd, WorkDoneProgressReport,
+    };
+
+    fn sample_entry(state: LspServerState, active: usize) -> LspStatusEntry {
+        LspStatusEntry {
+            binary: "test-ls".into(),
+            state,
+            active_progress: active,
+            progress_message: None,
+            updated_at: Instant::now(),
+        }
+    }
+
+    fn begin(title: &str) -> ProgressParamsValue {
+        ProgressParamsValue::WorkDone(WorkDoneProgress::Begin(WorkDoneProgressBegin {
+            title: title.into(),
+            cancellable: None,
+            message: None,
+            percentage: None,
+        }))
+    }
+
+    fn report(msg: Option<&str>) -> ProgressParamsValue {
+        ProgressParamsValue::WorkDone(WorkDoneProgress::Report(WorkDoneProgressReport {
+            cancellable: None,
+            message: msg.map(String::from),
+            percentage: None,
+        }))
+    }
+
+    fn end(msg: Option<&str>) -> ProgressParamsValue {
+        ProgressParamsValue::WorkDone(WorkDoneProgress::End(WorkDoneProgressEnd {
+            message: msg.map(String::from),
+        }))
+    }
 
     #[test]
     fn shared_diagnostics_insert_and_read() {
@@ -101,8 +218,109 @@ mod tests {
     #[test]
     fn create_client_returns_socket_and_mainloop() {
         let diags: SharedDiagnostics = Arc::new(Mutex::new(HashMap::new()));
-        let (_mainloop, _server_socket) = create_client(diags);
+        let status: SharedLspStatus = Arc::new(Mutex::new(HashMap::new()));
+        let (_mainloop, _server_socket) = create_client(diags, status, Language::Rust);
         // Just verify construction doesn't panic
+    }
+
+    #[test]
+    fn progress_begin_on_ready_transitions_to_indexing() {
+        let mut entry = sample_entry(LspServerState::Ready, 0);
+        apply_progress_update(&mut entry, begin("rustAnalyzer/Indexing"));
+        assert_eq!(entry.state, LspServerState::Indexing);
+        assert_eq!(entry.active_progress, 1);
+        assert_eq!(
+            entry.progress_message.as_deref(),
+            Some("rustAnalyzer/Indexing")
+        );
+    }
+
+    #[test]
+    fn progress_begin_on_starting_leaves_state_unchanged() {
+        let mut entry = sample_entry(LspServerState::Starting, 0);
+        apply_progress_update(&mut entry, begin("rustAnalyzer/Fetching"));
+        // Begin during Starting increments the counter only — Initialize return
+        // is responsible for the flip to Ready or Indexing.
+        assert_eq!(entry.state, LspServerState::Starting);
+        assert_eq!(entry.active_progress, 1);
+        assert_eq!(
+            entry.progress_message.as_deref(),
+            Some("rustAnalyzer/Fetching")
+        );
+    }
+
+    #[test]
+    fn progress_begin_on_indexing_increments_counter_only() {
+        let mut entry = sample_entry(LspServerState::Indexing, 2);
+        apply_progress_update(&mut entry, begin("second-op"));
+        assert_eq!(entry.state, LspServerState::Indexing);
+        assert_eq!(entry.active_progress, 3);
+    }
+
+    #[test]
+    fn progress_report_updates_message_only() {
+        let mut entry = sample_entry(LspServerState::Indexing, 1);
+        entry.progress_message = Some("old".into());
+        apply_progress_update(&mut entry, report(Some("Building crate graph")));
+        assert_eq!(entry.state, LspServerState::Indexing);
+        assert_eq!(entry.active_progress, 1);
+        assert_eq!(
+            entry.progress_message.as_deref(),
+            Some("Building crate graph")
+        );
+    }
+
+    #[test]
+    fn progress_report_without_message_is_noop() {
+        let mut entry = sample_entry(LspServerState::Indexing, 1);
+        entry.progress_message = Some("stable".into());
+        apply_progress_update(&mut entry, report(None));
+        assert_eq!(entry.progress_message.as_deref(), Some("stable"));
+    }
+
+    #[test]
+    fn progress_end_transitions_to_ready_when_counter_zero() {
+        let mut entry = sample_entry(LspServerState::Indexing, 1);
+        apply_progress_update(&mut entry, end(None));
+        assert_eq!(entry.state, LspServerState::Ready);
+        assert_eq!(entry.active_progress, 0);
+    }
+
+    #[test]
+    fn progress_end_stays_indexing_when_other_tokens_active() {
+        let mut entry = sample_entry(LspServerState::Indexing, 3);
+        apply_progress_update(&mut entry, end(None));
+        assert_eq!(entry.state, LspServerState::Indexing);
+        assert_eq!(entry.active_progress, 2);
+    }
+
+    #[test]
+    fn progress_end_underflow_saturates_at_zero() {
+        let mut entry = sample_entry(LspServerState::Ready, 0);
+        apply_progress_update(&mut entry, end(Some("stray end")));
+        assert_eq!(entry.state, LspServerState::Ready);
+        assert_eq!(entry.active_progress, 0);
+        assert_eq!(entry.progress_message.as_deref(), Some("stray end"));
+    }
+
+    #[test]
+    fn progress_end_does_not_flip_error_to_ready() {
+        // A crash watcher could have flipped the entry to Error while End
+        // notifications were in flight. End must not resurrect a dead server.
+        let mut entry = sample_entry(
+            LspServerState::Error {
+                reason: "boom".into(),
+            },
+            1,
+        );
+        apply_progress_update(&mut entry, end(None));
+        assert_eq!(
+            entry.state,
+            LspServerState::Error {
+                reason: "boom".into()
+            }
+        );
+        assert_eq!(entry.active_progress, 0);
     }
 
     #[test]
