@@ -367,6 +367,23 @@ impl ToolResultCache {
                     character
                 ))
             }
+            // FindSymbol is cached but has no single-path invalidation (multi-file search).
+            // Entries are evicted by generation turnover, same as grep/glob.
+            ToolName::FindSymbol => {
+                let symbol = args.get("symbol")?.as_str()?;
+                let op = args
+                    .get("operation")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("overview");
+                let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or(".");
+                let normalized = self.normalize_path(scope);
+                Some(format!(
+                    "find_symbol:{}:{}:{}",
+                    symbol,
+                    op,
+                    normalized.display()
+                ))
+            }
             // Don't cache tools with side effects or dynamic content
             ToolName::Bash
             | ToolName::Edit
@@ -413,6 +430,7 @@ impl ToolResultCache {
             | ToolName::Task
             | ToolName::Webfetch
             | ToolName::Memory
+            | ToolName::FindSymbol
             | ToolName::Agent => None,
         }
     }

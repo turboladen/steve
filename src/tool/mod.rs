@@ -3,6 +3,7 @@ pub mod bash;
 pub mod copy;
 pub mod delete;
 pub mod edit;
+pub mod find_symbol;
 pub mod glob;
 pub mod grep;
 pub mod list;
@@ -97,6 +98,9 @@ pub enum ToolName {
     Memory,
     Symbols,
     Lsp,
+    #[strum(serialize = "find_symbol")]
+    #[serde(rename = "find_symbol")]
+    FindSymbol,
     Agent,
 }
 
@@ -120,11 +124,16 @@ impl ToolName {
         )
     }
 
-    /// Whether this is a read-only tool (read, grep, glob, list, symbols).
+    /// Whether this is a read-only tool with no side effects.
     pub fn is_read_only(self) -> bool {
         matches!(
             self,
-            ToolName::Read | ToolName::Grep | ToolName::Glob | ToolName::List | ToolName::Symbols
+            ToolName::Read
+                | ToolName::Grep
+                | ToolName::Glob
+                | ToolName::List
+                | ToolName::Symbols
+                | ToolName::FindSymbol
         )
     }
 
@@ -168,6 +177,7 @@ impl ToolName {
             | ToolName::Task
             | ToolName::Webfetch
             | ToolName::Memory
+            | ToolName::FindSymbol
             | ToolName::Agent => &[],
         }
     }
@@ -183,7 +193,8 @@ impl ToolName {
             | ToolName::List
             | ToolName::Webfetch
             | ToolName::Symbols
-            | ToolName::Lsp => IntentCategory::Exploring,
+            | ToolName::Lsp
+            | ToolName::FindSymbol => IntentCategory::Exploring,
             ToolName::Edit
             | ToolName::Write
             | ToolName::Patch
@@ -209,7 +220,8 @@ impl ToolName {
             | ToolName::List
             | ToolName::Webfetch
             | ToolName::Symbols
-            | ToolName::Lsp => ToolVisualCategory::Read,
+            | ToolName::Lsp
+            | ToolName::FindSymbol => ToolVisualCategory::Read,
             ToolName::Edit
             | ToolName::Write
             | ToolName::Patch
@@ -236,7 +248,8 @@ impl ToolName {
             | ToolName::List
             | ToolName::Webfetch
             | ToolName::Symbols
-            | ToolName::Lsp => "\u{00b7}", // · (1 col)
+            | ToolName::Lsp
+            | ToolName::FindSymbol => "\u{00b7}", // · (1 col)
             ToolName::Edit
             | ToolName::Write
             | ToolName::Patch
@@ -264,7 +277,8 @@ impl ToolName {
             | ToolName::List
             | ToolName::Webfetch
             | ToolName::Symbols
-            | ToolName::Lsp => "\u{00b7}", // ·
+            | ToolName::Lsp
+            | ToolName::FindSymbol => "\u{00b7}", // ·
             ToolName::Edit
             | ToolName::Write
             | ToolName::Patch
@@ -317,6 +331,16 @@ pub enum LspOperation {
     Definition,
     References,
     Rename,
+}
+
+/// Operations supported by the `find_symbol` tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+pub enum FindSymbolOperation {
+    Definition,
+    References,
+    Overview,
 }
 
 /// Actions supported by the `memory` tool.
@@ -416,6 +440,7 @@ impl ToolRegistry {
         registry.register(list::tool());
         registry.register(symbols::tool());
         registry.register(lsp::tool());
+        registry.register(find_symbol::tool());
 
         // Register write/execute tools
         registry.register(edit::tool());
@@ -497,6 +522,7 @@ impl ToolRegistry {
                 ToolName::List => list::tool(),
                 ToolName::Symbols => symbols::tool(),
                 ToolName::Lsp => lsp::tool(),
+                ToolName::FindSymbol => find_symbol::tool(),
                 ToolName::Edit => edit::tool(),
                 ToolName::Write => write::tool(),
                 ToolName::Patch => patch::tool(),
@@ -623,6 +649,7 @@ mod tests {
                     | ToolName::Glob
                     | ToolName::List
                     | ToolName::Symbols
+                    | ToolName::FindSymbol
             ) {
                 assert!(t.is_read_only(), "{t} should be read-only");
             } else {
@@ -642,6 +669,7 @@ mod tests {
                     | ToolName::List
                     | ToolName::Symbols
                     | ToolName::Lsp
+                    | ToolName::FindSymbol
             ) {
                 assert!(t.is_cacheable(), "{t} should be cacheable");
             } else {
@@ -750,7 +778,7 @@ mod tests {
     fn intent_category_exhaustive() {
         for t in ToolName::iter() {
             let cat = t.intent_category();
-            if t.is_read_only() || t == ToolName::Webfetch || t == ToolName::Lsp {
+            if t.is_read_only() || matches!(t, ToolName::Webfetch | ToolName::Lsp) {
                 assert_eq!(cat, IntentCategory::Exploring, "{t} should be Exploring");
             } else if t.is_write_tool() || t.is_memory() {
                 assert_eq!(cat, IntentCategory::Editing, "{t} should be Editing");
@@ -781,7 +809,7 @@ mod tests {
     fn visual_category_exhaustive() {
         for t in ToolName::iter() {
             let cat = t.visual_category();
-            if t.is_read_only() || t == ToolName::Webfetch || t == ToolName::Lsp {
+            if t.is_read_only() || matches!(t, ToolName::Webfetch | ToolName::Lsp) {
                 assert_eq!(cat, ToolVisualCategory::Read, "{t} should be Read");
             } else if t.is_write_tool() || t.is_memory() {
                 assert_eq!(cat, ToolVisualCategory::Write, "{t} should be Write");
@@ -838,7 +866,7 @@ mod tests {
     fn path_arg_keys_exhaustive() {
         for t in ToolName::iter() {
             let keys = t.path_arg_keys();
-            if t.is_read_only()
+            if (t.is_read_only() && t != ToolName::FindSymbol)
                 || t == ToolName::Lsp
                 || t == ToolName::Delete
                 || t == ToolName::Mkdir

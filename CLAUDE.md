@@ -90,7 +90,7 @@ inside `mod tests`, which is private and inaccessible from other modules).
 ### Enums over Strings
 
 Tool operations use typed enums (`EditOperation`, `SymbolsOperation`, `LspOperation`,
-`MemoryAction`, `TaskAction`) instead of string matching. Tree-sitter languages use
+`FindSymbolOperation`, `MemoryAction`, `TaskAction`) instead of string matching. Tree-sitter languages use
 `TreeSitterLang` enum. Parse from JSON args with `.parse()`, match exhaustively — adding
 a variant produces compiler errors at every unhandled site.
 
@@ -134,7 +134,10 @@ suffix, used across tool display, export, and session modules.
 
 ### Exhaustive `ToolName` Match Locations
 
-All must update when adding a `ToolName` variant:
+All must update when adding a `ToolName` variant (also update `allowed_tools()` in
+`tool/agent.rs`, `always_allowed_rules()` in `permission/mod.rs` if read-only).
+Integration tests in `tests/permission_integration.rs` and `tests/tool_integration.rs`
+iterate `ToolName::iter()` with `if/else if/else` chains that must account for new variants:
 
 `extract_args_summary()` and `extract_diff_content()` in `app/tool_display.rs`, `extract_tool_summary()` in
 `export.rs`, `cache_key()` and `extract_path()` in `context/cache.rs`, `compress_tool_output()` in
@@ -143,6 +146,8 @@ All must update when adding a `ToolName` variant:
 `tool/mod.rs`, `build_mode_rules()` and `plan_mode_rules()` in `permission/mod.rs`.
 
 `path_arg_keys()` in `tool/mod.rs` is the single source of truth for tool→path-arg-key mapping.
+`path_arg_keys()` returns `&[]` for tools without file-path args (Bash, Question, FindSymbol,
+etc.) — do not add directory/scope params here since the permission system expects file paths.
 
 `resolve_path()` in `tool/mod.rs` is the single path resolution helper — do not add private
 copies in individual tool modules. `test_tool_context()` in `tool/mod.rs`'s test block is the
@@ -161,6 +166,20 @@ declaration's name node — `extract_name()` delegates to it (with import-specif
 handled before delegation). `find_symbol_node_recursive()` is the shared recursive walk
 returning `(decl_node, name_node)` — used by both `find_symbol_by_name()` and
 `resolve_symbol_position()`.
+
+`DefinitionInfo.start_line`/`end_line` span the entire declaration body (opening to
+closing brace). For classification, use `start_line` only — `end_line` includes the
+body interior where references (e.g., recursive calls) live.
+
+### Find Symbol Tool (`tool/find_symbol.rs`)
+
+`find_symbol` orchestrates grep → tree-sitter → LSP in a single tool call.
+Classified as `is_read_only()` (no side effects, always-allowed, parallel-eligible).
+`is_identifier()` gates `\b` word-boundary wrapping — non-identifier symbols
+(e.g., `operator+`) use plain escaped matching. LSP enrichment requires a
+tree-sitter definition site; falls back to grep+tree-sitter when LSP unavailable.
+`regex_syntax::escape()` (transitive dep via grep/ignore) for regex escaping —
+do not add `regex` crate as a direct dependency.
 
 ### MCP Client Integration (`mcp/`)
 

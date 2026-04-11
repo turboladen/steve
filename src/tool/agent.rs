@@ -49,6 +49,7 @@ impl AgentType {
                 ToolName::Glob,
                 ToolName::List,
                 ToolName::Symbols,
+                ToolName::FindSymbol,
             ],
             AgentType::Plan => vec![
                 ToolName::Read,
@@ -57,6 +58,7 @@ impl AgentType {
                 ToolName::List,
                 ToolName::Symbols,
                 ToolName::Lsp,
+                ToolName::FindSymbol,
             ],
             AgentType::General => vec![
                 ToolName::Read,
@@ -65,6 +67,7 @@ impl AgentType {
                 ToolName::List,
                 ToolName::Symbols,
                 ToolName::Lsp,
+                ToolName::FindSymbol,
                 ToolName::Edit,
                 ToolName::Write,
                 ToolName::Patch,

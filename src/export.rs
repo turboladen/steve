@@ -188,6 +188,7 @@ fn extract_tool_summary(tool_name: ToolName, input: &serde_json::Value) -> Strin
             | ToolName::Patch
             | ToolName::Symbols
             | ToolName::Lsp => "(no path)".to_string(),
+            ToolName::FindSymbol => "(no symbol)".to_string(),
             ToolName::Grep | ToolName::Glob => "(no pattern)".to_string(),
             ToolName::Bash => "(no command)".to_string(),
             ToolName::Webfetch => "(no url)".to_string(),

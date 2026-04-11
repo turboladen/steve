@@ -128,7 +128,8 @@ pub(super) fn build_permission_summary(tool_name: ToolName, args: &Value) -> Str
         | ToolName::Webfetch
         | ToolName::Memory
         | ToolName::Symbols
-        | ToolName::Lsp => {
+        | ToolName::Lsp
+        | ToolName::FindSymbol => {
             format!(
                 "{tool_name}: {}",
                 serde_json::to_string(args).unwrap_or_default()

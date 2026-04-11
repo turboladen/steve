@@ -494,7 +494,7 @@ fn uri_to_display(uri: &str) -> String {
 }
 
 /// Read a few lines of context from a file around a given 0-indexed line.
-fn read_context(path: &Path, center_line: usize, radius: usize) -> String {
+pub(crate) fn read_context(path: &Path, center_line: usize, radius: usize) -> String {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return String::new(),
