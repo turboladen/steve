@@ -125,6 +125,11 @@ impl App {
                 let checks = self.collect_diagnostics();
                 self.diagnostics_overlay.open(checks);
             }
+            Command::LspDiagnostics => {
+                self.close_all_overlays();
+                let snapshot = self.collect_lsp_diagnostics_snapshot();
+                self.lsp_diagnostics_overlay.open(snapshot);
+            }
             Command::Init => {
                 let agents_path = self.project.cwd.join("AGENTS.md");
                 if agents_path.exists() {

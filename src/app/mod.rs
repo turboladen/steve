@@ -182,6 +182,9 @@ pub struct App {
     /// MCP overlay state.
     pub mcp_overlay: crate::ui::mcp_overlay::McpOverlayState,
 
+    /// LSP diagnostics overlay state.
+    pub lsp_diagnostics_overlay: crate::ui::lsp_diagnostics_overlay::LspDiagnosticsOverlayState,
+
     /// Number of compactions in the current session (for diagnostics).
     pub compaction_count: u32,
 
@@ -379,6 +382,8 @@ impl App {
             model_picker: ModelPickerState::default(),
             diagnostics_overlay: crate::ui::diagnostics_overlay::DiagnosticsOverlayState::default(),
             mcp_overlay: crate::ui::mcp_overlay::McpOverlayState::default(),
+            lsp_diagnostics_overlay:
+                crate::ui::lsp_diagnostics_overlay::LspDiagnosticsOverlayState::default(),
             compaction_count: 0,
             selection_state: SelectionState::default(),
             last_message_area: ratatui::layout::Rect::default(),

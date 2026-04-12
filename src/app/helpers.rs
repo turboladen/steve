@@ -24,13 +24,14 @@ impl App {
         });
     }
 
-    /// Close all overlay panels (model picker, session picker, diagnostics, MCP).
+    /// Close all overlay panels (model picker, session picker, diagnostics, MCP, LSP diagnostics).
     /// Called before opening a new overlay to enforce mutual exclusivity.
     pub(super) fn close_all_overlays(&mut self) {
         self.model_picker.close();
         self.session_picker.close();
         self.diagnostics_overlay.close();
         self.mcp_overlay.close();
+        self.lsp_diagnostics_overlay.close();
     }
 
     /// Resolve a model ref to a client, pushing error messages on failure.
@@ -462,17 +463,21 @@ mod tests {
         let snapshot = crate::ui::mcp_overlay::McpSnapshot::default();
         app.mcp_overlay
             .open(crate::ui::mcp_overlay::McpTab::Servers, snapshot, None);
+        app.lsp_diagnostics_overlay
+            .open(crate::ui::lsp_diagnostics_overlay::LspDiagnosticsSnapshot::default());
         // session_picker needs SessionInfo, so set visible directly
         app.session_picker.visible = true;
         assert!(app.model_picker.visible);
         assert!(app.diagnostics_overlay.visible);
         assert!(app.mcp_overlay.visible);
+        assert!(app.lsp_diagnostics_overlay.visible);
         assert!(app.session_picker.visible);
 
         app.close_all_overlays();
         assert!(!app.model_picker.visible);
         assert!(!app.diagnostics_overlay.visible);
         assert!(!app.mcp_overlay.visible);
+        assert!(!app.lsp_diagnostics_overlay.visible);
         assert!(!app.session_picker.visible);
     }
 

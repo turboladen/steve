@@ -22,6 +22,7 @@ pub enum Command {
     Epics,
     EpicNew(String),
     Diagnostics,
+    LspDiagnostics,
     AgentsUpdate,
     // MCP commands
     Mcp,
@@ -90,6 +91,21 @@ impl Command {
                 _ => Err("Usage: /task-edit <task-id> <field>=<value> ...".to_string()),
             },
             "/diagnostics" => Ok(Command::Diagnostics),
+            "/lsp" => match arg {
+                None => Ok(Command::LspDiagnostics),
+                Some(rest) => {
+                    let rest = rest.trim();
+                    if rest.is_empty() {
+                        return Ok(Command::LspDiagnostics);
+                    }
+                    match rest {
+                        "diagnostics" => Ok(Command::LspDiagnostics),
+                        other => Err(format!(
+                            "Unknown /lsp subcommand: {other}. Available: diagnostics"
+                        )),
+                    }
+                }
+            },
             "/agents-update" => Ok(Command::AgentsUpdate),
             "/mcp" => match arg {
                 None => Ok(Command::Mcp),
@@ -198,6 +214,14 @@ impl Command {
             CommandInfo {
                 name: "/diagnostics",
                 description: "Show health dashboard",
+            },
+            CommandInfo {
+                name: "/lsp",
+                description: "LSP overview",
+            },
+            CommandInfo {
+                name: "/lsp diagnostics",
+                description: "Browse LSP diagnostics",
             },
             CommandInfo {
                 name: "/agents-update",
@@ -312,12 +336,14 @@ mod tests {
         assert!(names.contains(&"/task-edit"));
         assert!(names.contains(&"/epic-new"));
         assert!(names.contains(&"/diagnostics"));
+        assert!(names.contains(&"/lsp"));
+        assert!(names.contains(&"/lsp diagnostics"));
         assert!(names.contains(&"/agents-update"));
         assert!(names.contains(&"/mcp"));
         assert!(names.contains(&"/mcp tools"));
         assert!(names.contains(&"/mcp resources"));
         assert!(names.contains(&"/mcp prompts"));
-        assert_eq!(cmds.len(), 24);
+        assert_eq!(cmds.len(), 26);
     }
 
     #[test]
@@ -340,7 +366,7 @@ mod tests {
     #[test]
     fn filter_commands_slash_only() {
         let matches = Command::matching_commands("/");
-        assert_eq!(matches.len(), 24);
+        assert_eq!(matches.len(), 26);
     }
 
     #[test]
@@ -427,6 +453,40 @@ mod tests {
             Command::parse("/diagnostics").unwrap(),
             Command::Diagnostics
         );
+    }
+
+    // -- LSP command tests --
+
+    #[test]
+    fn parse_lsp_bare() {
+        assert_eq!(Command::parse("/lsp").unwrap(), Command::LspDiagnostics);
+    }
+
+    #[test]
+    fn parse_lsp_diagnostics() {
+        assert_eq!(
+            Command::parse("/lsp diagnostics").unwrap(),
+            Command::LspDiagnostics
+        );
+    }
+
+    #[test]
+    fn parse_lsp_trailing_spaces() {
+        assert_eq!(Command::parse("/lsp   ").unwrap(), Command::LspDiagnostics);
+    }
+
+    #[test]
+    fn parse_lsp_unknown_subcommand() {
+        assert!(Command::parse("/lsp foobar").is_err());
+    }
+
+    #[test]
+    fn filter_commands_lsp_prefix() {
+        let matches = Command::matching_commands("/lsp");
+        let names: Vec<&str> = matches.iter().map(|c| c.name).collect();
+        assert!(names.contains(&"/lsp"));
+        assert!(names.contains(&"/lsp diagnostics"));
+        assert_eq!(names.len(), 2);
     }
 
     #[test]
