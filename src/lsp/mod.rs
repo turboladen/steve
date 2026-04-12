@@ -55,8 +55,10 @@ impl LspServerState {
 ///
 /// Written by `LspManager::start_server` (Starting → Ready/Indexing/Error),
 /// the `$/progress` notification handler in `client::create_client`, and the
-/// per-server crash watcher task. Read by `LspManager::status_snapshot` for
-/// the sidebar and by `LspManager::language_status` for the LLM system prompt.
+/// per-server crash watcher task. Read by `LspManager::snapshot_cache` (for
+/// the sidebar, via a direct Arc clone that bypasses the manager RwLock) and
+/// by `LspManager::language_status` (for the LLM system prompt, read from
+/// inside the manager at a non-startup moment).
 #[derive(Debug, Clone)]
 pub struct LspStatusEntry {
     /// The resolved binary name (e.g., `"rust-analyzer"`). May start as a
@@ -77,7 +79,20 @@ pub struct LspStatusEntry {
     pub updated_at: Instant,
 }
 
-#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, EnumIter, EnumString, Display, IntoStaticStr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Hash,
+    Eq,
+    PartialEq,
+    Ord,
+    PartialOrd,
+    EnumIter,
+    EnumString,
+    Display,
+    IntoStaticStr,
+)]
 #[strum(serialize_all = "lowercase")]
 pub enum Language {
     Rust,

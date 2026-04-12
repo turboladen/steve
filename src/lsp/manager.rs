@@ -336,6 +336,17 @@ impl LspManager {
         self.servers.keys().copied().collect()
     }
 
+    /// Clone of the shared status cache Arc. The event loop stores this
+    /// once at App construction so the Tick handler can read status without
+    /// acquiring the `RwLock<LspManager>` — critical because the startup
+    /// `spawn_blocking` holds the write lock for the duration of every
+    /// blocking Initialize request, which would otherwise make every
+    /// `try_read()` from the Tick handler fail and hide Starting/Indexing
+    /// transitions entirely.
+    pub fn status_cache_handle(&self) -> SharedLspStatus {
+        self.status.clone()
+    }
+
     /// Rich status snapshot for every detected language. Reads from the
     /// shared status cache — the single source of truth.
     pub fn status_snapshot(&self) -> Vec<(Language, LspStatusEntry)> {
@@ -344,6 +355,25 @@ impl LspManager {
             .iter()
             .filter_map(|&lang| map.get(&lang).map(|entry| (lang, entry.clone())))
             .collect()
+    }
+
+    /// Pure function that snapshots the shared cache into a sorted vector,
+    /// without requiring access to `self.detected_languages`. Used by the
+    /// event loop Tick handler, which cannot call `status_snapshot` because
+    /// the startup `spawn_blocking` holds the `RwLock<LspManager>` write
+    /// lock for the duration of server Initialize.
+    ///
+    /// The snapshot is sorted by `Language` (declaration order matches
+    /// `detect_from_project` order) so the sidebar ordering is stable across
+    /// ticks even though `HashMap` iteration is not.
+    pub fn snapshot_cache(cache: &SharedLspStatus) -> Vec<(Language, LspStatusEntry)> {
+        let map = cache.lock().unwrap_or_else(|p| p.into_inner());
+        let mut entries: Vec<(Language, LspStatusEntry)> = map
+            .iter()
+            .map(|(lang, entry)| (*lang, entry.clone()))
+            .collect();
+        entries.sort_by_key(|(lang, _)| *lang);
+        entries
     }
 
     /// Back-compat pair view used by `src/app/prompt.rs` when building the
@@ -474,6 +504,96 @@ mod tests {
         let snap = mgr.status_snapshot();
         assert_eq!(snap.len(), 1);
         assert_eq!(snap[0].0, Language::Rust);
+    }
+
+    #[tokio::test]
+    async fn snapshot_cache_reads_directly_from_arc_and_sorts_by_language() {
+        let dir = tempdir().unwrap();
+        let mut mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+        // Capture a cache handle BEFORE inserting — this proves the Arc is
+        // a live view of the same HashMap the manager writes to.
+        let cache_handle = mgr.status_cache_handle();
+        // Insert in "wrong" order to verify sorting.
+        mgr.insert_status_for_test(
+            Language::Json,
+            sample_entry(LspServerState::Ready, "json-ls"),
+        );
+        mgr.insert_status_for_test(
+            Language::Rust,
+            sample_entry(LspServerState::Starting, "rust-analyzer"),
+        );
+        mgr.insert_status_for_test(
+            Language::Python,
+            sample_entry(LspServerState::Indexing, "pyright-langserver"),
+        );
+        // Call the static helper through the captured cache Arc — it must
+        // see all three entries without touching `mgr`.
+        let snap = LspManager::snapshot_cache(&cache_handle);
+        assert_eq!(snap.len(), 3);
+        // Declaration order: Rust, Python, TypeScript, Json, Ruby.
+        assert_eq!(snap[0].0, Language::Rust);
+        assert_eq!(snap[1].0, Language::Python);
+        assert_eq!(snap[2].0, Language::Json);
+    }
+
+    #[tokio::test]
+    async fn cache_handle_reads_bypass_manager_rwlock() {
+        // Regression: startup `spawn_blocking` holds `RwLock<LspManager>::write`
+        // for the entire duration of server Initialize, blocking all
+        // `try_read()` calls during that window. The whole point of the
+        // direct cache Arc is that it sidesteps that lock. This test proves
+        // a reader holding only the cache Arc can observe updates while a
+        // writer holds the enclosing RwLock exclusively.
+        use std::sync::RwLock;
+        let dir = tempdir().unwrap();
+        let mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+        let cache_handle = mgr.status_cache_handle();
+        let rwlock = Arc::new(RwLock::new(mgr));
+
+        // Simulate the startup pattern: a writer holds the LspManager
+        // exclusively and mutates the cache through the locked manager.
+        {
+            let mut write_guard = rwlock.write().unwrap();
+            write_guard.insert_status_for_test(
+                Language::Rust,
+                sample_entry(LspServerState::Starting, "rust-analyzer"),
+            );
+
+            // While the write lock is still held, a reader using the cache
+            // Arc directly can see the entry. This is what the Tick handler
+            // does.
+            assert!(
+                rwlock.try_read().is_err(),
+                "write lock should be held exclusively"
+            );
+            let snap = LspManager::snapshot_cache(&cache_handle);
+            assert_eq!(snap.len(), 1);
+            assert_eq!(snap[0].1.state, LspServerState::Starting);
+
+            // Writer transitions state — reader observes that too.
+            write_guard.insert_status_for_test(
+                Language::Rust,
+                sample_entry(LspServerState::Ready, "rust-analyzer"),
+            );
+            let snap = LspManager::snapshot_cache(&cache_handle);
+            assert_eq!(snap[0].1.state, LspServerState::Ready);
+        }
+    }
+
+    #[tokio::test]
+    async fn status_cache_handle_returns_same_arc_instance() {
+        let dir = tempdir().unwrap();
+        let mut mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+        let handle = mgr.status_cache_handle();
+        mgr.insert_status_for_test(
+            Language::Rust,
+            sample_entry(LspServerState::Ready, "rust-analyzer"),
+        );
+        // The handle we captured BEFORE the insert must see the new entry,
+        // proving both views share the same underlying HashMap.
+        let snap = LspManager::snapshot_cache(&handle);
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].1.state, LspServerState::Ready);
     }
 
     #[tokio::test]

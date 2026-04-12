@@ -194,6 +194,14 @@ pub struct App {
     /// LSP manager (shared with tool handlers via ToolContext).
     lsp_manager: Arc<std::sync::RwLock<crate::lsp::LspManager>>,
 
+    /// Direct clone of the LSP status cache Arc, bypassing `lsp_manager`'s
+    /// `RwLock`. The startup `spawn_blocking` holds the write lock for the
+    /// entire duration of server Initialize (seconds for rust-analyzer),
+    /// so Tick handlers that go through `lsp_manager.try_read()` would fail
+    /// for the entire startup window and never observe Starting/Indexing
+    /// transitions. Reading the cache directly via this Arc sidesteps that.
+    lsp_status_cache: crate::lsp::client::SharedLspStatus,
+
     /// MCP manager for dynamic tool/resource servers.
     mcp_manager: Arc<tokio::sync::Mutex<crate::mcp::McpManager>>,
 
@@ -255,11 +263,18 @@ impl App {
             crate::project::git_repo_name(&project.root).unwrap_or_else(|| "proj".to_string());
         let task_store = crate::task::TaskStore::new(storage.clone(), repo_name);
 
-        // Build LSP manager (servers started in background after app init)
-        let lsp_manager = Arc::new(std::sync::RwLock::new(crate::lsp::LspManager::new(
-            project.root.clone(),
-            tokio::runtime::Handle::current(),
-        )));
+        // Build LSP manager (servers started in background after app init).
+        // Capture a direct clone of the status cache Arc before wrapping the
+        // manager in a RwLock — so the Tick handler can read status without
+        // contending with the startup write lock.
+        let (lsp_manager, lsp_status_cache) = {
+            let mgr = crate::lsp::LspManager::new(
+                project.root.clone(),
+                tokio::runtime::Handle::current(),
+            );
+            let cache = mgr.status_cache_handle();
+            (Arc::new(std::sync::RwLock::new(mgr)), cache)
+        };
 
         // Build MCP manager (servers started in background after app init)
         let mcp_manager = Arc::new(tokio::sync::Mutex::new(crate::mcp::McpManager::new()));
@@ -348,6 +363,7 @@ impl App {
             selection_state: SelectionState::default(),
             last_message_area: ratatui::layout::Rect::default(),
             lsp_manager,
+            lsp_status_cache,
             mcp_manager,
             usage_writer,
             event_tx,

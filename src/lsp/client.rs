@@ -29,8 +29,9 @@ pub type SharedDiagnostics = Arc<Mutex<HashMap<Url, Vec<Diagnostic>>>>;
 
 /// Shared per-language LSP status cache — written by `LspManager::start_server`,
 /// the `$/progress` notification handler, and the crash watcher task; read by
-/// `LspManager::status_snapshot` (for the sidebar) and `language_status` (for
-/// the system prompt). Mirrors the `SharedDiagnostics` pattern.
+/// `LspManager::snapshot_cache` (sidebar, via a direct Arc clone that bypasses
+/// the `RwLock<LspManager>`) and `LspManager::language_status` (system prompt,
+/// via the manager). Mirrors the `SharedDiagnostics` pattern.
 pub type SharedLspStatus = Arc<Mutex<HashMap<Language, LspStatusEntry>>>;
 
 /// State held by the Router service.
