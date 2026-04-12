@@ -42,32 +42,46 @@ impl LspManager {
         }
     }
 
-    pub fn start_servers(&mut self) {
+    /// Run filesystem detection and seed a `Starting` entry in the shared
+    /// status cache for every detected language. Idempotent — safe to call
+    /// multiple times.
+    ///
+    /// This method is split out from `start_servers` so the main thread can
+    /// call it synchronously at `App::new` time, before the event loop and
+    /// the background `spawn_blocking` task. That way the sidebar shows
+    /// `Starting` entries on the very first `Tick` rather than briefly
+    /// showing nothing and then jumping straight to `Ready` (or worse,
+    /// `Ready` appearing before `Starting` is ever visible because the
+    /// blocking startup is too fast). The actual server startup (which
+    /// includes the slow `block_on(Initialize)` calls) still happens in
+    /// `start_servers`, invoked from `spawn_blocking`.
+    pub fn detect_and_seed_starting(&mut self) {
         let languages = Language::detect_from_project(&self.project_root);
         self.detected_languages = languages.clone();
 
-        // Seed the status cache with Starting entries for every detected
-        // language so the sidebar renders them from the very first frame,
-        // before any Initialize completes. We pick a best-guess binary name
-        // (first candidate) which gets overwritten by `start_server` once
-        // `resolve_server` picks the actual binary.
-        {
-            let mut map = self.status.lock().unwrap_or_else(|p| p.into_inner());
-            for &lang in &languages {
-                let binary = lang
-                    .server_candidates()
-                    .first()
-                    .map(|c| c.binary.to_string())
-                    .unwrap_or_else(|| format!("{lang}-lsp"));
-                map.entry(lang).or_insert_with(|| LspStatusEntry {
-                    binary,
-                    state: LspServerState::Starting,
-                    active_progress: 0,
-                    progress_message: None,
-                    updated_at: Instant::now(),
-                });
-            }
+        let mut map = self.status.lock().unwrap_or_else(|p| p.into_inner());
+        for &lang in &languages {
+            let binary = lang
+                .server_candidates()
+                .first()
+                .map(|c| c.binary.to_string())
+                .unwrap_or_else(|| format!("{lang}-lsp"));
+            map.entry(lang).or_insert_with(|| LspStatusEntry {
+                binary,
+                state: LspServerState::Starting,
+                active_progress: 0,
+                progress_message: None,
+                updated_at: Instant::now(),
+            });
         }
+    }
+
+    pub fn start_servers(&mut self) {
+        // Idempotent — if `detect_and_seed_starting` already ran at
+        // `App::new` time, this is a no-op re-detection plus `or_insert_with`
+        // seeding. Otherwise it does the detection + seeding now.
+        self.detect_and_seed_starting();
+        let languages = self.detected_languages.clone();
 
         for lang in languages {
             if self.servers.contains_key(&lang) {
@@ -208,6 +222,15 @@ impl LspManager {
                     }),
                     ..Default::default()
                 }),
+                // Declare window.workDoneProgress so servers emit `$/progress`
+                // notifications. Without this, rust-analyzer (and others)
+                // silently index without telling the client — the sidebar
+                // would never leave Ready. Required for the Indexing state
+                // to ever fire.
+                window: Some(WindowClientCapabilities {
+                    work_done_progress: Some(true),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -242,11 +265,19 @@ impl LspManager {
         {
             let mut map = self.status.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(entry) = map.get_mut(&lang) {
-                entry.state = if entry.active_progress > 0 {
+                let new_state = if entry.active_progress > 0 {
                     LspServerState::Indexing
                 } else {
                     LspServerState::Ready
                 };
+                tracing::debug!(
+                    "LSP {} ({lang}) post-Initialize transition: {:?} → {:?} (active_progress={})",
+                    binary,
+                    entry.state,
+                    new_state,
+                    entry.active_progress,
+                );
+                entry.state = new_state;
                 entry.updated_at = Instant::now();
             }
         }

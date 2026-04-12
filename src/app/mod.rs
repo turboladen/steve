@@ -264,14 +264,19 @@ impl App {
         let task_store = crate::task::TaskStore::new(storage.clone(), repo_name);
 
         // Build LSP manager (servers started in background after app init).
-        // Capture a direct clone of the status cache Arc before wrapping the
-        // manager in a RwLock — so the Tick handler can read status without
-        // contending with the startup write lock.
+        // We do two things synchronously here so the sidebar can show
+        // `Starting` entries on the very first frame:
+        //   1. Run `detect_and_seed_starting` — filesystem walk + seed the
+        //      shared cache with a `Starting` entry per detected language.
+        //   2. Clone the status cache Arc so the Tick handler can read it
+        //      directly (bypassing the enclosing `RwLock<LspManager>` which
+        //      is held exclusively during the startup `spawn_blocking`).
         let (lsp_manager, lsp_status_cache) = {
-            let mgr = crate::lsp::LspManager::new(
+            let mut mgr = crate::lsp::LspManager::new(
                 project.root.clone(),
                 tokio::runtime::Handle::current(),
             );
+            mgr.detect_and_seed_starting();
             let cache = mgr.status_cache_handle();
             (Arc::new(std::sync::RwLock::new(mgr)), cache)
         };
@@ -336,7 +341,22 @@ impl App {
             autocomplete_state: AutocompleteState::default(),
             messages,
             message_area_state: MessageAreaState::default(),
-            sidebar_state: SidebarState::default(),
+            sidebar_state: {
+                // Pre-populate `lsp_servers` from the seeded cache so the
+                // very first render (before any `Tick` fires) already shows
+                // `Starting` entries — otherwise there is a visible gap
+                // between the initial draw and the first Tick poll.
+                let mut state = SidebarState::default();
+                state.lsp_servers = crate::lsp::LspManager::snapshot_cache(&lsp_status_cache)
+                    .into_iter()
+                    .map(|(_, entry)| SidebarLsp {
+                        binary: entry.binary,
+                        state: entry.state,
+                        progress_message: entry.progress_message,
+                    })
+                    .collect();
+                state
+            },
             theme: Theme::default(),
             status_line_state: StatusLineState::default(),
             is_loading: false,

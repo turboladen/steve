@@ -117,6 +117,12 @@ pub(crate) fn create_client(
 
         // Handle $/progress — track active workDone tokens for Indexing state
         router.notification::<notification::Progress>(|state, params| {
+            tracing::debug!(
+                language = ?state.language,
+                token = ?params.token,
+                value = ?params.value,
+                "$/progress notification received"
+            );
             let mut map = match state.status.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => {
@@ -132,6 +138,12 @@ pub(crate) fn create_client(
                 return ControlFlow::Continue(());
             };
             apply_progress_update(entry, params.value);
+            tracing::debug!(
+                language = ?state.language,
+                state = ?entry.state,
+                active_progress = entry.active_progress,
+                "after apply_progress_update"
+            );
             ControlFlow::Continue(())
         });
 
