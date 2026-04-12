@@ -49,6 +49,7 @@ impl AgentType {
                 ToolName::Glob,
                 ToolName::List,
                 ToolName::Symbols,
+                ToolName::Lsp,
                 ToolName::FindSymbol,
             ],
             AgentType::Plan => vec![
@@ -232,8 +233,8 @@ mod tests {
         let tools = AgentType::Explore.allowed_tools();
         for t in &tools {
             assert!(
-                t.is_read_only(),
-                "Explore agent should only have read-only tools, but has {t}"
+                t.is_read_only() || *t == ToolName::Lsp,
+                "Explore agent should only have read-only + LSP tools, but has {t}"
             );
         }
     }

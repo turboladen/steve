@@ -1511,3 +1511,54 @@ fn general_agent_excludes_only_agent() {
         }
     }
 }
+
+#[test]
+fn measure_tool_definitions_size() {
+    use std::path::PathBuf;
+
+    let registry = ToolRegistry::new(PathBuf::from("/tmp"));
+    let defs = registry.tool_definitions();
+
+    println!("\n\n========================================");
+    println!("TOOL DEFINITIONS PAYLOAD ANALYSIS");
+    println!("========================================\n");
+    println!("Total tools in registry: {}", registry.tool_names().len());
+    println!("Tool definitions count: {}\n", defs.len());
+
+    let mut total_size = 0usize;
+    let mut tool_sizes = Vec::new();
+
+    for def in &defs {
+        let serialized = serde_json::to_string(def).unwrap();
+        let size = serialized.len();
+        total_size += size;
+        let name = def
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        tool_sizes.push((name, size));
+    }
+
+    tool_sizes.sort_by(|a, b| b.1.cmp(&a.1));
+
+    println!("Tool Definition Sizes (by size):");
+    println!("{:-<50}", "");
+    for (name, size) in &tool_sizes {
+        println!("{:<30} {:>8} bytes", name, size);
+    }
+    println!("{:-<50}", "");
+    println!(
+        "Total payload size: {} bytes ({:.1} KB)",
+        total_size,
+        total_size as f64 / 1024.0
+    );
+
+    let approx_tokens = total_size / 4;
+    println!(
+        "Approximate tokens: ~{} (1 token per ~4 chars)",
+        approx_tokens
+    );
+    println!("\n========================================\n");
+}
