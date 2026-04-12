@@ -69,8 +69,8 @@ pub struct SidebarLsp {
     pub binary: String,
     /// Current lifecycle state: Starting / Indexing / Ready / Error.
     pub state: crate::lsp::LspServerState,
-    /// Latest `$/progress` message. Stored for a future tooltip/overflow
-    /// surface — not rendered in v1 to keep the narrow sidebar readable.
+    /// Latest `$/progress` message. Rendered as a dimmed indented line below
+    /// the server line during active states (Starting/Indexing).
     pub progress_message: Option<String>,
 }
 

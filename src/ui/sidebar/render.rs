@@ -237,6 +237,22 @@ fn render_servers_section<'a>(
                 Span::styled(format!(" {glyph} "), Style::default().fg(color)),
                 Span::styled(label, Style::default().fg(theme.fg)),
             ]));
+            // Show progress message as a dimmed indented line during active states.
+            let is_active = matches!(
+                server.state,
+                LspServerState::Starting | LspServerState::Indexing
+            );
+            if is_active && let Some(msg) = &server.progress_message {
+                // 3 chars for " ● " glyph column, then 1 indent = 4 chars prefix
+                let max_chars = sidebar_width.saturating_sub(4);
+                if max_chars > 0 {
+                    let truncated = crate::truncate_chars(msg, max_chars);
+                    lines.push(Line::from(Span::styled(
+                        format!("    {truncated}"),
+                        Style::default().fg(theme.dim),
+                    )));
+                }
+            }
         }
         lines.push(primitives::section_separator(sidebar_width, theme));
     }
@@ -914,6 +930,110 @@ mod tests {
         assert!(
             text.contains("\u{2715}"),
             "Error state should show ✕ glyph, got: {text}"
+        );
+    }
+
+    #[test]
+    fn buffer_sidebar_lsp_progress_message_shown_during_indexing() {
+        let state = SidebarState {
+            lsp_servers: vec![SidebarLsp {
+                binary: "rust-analyzer".to_string(),
+                state: crate::lsp::LspServerState::Indexing,
+                progress_message: Some("Building crate graph".to_string()),
+            }],
+            spinner_frame: 0,
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(50, 20, &state);
+        assert!(
+            text.contains("Building crate graph"),
+            "should show progress message during Indexing, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn buffer_sidebar_lsp_progress_message_shown_during_starting() {
+        let state = SidebarState {
+            lsp_servers: vec![SidebarLsp {
+                binary: "rust-analyzer".to_string(),
+                state: crate::lsp::LspServerState::Starting,
+                progress_message: Some("Fetching metadata".to_string()),
+            }],
+            spinner_frame: 0,
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(50, 20, &state);
+        assert!(
+            text.contains("Fetching metadata"),
+            "should show progress message during Starting, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn buffer_sidebar_lsp_progress_message_hidden_when_ready() {
+        let state = SidebarState {
+            lsp_servers: vec![SidebarLsp {
+                binary: "rust-analyzer".to_string(),
+                state: crate::lsp::LspServerState::Ready,
+                progress_message: Some("leftover message".to_string()),
+            }],
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(50, 20, &state);
+        assert!(
+            !text.contains("leftover message"),
+            "should NOT show progress message when Ready, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn buffer_sidebar_lsp_progress_message_truncated_in_narrow_sidebar() {
+        let state = SidebarState {
+            lsp_servers: vec![SidebarLsp {
+                binary: "rust-analyzer".to_string(),
+                state: crate::lsp::LspServerState::Indexing,
+                progress_message: Some(
+                    "Very long progress message that exceeds sidebar width".to_string(),
+                ),
+            }],
+            spinner_frame: 0,
+            ..Default::default()
+        };
+        // Width 20: 4 chars prefix leaves 16 chars for message
+        let text = render_sidebar_to_string(20, 20, &state);
+        assert!(
+            text.contains("..."),
+            "long message should be truncated with ellipsis in narrow sidebar, got:\n{text}"
+        );
+        assert!(
+            !text.contains("exceeds sidebar width"),
+            "full message should not appear in narrow sidebar"
+        );
+    }
+
+    #[test]
+    fn buffer_sidebar_lsp_no_progress_line_when_none() {
+        let state = SidebarState {
+            lsp_servers: vec![SidebarLsp {
+                binary: "rust-analyzer".to_string(),
+                state: crate::lsp::LspServerState::Indexing,
+                progress_message: None,
+            }],
+            spinner_frame: 0,
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(50, 20, &state);
+        // Should show Indexing but no extra progress line
+        assert!(text.contains("Indexing"), "should show Indexing label");
+        // Count lines containing rust-analyzer content — should be just 1
+        let ra_lines: Vec<&str> = text
+            .lines()
+            .filter(|l| l.contains("rust-analyzer") || l.contains("Indexing"))
+            .collect();
+        assert_eq!(
+            ra_lines.len(),
+            1,
+            "should be exactly one line for server without progress message, got: {ra_lines:?}"
         );
     }
 

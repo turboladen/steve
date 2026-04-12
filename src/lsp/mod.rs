@@ -70,9 +70,8 @@ pub struct LspStatusEntry {
     /// Number of outstanding `$/progress` work-done tokens. State is
     /// `Indexing` iff this is nonzero (and Initialize has returned).
     pub active_progress: usize,
-    /// Latest `$/progress` title or Report message. Stored for a future
-    /// tooltip/overflow surface — not rendered in v1 to keep the narrow
-    /// sidebar readable.
+    /// Latest `$/progress` title or Report message. Rendered as a dimmed
+    /// indented line in the sidebar during active states (Starting/Indexing).
     pub progress_message: Option<String>,
     /// When the entry was last mutated. Not currently rendered; enables
     /// future "indexing for Ns" UX without a schema change.
