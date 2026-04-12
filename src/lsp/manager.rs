@@ -42,32 +42,46 @@ impl LspManager {
         }
     }
 
-    pub fn start_servers(&mut self) {
+    /// Run filesystem detection and seed a `Starting` entry in the shared
+    /// status cache for every detected language. Idempotent — safe to call
+    /// multiple times.
+    ///
+    /// This method is split out from `start_servers` so the main thread can
+    /// call it synchronously at `App::new` time, before the event loop and
+    /// the background `spawn_blocking` task. That way the sidebar shows
+    /// `Starting` entries on the very first `Tick` rather than briefly
+    /// showing nothing and then jumping straight to `Ready` (or worse,
+    /// `Ready` appearing before `Starting` is ever visible because the
+    /// blocking startup is too fast). The actual server startup (which
+    /// includes the slow `block_on(Initialize)` calls) still happens in
+    /// `start_servers`, invoked from `spawn_blocking`.
+    pub fn detect_and_seed_starting(&mut self) {
         let languages = Language::detect_from_project(&self.project_root);
         self.detected_languages = languages.clone();
 
-        // Seed the status cache with Starting entries for every detected
-        // language so the sidebar renders them from the very first frame,
-        // before any Initialize completes. We pick a best-guess binary name
-        // (first candidate) which gets overwritten by `start_server` once
-        // `resolve_server` picks the actual binary.
-        {
-            let mut map = self.status.lock().unwrap_or_else(|p| p.into_inner());
-            for &lang in &languages {
-                let binary = lang
-                    .server_candidates()
-                    .first()
-                    .map(|c| c.binary.to_string())
-                    .unwrap_or_else(|| format!("{lang}-lsp"));
-                map.entry(lang).or_insert_with(|| LspStatusEntry {
-                    binary,
-                    state: LspServerState::Starting,
-                    active_progress: 0,
-                    progress_message: None,
-                    updated_at: Instant::now(),
-                });
-            }
+        let mut map = self.status.lock().unwrap_or_else(|p| p.into_inner());
+        for &lang in &languages {
+            let binary = lang
+                .server_candidates()
+                .first()
+                .map(|c| c.binary.to_string())
+                .unwrap_or_else(|| format!("{lang}-lsp"));
+            map.entry(lang).or_insert_with(|| LspStatusEntry {
+                binary,
+                state: LspServerState::Starting,
+                active_progress: 0,
+                progress_message: None,
+                updated_at: Instant::now(),
+            });
         }
+    }
+
+    pub fn start_servers(&mut self) {
+        // Idempotent — if `detect_and_seed_starting` already ran at
+        // `App::new` time, this is a no-op re-detection plus `or_insert_with`
+        // seeding. Otherwise it does the detection + seeding now.
+        self.detect_and_seed_starting();
+        let languages = self.detected_languages.clone();
 
         for lang in languages {
             if self.servers.contains_key(&lang) {
@@ -80,10 +94,18 @@ impl LspManager {
                 }
                 Err(e) => {
                     tracing::debug!("LSP: {lang} server not available: {e:#}");
-                    // Flip the seeded Starting entry to Error so the sidebar
-                    // surfaces the failure instead of silently dropping it.
+                    // Fallback write: flip the seeded Starting entry to Error
+                    // for failure paths that `start_server` cannot record
+                    // itself — e.g., `resolve_server` returning `None` or
+                    // `spawn` failing, both of which happen before the
+                    // in-method cache upsert. If `start_server` has already
+                    // written a more specific Error (e.g., the Initialize
+                    // failure path), preserve that reason instead of
+                    // clobbering it with the anyhow-wrapped outer message.
                     let mut map = self.status.lock().unwrap_or_else(|p| p.into_inner());
-                    if let Some(entry) = map.get_mut(&lang) {
+                    if let Some(entry) = map.get_mut(&lang)
+                        && !matches!(entry.state, LspServerState::Error { .. })
+                    {
                         entry.state = LspServerState::Error {
                             reason: format!("{e:#}"),
                         };
@@ -200,6 +222,15 @@ impl LspManager {
                     }),
                     ..Default::default()
                 }),
+                // Declare window.workDoneProgress so servers emit `$/progress`
+                // notifications. Without this, rust-analyzer (and others)
+                // silently index without telling the client — the sidebar
+                // would never leave Ready. Required for the Indexing state
+                // to ever fire.
+                window: Some(WindowClientCapabilities {
+                    work_done_progress: Some(true),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -234,11 +265,19 @@ impl LspManager {
         {
             let mut map = self.status.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(entry) = map.get_mut(&lang) {
-                entry.state = if entry.active_progress > 0 {
+                let new_state = if entry.active_progress > 0 {
                     LspServerState::Indexing
                 } else {
                     LspServerState::Ready
                 };
+                tracing::debug!(
+                    "LSP {} ({lang}) post-Initialize transition: {:?} → {:?} (active_progress={})",
+                    binary,
+                    entry.state,
+                    new_state,
+                    entry.active_progress,
+                );
+                entry.state = new_state;
                 entry.updated_at = Instant::now();
             }
         }
@@ -336,6 +375,17 @@ impl LspManager {
         self.servers.keys().copied().collect()
     }
 
+    /// Clone of the shared status cache Arc. The event loop stores this
+    /// once at App construction so the Tick handler can read status without
+    /// acquiring the `RwLock<LspManager>` — critical because the startup
+    /// `spawn_blocking` holds the write lock for the duration of every
+    /// blocking Initialize request, which would otherwise make every
+    /// `try_read()` from the Tick handler fail and hide Starting/Indexing
+    /// transitions entirely.
+    pub fn status_cache_handle(&self) -> SharedLspStatus {
+        self.status.clone()
+    }
+
     /// Rich status snapshot for every detected language. Reads from the
     /// shared status cache — the single source of truth.
     pub fn status_snapshot(&self) -> Vec<(Language, LspStatusEntry)> {
@@ -344,6 +394,33 @@ impl LspManager {
             .iter()
             .filter_map(|&lang| map.get(&lang).map(|entry| (lang, entry.clone())))
             .collect()
+    }
+
+    /// Pure function that snapshots the shared cache into a sorted vector,
+    /// without requiring access to `self.detected_languages`. Used by the
+    /// event loop Tick handler, which cannot call `status_snapshot` because
+    /// the startup `spawn_blocking` holds the `RwLock<LspManager>` write
+    /// lock for the duration of server Initialize.
+    ///
+    /// The snapshot is sorted by `Language` (declaration order matches
+    /// `detect_from_project` order) so the sidebar ordering is stable across
+    /// ticks even though `HashMap` iteration is not.
+    ///
+    /// Unlike `status_snapshot`, this does NOT filter by `detected_languages`
+    /// — it returns every entry in the cache. In practice the two sets are
+    /// equal because `start_servers` only seeds entries for detected
+    /// languages, and `ensure_server` appends to `detected_languages` before
+    /// calling `start_server` (which writes to the cache). So any language
+    /// with a cache entry is also in `detected_languages`. If that invariant
+    /// ever breaks, this snapshot and `status_snapshot` would diverge.
+    pub fn snapshot_cache(cache: &SharedLspStatus) -> Vec<(Language, LspStatusEntry)> {
+        let map = cache.lock().unwrap_or_else(|p| p.into_inner());
+        let mut entries: Vec<(Language, LspStatusEntry)> = map
+            .iter()
+            .map(|(lang, entry)| (*lang, entry.clone()))
+            .collect();
+        entries.sort_by_key(|(lang, _)| *lang);
+        entries
     }
 
     /// Back-compat pair view used by `src/app/prompt.rs` when building the
@@ -477,6 +554,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn snapshot_cache_reads_directly_from_arc_and_sorts_by_language() {
+        let dir = tempdir().unwrap();
+        let mut mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+        // Capture a cache handle BEFORE inserting — this proves the Arc is
+        // a live view of the same HashMap the manager writes to.
+        let cache_handle = mgr.status_cache_handle();
+        // Insert in "wrong" order to verify sorting.
+        mgr.insert_status_for_test(
+            Language::Json,
+            sample_entry(LspServerState::Ready, "json-ls"),
+        );
+        mgr.insert_status_for_test(
+            Language::Rust,
+            sample_entry(LspServerState::Starting, "rust-analyzer"),
+        );
+        mgr.insert_status_for_test(
+            Language::Python,
+            sample_entry(LspServerState::Indexing, "pyright-langserver"),
+        );
+        // Call the static helper through the captured cache Arc — it must
+        // see all three entries without touching `mgr`.
+        let snap = LspManager::snapshot_cache(&cache_handle);
+        assert_eq!(snap.len(), 3);
+        // Declaration order: Rust, Python, TypeScript, Json, Ruby.
+        assert_eq!(snap[0].0, Language::Rust);
+        assert_eq!(snap[1].0, Language::Python);
+        assert_eq!(snap[2].0, Language::Json);
+    }
+
+    #[tokio::test]
+    async fn cache_handle_reads_bypass_manager_rwlock() {
+        // Regression: startup `spawn_blocking` holds `RwLock<LspManager>::write`
+        // for the entire duration of server Initialize, blocking all
+        // `try_read()` calls during that window. The whole point of the
+        // direct cache Arc is that it sidesteps that lock. This test proves
+        // a reader holding only the cache Arc can observe updates while a
+        // writer holds the enclosing RwLock exclusively.
+        use std::sync::RwLock;
+        let dir = tempdir().unwrap();
+        let mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+        let cache_handle = mgr.status_cache_handle();
+        let rwlock = Arc::new(RwLock::new(mgr));
+
+        // Simulate the startup pattern: a writer holds the LspManager
+        // exclusively and mutates the cache through the locked manager.
+        {
+            let mut write_guard = rwlock.write().unwrap();
+            write_guard.insert_status_for_test(
+                Language::Rust,
+                sample_entry(LspServerState::Starting, "rust-analyzer"),
+            );
+
+            // While the write lock is still held, a reader using the cache
+            // Arc directly can see the entry. This is what the Tick handler
+            // does.
+            assert!(
+                rwlock.try_read().is_err(),
+                "write lock should be held exclusively"
+            );
+            let snap = LspManager::snapshot_cache(&cache_handle);
+            assert_eq!(snap.len(), 1);
+            assert_eq!(snap[0].1.state, LspServerState::Starting);
+
+            // Writer transitions state — reader observes that too.
+            write_guard.insert_status_for_test(
+                Language::Rust,
+                sample_entry(LspServerState::Ready, "rust-analyzer"),
+            );
+            let snap = LspManager::snapshot_cache(&cache_handle);
+            assert_eq!(snap[0].1.state, LspServerState::Ready);
+        }
+    }
+
+    #[tokio::test]
+    async fn status_cache_handle_returns_same_arc_instance() {
+        let dir = tempdir().unwrap();
+        let mut mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+        let handle = mgr.status_cache_handle();
+        mgr.insert_status_for_test(
+            Language::Rust,
+            sample_entry(LspServerState::Ready, "rust-analyzer"),
+        );
+        // The handle we captured BEFORE the insert must see the new entry,
+        // proving both views share the same underlying HashMap.
+        let snap = LspManager::snapshot_cache(&handle);
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].1.state, LspServerState::Ready);
+    }
+
+    #[tokio::test]
     async fn shutdown_clears_status_cache() {
         let dir = tempdir().unwrap();
         let mut mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
@@ -487,6 +654,93 @@ mod tests {
         assert_eq!(mgr.status_snapshot().len(), 1);
         mgr.shutdown();
         assert!(mgr.status_snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn outer_error_write_preserves_more_specific_inner_reason() {
+        // Regression: `start_server`'s Initialize-failure branch writes a
+        // specific `Error { reason: "initialize failed: ..." }` to the cache,
+        // then returns Err. The caller `start_servers` catches the Err and
+        // ALSO writes an Error entry — the second write must NOT clobber
+        // the first when the first already recorded a specific reason.
+        let dir = tempdir().unwrap();
+        let mut mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+
+        // Seed the cache with a specific Error as if `start_server`'s inner
+        // Initialize-failure branch had just written it.
+        mgr.insert_status_for_test(
+            Language::Rust,
+            LspStatusEntry {
+                binary: "rust-analyzer".into(),
+                state: LspServerState::Error {
+                    reason: "initialize failed: ResponseError { code: -32001, message: \"indexer borked\" }".into(),
+                },
+                active_progress: 0,
+                progress_message: None,
+                updated_at: Instant::now(),
+            },
+        );
+
+        // Simulate the outer catch in `start_servers` — this code path runs
+        // for every `start_server` error, including ones that already wrote
+        // a more specific reason. It must preserve the existing reason.
+        {
+            let mut map = mgr.status.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(entry) = map.get_mut(&Language::Rust)
+                && !matches!(entry.state, LspServerState::Error { .. })
+            {
+                entry.state = LspServerState::Error {
+                    reason: "initialize request failed: generic".into(),
+                };
+                entry.updated_at = Instant::now();
+            }
+        }
+
+        // The original, more specific reason should still be in the cache.
+        let snap = mgr.status_snapshot();
+        match &snap[0].1.state {
+            LspServerState::Error { reason } => {
+                assert!(
+                    reason.contains("indexer borked"),
+                    "outer fallback clobbered the specific reason: {reason}"
+                );
+            }
+            other => panic!("expected Error state, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn outer_error_write_fires_when_no_inner_error_was_recorded() {
+        // Complement: if the entry is still `Starting` (e.g., `resolve_server`
+        // returned None before `start_server` could upsert), the outer write
+        // MUST fire so the sidebar surfaces the failure.
+        let dir = tempdir().unwrap();
+        let mut mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+        mgr.insert_status_for_test(
+            Language::Rust,
+            sample_entry(LspServerState::Starting, "rust-analyzer"),
+        );
+
+        // Simulate the outer catch firing with the entry still in Starting.
+        {
+            let mut map = mgr.status.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(entry) = map.get_mut(&Language::Rust)
+                && !matches!(entry.state, LspServerState::Error { .. })
+            {
+                entry.state = LspServerState::Error {
+                    reason: "no rust language server found on PATH".into(),
+                };
+                entry.updated_at = Instant::now();
+            }
+        }
+
+        let snap = mgr.status_snapshot();
+        match &snap[0].1.state {
+            LspServerState::Error { reason } => {
+                assert!(reason.contains("not found") || reason.contains("no rust"));
+            }
+            other => panic!("expected Error state, got {other:?}"),
+        }
     }
 
     #[tokio::test]

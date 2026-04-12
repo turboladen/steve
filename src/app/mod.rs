@@ -194,6 +194,14 @@ pub struct App {
     /// LSP manager (shared with tool handlers via ToolContext).
     lsp_manager: Arc<std::sync::RwLock<crate::lsp::LspManager>>,
 
+    /// Direct clone of the LSP status cache Arc, bypassing `lsp_manager`'s
+    /// `RwLock`. The startup `spawn_blocking` holds the write lock for the
+    /// entire duration of server Initialize (seconds for rust-analyzer),
+    /// so Tick handlers that go through `lsp_manager.try_read()` would fail
+    /// for the entire startup window and never observe Starting/Indexing
+    /// transitions. Reading the cache directly via this Arc sidesteps that.
+    lsp_status_cache: crate::lsp::client::SharedLspStatus,
+
     /// MCP manager for dynamic tool/resource servers.
     mcp_manager: Arc<tokio::sync::Mutex<crate::mcp::McpManager>>,
 
@@ -255,11 +263,23 @@ impl App {
             crate::project::git_repo_name(&project.root).unwrap_or_else(|| "proj".to_string());
         let task_store = crate::task::TaskStore::new(storage.clone(), repo_name);
 
-        // Build LSP manager (servers started in background after app init)
-        let lsp_manager = Arc::new(std::sync::RwLock::new(crate::lsp::LspManager::new(
-            project.root.clone(),
-            tokio::runtime::Handle::current(),
-        )));
+        // Build LSP manager (servers started in background after app init).
+        // We do two things synchronously here so the sidebar can show
+        // `Starting` entries on the very first frame:
+        //   1. Run `detect_and_seed_starting` — filesystem walk + seed the
+        //      shared cache with a `Starting` entry per detected language.
+        //   2. Clone the status cache Arc so the Tick handler can read it
+        //      directly (bypassing the enclosing `RwLock<LspManager>` which
+        //      is held exclusively during the startup `spawn_blocking`).
+        let (lsp_manager, lsp_status_cache) = {
+            let mut mgr = crate::lsp::LspManager::new(
+                project.root.clone(),
+                tokio::runtime::Handle::current(),
+            );
+            mgr.detect_and_seed_starting();
+            let cache = mgr.status_cache_handle();
+            (Arc::new(std::sync::RwLock::new(mgr)), cache)
+        };
 
         // Build MCP manager (servers started in background after app init)
         let mcp_manager = Arc::new(tokio::sync::Mutex::new(crate::mcp::McpManager::new()));
@@ -321,7 +341,22 @@ impl App {
             autocomplete_state: AutocompleteState::default(),
             messages,
             message_area_state: MessageAreaState::default(),
-            sidebar_state: SidebarState::default(),
+            sidebar_state: {
+                // Pre-populate `lsp_servers` from the seeded cache so the
+                // very first render (before any `Tick` fires) already shows
+                // `Starting` entries — otherwise there is a visible gap
+                // between the initial draw and the first Tick poll.
+                let mut state = SidebarState::default();
+                state.lsp_servers = crate::lsp::LspManager::snapshot_cache(&lsp_status_cache)
+                    .into_iter()
+                    .map(|(_, entry)| SidebarLsp {
+                        binary: entry.binary,
+                        state: entry.state,
+                        progress_message: entry.progress_message,
+                    })
+                    .collect();
+                state
+            },
             theme: Theme::default(),
             status_line_state: StatusLineState::default(),
             is_loading: false,
@@ -348,6 +383,7 @@ impl App {
             selection_state: SelectionState::default(),
             last_message_area: ratatui::layout::Rect::default(),
             lsp_manager,
+            lsp_status_cache,
             mcp_manager,
             usage_writer,
             event_tx,

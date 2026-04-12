@@ -61,7 +61,8 @@ pub struct FileChange {
 ///
 /// Backed by `LspStatusEntry` in `src/lsp/mod.rs`, which is the single source
 /// of truth. The sidebar refreshes this on each `AppEvent::Tick` by polling
-/// `LspManager::status_snapshot()`.
+/// the shared status cache directly via `LspManager::snapshot_cache`
+/// (bypassing `RwLock<LspManager>` — see `App::lsp_status_cache`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SidebarLsp {
     /// Binary name of the LSP server (e.g., "rust-analyzer", "ty", "ruff").

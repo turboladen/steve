@@ -29,8 +29,9 @@ pub type SharedDiagnostics = Arc<Mutex<HashMap<Url, Vec<Diagnostic>>>>;
 
 /// Shared per-language LSP status cache — written by `LspManager::start_server`,
 /// the `$/progress` notification handler, and the crash watcher task; read by
-/// `LspManager::status_snapshot` (for the sidebar) and `language_status` (for
-/// the system prompt). Mirrors the `SharedDiagnostics` pattern.
+/// `LspManager::snapshot_cache` (sidebar, via a direct Arc clone that bypasses
+/// the `RwLock<LspManager>`) and `LspManager::language_status` (system prompt,
+/// via the manager). Mirrors the `SharedDiagnostics` pattern.
 pub type SharedLspStatus = Arc<Mutex<HashMap<Language, LspStatusEntry>>>;
 
 /// State held by the Router service.
@@ -116,6 +117,12 @@ pub(crate) fn create_client(
 
         // Handle $/progress — track active workDone tokens for Indexing state
         router.notification::<notification::Progress>(|state, params| {
+            tracing::debug!(
+                language = ?state.language,
+                token = ?params.token,
+                value = ?params.value,
+                "$/progress notification received"
+            );
             let mut map = match state.status.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => {
@@ -131,6 +138,12 @@ pub(crate) fn create_client(
                 return ControlFlow::Continue(());
             };
             apply_progress_update(entry, params.value);
+            tracing::debug!(
+                language = ?state.language,
+                state = ?entry.state,
+                active_progress = entry.active_progress,
+                "after apply_progress_update"
+            );
             ControlFlow::Continue(())
         });
 

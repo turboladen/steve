@@ -202,12 +202,15 @@ impl App {
             AppEvent::Tick => {
                 self.status_line_state.tick();
                 self.sidebar_state.advance_spinner();
-                // Poll the shared LSP status cache (single source of truth).
-                // Diff-apply into sidebar_state so the render path sees changes
-                // without locking the LspManager on every draw.
-                if let Ok(mgr) = self.lsp_manager.try_read() {
-                    let next: Vec<SidebarLsp> = mgr
-                        .status_snapshot()
+                // Poll the shared LSP status cache directly via the cloned
+                // Arc — NOT via `lsp_manager.try_read()`. The startup
+                // `spawn_blocking` holds the `RwLock<LspManager>` write lock
+                // for the entire duration of every server's Initialize
+                // (seconds for rust-analyzer), so a `try_read()` here would
+                // fail throughout startup and the user would never see
+                // Starting/Indexing — only the final Ready/Error state.
+                let next: Vec<SidebarLsp> =
+                    crate::lsp::LspManager::snapshot_cache(&self.lsp_status_cache)
                         .into_iter()
                         .map(|(_, entry)| SidebarLsp {
                             binary: entry.binary,
@@ -215,9 +218,8 @@ impl App {
                             progress_message: entry.progress_message,
                         })
                         .collect();
-                    if next != self.sidebar_state.lsp_servers {
-                        self.sidebar_state.lsp_servers = next;
-                    }
+                if next != self.sidebar_state.lsp_servers {
+                    self.sidebar_state.lsp_servers = next;
                 }
                 // Clear expired "Copied!" flash
                 if let Some(t) = self.selection_state.copied_flash
