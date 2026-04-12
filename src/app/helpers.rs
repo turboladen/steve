@@ -24,13 +24,14 @@ impl App {
         });
     }
 
-    /// Close all overlay panels (model picker, session picker, diagnostics, MCP).
+    /// Close all overlay panels (model picker, session picker, diagnostics, MCP, LSP diagnostics).
     /// Called before opening a new overlay to enforce mutual exclusivity.
     pub(super) fn close_all_overlays(&mut self) {
         self.model_picker.close();
         self.session_picker.close();
         self.diagnostics_overlay.close();
         self.mcp_overlay.close();
+        self.lsp_diagnostics_overlay.close();
     }
 
     /// Resolve a model ref to a client, pushing error messages on failure.

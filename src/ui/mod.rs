@@ -2,6 +2,7 @@ pub mod autocomplete;
 pub mod diagnostics_overlay;
 pub mod input;
 pub mod layout;
+pub mod lsp_diagnostics_overlay;
 pub mod markdown;
 pub mod mcp_overlay;
 pub mod message_area;
@@ -47,6 +48,7 @@ use input::{
     render_paste_preview,
 };
 use layout::compute_layout;
+use lsp_diagnostics_overlay::render_lsp_diagnostics_overlay;
 use mcp_overlay::render_mcp_overlay;
 use message_area::render_message_blocks;
 use model_picker::render_model_picker;
@@ -336,6 +338,14 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         frame,
         layout.message_area,
         &app.mcp_overlay,
+        &app.theme,
+        pct,
+    );
+
+    render_lsp_diagnostics_overlay(
+        frame,
+        layout.message_area,
+        &app.lsp_diagnostics_overlay,
         &app.theme,
         pct,
     );

@@ -173,6 +173,18 @@ impl LspServer {
         Ok(locked.get(&uri).cloned().unwrap_or_default())
     }
 
+    /// Return all cached diagnostics across every file this server has reported on.
+    /// Safe to call from within the tokio runtime (no `block_on`).
+    pub fn all_cached_diagnostics(&self) -> HashMap<Url, Vec<Diagnostic>> {
+        match self.diagnostics.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                tracing::warn!("diagnostics mutex poisoned in all_cached reader, recovering");
+                poisoned.into_inner().clone()
+            }
+        }
+    }
+
     pub fn diagnostics(&self, path: &Path) -> Result<Vec<Diagnostic>> {
         let uri = self.ensure_open(path)?;
 
@@ -585,6 +597,57 @@ mod tests {
         let result = locked.get(&Url::parse("file:///test.rs").unwrap()).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].message, "test error");
+    }
+
+    #[test]
+    fn all_cached_diagnostics_empty() {
+        use crate::lsp::client::SharedDiagnostics;
+
+        let diags: SharedDiagnostics = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let result = diags.lock().unwrap().clone();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn all_cached_diagnostics_multi_file() {
+        use crate::lsp::client::SharedDiagnostics;
+
+        let diags: SharedDiagnostics = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let uri_a = Url::parse("file:///a.rs").unwrap();
+        let uri_b = Url::parse("file:///b.rs").unwrap();
+        {
+            let mut locked = diags.lock().unwrap();
+            locked.insert(
+                uri_a.clone(),
+                vec![Diagnostic {
+                    range: Range::new(Position::new(0, 0), Position::new(0, 5)),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    message: "error in a".to_string(),
+                    ..Default::default()
+                }],
+            );
+            locked.insert(
+                uri_b.clone(),
+                vec![
+                    Diagnostic {
+                        range: Range::new(Position::new(1, 0), Position::new(1, 5)),
+                        severity: Some(DiagnosticSeverity::WARNING),
+                        message: "warn in b".to_string(),
+                        ..Default::default()
+                    },
+                    Diagnostic {
+                        range: Range::new(Position::new(3, 0), Position::new(3, 5)),
+                        severity: Some(DiagnosticSeverity::HINT),
+                        message: "hint in b".to_string(),
+                        ..Default::default()
+                    },
+                ],
+            );
+        }
+        let all = diags.lock().unwrap().clone();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[&uri_a].len(), 1);
+        assert_eq!(all[&uri_b].len(), 2);
     }
 
     #[test]

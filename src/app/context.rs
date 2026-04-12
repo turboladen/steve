@@ -152,6 +152,77 @@ impl App {
         crate::diagnostics::run_diagnostics(&input)
     }
 
+    /// Collect all LSP diagnostics from running servers into a display snapshot.
+    pub(super) fn collect_lsp_diagnostics_snapshot(
+        &self,
+    ) -> crate::ui::lsp_diagnostics_overlay::LspDiagnosticsSnapshot {
+        use crate::ui::lsp_diagnostics_overlay::*;
+        use std::collections::BTreeMap;
+
+        let mgr = match self.lsp_manager.try_read() {
+            Ok(guard) => guard,
+            Err(_) => return LspDiagnosticsSnapshot::default(),
+        };
+
+        let mut file_map: BTreeMap<String, Vec<LspDiagnosticEntry>> = BTreeMap::new();
+
+        for server in mgr.running_servers() {
+            let all = server.all_cached_diagnostics();
+            for (uri, diagnostics) in all {
+                let path = uri
+                    .to_file_path()
+                    .ok()
+                    .and_then(|p| {
+                        p.strip_prefix(&self.project.root)
+                            .ok()
+                            .map(|rel| rel.to_string_lossy().to_string())
+                    })
+                    .unwrap_or_else(|| uri.to_string());
+
+                let entries = file_map.entry(path).or_default();
+                for d in diagnostics {
+                    entries.push(LspDiagnosticEntry {
+                        severity: LspSeverity::from_lsp(d.severity),
+                        line: d.range.start.line,
+                        column: d.range.start.character,
+                        message: d.message,
+                        source: d.source,
+                    });
+                }
+            }
+        }
+        drop(mgr);
+
+        let mut total_errors = 0;
+        let mut total_warnings = 0;
+        let mut total_other = 0;
+
+        let files: Vec<FileDiagnostics> = file_map
+            .into_iter()
+            .map(|(path, mut entries)| {
+                entries.sort_by(|a, b| a.severity.cmp(&b.severity).then(a.line.cmp(&b.line)));
+                for e in &entries {
+                    match e.severity {
+                        LspSeverity::Error => total_errors += 1,
+                        LspSeverity::Warning => total_warnings += 1,
+                        LspSeverity::Information | LspSeverity::Hint => total_other += 1,
+                    }
+                }
+                FileDiagnostics {
+                    relative_path: path,
+                    entries,
+                }
+            })
+            .collect();
+
+        LspDiagnosticsSnapshot {
+            files,
+            total_errors,
+            total_warnings,
+            total_other,
+        }
+    }
+
     /// Refresh diagnostics summary for the sidebar indicator.
     pub(super) fn sync_diagnostics(&mut self) {
         let checks = self.collect_diagnostics();

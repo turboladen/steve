@@ -203,6 +203,29 @@ impl App {
             return Ok(());
         }
 
+        // If the LSP diagnostics overlay is open, intercept keystrokes
+        if self.lsp_diagnostics_overlay.visible {
+            match (key.code, key.modifiers) {
+                (KeyCode::Esc, _) => {
+                    self.lsp_diagnostics_overlay.close();
+                }
+                (KeyCode::Char('c'), m) if m.contains(KeyModifiers::CONTROL) => {
+                    self.lsp_diagnostics_overlay.close();
+                    if self.is_loading || self.streaming_active {
+                        self.cancel_stream();
+                    }
+                }
+                (KeyCode::Up, _) => {
+                    self.lsp_diagnostics_overlay.scroll_up(1);
+                }
+                (KeyCode::Down, _) => {
+                    self.lsp_diagnostics_overlay.scroll_down(1);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 if self.is_loading || self.streaming_active {
