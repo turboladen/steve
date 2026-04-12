@@ -172,7 +172,7 @@ fn build_content_lines<'a>(
             let source_len = entry
                 .source
                 .as_ref()
-                .map(|s| s.len() + 4) // "  [{src}]"
+                .map(|s| s.chars().count() + 4) // "  [{src}]"
                 .unwrap_or(0);
             let msg_budget = INNER_WIDTH.saturating_sub(prefix_len + source_len);
             let msg = crate::truncate_chars(&entry.message, msg_budget);

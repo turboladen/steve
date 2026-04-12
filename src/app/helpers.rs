@@ -463,17 +463,21 @@ mod tests {
         let snapshot = crate::ui::mcp_overlay::McpSnapshot::default();
         app.mcp_overlay
             .open(crate::ui::mcp_overlay::McpTab::Servers, snapshot, None);
+        app.lsp_diagnostics_overlay
+            .open(crate::ui::lsp_diagnostics_overlay::LspDiagnosticsSnapshot::default());
         // session_picker needs SessionInfo, so set visible directly
         app.session_picker.visible = true;
         assert!(app.model_picker.visible);
         assert!(app.diagnostics_overlay.visible);
         assert!(app.mcp_overlay.visible);
+        assert!(app.lsp_diagnostics_overlay.visible);
         assert!(app.session_picker.visible);
 
         app.close_all_overlays();
         assert!(!app.model_picker.visible);
         assert!(!app.diagnostics_overlay.visible);
         assert!(!app.mcp_overlay.visible);
+        assert!(!app.lsp_diagnostics_overlay.visible);
         assert!(!app.session_picker.visible);
     }
 

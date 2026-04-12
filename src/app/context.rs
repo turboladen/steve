@@ -201,6 +201,10 @@ impl App {
             .into_iter()
             .map(|(path, mut entries)| {
                 entries.sort_by(|a, b| a.severity.cmp(&b.severity).then(a.line.cmp(&b.line)));
+                // Deduplicate across servers reporting on the same file
+                entries.dedup_by(|a, b| {
+                    a.line == b.line && a.column == b.column && a.message == b.message
+                });
                 for e in &entries {
                     match e.severity {
                         LspSeverity::Error => total_errors += 1,
