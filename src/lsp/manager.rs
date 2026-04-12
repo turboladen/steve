@@ -80,10 +80,18 @@ impl LspManager {
                 }
                 Err(e) => {
                     tracing::debug!("LSP: {lang} server not available: {e:#}");
-                    // Flip the seeded Starting entry to Error so the sidebar
-                    // surfaces the failure instead of silently dropping it.
+                    // Fallback write: flip the seeded Starting entry to Error
+                    // for failure paths that `start_server` cannot record
+                    // itself — e.g., `resolve_server` returning `None` or
+                    // `spawn` failing, both of which happen before the
+                    // in-method cache upsert. If `start_server` has already
+                    // written a more specific Error (e.g., the Initialize
+                    // failure path), preserve that reason instead of
+                    // clobbering it with the anyhow-wrapped outer message.
                     let mut map = self.status.lock().unwrap_or_else(|p| p.into_inner());
-                    if let Some(entry) = map.get_mut(&lang) {
+                    if let Some(entry) = map.get_mut(&lang)
+                        && !matches!(entry.state, LspServerState::Error { .. })
+                    {
                         entry.state = LspServerState::Error {
                             reason: format!("{e:#}"),
                         };
@@ -366,6 +374,14 @@ impl LspManager {
     /// The snapshot is sorted by `Language` (declaration order matches
     /// `detect_from_project` order) so the sidebar ordering is stable across
     /// ticks even though `HashMap` iteration is not.
+    ///
+    /// Unlike `status_snapshot`, this does NOT filter by `detected_languages`
+    /// — it returns every entry in the cache. In practice the two sets are
+    /// equal because `start_servers` only seeds entries for detected
+    /// languages, and `ensure_server` appends to `detected_languages` before
+    /// calling `start_server` (which writes to the cache). So any language
+    /// with a cache entry is also in `detected_languages`. If that invariant
+    /// ever breaks, this snapshot and `status_snapshot` would diverge.
     pub fn snapshot_cache(cache: &SharedLspStatus) -> Vec<(Language, LspStatusEntry)> {
         let map = cache.lock().unwrap_or_else(|p| p.into_inner());
         let mut entries: Vec<(Language, LspStatusEntry)> = map
@@ -607,6 +623,93 @@ mod tests {
         assert_eq!(mgr.status_snapshot().len(), 1);
         mgr.shutdown();
         assert!(mgr.status_snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn outer_error_write_preserves_more_specific_inner_reason() {
+        // Regression: `start_server`'s Initialize-failure branch writes a
+        // specific `Error { reason: "initialize failed: ..." }` to the cache,
+        // then returns Err. The caller `start_servers` catches the Err and
+        // ALSO writes an Error entry — the second write must NOT clobber
+        // the first when the first already recorded a specific reason.
+        let dir = tempdir().unwrap();
+        let mut mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+
+        // Seed the cache with a specific Error as if `start_server`'s inner
+        // Initialize-failure branch had just written it.
+        mgr.insert_status_for_test(
+            Language::Rust,
+            LspStatusEntry {
+                binary: "rust-analyzer".into(),
+                state: LspServerState::Error {
+                    reason: "initialize failed: ResponseError { code: -32001, message: \"indexer borked\" }".into(),
+                },
+                active_progress: 0,
+                progress_message: None,
+                updated_at: Instant::now(),
+            },
+        );
+
+        // Simulate the outer catch in `start_servers` — this code path runs
+        // for every `start_server` error, including ones that already wrote
+        // a more specific reason. It must preserve the existing reason.
+        {
+            let mut map = mgr.status.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(entry) = map.get_mut(&Language::Rust)
+                && !matches!(entry.state, LspServerState::Error { .. })
+            {
+                entry.state = LspServerState::Error {
+                    reason: "initialize request failed: generic".into(),
+                };
+                entry.updated_at = Instant::now();
+            }
+        }
+
+        // The original, more specific reason should still be in the cache.
+        let snap = mgr.status_snapshot();
+        match &snap[0].1.state {
+            LspServerState::Error { reason } => {
+                assert!(
+                    reason.contains("indexer borked"),
+                    "outer fallback clobbered the specific reason: {reason}"
+                );
+            }
+            other => panic!("expected Error state, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn outer_error_write_fires_when_no_inner_error_was_recorded() {
+        // Complement: if the entry is still `Starting` (e.g., `resolve_server`
+        // returned None before `start_server` could upsert), the outer write
+        // MUST fire so the sidebar surfaces the failure.
+        let dir = tempdir().unwrap();
+        let mut mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+        mgr.insert_status_for_test(
+            Language::Rust,
+            sample_entry(LspServerState::Starting, "rust-analyzer"),
+        );
+
+        // Simulate the outer catch firing with the entry still in Starting.
+        {
+            let mut map = mgr.status.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(entry) = map.get_mut(&Language::Rust)
+                && !matches!(entry.state, LspServerState::Error { .. })
+            {
+                entry.state = LspServerState::Error {
+                    reason: "no rust language server found on PATH".into(),
+                };
+                entry.updated_at = Instant::now();
+            }
+        }
+
+        let snap = mgr.status_snapshot();
+        match &snap[0].1.state {
+            LspServerState::Error { reason } => {
+                assert!(reason.contains("not found") || reason.contains("no rust"));
+            }
+            other => panic!("expected Error state, got {other:?}"),
+        }
     }
 
     #[tokio::test]
