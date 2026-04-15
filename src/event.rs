@@ -88,6 +88,10 @@ pub enum AppEvent {
     McpStatus {
         servers: Vec<crate::ui::sidebar::SidebarMcp>,
     },
+    /// An LSP server crashed and should be restarted. Sent by the crash
+    /// watcher after a backoff delay. The event loop handles this by
+    /// calling `LspManager::restart_server(lang)` in a `spawn_blocking`.
+    LspRestartNeeded { lang: crate::lsp::Language },
 
     // -- Permission events --
     /// A tool call needs user permission before executing.
