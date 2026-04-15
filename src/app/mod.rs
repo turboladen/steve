@@ -278,6 +278,7 @@ impl App {
             let mut mgr = crate::lsp::LspManager::new(
                 project.root.clone(),
                 tokio::runtime::Handle::current(),
+                Some(event_tx.clone()),
             );
             mgr.detect_and_seed_starting();
             let cache = mgr.status_cache_handle();

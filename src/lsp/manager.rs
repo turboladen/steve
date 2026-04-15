@@ -29,16 +29,23 @@ pub struct LspManager {
     /// the `$/progress` notification handler in `client::create_client`,
     /// and per-server crash-watcher tasks.
     status: SharedLspStatus,
+    /// Event channel sender for LSP restart events. `None` during tests.
+    event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::event::AppEvent>>,
 }
 
 impl LspManager {
-    pub fn new(project_root: PathBuf, handle: tokio::runtime::Handle) -> Self {
+    pub fn new(
+        project_root: PathBuf,
+        handle: tokio::runtime::Handle,
+        event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::event::AppEvent>>,
+    ) -> Self {
         Self {
             servers: HashMap::new(),
             detected_languages: Vec::new(),
             project_root,
             handle,
             status: Arc::new(Mutex::new(HashMap::new())),
+            event_tx,
         }
     }
 
@@ -89,7 +96,7 @@ impl LspManager {
             if self.servers.contains_key(&lang) {
                 continue;
             }
-            match self.start_server(lang) {
+            match self.start_server(lang, self.event_tx.clone()) {
                 Ok(server) => {
                     tracing::info!("LSP: started {lang} server");
                     self.servers.insert(lang, server);
@@ -118,7 +125,11 @@ impl LspManager {
         }
     }
 
-    fn start_server(&self, lang: Language) -> Result<LspServer> {
+    fn start_server(
+        &self,
+        lang: Language,
+        event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::event::AppEvent>>,
+    ) -> Result<LspServer> {
         let (binary, args) = lang
             .resolve_server()
             .ok_or_else(|| anyhow::anyhow!("no {lang} language server found on PATH"))?;
@@ -175,11 +186,13 @@ impl LspManager {
 
         // Spawn a crash watcher that awaits mainloop completion. If the
         // shutdown flag is not set, the mainloop exited unexpectedly —
-        // write Error to the status cache so the sidebar surfaces it.
+        // write Error to the status cache so the sidebar surfaces it,
+        // then schedule a restart via `LspRestartNeeded` if budget remains.
         {
             let status = self.status.clone();
             let shutdown_flag_watch = shutdown_flag.clone();
             let binary_for_watch = binary.clone();
+            let event_tx = event_tx.clone();
             self.handle.spawn(async move {
                 let join_result = mainloop_handle.await;
                 if shutdown_flag_watch.load(Ordering::SeqCst) {
@@ -191,12 +204,46 @@ impl LspManager {
                     Err(e) => format!("mainloop panicked: {e}"),
                 };
                 tracing::warn!("LSP {binary_for_watch} ({lang}) {reason}");
-                let mut map = status.lock().unwrap_or_else(|p| p.into_inner());
-                if let Some(entry) = map.get_mut(&lang) {
-                    entry.state = LspServerState::Error { reason };
-                    entry.active_progress = 0;
-                    entry.progress_message = None;
-                    entry.updated_at = Instant::now();
+
+                let should_restart = {
+                    let mut map = status.lock().unwrap_or_else(|p| p.into_inner());
+                    if let Some(entry) = map.get_mut(&lang) {
+                        entry.state = LspServerState::Error {
+                            reason: reason.clone(),
+                        };
+                        entry.active_progress = 0;
+                        entry.progress_message = None;
+                        entry.updated_at = Instant::now();
+
+                        let attempt = entry.restart_attempts;
+                        if attempt < crate::lsp::MAX_RESTART_ATTEMPTS {
+                            if let Some(ref tx) = event_tx {
+                                let delay = crate::lsp::restart_backoff(attempt);
+                                entry.restart_attempts = attempt + 1;
+                                entry.state = LspServerState::Restarting;
+                                entry.next_restart_at = Some(Instant::now() + delay);
+                                entry.updated_at = Instant::now();
+                                Some((tx.clone(), delay))
+                            } else {
+                                None
+                            }
+                        } else {
+                            tracing::warn!(
+                                "LSP {binary_for_watch} ({lang}): max restart attempts ({}) reached, giving up",
+                                crate::lsp::MAX_RESTART_ATTEMPTS,
+                            );
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some((tx, delay)) = should_restart {
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
+                    let _ = tx.send(crate::event::AppEvent::LspRestartNeeded { lang });
                 }
             });
         }
@@ -347,10 +394,51 @@ impl LspManager {
             if !self.detected_languages.contains(&lang) {
                 self.detected_languages.push(lang);
             }
-            let server = self.start_server(lang)?;
+            let server = self.start_server(lang, self.event_tx.clone())?;
             self.servers.insert(lang, server);
         }
         Ok(self.servers.get(&lang).expect("just inserted"))
+    }
+
+    /// Restart a crashed LSP server. Called from the event loop's
+    /// `LspRestartNeeded` handler via `spawn_blocking`.
+    ///
+    /// 1. Removes the old `LspServer` from `servers` (setting its shutdown
+    ///    flag first so any residual watcher exits cleanly).
+    /// 2. Calls `start_server` to spawn a fresh process + Initialize.
+    /// 3. On init failure, sets `restart_attempts` to MAX so the new
+    ///    watcher won't retry (init failures are config/binary issues).
+    pub fn restart_server(&mut self, lang: Language) -> Result<()> {
+        if let Some(old_server) = self.servers.remove(&lang) {
+            old_server
+                .shutdown_flag
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            drop(old_server);
+        }
+
+        tracing::info!("LSP: restarting {lang} server");
+
+        match self.start_server(lang, self.event_tx.clone()) {
+            Ok(server) => {
+                tracing::info!("LSP: restarted {lang} server successfully");
+                self.servers.insert(lang, server);
+                let mut map = self.status.lock().unwrap_or_else(|p| p.into_inner());
+                if let Some(entry) = map.get_mut(&lang) {
+                    entry.restart_attempts = 0;
+                    entry.next_restart_at = None;
+                }
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!("LSP: restart of {lang} failed: {e:#}");
+                let mut map = self.status.lock().unwrap_or_else(|p| p.into_inner());
+                if let Some(entry) = map.get_mut(&lang) {
+                    entry.restart_attempts = crate::lsp::MAX_RESTART_ATTEMPTS;
+                    entry.next_restart_at = None;
+                }
+                Err(e)
+            }
+        }
     }
 
     pub fn shutdown(&mut self) {
@@ -471,7 +559,11 @@ mod tests {
     #[tokio::test]
     async fn lsp_manager_new() {
         let dir = tempdir().unwrap();
-        let mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+        let mgr = LspManager::new(
+            dir.path().to_path_buf(),
+            tokio::runtime::Handle::current(),
+            None,
+        );
         assert!(!mgr.has_servers());
         assert!(mgr.running_languages().is_empty());
         assert!(mgr.language_status().is_empty());
@@ -480,7 +572,11 @@ mod tests {
     #[tokio::test]
     async fn running_servers_empty() {
         let dir = tempdir().unwrap();
-        let mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+        let mgr = LspManager::new(
+            dir.path().to_path_buf(),
+            tokio::runtime::Handle::current(),
+            None,
+        );
         assert_eq!(mgr.running_servers().count(), 0);
     }
 
@@ -499,7 +595,11 @@ mod tests {
     #[tokio::test]
     async fn language_status_reads_from_state_cache_starting_and_error_are_not_running() {
         let dir = tempdir().unwrap();
-        let mut mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+        let mut mgr = LspManager::new(
+            dir.path().to_path_buf(),
+            tokio::runtime::Handle::current(),
+            None,
+        );
         mgr.insert_status_for_test(
             Language::Rust,
             sample_entry(LspServerState::Starting, "rust-analyzer"),
@@ -524,7 +624,11 @@ mod tests {
     #[tokio::test]
     async fn language_status_ready_and_indexing_report_running_true() {
         let dir = tempdir().unwrap();
-        let mut mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+        let mut mgr = LspManager::new(
+            dir.path().to_path_buf(),
+            tokio::runtime::Handle::current(),
+            None,
+        );
         mgr.insert_status_for_test(
             Language::Rust,
             sample_entry(LspServerState::Ready, "rust-analyzer"),
@@ -543,7 +647,11 @@ mod tests {
     #[tokio::test]
     async fn status_snapshot_returns_entries_for_detected_languages_only() {
         let dir = tempdir().unwrap();
-        let mut mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+        let mut mgr = LspManager::new(
+            dir.path().to_path_buf(),
+            tokio::runtime::Handle::current(),
+            None,
+        );
         mgr.insert_status_for_test(
             Language::Rust,
             sample_entry(LspServerState::Ready, "rust-analyzer"),
@@ -562,7 +670,11 @@ mod tests {
     #[tokio::test]
     async fn snapshot_cache_reads_directly_from_arc_and_sorts_by_language() {
         let dir = tempdir().unwrap();
-        let mut mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+        let mut mgr = LspManager::new(
+            dir.path().to_path_buf(),
+            tokio::runtime::Handle::current(),
+            None,
+        );
         // Capture a cache handle BEFORE inserting — this proves the Arc is
         // a live view of the same HashMap the manager writes to.
         let cache_handle = mgr.status_cache_handle();
@@ -599,7 +711,11 @@ mod tests {
         // writer holds the enclosing RwLock exclusively.
         use std::sync::RwLock;
         let dir = tempdir().unwrap();
-        let mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+        let mgr = LspManager::new(
+            dir.path().to_path_buf(),
+            tokio::runtime::Handle::current(),
+            None,
+        );
         let cache_handle = mgr.status_cache_handle();
         let rwlock = Arc::new(RwLock::new(mgr));
 
@@ -636,7 +752,11 @@ mod tests {
     #[tokio::test]
     async fn status_cache_handle_returns_same_arc_instance() {
         let dir = tempdir().unwrap();
-        let mut mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+        let mut mgr = LspManager::new(
+            dir.path().to_path_buf(),
+            tokio::runtime::Handle::current(),
+            None,
+        );
         let handle = mgr.status_cache_handle();
         mgr.insert_status_for_test(
             Language::Rust,
@@ -652,7 +772,11 @@ mod tests {
     #[tokio::test]
     async fn shutdown_clears_status_cache() {
         let dir = tempdir().unwrap();
-        let mut mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+        let mut mgr = LspManager::new(
+            dir.path().to_path_buf(),
+            tokio::runtime::Handle::current(),
+            None,
+        );
         mgr.insert_status_for_test(
             Language::Rust,
             sample_entry(LspServerState::Ready, "rust-analyzer"),
@@ -670,7 +794,11 @@ mod tests {
         // ALSO writes an Error entry — the second write must NOT clobber
         // the first when the first already recorded a specific reason.
         let dir = tempdir().unwrap();
-        let mut mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+        let mut mgr = LspManager::new(
+            dir.path().to_path_buf(),
+            tokio::runtime::Handle::current(),
+            None,
+        );
 
         // Seed the cache with a specific Error as if `start_server`'s inner
         // Initialize-failure branch had just written it.
@@ -723,7 +851,11 @@ mod tests {
         // returned None before `start_server` could upsert), the outer write
         // MUST fire so the sidebar surfaces the failure.
         let dir = tempdir().unwrap();
-        let mut mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+        let mut mgr = LspManager::new(
+            dir.path().to_path_buf(),
+            tokio::runtime::Handle::current(),
+            None,
+        );
         mgr.insert_status_for_test(
             Language::Rust,
             sample_entry(LspServerState::Starting, "rust-analyzer"),
@@ -766,7 +898,11 @@ mod tests {
             "[package]\nname = \"test\"\nversion = \"0.1.0\"\n",
         )
         .unwrap();
-        let mut mgr = LspManager::new(dir.path().to_path_buf(), tokio::runtime::Handle::current());
+        let mut mgr = LspManager::new(
+            dir.path().to_path_buf(),
+            tokio::runtime::Handle::current(),
+            None,
+        );
         mgr.start_servers();
         let snap = mgr.status_snapshot();
         let rust_entry = snap
@@ -779,5 +915,40 @@ mod tests {
             "expected Error state when rust-analyzer is missing, got {:?}",
             rust_entry.state
         );
+    }
+
+    #[tokio::test]
+    async fn restart_server_resets_status_to_starting() {
+        let dir = tempdir().unwrap();
+        let dir_path = dir.path().to_path_buf();
+        // Run in spawn_blocking so `start_server`'s `block_on` doesn't
+        // conflict with the test's outer tokio runtime.
+        let (result_is_err, snap) = tokio::task::spawn_blocking(move || {
+            let mut mgr = LspManager::new(dir_path, tokio::runtime::Handle::current(), None);
+            mgr.insert_status_for_test(
+                Language::Rust,
+                LspStatusEntry {
+                    binary: "rust-analyzer".into(),
+                    state: LspServerState::Error {
+                        reason: "mainloop exited".into(),
+                    },
+                    active_progress: 0,
+                    progress_message: None,
+                    updated_at: Instant::now(),
+                    restart_attempts: 1,
+                    next_restart_at: None,
+                },
+            );
+            let result = mgr.restart_server(Language::Rust);
+            let snap = mgr.status_snapshot();
+            (result.is_err(), snap)
+        })
+        .await
+        .unwrap();
+        let entry = snap.iter().find(|(l, _)| *l == Language::Rust).unwrap();
+        if result_is_err {
+            assert!(matches!(entry.1.state, LspServerState::Error { .. }));
+            assert_eq!(entry.1.restart_attempts, crate::lsp::MAX_RESTART_ATTEMPTS);
+        }
     }
 }
