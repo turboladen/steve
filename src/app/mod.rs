@@ -357,6 +357,7 @@ impl App {
                         binary: entry.binary,
                         state: entry.state,
                         progress_message: entry.progress_message,
+                        next_restart_at: entry.next_restart_at,
                     })
                     .collect();
                 state

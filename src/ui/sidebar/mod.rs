@@ -72,6 +72,8 @@ pub struct SidebarLsp {
     /// Latest `$/progress` message. Rendered as a dimmed indented line below
     /// the server line during active states (Starting/Indexing).
     pub progress_message: Option<String>,
+    /// When the next restart attempt will fire (only set during `Restarting`).
+    pub next_restart_at: Option<std::time::Instant>,
 }
 
 /// MCP server status for sidebar display.
@@ -698,11 +700,13 @@ mod tests {
             binary: "rust-analyzer".into(),
             state: crate::lsp::LspServerState::Ready,
             progress_message: None,
+            next_restart_at: None,
         };
         let starting = SidebarLsp {
             binary: "rust-analyzer".into(),
             state: crate::lsp::LspServerState::Starting,
             progress_message: None,
+            next_restart_at: None,
         };
         assert_ne!(ready, starting, "state change must affect equality");
     }
