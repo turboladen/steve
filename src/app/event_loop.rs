@@ -603,6 +603,24 @@ impl App {
             } => {
                 self.apply_title_if_current(&session_id, &fallback_title);
             }
+            AppEvent::LspRestartNeeded { lang } => {
+                let lsp = self.lsp_manager.clone();
+                let tx = self.event_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Ok(mut mgr) = lsp.write() {
+                        match mgr.restart_server(lang) {
+                            Ok(()) => {
+                                let _ = tx.send(AppEvent::StreamNotice {
+                                    text: format!("LSP {lang} server restarted successfully"),
+                                });
+                            }
+                            Err(e) => {
+                                tracing::warn!("LSP restart of {lang} failed: {e:#}");
+                            }
+                        }
+                    }
+                });
+            }
             _ => {}
         }
         Ok(())
@@ -891,6 +909,16 @@ mod tests {
             state.auto_scroll,
             "returning to bottom should re-enable auto_scroll"
         );
+    }
+
+    #[tokio::test]
+    async fn event_lsp_restart_needed_does_not_panic() {
+        let mut app = make_test_app();
+        app.handle_event(AppEvent::LspRestartNeeded {
+            lang: crate::lsp::Language::Rust,
+        })
+        .await
+        .unwrap();
     }
 
     #[test]
