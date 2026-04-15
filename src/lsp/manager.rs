@@ -72,6 +72,8 @@ impl LspManager {
                 active_progress: 0,
                 progress_message: None,
                 updated_at: Instant::now(),
+                restart_attempts: 0,
+                next_restart_at: None,
             });
         }
     }
@@ -144,6 +146,8 @@ impl LspManager {
                 active_progress: 0,
                 progress_message: None,
                 updated_at: Instant::now(),
+                restart_attempts: 0,
+                next_restart_at: None,
             });
             entry.binary = binary.clone();
             entry.state = LspServerState::Starting;
@@ -487,6 +491,8 @@ mod tests {
             active_progress: 0,
             progress_message: None,
             updated_at: Instant::now(),
+            restart_attempts: 0,
+            next_restart_at: None,
         }
     }
 
@@ -678,6 +684,8 @@ mod tests {
                 active_progress: 0,
                 progress_message: None,
                 updated_at: Instant::now(),
+                restart_attempts: 0,
+                next_restart_at: None,
             },
         );
 

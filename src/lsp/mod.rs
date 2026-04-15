@@ -16,9 +16,9 @@ use strum::{Display, EnumIter, EnumString, IntoStaticStr};
 
 /// Lifecycle state of a single language server as tracked by `LspManager`.
 ///
-/// The Error variant is terminal within a session — Steve does not auto-restart
-/// crashed servers. Users must restart Steve to recover. This keeps crash
-/// detection simple (mark-only, no restart loop).
+/// Crash detection writes `Error`, then transitions to `Restarting` if
+/// retry budget remains. After `MAX_RESTART_ATTEMPTS` failures, `Error`
+/// is terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LspServerState {
     /// Process spawned; Initialize request in flight or queued.
@@ -27,7 +27,9 @@ pub enum LspServerState {
     Indexing,
     /// Initialize returned; no active progress tokens.
     Ready,
-    /// Initialize failed, or the mainloop exited unexpectedly. Terminal.
+    /// Crash detected; waiting for backoff timer before re-spawning.
+    Restarting,
+    /// Initialize failed, or the mainloop exited unexpectedly.
     Error { reason: String },
 }
 
@@ -38,6 +40,7 @@ impl LspServerState {
             Self::Starting => "Starting",
             Self::Indexing => "Indexing",
             Self::Ready => "Ready",
+            Self::Restarting => "Restarting",
             Self::Error { .. } => "Error",
         }
     }
@@ -45,7 +48,7 @@ impl LspServerState {
     /// Whether this state should render an animated spinner (vs a static glyph).
     pub fn is_animated(&self) -> bool {
         match self {
-            Self::Starting | Self::Indexing => true,
+            Self::Starting | Self::Indexing | Self::Restarting => true,
             Self::Ready | Self::Error { .. } => false,
         }
     }
@@ -76,6 +79,22 @@ pub struct LspStatusEntry {
     /// When the entry was last mutated. Not currently rendered; enables
     /// future "indexing for Ns" UX without a schema change.
     pub updated_at: Instant,
+    /// Number of restart attempts since the last successful Ready state.
+    pub restart_attempts: u8,
+    /// When the next restart attempt should fire (backoff timer).
+    pub next_restart_at: Option<Instant>,
+}
+
+/// Maximum number of restart attempts before `Error` becomes terminal.
+pub const MAX_RESTART_ATTEMPTS: u8 = 3;
+
+/// Backoff duration before the Nth restart attempt.
+pub fn restart_backoff(attempt: u8) -> std::time::Duration {
+    match attempt {
+        0 => std::time::Duration::ZERO,
+        1 => std::time::Duration::from_secs(1),
+        _ => std::time::Duration::from_secs(5),
+    }
 }
 
 #[derive(
@@ -444,6 +463,7 @@ mod tests {
         assert_eq!(LspServerState::Starting.label(), "Starting");
         assert_eq!(LspServerState::Indexing.label(), "Indexing");
         assert_eq!(LspServerState::Ready.label(), "Ready");
+        assert_eq!(LspServerState::Restarting.label(), "Restarting");
         assert_eq!(
             LspServerState::Error {
                 reason: "boom".into()
@@ -457,6 +477,7 @@ mod tests {
     fn lsp_server_state_is_animated_matrix() {
         assert!(LspServerState::Starting.is_animated());
         assert!(LspServerState::Indexing.is_animated());
+        assert!(LspServerState::Restarting.is_animated());
         assert!(!LspServerState::Ready.is_animated());
         assert!(
             !LspServerState::Error {
@@ -474,6 +495,8 @@ mod tests {
             active_progress: 3,
             progress_message: Some("Building crate graph".into()),
             updated_at: std::time::Instant::now(),
+            restart_attempts: 2,
+            next_restart_at: Some(std::time::Instant::now()),
         };
         let cloned = original.clone();
         assert_eq!(cloned.binary, original.binary);
@@ -481,5 +504,20 @@ mod tests {
         assert_eq!(cloned.active_progress, original.active_progress);
         assert_eq!(cloned.progress_message, original.progress_message);
         assert_eq!(cloned.updated_at, original.updated_at);
+        assert_eq!(cloned.restart_attempts, original.restart_attempts);
+        assert_eq!(cloned.next_restart_at, original.next_restart_at);
+    }
+
+    #[test]
+    fn restart_backoff_delays() {
+        assert_eq!(restart_backoff(0), std::time::Duration::ZERO);
+        assert_eq!(restart_backoff(1), std::time::Duration::from_secs(1));
+        assert_eq!(restart_backoff(2), std::time::Duration::from_secs(5));
+        assert_eq!(restart_backoff(3), std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn max_restart_attempts_is_three() {
+        assert_eq!(MAX_RESTART_ATTEMPTS, 3);
     }
 }

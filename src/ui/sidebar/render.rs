@@ -230,6 +230,7 @@ fn render_servers_section<'a>(
                 LspServerState::Starting => (spinner_glyph.clone(), theme.warning),
                 LspServerState::Indexing => (spinner_glyph.clone(), theme.success),
                 LspServerState::Ready => ("\u{25cf}".to_string(), theme.success),
+                LspServerState::Restarting => (spinner_glyph.clone(), theme.warning),
                 LspServerState::Error { .. } => ("\u{2715}".to_string(), theme.error),
             };
             let label = format!("{} ({})", server.binary, server.state.label());

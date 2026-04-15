@@ -183,6 +183,8 @@ mod tests {
             active_progress: active,
             progress_message: None,
             updated_at: Instant::now(),
+            restart_attempts: 0,
+            next_restart_at: None,
         }
     }
 
