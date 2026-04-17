@@ -152,51 +152,47 @@ impl App {
                             }
                         }
                     }
-                    MouseEventKind::Drag(MouseButton::Left) => {
-                        if self.selection_state.dragging {
-                            let area = self.last_message_area;
-                            // Scroll-to-select: scroll when dragging past edges
-                            if mouse.row < area.y {
-                                self.message_area_state.scroll_up(1);
-                            } else if mouse.row >= area.y + area.height {
-                                self.message_area_state.scroll_down(1);
-                            }
-                            if let Some(map) = &self.message_area_state.content_map
-                                && let Some(pos) = map.screen_to_content(
-                                    mouse.row,
-                                    mouse.column,
-                                    self.message_area_state.scroll_offset,
-                                    area.y,
-                                    area.x,
-                                )
-                            {
-                                self.selection_state.cursor = Some(pos);
-                            }
+                    MouseEventKind::Drag(MouseButton::Left) if self.selection_state.dragging => {
+                        let area = self.last_message_area;
+                        // Scroll-to-select: scroll when dragging past edges
+                        if mouse.row < area.y {
+                            self.message_area_state.scroll_up(1);
+                        } else if mouse.row >= area.y + area.height {
+                            self.message_area_state.scroll_down(1);
+                        }
+                        if let Some(map) = &self.message_area_state.content_map
+                            && let Some(pos) = map.screen_to_content(
+                                mouse.row,
+                                mouse.column,
+                                self.message_area_state.scroll_offset,
+                                area.y,
+                                area.x,
+                            )
+                        {
+                            self.selection_state.cursor = Some(pos);
                         }
                     }
-                    MouseEventKind::Up(MouseButton::Left) => {
-                        if self.selection_state.dragging {
-                            self.selection_state.dragging = false;
-                            // If we have a valid selection range, copy to clipboard
-                            if let Some((start, end)) = self.selection_state.ordered_range()
-                                && let Some(map) = &self.message_area_state.content_map
-                            {
-                                let text = map.extract_text(&start, &end);
-                                if !text.is_empty() {
-                                    self.copy_to_clipboard(&text);
-                                }
+                    MouseEventKind::Up(MouseButton::Left) if self.selection_state.dragging => {
+                        self.selection_state.dragging = false;
+                        // If we have a valid selection range, copy to clipboard
+                        if let Some((start, end)) = self.selection_state.ordered_range()
+                            && let Some(map) = &self.message_area_state.content_map
+                        {
+                            let text = map.extract_text(&start, &end);
+                            if !text.is_empty() {
+                                self.copy_to_clipboard(&text);
                             }
                         }
                     }
                     _ => {}
                 }
             }
-            AppEvent::Input(Event::Paste(text)) => {
-                if self.pending_permission.is_none() && self.pending_question.is_none() {
-                    self.input.collapse_paste(&text);
-                    let current_text = self.input.textarea.lines().join("\n");
-                    self.autocomplete_state.update(&current_text);
-                }
+            AppEvent::Input(Event::Paste(text))
+                if self.pending_permission.is_none() && self.pending_question.is_none() =>
+            {
+                self.input.collapse_paste(&text);
+                let current_text = self.input.textarea.lines().join("\n");
+                self.autocomplete_state.update(&current_text);
             }
             AppEvent::Input(Event::Resize(_, _)) => {}
             AppEvent::Tick => {
@@ -231,48 +227,42 @@ impl App {
             }
 
             // -- Streaming events --
-            AppEvent::LlmResponseStart => {
-                if self.streaming_active {
-                    // Save the completed assistant message from the previous response
-                    if let Some(msg) = self.streaming_message.take()
-                        && !msg.text_content().is_empty()
-                    {
-                        let mgr = SessionManager::new(&self.storage, &self.project.id);
-                        let _ = mgr.save_message(&msg);
-                        self.stored_messages.push(msg);
-                    }
+            AppEvent::LlmResponseStart if self.streaming_active => {
+                // Save the completed assistant message from the previous response
+                if let Some(msg) = self.streaming_message.take()
+                    && !msg.text_content().is_empty()
+                {
+                    let mgr = SessionManager::new(&self.storage, &self.project.id);
+                    let _ = mgr.save_message(&msg);
+                    self.stored_messages.push(msg);
+                }
 
-                    // Start a fresh assistant block for the interjection response
-                    if let Some(session) = &self.current_session {
-                        self.streaming_message = Some(Message::assistant(&session.id, ""));
-                    }
-                    self.messages.push(MessageBlock::Assistant {
-                        thinking: None,
-                        parts: vec![],
-                    });
+                // Start a fresh assistant block for the interjection response
+                if let Some(session) = &self.current_session {
+                    self.streaming_message = Some(Message::assistant(&session.id, ""));
                 }
+                self.messages.push(MessageBlock::Assistant {
+                    thinking: None,
+                    parts: vec![],
+                });
             }
-            AppEvent::LlmDelta { text } => {
-                if self.streaming_active {
-                    // Append to the display message
-                    if let Some(last) = self.last_assistant_mut() {
-                        last.append_text(&text);
-                    }
-                    // Also append to the in-progress Message for persistence
-                    if let Some(msg) = &mut self.streaming_message {
-                        msg.append_text(&text);
-                    }
-                    self.message_area_state.scroll_to_bottom();
+            AppEvent::LlmDelta { text } if self.streaming_active => {
+                // Append to the display message
+                if let Some(last) = self.last_assistant_mut() {
+                    last.append_text(&text);
                 }
+                // Also append to the in-progress Message for persistence
+                if let Some(msg) = &mut self.streaming_message {
+                    msg.append_text(&text);
+                }
+                self.message_area_state.scroll_to_bottom();
             }
 
-            AppEvent::LlmReasoning { text } => {
-                if self.streaming_active {
-                    if let Some(last) = self.last_assistant_mut() {
-                        last.append_thinking(&text);
-                    }
-                    self.message_area_state.scroll_to_bottom();
+            AppEvent::LlmReasoning { text } if self.streaming_active => {
+                if let Some(last) = self.last_assistant_mut() {
+                    last.append_thinking(&text);
                 }
+                self.message_area_state.scroll_to_bottom();
             }
 
             // -- Tool events --

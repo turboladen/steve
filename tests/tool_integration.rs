@@ -1546,7 +1546,7 @@ fn measure_tool_definitions_size() {
         tool_sizes.push((name, size));
     }
 
-    tool_sizes.sort_by(|a, b| b.1.cmp(&a.1));
+    tool_sizes.sort_by_key(|t| std::cmp::Reverse(t.1));
 
     println!("Tool Definition Sizes (by size):");
     println!("{:-<50}", "");

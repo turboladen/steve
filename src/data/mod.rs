@@ -92,15 +92,13 @@ impl DataApp {
 
     fn handle_session_list_key(&mut self, code: KeyCode) -> Result<()> {
         match code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                if self.state.selected_row > 0 {
-                    self.state.selected_row -= 1;
-                }
+            KeyCode::Up | KeyCode::Char('k') if self.state.selected_row > 0 => {
+                self.state.selected_row -= 1;
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.state.selected_row + 1 < self.state.sessions.len() {
-                    self.state.selected_row += 1;
-                }
+            KeyCode::Down | KeyCode::Char('j')
+                if self.state.selected_row + 1 < self.state.sessions.len() =>
+            {
+                self.state.selected_row += 1;
             }
             KeyCode::PageUp => {
                 self.state.selected_row = self.state.selected_row.saturating_sub(20);
@@ -146,15 +144,13 @@ impl DataApp {
 
     fn handle_detail_key(&mut self, code: KeyCode) -> Result<()> {
         match code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                if self.state.detail_selected > 0 {
-                    self.state.detail_selected -= 1;
-                }
+            KeyCode::Up | KeyCode::Char('k') if self.state.detail_selected > 0 => {
+                self.state.detail_selected -= 1;
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.state.detail_selected + 1 < self.state.detail_calls.len() {
-                    self.state.detail_selected += 1;
-                }
+            KeyCode::Down | KeyCode::Char('j')
+                if self.state.detail_selected + 1 < self.state.detail_calls.len() =>
+            {
+                self.state.detail_selected += 1;
             }
             KeyCode::PageUp => {
                 self.state.detail_selected = self.state.detail_selected.saturating_sub(20);
