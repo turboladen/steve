@@ -385,9 +385,37 @@ impl LspManager {
         let lang = Language::from_extension(ext)
             .ok_or_else(|| anyhow::anyhow!("unsupported language for .{ext}"))?;
 
+        // During the crash-restart backoff window the `LspServer` is still in
+        // `self.servers` but its transport is dead, so any request against it
+        // will fail or time out. Consult the status cache (which the crash
+        // watcher updated synchronously on exit) and treat Error/Restarting
+        // as not-running. The real removal happens when `restart_server`
+        // runs after the backoff.
+        if !self.is_server_live(lang) {
+            return Err(anyhow::anyhow!(
+                "{lang} server is not currently live (crashed or restarting)"
+            ));
+        }
+
         self.servers
             .get(&lang)
             .ok_or_else(|| anyhow::anyhow!("no {lang} server running"))
+    }
+
+    /// Whether the status cache shows a server we can actually send requests
+    /// to. False during the crash-restart backoff window and after any
+    /// Initialize failure.
+    fn is_server_live(&self, lang: Language) -> bool {
+        let map = self.status.lock().unwrap_or_else(|p| p.into_inner());
+        match map.get(&lang).map(|e| &e.state) {
+            Some(LspServerState::Ready | LspServerState::Indexing) => true,
+            Some(
+                LspServerState::Starting
+                | LspServerState::Restarting
+                | LspServerState::Error { .. },
+            )
+            | None => false,
+        }
     }
 
     /// Notify the appropriate LSP server that a file was modified and saved.
@@ -416,6 +444,24 @@ impl LspManager {
     }
 
     fn ensure_server(&mut self, lang: Language) -> Result<&LspServer> {
+        // If a server is mid-restart, the old transport is dead and a fresh
+        // process is already queued via LspRestartNeeded — don't racing-start
+        // a second one. Tool callers see a clear error and can retry once
+        // the sidebar goes back to Ready.
+        {
+            let map = self.status.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(entry) = map.get(&lang)
+                && matches!(
+                    entry.state,
+                    LspServerState::Restarting | LspServerState::Error { .. }
+                )
+            {
+                return Err(anyhow::anyhow!(
+                    "{lang} server is not currently live (crashed or restarting)"
+                ));
+            }
+        }
+
         if !self.servers.contains_key(&lang) {
             // On-demand starts for a language not in the initial detection
             // set should also appear in the sidebar — append to
@@ -498,8 +544,27 @@ impl LspManager {
             .clear();
     }
 
+    /// Iterator over servers whose transport is actually live — i.e., the
+    /// status cache shows Ready or Indexing. Crashed servers awaiting restart
+    /// are excluded so callers (e.g., workspace/symbol fan-out) don't send
+    /// requests into a dead transport.
     pub fn running_servers(&self) -> impl Iterator<Item = &LspServer> {
-        self.servers.values()
+        let live: std::collections::HashSet<Language> = {
+            let map = self.status.lock().unwrap_or_else(|p| p.into_inner());
+            map.iter()
+                .filter(|(_, entry)| {
+                    matches!(
+                        entry.state,
+                        LspServerState::Ready | LspServerState::Indexing
+                    )
+                })
+                .map(|(lang, _)| *lang)
+                .collect()
+        };
+        self.servers
+            .iter()
+            .filter(move |(lang, _)| live.contains(lang))
+            .map(|(_, server)| server)
     }
 
     pub fn has_servers(&self) -> bool {
@@ -633,6 +698,82 @@ mod tests {
             restart_attempts: 0,
             next_restart_at: None,
         }
+    }
+
+    #[tokio::test]
+    async fn server_for_file_errors_when_status_cache_shows_restarting() {
+        // During the crash-restart backoff window, `self.servers` may still
+        // hold the crashed LspServer (removal happens when restart_server
+        // runs after the sleep). Lookups must fail fast instead of handing
+        // out a dead transport.
+        let dir = tempdir().unwrap();
+        let mut mgr = LspManager::new(
+            dir.path().to_path_buf(),
+            tokio::runtime::Handle::current(),
+            None,
+        );
+        mgr.insert_status_for_test(
+            Language::Rust,
+            sample_entry(LspServerState::Restarting, "rust-analyzer"),
+        );
+        let rust_file = dir.path().join("main.rs");
+        std::fs::write(&rust_file, "fn main() {}").unwrap();
+        let err = match mgr.server_for_file(&rust_file) {
+            Err(e) => e,
+            Ok(_) => panic!("lookup should fail while Restarting"),
+        };
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("not currently live"),
+            "expected 'not currently live' in error, got {msg:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn server_for_file_errors_when_status_cache_shows_error() {
+        let dir = tempdir().unwrap();
+        let mut mgr = LspManager::new(
+            dir.path().to_path_buf(),
+            tokio::runtime::Handle::current(),
+            None,
+        );
+        mgr.insert_status_for_test(
+            Language::Rust,
+            sample_entry(
+                LspServerState::Error {
+                    reason: "mainloop exited".into(),
+                },
+                "rust-analyzer",
+            ),
+        );
+        let rust_file = dir.path().join("main.rs");
+        std::fs::write(&rust_file, "fn main() {}").unwrap();
+        assert!(mgr.server_for_file(&rust_file).is_err());
+    }
+
+    #[tokio::test]
+    async fn ensure_server_errors_instead_of_double_starting_during_restart() {
+        let dir = tempdir().unwrap();
+        let mut mgr = LspManager::new(
+            dir.path().to_path_buf(),
+            tokio::runtime::Handle::current(),
+            None,
+        );
+        mgr.insert_status_for_test(
+            Language::Rust,
+            sample_entry(LspServerState::Restarting, "rust-analyzer"),
+        );
+        // ensure_server is &mut self — we can't call it from inside the
+        // #[tokio::test] outer runtime without spawn_blocking (block_on
+        // issues), so drive through server_for_file_or_start with a dummy
+        // path. Restarting short-circuits before any block_on.
+        let rust_file = dir.path().join("main.rs");
+        std::fs::write(&rust_file, "fn main() {}").unwrap();
+        let err = match mgr.server_for_file_or_start(&rust_file) {
+            Err(e) => e,
+            Ok(_) => panic!("should refuse to start while Restarting"),
+        };
+        assert!(format!("{err}").contains("not currently live"));
     }
 
     #[tokio::test]

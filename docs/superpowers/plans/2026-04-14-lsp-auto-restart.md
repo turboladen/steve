@@ -269,15 +269,18 @@ async fn restart_server_resets_status_to_starting() {
     let snap = mgr.status_snapshot();
     let entry = snap.iter().find(|(l, _)| *l == Language::Rust).unwrap();
     if result.is_err() {
-        // Failed to start — should be Error with max attempts
+        // Failed to start — should be Error, but preserve the existing
+        // restart_attempts value so transient init/start failures do not
+        // consume the entire restart budget. (Implementation diverged from
+        // the original plan, which called for clamping to MAX here — see
+        // PR review findings on PR #36.)
         assert!(
             matches!(entry.1.state, LspServerState::Error { .. }),
             "failed restart should set Error state"
         );
         assert_eq!(
-            entry.1.restart_attempts,
-            crate::lsp::MAX_RESTART_ATTEMPTS,
-            "failed restart should set attempts to MAX"
+            entry.1.restart_attempts, 1,
+            "failed restart should preserve existing restart_attempts"
         );
     }
     // If it succeeded (rust-analyzer on PATH), it would be Starting/Ready
@@ -298,49 +301,72 @@ Add this method to `impl LspManager` in `src/lsp/manager.rs`:
 /// Restart a crashed LSP server. Called from the event loop's
 /// `LspRestartNeeded` handler via `spawn_blocking`.
 ///
-/// 1. Removes the old `LspServer` from `servers` (setting its shutdown
-///    flag first so any residual watcher exits cleanly).
+/// 1. Removes the old `LspServer` and calls `transport_shutdown` on it
+///    so any still-live child process is reaped instead of orphaned.
+///    In the normal post-crash case the mainloop is already dead, so
+///    this is a cheap no-op; it defends against future callers
+///    invoking restart on a healthy server.
 /// 2. Calls `start_server` to spawn a fresh process + Initialize.
-/// 3. On init failure, sets `restart_attempts` to MAX so the new
-///    watcher won't retry (init failures are config/binary issues).
+///    `restart_attempts` is reset to 0 inside `start_server`'s
+///    post-Initialize critical section, atomically with the Ready
+///    transition.
+/// 3. On init/start failure, preserves `restart_attempts` (already
+///    incremented by the crash watcher before `LspRestartNeeded`
+///    fired) — clamping to MAX here would permanently disable
+///    auto-restart after a transient spawn failure.
 pub fn restart_server(&mut self, lang: Language) -> Result<()> {
-    // Remove the old crashed server if still present.
-    // Set its shutdown_flag so dropping it doesn't trigger another
-    // Error write from any lingering watcher reference.
-    if let Some(old_server) = self.servers.remove(&lang) {
-        old_server.shutdown_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-        // Drop old_server — process is already dead, this is cleanup only.
-        drop(old_server);
+    if let Some(old_server) = self.servers.remove(&lang)
+        && let Err(e) = old_server.transport_shutdown()
+    {
+        tracing::debug!("LSP: {lang} old-server shutdown error during restart: {e}");
     }
 
     tracing::info!("LSP: restarting {lang} server");
 
-    match self.start_server(lang) {
+    match self.start_server(lang, self.event_tx.clone()) {
         Ok(server) => {
             tracing::info!("LSP: restarted {lang} server successfully");
             self.servers.insert(lang, server);
-            // Reset attempts since start_server succeeded past Initialize.
-            let mut map = self.status.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(entry) = map.get_mut(&lang) {
-                entry.restart_attempts = 0;
-                entry.next_restart_at = None;
-            }
             Ok(())
         }
         Err(e) => {
             tracing::warn!("LSP: restart of {lang} failed: {e:#}");
-            // Init failure — set attempts to MAX so the new watcher
-            // (if any) won't retry. This is a config/binary issue.
             let mut map = self.status.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(entry) = map.get_mut(&lang) {
-                entry.restart_attempts = crate::lsp::MAX_RESTART_ATTEMPTS;
                 entry.next_restart_at = None;
+                // Preserve restart_attempts. If start_server's Initialize-
+                // failure branch already wrote a specific Error, keep that
+                // reason; otherwise flip Starting/Restarting to Error.
+                if !matches!(entry.state, LspServerState::Error { .. }) {
+                    entry.state = LspServerState::Error {
+                        reason: format!("restart failed: {e}"),
+                    };
+                    entry.active_progress = 0;
+                    entry.progress_message = None;
+                    entry.updated_at = Instant::now();
+                }
             }
             Err(e)
         }
     }
 }
 ```
+
+> **Post-implementation note** (PR #36 review): the original plan had
+> `restart_server` manually setting `shutdown_flag` and dropping the old
+> server, and clamping `restart_attempts` to `MAX_RESTART_ATTEMPTS` on
+> init failure. Both were revised during review:
+>
+> - Shutdown: `transport_shutdown()` already sets `shutdown_flag` before
+>   aborting, sends Shutdown/Exit if the transport is still alive, and
+>   reaps the child process. Using it instead of manual `shutdown_flag +
+>   drop` is safer and makes `restart_server` correct even if invoked on
+>   a server whose mainloop hasn't actually died.
+> - Attempts clamp: clamping to MAX on a failed restart permanently
+>   disables auto-restart even when the underlying cause is transient
+>   (binary temporarily unavailable, initialize timeout). Preserving the
+>   existing count lets the next naturally-occurring crash (if the
+>   server eventually starts) still get the remaining budget.
 
 - [ ] **Step 4: Run the test**
 

@@ -56,10 +56,13 @@ Ready/Indexing
   -> Starting        (restart_server() removes old server, calls start_server())
   -> Ready/Indexing  (initialize success, restart_attempts reset to 0)
      OR
-  -> Error           (initialize failure, attempts set to max, permanent)
+  -> Error           (initialize/start failure; retry budget is preserved,
+                      not clamped to max — a subsequent successful restart
+                      still resets it)
 
 Ready/Indexing
-  -> Error           (crash detected, attempts >= 3, permanent)
+  -> Error           (crash detected, attempts >= 3, no further auto-restart
+                      this session)
 ```
 
 ### New `AppEvent` Variant (event.rs)
@@ -112,21 +115,33 @@ On `AppEvent::LspRestartNeeded { lang }`:
 
 New method on `LspManager`:
 
-1. Remove old `LspServer` from `servers` HashMap (drop it, which does NOT call
-   `transport_shutdown` — the server already crashed)
+1. Remove old `LspServer` from `servers` HashMap and call `transport_shutdown()`
+   on it. In the normal post-crash case the mainloop is already dead so this
+   is mostly a cheap no-op, but it reliably reaps any still-live child process
+   (useful if `restart_server` is ever invoked on a healthy server in the
+   future, e.g. from a manual restart command)
 2. Call `start_server(lang)` (reuses existing startup path)
 3. Insert new server into `servers`
-4. On success: `restart_attempts` reset to 0 happens when state reaches `Ready`
-5. On init failure: set `restart_attempts` to `MAX_RESTART_ATTEMPTS` so the new
-   watcher won't retry (init failures are config/binary issues, not transient)
+4. On success: `restart_attempts` reset to 0 happens inside `start_server`'s
+   post-Initialize critical section, atomically with the Ready transition —
+   so a rapid re-crash cannot race between "Ready" and "budget reset"
+5. On init/start failure: preserve the existing `restart_attempts` value.
+   The crash watcher already incremented it before `LspRestartNeeded` was
+   sent, and clamping to MAX here would permanently disable auto-restart
+   after a transient spawn failure (binary momentarily unavailable, etc.).
+   Set `next_restart_at` to None and flip to `Error` if `start_server` did
+   not already record a specific Error reason.
 
-### Dropping the Old Server
+### Shutting Down the Old Server
 
-`LspServer`'s `Drop` impl (if any) or explicit cleanup must handle the case
-where the process already exited. `transport_shutdown()` should NOT be called
-for a crashed server — the process is already gone. `restart_server()` should
-manually set `shutdown_flag = true` on the old server before dropping it, so
-if there's any residual watcher it exits cleanly.
+`transport_shutdown()` sets `shutdown_flag = true` before aborting the
+mainloop and best-effort killing the child. Calling it during restart
+handles both the normal case (mainloop already dead — cheap no-op path
+through the shutdown sequence) and the edge case where `restart_server`
+is invoked on a server whose mainloop is still running. The old
+implementation manually set `shutdown_flag` and dropped the server; this
+was replaced with `transport_shutdown()` so the child process is reliably
+reaped instead of orphaned.
 
 ## Sidebar Display
 
