@@ -92,7 +92,7 @@ impl<'a> SessionManager<'a> {
             .iter()
             .filter_map(|id| self.load_session(id).ok())
             .collect();
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
         Ok(sessions)
     }
 
@@ -115,7 +115,7 @@ impl<'a> SessionManager<'a> {
                     .ok()
             })
             .collect();
-        messages.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        messages.sort_by_key(|m| m.created_at);
         Ok(messages)
     }
 

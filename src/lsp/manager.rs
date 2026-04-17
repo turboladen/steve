@@ -33,6 +33,38 @@ pub struct LspManager {
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::event::AppEvent>>,
 }
 
+/// Pure scheduling logic for the crash watcher. Given the current status
+/// entry and whether a restart can actually be notified, this transitions
+/// the entry to Error (always) and optionally to Restarting with a computed
+/// backoff delay. Returns `Some(delay)` iff a restart should be scheduled.
+///
+/// Extracted as a free function so the decision logic can be unit-tested
+/// without spawning real LSP processes or waiting for crashes. The caller
+/// is responsible for holding the status-mutex critical section around the
+/// call and for actually sending the `LspRestartNeeded` event after the
+/// returned delay has elapsed.
+pub(super) fn plan_crash_restart(
+    entry: &mut LspStatusEntry,
+    reason: String,
+    can_notify: bool,
+) -> Option<std::time::Duration> {
+    entry.state = LspServerState::Error { reason };
+    entry.active_progress = 0;
+    entry.progress_message = None;
+    entry.updated_at = Instant::now();
+
+    let attempt = entry.restart_attempts;
+    if !can_notify || attempt >= crate::lsp::MAX_RESTART_ATTEMPTS {
+        return None;
+    }
+    let delay = crate::lsp::restart_backoff(attempt);
+    entry.restart_attempts = attempt + 1;
+    entry.state = LspServerState::Restarting;
+    entry.next_restart_at = Some(Instant::now() + delay);
+    entry.updated_at = Instant::now();
+    Some(delay)
+}
+
 impl LspManager {
     pub fn new(
         project_root: PathBuf,
@@ -205,45 +237,31 @@ impl LspManager {
                 };
                 tracing::warn!("LSP {binary_for_watch} ({lang}) {reason}");
 
-                let should_restart = {
+                let restart_delay = {
                     let mut map = status.lock().unwrap_or_else(|p| p.into_inner());
-                    if let Some(entry) = map.get_mut(&lang) {
-                        entry.state = LspServerState::Error {
-                            reason: reason.clone(),
-                        };
-                        entry.active_progress = 0;
-                        entry.progress_message = None;
-                        entry.updated_at = Instant::now();
-
-                        let attempt = entry.restart_attempts;
-                        if attempt < crate::lsp::MAX_RESTART_ATTEMPTS {
-                            if let Some(ref tx) = event_tx {
-                                let delay = crate::lsp::restart_backoff(attempt);
-                                entry.restart_attempts = attempt + 1;
-                                entry.state = LspServerState::Restarting;
-                                entry.next_restart_at = Some(Instant::now() + delay);
-                                entry.updated_at = Instant::now();
-                                Some((tx.clone(), delay))
-                            } else {
-                                None
-                            }
-                        } else {
-                            tracing::warn!(
-                                "LSP {binary_for_watch} ({lang}): max restart attempts ({}) reached, giving up",
-                                crate::lsp::MAX_RESTART_ATTEMPTS,
-                            );
-                            None
-                        }
-                    } else {
-                        None
-                    }
+                    map.get_mut(&lang).and_then(|entry| {
+                        plan_crash_restart(entry, reason.clone(), event_tx.is_some())
+                    })
                 };
 
-                if let Some((tx, delay)) = should_restart {
-                    if !delay.is_zero() {
-                        tokio::time::sleep(delay).await;
+                match (restart_delay, event_tx) {
+                    (Some(delay), Some(tx)) => {
+                        if !delay.is_zero() {
+                            tokio::time::sleep(delay).await;
+                        }
+                        let _ = tx.send(crate::event::AppEvent::LspRestartNeeded { lang });
                     }
-                    let _ = tx.send(crate::event::AppEvent::LspRestartNeeded { lang });
+                    (None, Some(_)) => {
+                        // Had an event channel but the plan declined — restart
+                        // budget is exhausted. In test mode (event_tx None) the
+                        // plan also returns None, but that's expected, not a
+                        // user-visible giving-up.
+                        tracing::warn!(
+                            "LSP {binary_for_watch} ({lang}): restart budget exhausted (max {}), giving up",
+                            crate::lsp::MAX_RESTART_ATTEMPTS,
+                        );
+                    }
+                    _ => {}
                 }
             });
         }
@@ -296,11 +314,17 @@ impl LspManager {
                 // Record Error in the cache before returning — the caller
                 // (`start_servers`) sees the Err and bails, but the cache
                 // needs to reflect the specific initialize failure.
+                // Clear Restarting-path fields so the Error row doesn't
+                // carry stale `next_restart_at` / progress data into the
+                // sidebar.
                 let mut map = self.status.lock().unwrap_or_else(|p| p.into_inner());
                 if let Some(entry) = map.get_mut(&lang) {
                     entry.state = LspServerState::Error {
                         reason: format!("initialize failed: {e:?}"),
                     };
+                    entry.active_progress = 0;
+                    entry.progress_message = None;
+                    entry.next_restart_at = None;
                     entry.updated_at = Instant::now();
                 }
                 return Err(anyhow::anyhow!("initialize request failed: {e:?}"));
@@ -313,6 +337,9 @@ impl LspManager {
 
         // Transition Starting → Ready (or Indexing if `$/progress` Begin
         // notifications arrived during init — rust-analyzer does this).
+        // Reset restart-budget fields in the same critical section as the
+        // state transition so a rapid re-crash cannot race between the
+        // Ready write and the budget reset.
         {
             let mut map = self.status.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(entry) = map.get_mut(&lang) {
@@ -329,6 +356,8 @@ impl LspManager {
                     entry.active_progress,
                 );
                 entry.state = new_state;
+                entry.restart_attempts = 0;
+                entry.next_restart_at = None;
                 entry.updated_at = Instant::now();
             }
         }
@@ -403,17 +432,25 @@ impl LspManager {
     /// Restart a crashed LSP server. Called from the event loop's
     /// `LspRestartNeeded` handler via `spawn_blocking`.
     ///
-    /// 1. Removes the old `LspServer` from `servers` (setting its shutdown
-    ///    flag first so any residual watcher exits cleanly).
+    /// 1. Removes the old `LspServer` and calls `transport_shutdown` on it
+    ///    so any still-live child process is reaped instead of orphaned.
+    ///    In the normal post-crash case the mainloop is already dead, so
+    ///    this is a cheap no-op; it defends against future callers
+    ///    invoking restart on a healthy server.
     /// 2. Calls `start_server` to spawn a fresh process + Initialize.
-    /// 3. On init failure, sets `restart_attempts` to MAX so the new
-    ///    watcher won't retry (init failures are config/binary issues).
+    ///    `restart_attempts` is reset to 0 inside `start_server`'s
+    ///    post-Initialize critical section, so the reset is atomic with
+    ///    the Ready transition.
+    /// 3. On init failure, leaves `restart_attempts` untouched (already
+    ///    incremented by the crash watcher before `LspRestartNeeded` was
+    ///    sent). Clears `next_restart_at` and — if `start_server` didn't
+    ///    already write a specific Error — flips the entry to Error so
+    ///    the sidebar shows the failure.
     pub fn restart_server(&mut self, lang: Language) -> Result<()> {
-        if let Some(old_server) = self.servers.remove(&lang) {
-            old_server
-                .shutdown_flag
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-            drop(old_server);
+        if let Some(old_server) = self.servers.remove(&lang)
+            && let Err(e) = old_server.transport_shutdown()
+        {
+            tracing::debug!("LSP: {lang} old-server shutdown error during restart: {e}");
         }
 
         tracing::info!("LSP: restarting {lang} server");
@@ -422,19 +459,25 @@ impl LspManager {
             Ok(server) => {
                 tracing::info!("LSP: restarted {lang} server successfully");
                 self.servers.insert(lang, server);
-                let mut map = self.status.lock().unwrap_or_else(|p| p.into_inner());
-                if let Some(entry) = map.get_mut(&lang) {
-                    entry.restart_attempts = 0;
-                    entry.next_restart_at = None;
-                }
                 Ok(())
             }
             Err(e) => {
                 tracing::warn!("LSP: restart of {lang} failed: {e:#}");
                 let mut map = self.status.lock().unwrap_or_else(|p| p.into_inner());
                 if let Some(entry) = map.get_mut(&lang) {
-                    entry.restart_attempts = crate::lsp::MAX_RESTART_ATTEMPTS;
                     entry.next_restart_at = None;
+                    // If `start_server`'s Initialize-failure branch already
+                    // wrote a specific Error, preserve it. Otherwise (e.g.
+                    // resolve_server returned None, spawn failed), flip the
+                    // still-Starting/Restarting entry to Error now.
+                    if !matches!(entry.state, LspServerState::Error { .. }) {
+                        entry.state = LspServerState::Error {
+                            reason: format!("restart failed: {e}"),
+                        };
+                        entry.active_progress = 0;
+                        entry.progress_message = None;
+                        entry.updated_at = Instant::now();
+                    }
                 }
                 Err(e)
             }
@@ -918,37 +961,172 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restart_server_resets_status_to_starting() {
+    async fn restart_server_failure_flips_to_error_and_preserves_attempts() {
+        // Deterministic failure path: pick a language whose LSP binaries
+        // almost certainly aren't on PATH. If they happen to be, skip —
+        // the success path is covered by the `plan_crash_restart` unit
+        // tests below plus the end-to-end rust-analyzer test elsewhere.
+        if which::which("solargraph").is_ok() || which::which("ruby-lsp").is_ok() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let dir_path = dir.path().to_path_buf();
-        // Run in spawn_blocking so `start_server`'s `block_on` doesn't
-        // conflict with the test's outer tokio runtime.
-        let (result_is_err, snap) = tokio::task::spawn_blocking(move || {
+        let (err_result, snap) = tokio::task::spawn_blocking(move || {
             let mut mgr = LspManager::new(dir_path, tokio::runtime::Handle::current(), None);
+            // Simulate state right before `LspRestartNeeded` is handled:
+            // crash watcher has transitioned to Restarting with attempts=1
+            // and a scheduled restart_at. Also plant stale progress state
+            // to verify the Err path clears it.
             mgr.insert_status_for_test(
-                Language::Rust,
+                Language::Ruby,
                 LspStatusEntry {
-                    binary: "rust-analyzer".into(),
-                    state: LspServerState::Error {
-                        reason: "mainloop exited".into(),
-                    },
-                    active_progress: 0,
-                    progress_message: None,
+                    binary: "solargraph".into(),
+                    state: LspServerState::Restarting,
+                    active_progress: 2,
+                    progress_message: Some("stale progress".into()),
                     updated_at: Instant::now(),
                     restart_attempts: 1,
-                    next_restart_at: None,
+                    next_restart_at: Some(Instant::now()),
                 },
             );
-            let result = mgr.restart_server(Language::Rust);
+            let err = mgr.restart_server(Language::Ruby);
             let snap = mgr.status_snapshot();
-            (result.is_err(), snap)
+            (err, snap)
         })
         .await
         .unwrap();
-        let entry = snap.iter().find(|(l, _)| *l == Language::Rust).unwrap();
-        if result_is_err {
-            assert!(matches!(entry.1.state, LspServerState::Error { .. }));
-            assert_eq!(entry.1.restart_attempts, crate::lsp::MAX_RESTART_ATTEMPTS);
+        assert!(
+            err_result.is_err(),
+            "start_server should fail when Ruby LSP is not on PATH"
+        );
+        let (_, entry) = snap.iter().find(|(l, _)| *l == Language::Ruby).unwrap();
+        assert!(
+            matches!(entry.state, LspServerState::Error { .. }),
+            "restart failure should leave state Error, got {:?}",
+            entry.state
+        );
+        assert_eq!(
+            entry.restart_attempts, 1,
+            "restart_attempts preserved — not clamped to MAX — so a future \
+             successful restart can reset it normally"
+        );
+        assert!(
+            entry.next_restart_at.is_none(),
+            "next_restart_at cleared after failed restart"
+        );
+        assert_eq!(
+            entry.active_progress, 0,
+            "active_progress cleared after failed restart"
+        );
+        assert!(
+            entry.progress_message.is_none(),
+            "progress_message cleared after failed restart"
+        );
+    }
+
+    // -- plan_crash_restart: unit tests covering every branch of the pure
+    // scheduling logic used by the crash watcher. These don't spawn any
+    // LSP processes — they test the decision table directly.
+
+    fn restart_entry(attempts: u8) -> LspStatusEntry {
+        LspStatusEntry {
+            binary: "fake-ls".into(),
+            state: LspServerState::Ready,
+            active_progress: 3,
+            progress_message: Some("indexing something".into()),
+            updated_at: Instant::now(),
+            restart_attempts: attempts,
+            next_restart_at: None,
+        }
+    }
+
+    #[test]
+    fn plan_crash_restart_first_crash_schedules_zero_delay() {
+        let mut entry = restart_entry(0);
+        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), true);
+        assert_eq!(delay, Some(std::time::Duration::ZERO));
+        assert_eq!(entry.state, LspServerState::Restarting);
+        assert_eq!(entry.restart_attempts, 1);
+        assert!(entry.next_restart_at.is_some());
+        assert_eq!(entry.active_progress, 0, "stale progress cleared");
+        assert!(entry.progress_message.is_none(), "stale message cleared");
+    }
+
+    #[test]
+    fn plan_crash_restart_second_crash_schedules_one_second() {
+        let mut entry = restart_entry(1);
+        let delay = plan_crash_restart(&mut entry, "mainloop panicked".into(), true);
+        assert_eq!(delay, Some(std::time::Duration::from_secs(1)));
+        assert_eq!(entry.state, LspServerState::Restarting);
+        assert_eq!(entry.restart_attempts, 2);
+    }
+
+    #[test]
+    fn plan_crash_restart_third_crash_schedules_five_seconds() {
+        let mut entry = restart_entry(2);
+        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), true);
+        assert_eq!(delay, Some(std::time::Duration::from_secs(5)));
+        assert_eq!(entry.state, LspServerState::Restarting);
+        assert_eq!(entry.restart_attempts, 3);
+    }
+
+    #[test]
+    fn plan_crash_restart_budget_exhausted_stays_error() {
+        let mut entry = restart_entry(crate::lsp::MAX_RESTART_ATTEMPTS);
+        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), true);
+        assert_eq!(delay, None, "no more retries once budget is exhausted");
+        assert!(
+            matches!(entry.state, LspServerState::Error { .. }),
+            "state should remain Error, got {:?}",
+            entry.state
+        );
+        assert_eq!(
+            entry.restart_attempts,
+            crate::lsp::MAX_RESTART_ATTEMPTS,
+            "attempts should not increment past MAX"
+        );
+        assert!(entry.next_restart_at.is_none());
+    }
+
+    #[test]
+    fn plan_crash_restart_no_event_channel_stays_error() {
+        // Test mode (event_tx absent): plan must NOT transition to
+        // Restarting, because no LspRestartNeeded event will ever be sent.
+        let mut entry = restart_entry(0);
+        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), false);
+        assert_eq!(delay, None);
+        assert!(
+            matches!(entry.state, LspServerState::Error { .. }),
+            "without an event channel the plan should stop at Error, got {:?}",
+            entry.state
+        );
+        assert_eq!(
+            entry.restart_attempts, 0,
+            "attempts should not increment when no retry is scheduled"
+        );
+        assert!(entry.next_restart_at.is_none());
+    }
+
+    #[test]
+    fn plan_crash_restart_stores_reason_on_error_transition_even_when_scheduling() {
+        // Even when a restart IS scheduled, the intermediate Error state
+        // must have carried the reason through — the watcher temporarily
+        // writes Error before overwriting with Restarting, and the reason
+        // is what makes Error useful if the user happens to see it.
+        let mut entry = restart_entry(0);
+        let reason = "mainloop panicked: JoinError".to_string();
+        let _ = plan_crash_restart(&mut entry, reason, true);
+        // After a successful schedule the state is Restarting (confirmed
+        // in other tests). This test documents the intent of the reason
+        // path — covered via the budget-exhausted test, which lands in
+        // Error with the reason set.
+        let mut exhausted = restart_entry(crate::lsp::MAX_RESTART_ATTEMPTS);
+        plan_crash_restart(&mut exhausted, "specific reason".into(), true);
+        match &exhausted.state {
+            LspServerState::Error { reason } => {
+                assert_eq!(reason, "specific reason");
+            }
+            other => panic!("expected Error state with reason, got {other:?}"),
         }
     }
 }

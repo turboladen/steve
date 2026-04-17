@@ -97,7 +97,6 @@ async fn main() -> Result<()> {
         };
 
     // Initialize usage analytics (SQLite background writer)
-
     let data_dir = directories::ProjectDirs::from("", "", "steve")
         .map(|d| d.data_dir().to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("/tmp/steve-data"));
