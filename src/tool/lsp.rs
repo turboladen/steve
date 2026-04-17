@@ -543,6 +543,7 @@ mod tests {
             lsp_manager: Some(Arc::new(RwLock::new(LspManager::new(
                 dir.to_path_buf(),
                 test_runtime_handle(),
+                None,
             )))),
         }
     }

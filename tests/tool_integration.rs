@@ -443,6 +443,7 @@ fn lsp_tool_file_not_found() {
     let lsp_mgr = std::sync::Arc::new(std::sync::RwLock::new(steve::lsp::LspManager::new(
         root.clone(),
         rt.handle().clone(),
+        None,
     )));
     let ctx = ToolContext {
         project_root: root.clone(),
@@ -471,6 +472,7 @@ fn lsp_tool_unknown_operation() {
     let lsp_mgr = std::sync::Arc::new(std::sync::RwLock::new(steve::lsp::LspManager::new(
         root.clone(),
         rt.handle().clone(),
+        None,
     )));
     let ctx = ToolContext {
         project_root: root.clone(),
@@ -506,6 +508,7 @@ fn lsp_tool_definition_missing_position() {
     let lsp_mgr = std::sync::Arc::new(std::sync::RwLock::new(steve::lsp::LspManager::new(
         root.clone(),
         rt.handle().clone(),
+        None,
     )));
     let ctx = ToolContext {
         project_root: root.clone(),
@@ -549,6 +552,7 @@ fn lsp_diagnostics_with_rust_analyzer() {
     let lsp_mgr = std::sync::Arc::new(std::sync::RwLock::new(steve::lsp::LspManager::new(
         root.clone(),
         rt.handle().clone(),
+        None,
     )));
     let ctx = ToolContext {
         project_root: root.clone(),
@@ -596,6 +600,7 @@ fn lsp_definition_with_rust_analyzer() {
     let lsp_mgr = std::sync::Arc::new(std::sync::RwLock::new(steve::lsp::LspManager::new(
         root.clone(),
         rt.handle().clone(),
+        None,
     )));
     let ctx = ToolContext {
         project_root: root.clone(),

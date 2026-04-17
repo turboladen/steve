@@ -230,6 +230,7 @@ fn render_servers_section<'a>(
                 LspServerState::Starting => (spinner_glyph.clone(), theme.warning),
                 LspServerState::Indexing => (spinner_glyph.clone(), theme.success),
                 LspServerState::Ready => ("\u{25cf}".to_string(), theme.success),
+                LspServerState::Restarting => (spinner_glyph.clone(), theme.warning),
                 LspServerState::Error { .. } => ("\u{2715}".to_string(), theme.error),
             };
             let label = format!("{} ({})", server.binary, server.state.label());
@@ -240,15 +241,31 @@ fn render_servers_section<'a>(
             // Show progress message as a dimmed indented line during active states.
             let is_active = matches!(
                 server.state,
-                LspServerState::Starting | LspServerState::Indexing
+                LspServerState::Starting | LspServerState::Indexing | LspServerState::Restarting
             );
-            if is_active && let Some(msg) = &server.progress_message {
+            if matches!(server.state, LspServerState::Restarting) {
+                if let Some(restart_at) = server.next_restart_at {
+                    let remaining = restart_at.saturating_duration_since(std::time::Instant::now());
+                    let secs = remaining.as_secs();
+                    if secs > 0 {
+                        let countdown = format!("restarting in {secs}s");
+                        let max_chars = sidebar_width.saturating_sub(4);
+                        if max_chars > 0 {
+                            let display = crate::truncate_chars(&countdown, max_chars);
+                            lines.push(Line::from(vec![Span::styled(
+                                format!("    {display}"),
+                                Style::default().fg(theme.dim),
+                            )]));
+                        }
+                    }
+                }
+            } else if is_active && let Some(msg) = &server.progress_message {
                 // 3 chars for " ● " glyph column, then 1 indent = 4 chars prefix
                 let max_chars = sidebar_width.saturating_sub(4);
                 if max_chars > 0 {
-                    let truncated = crate::truncate_chars(msg, max_chars);
+                    let display = crate::truncate_chars(msg, max_chars);
                     lines.push(Line::from(Span::styled(
-                        format!("    {truncated}"),
+                        format!("    {display}"),
                         Style::default().fg(theme.dim),
                     )));
                 }
@@ -865,6 +882,7 @@ mod tests {
             binary: binary.to_string(),
             state: crate::lsp::LspServerState::Ready,
             progress_message: None,
+            next_restart_at: None,
         }
     }
 
@@ -892,11 +910,13 @@ mod tests {
                     binary: "rust-analyzer".to_string(),
                     state: crate::lsp::LspServerState::Starting,
                     progress_message: None,
+                    next_restart_at: None,
                 },
                 SidebarLsp {
                     binary: "pyright-langserver".to_string(),
                     state: crate::lsp::LspServerState::Indexing,
                     progress_message: None,
+                    next_restart_at: None,
                 },
             ],
             spinner_frame: 0,
@@ -922,6 +942,7 @@ mod tests {
                     reason: "not found on PATH".to_string(),
                 },
                 progress_message: None,
+                next_restart_at: None,
             }],
             ..Default::default()
         };
@@ -940,6 +961,7 @@ mod tests {
                 binary: "rust-analyzer".to_string(),
                 state: crate::lsp::LspServerState::Indexing,
                 progress_message: Some("Building crate graph".to_string()),
+                next_restart_at: None,
             }],
             spinner_frame: 0,
             ..Default::default()
@@ -958,6 +980,7 @@ mod tests {
                 binary: "rust-analyzer".to_string(),
                 state: crate::lsp::LspServerState::Starting,
                 progress_message: Some("Fetching metadata".to_string()),
+                next_restart_at: None,
             }],
             spinner_frame: 0,
             ..Default::default()
@@ -976,6 +999,7 @@ mod tests {
                 binary: "rust-analyzer".to_string(),
                 state: crate::lsp::LspServerState::Ready,
                 progress_message: Some("leftover message".to_string()),
+                next_restart_at: None,
             }],
             ..Default::default()
         };
@@ -995,6 +1019,7 @@ mod tests {
                 progress_message: Some(
                     "Very long progress message that exceeds sidebar width".to_string(),
                 ),
+                next_restart_at: None,
             }],
             spinner_frame: 0,
             ..Default::default()
@@ -1018,6 +1043,7 @@ mod tests {
                 binary: "rust-analyzer".to_string(),
                 state: crate::lsp::LspServerState::Indexing,
                 progress_message: None,
+                next_restart_at: None,
             }],
             spinner_frame: 0,
             ..Default::default()
@@ -1035,6 +1061,27 @@ mod tests {
             1,
             "should be exactly one line for server without progress message, got: {ra_lines:?}"
         );
+    }
+
+    #[test]
+    fn buffer_sidebar_lsp_section_shows_restarting_with_spinner() {
+        use crate::ui::status_line::SPINNER_FRAMES;
+        let state = SidebarState {
+            lsp_servers: vec![SidebarLsp {
+                binary: "rust-analyzer".to_string(),
+                state: crate::lsp::LspServerState::Restarting,
+                progress_message: None,
+                next_restart_at: None,
+            }],
+            spinner_frame: 0,
+            ..Default::default()
+        };
+        let text = render_sidebar_to_string(40, 20, &state);
+        assert!(text.contains("LSP"));
+        assert!(text.contains("rust-analyzer"));
+        assert!(text.contains("Restarting"));
+        let first_spinner = SPINNER_FRAMES[0];
+        assert!(text.contains(first_spinner));
     }
 
     #[test]

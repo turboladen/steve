@@ -216,6 +216,7 @@ impl App {
                             binary: entry.binary,
                             state: entry.state,
                             progress_message: entry.progress_message,
+                            next_restart_at: entry.next_restart_at,
                         })
                         .collect();
                 if next != self.sidebar_state.lsp_servers {
@@ -603,6 +604,25 @@ impl App {
             } => {
                 self.apply_title_if_current(&session_id, &fallback_title);
             }
+            AppEvent::LspRestartNeeded { lang } => {
+                let lsp = self.lsp_manager.clone();
+                let tx = self.event_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    // Match the rest of the codebase: recover from poisoning
+                    // rather than silently dropping the restart request.
+                    let mut mgr = lsp.write().unwrap_or_else(|p| p.into_inner());
+                    match mgr.restart_server(lang) {
+                        Ok(()) => {
+                            let _ = tx.send(AppEvent::StreamNotice {
+                                text: format!("LSP {lang} server restarted successfully"),
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!("LSP restart of {lang} failed: {e:#}");
+                        }
+                    }
+                });
+            }
             _ => {}
         }
         Ok(())
@@ -893,6 +913,16 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn event_lsp_restart_needed_does_not_panic() {
+        let mut app = make_test_app();
+        app.handle_event(AppEvent::LspRestartNeeded {
+            lang: crate::lsp::Language::Rust,
+        })
+        .await
+        .unwrap();
+    }
+
     #[test]
     fn keyboard_page_scroll() {
         let mut state = crate::ui::message_area::MessageAreaState::default();
@@ -909,6 +939,37 @@ mod tests {
             state.auto_scroll,
             "page down to bottom should re-enable auto_scroll"
         );
+    }
+
+    #[tokio::test]
+    async fn event_tick_shows_restarting_lsp_in_sidebar() {
+        let mut app = make_test_app();
+        {
+            let mut map = app.lsp_status_cache.lock().unwrap();
+            // Clear any entries seeded during App::new so we get exactly one.
+            map.clear();
+            map.insert(
+                crate::lsp::Language::Rust,
+                crate::lsp::LspStatusEntry {
+                    binary: "rust-analyzer".into(),
+                    state: crate::lsp::LspServerState::Restarting,
+                    active_progress: 0,
+                    progress_message: None,
+                    updated_at: std::time::Instant::now(),
+                    restart_attempts: 1,
+                    next_restart_at: Some(
+                        std::time::Instant::now() + std::time::Duration::from_secs(3),
+                    ),
+                },
+            );
+        }
+        app.handle_event(AppEvent::Tick).await.unwrap();
+        assert_eq!(app.sidebar_state.lsp_servers.len(), 1);
+        assert_eq!(
+            app.sidebar_state.lsp_servers[0].state,
+            crate::lsp::LspServerState::Restarting
+        );
+        assert!(app.sidebar_state.lsp_servers[0].next_restart_at.is_some());
     }
 
     #[tokio::test]
