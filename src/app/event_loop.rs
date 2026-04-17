@@ -152,51 +152,47 @@ impl App {
                             }
                         }
                     }
-                    MouseEventKind::Drag(MouseButton::Left) => {
-                        if self.selection_state.dragging {
-                            let area = self.last_message_area;
-                            // Scroll-to-select: scroll when dragging past edges
-                            if mouse.row < area.y {
-                                self.message_area_state.scroll_up(1);
-                            } else if mouse.row >= area.y + area.height {
-                                self.message_area_state.scroll_down(1);
-                            }
-                            if let Some(map) = &self.message_area_state.content_map
-                                && let Some(pos) = map.screen_to_content(
-                                    mouse.row,
-                                    mouse.column,
-                                    self.message_area_state.scroll_offset,
-                                    area.y,
-                                    area.x,
-                                )
-                            {
-                                self.selection_state.cursor = Some(pos);
-                            }
+                    MouseEventKind::Drag(MouseButton::Left) if self.selection_state.dragging => {
+                        let area = self.last_message_area;
+                        // Scroll-to-select: scroll when dragging past edges
+                        if mouse.row < area.y {
+                            self.message_area_state.scroll_up(1);
+                        } else if mouse.row >= area.y + area.height {
+                            self.message_area_state.scroll_down(1);
+                        }
+                        if let Some(map) = &self.message_area_state.content_map
+                            && let Some(pos) = map.screen_to_content(
+                                mouse.row,
+                                mouse.column,
+                                self.message_area_state.scroll_offset,
+                                area.y,
+                                area.x,
+                            )
+                        {
+                            self.selection_state.cursor = Some(pos);
                         }
                     }
-                    MouseEventKind::Up(MouseButton::Left) => {
-                        if self.selection_state.dragging {
-                            self.selection_state.dragging = false;
-                            // If we have a valid selection range, copy to clipboard
-                            if let Some((start, end)) = self.selection_state.ordered_range()
-                                && let Some(map) = &self.message_area_state.content_map
-                            {
-                                let text = map.extract_text(&start, &end);
-                                if !text.is_empty() {
-                                    self.copy_to_clipboard(&text);
-                                }
+                    MouseEventKind::Up(MouseButton::Left) if self.selection_state.dragging => {
+                        self.selection_state.dragging = false;
+                        // If we have a valid selection range, copy to clipboard
+                        if let Some((start, end)) = self.selection_state.ordered_range()
+                            && let Some(map) = &self.message_area_state.content_map
+                        {
+                            let text = map.extract_text(&start, &end);
+                            if !text.is_empty() {
+                                self.copy_to_clipboard(&text);
                             }
                         }
                     }
                     _ => {}
                 }
             }
-            AppEvent::Input(Event::Paste(text)) => {
-                if self.pending_permission.is_none() && self.pending_question.is_none() {
-                    self.input.collapse_paste(&text);
-                    let current_text = self.input.textarea.lines().join("\n");
-                    self.autocomplete_state.update(&current_text);
-                }
+            AppEvent::Input(Event::Paste(text))
+                if self.pending_permission.is_none() && self.pending_question.is_none() =>
+            {
+                self.input.collapse_paste(&text);
+                let current_text = self.input.textarea.lines().join("\n");
+                self.autocomplete_state.update(&current_text);
             }
             AppEvent::Input(Event::Resize(_, _)) => {}
             AppEvent::Tick => {
@@ -216,6 +212,7 @@ impl App {
                             binary: entry.binary,
                             state: entry.state,
                             progress_message: entry.progress_message,
+                            next_restart_at: entry.next_restart_at,
                         })
                         .collect();
                 if next != self.sidebar_state.lsp_servers {
@@ -230,48 +227,42 @@ impl App {
             }
 
             // -- Streaming events --
-            AppEvent::LlmResponseStart => {
-                if self.streaming_active {
-                    // Save the completed assistant message from the previous response
-                    if let Some(msg) = self.streaming_message.take()
-                        && !msg.text_content().is_empty()
-                    {
-                        let mgr = SessionManager::new(&self.storage, &self.project.id);
-                        let _ = mgr.save_message(&msg);
-                        self.stored_messages.push(msg);
-                    }
+            AppEvent::LlmResponseStart if self.streaming_active => {
+                // Save the completed assistant message from the previous response
+                if let Some(msg) = self.streaming_message.take()
+                    && !msg.text_content().is_empty()
+                {
+                    let mgr = SessionManager::new(&self.storage, &self.project.id);
+                    let _ = mgr.save_message(&msg);
+                    self.stored_messages.push(msg);
+                }
 
-                    // Start a fresh assistant block for the interjection response
-                    if let Some(session) = &self.current_session {
-                        self.streaming_message = Some(Message::assistant(&session.id, ""));
-                    }
-                    self.messages.push(MessageBlock::Assistant {
-                        thinking: None,
-                        parts: vec![],
-                    });
+                // Start a fresh assistant block for the interjection response
+                if let Some(session) = &self.current_session {
+                    self.streaming_message = Some(Message::assistant(&session.id, ""));
                 }
+                self.messages.push(MessageBlock::Assistant {
+                    thinking: None,
+                    parts: vec![],
+                });
             }
-            AppEvent::LlmDelta { text } => {
-                if self.streaming_active {
-                    // Append to the display message
-                    if let Some(last) = self.last_assistant_mut() {
-                        last.append_text(&text);
-                    }
-                    // Also append to the in-progress Message for persistence
-                    if let Some(msg) = &mut self.streaming_message {
-                        msg.append_text(&text);
-                    }
-                    self.message_area_state.scroll_to_bottom();
+            AppEvent::LlmDelta { text } if self.streaming_active => {
+                // Append to the display message
+                if let Some(last) = self.last_assistant_mut() {
+                    last.append_text(&text);
                 }
+                // Also append to the in-progress Message for persistence
+                if let Some(msg) = &mut self.streaming_message {
+                    msg.append_text(&text);
+                }
+                self.message_area_state.scroll_to_bottom();
             }
 
-            AppEvent::LlmReasoning { text } => {
-                if self.streaming_active {
-                    if let Some(last) = self.last_assistant_mut() {
-                        last.append_thinking(&text);
-                    }
-                    self.message_area_state.scroll_to_bottom();
+            AppEvent::LlmReasoning { text } if self.streaming_active => {
+                if let Some(last) = self.last_assistant_mut() {
+                    last.append_thinking(&text);
                 }
+                self.message_area_state.scroll_to_bottom();
             }
 
             // -- Tool events --
@@ -603,6 +594,25 @@ impl App {
             } => {
                 self.apply_title_if_current(&session_id, &fallback_title);
             }
+            AppEvent::LspRestartNeeded { lang } => {
+                let lsp = self.lsp_manager.clone();
+                let tx = self.event_tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    // Match the rest of the codebase: recover from poisoning
+                    // rather than silently dropping the restart request.
+                    let mut mgr = lsp.write().unwrap_or_else(|p| p.into_inner());
+                    match mgr.restart_server(lang) {
+                        Ok(()) => {
+                            let _ = tx.send(AppEvent::StreamNotice {
+                                text: format!("LSP {lang} server restarted successfully"),
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!("LSP restart of {lang} failed: {e:#}");
+                        }
+                    }
+                });
+            }
             _ => {}
         }
         Ok(())
@@ -893,6 +903,16 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn event_lsp_restart_needed_does_not_panic() {
+        let mut app = make_test_app();
+        app.handle_event(AppEvent::LspRestartNeeded {
+            lang: crate::lsp::Language::Rust,
+        })
+        .await
+        .unwrap();
+    }
+
     #[test]
     fn keyboard_page_scroll() {
         let mut state = crate::ui::message_area::MessageAreaState::default();
@@ -909,6 +929,37 @@ mod tests {
             state.auto_scroll,
             "page down to bottom should re-enable auto_scroll"
         );
+    }
+
+    #[tokio::test]
+    async fn event_tick_shows_restarting_lsp_in_sidebar() {
+        let mut app = make_test_app();
+        {
+            let mut map = app.lsp_status_cache.lock().unwrap();
+            // Clear any entries seeded during App::new so we get exactly one.
+            map.clear();
+            map.insert(
+                crate::lsp::Language::Rust,
+                crate::lsp::LspStatusEntry {
+                    binary: "rust-analyzer".into(),
+                    state: crate::lsp::LspServerState::Restarting,
+                    active_progress: 0,
+                    progress_message: None,
+                    updated_at: std::time::Instant::now(),
+                    restart_attempts: 1,
+                    next_restart_at: Some(
+                        std::time::Instant::now() + std::time::Duration::from_secs(3),
+                    ),
+                },
+            );
+        }
+        app.handle_event(AppEvent::Tick).await.unwrap();
+        assert_eq!(app.sidebar_state.lsp_servers.len(), 1);
+        assert_eq!(
+            app.sidebar_state.lsp_servers[0].state,
+            crate::lsp::LspServerState::Restarting
+        );
+        assert!(app.sidebar_state.lsp_servers[0].next_restart_at.is_some());
     }
 
     #[tokio::test]
