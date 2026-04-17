@@ -1441,11 +1441,14 @@ fn explore_agent_has_only_read_tools() {
     let tools = AgentType::Explore.allowed_tools();
     let filtered = ToolRegistry::filtered(PathBuf::from("/tmp"), &tools);
 
-    // Every allowed tool must be read-only.
+    // Every allowed tool must be read-only or LSP (auto-approved, no side effects).
     // Note: Webfetch is categorized as Exploring (UI) but is_read_only() == false,
     // so it is deliberately excluded from the Explore agent's tool set.
     for t in &tools {
-        assert!(t.is_read_only(), "Explore tool {t} should be read-only");
+        assert!(
+            t.is_read_only() || *t == ToolName::Lsp,
+            "Explore tool {t} should be read-only or LSP"
+        );
     }
 
     // Every non-allowed variant must be absent from the filtered registry
