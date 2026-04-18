@@ -57,3 +57,5 @@ sync.git-remote: "ssh://git@github.com/turboladen/steve.git"
 
 dolt:
   port: 59305
+
+sync.remote: "https://doltremoteapi.dolthub.com/turboladen/steve"
