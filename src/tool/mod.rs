@@ -730,7 +730,7 @@ mod tests {
                     "{t} is a write tool but doesn't have write marker"
                 );
             } else {
-                // Bash, Question, Task, Webfetch, Lsp, Symbols, FindSymbol, Agent — not covered by predicates
+                // Bash, Question, Task, Webfetch, Lsp, Agent — not covered by predicates
                 assert!(
                     ["\u{00b7}", "$", "\u{26a1}", ">"].contains(&t.tool_marker()),
                     "{t} has unexpected marker '{}'",
