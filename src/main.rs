@@ -51,6 +51,14 @@ async fn main() -> Result<()> {
 
     tracing::info!("steve starting up");
 
+    // One-time cleanup of orphan memory.md files left by the removed memory tool.
+    // Idempotent — safe to run every startup.
+    match steve::storage::sweep_legacy_memory_files() {
+        Ok(n) if n > 0 => tracing::info!(count = n, "removed legacy memory.md files"),
+        Ok(_) => {}
+        Err(err) => tracing::warn!(error = %err, "legacy memory sweep failed"),
+    }
+
     // Handle subcommands that don't need the full chat TUI setup
     match cli.command {
         Some(Commands::Data) => {
