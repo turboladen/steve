@@ -5,7 +5,7 @@ pub mod types;
 
 pub use types::{Category, DiagnosticCheck, DiagnosticSummary, Severity};
 
-use crate::config::Config;
+use crate::{config::Config, provider::ProviderInitWarning};
 
 /// Bundle of inputs for running all diagnostic checks.
 /// Borrows from existing App state — no cloning required.
@@ -22,6 +22,9 @@ pub struct DiagnosticInput<'a> {
     pub session_cost: Option<f64>,
     pub mcp_configured: &'a [&'a str],
     pub mcp_connected: &'a [(&'a str, usize, usize, usize)],
+    /// Providers whose `api_key_env` variable was unset at startup.
+    /// Surfaced as Error-severity checks under `AiEnvironment`.
+    pub missing_api_keys: &'a [ProviderInitWarning],
 }
 
 /// Run all diagnostic checks and return the combined results.
@@ -33,6 +36,8 @@ pub fn run_diagnostics(input: &DiagnosticInput) -> Vec<DiagnosticCheck> {
         input.system_prompt_len,
         input.config,
     ));
+
+    results.extend(checks::api_key_env_checks(input.missing_api_keys));
 
     results.extend(checks::lsp_health_checks(input.lsp_servers));
 
@@ -89,6 +94,7 @@ mod tests {
             session_cost: None,
             mcp_configured: &["github"],
             mcp_connected: &[],
+            missing_api_keys: &[],
         };
 
         let checks = run_diagnostics(&input);
@@ -97,6 +103,39 @@ mod tests {
         assert!(categories.contains(&Category::LspHealth));
         assert!(categories.contains(&Category::McpHealth));
         assert!(categories.contains(&Category::SessionEfficiency));
+    }
+
+    #[test]
+    fn run_diagnostics_surfaces_missing_api_keys_as_error() {
+        let config = Config::default();
+        let missing = vec![ProviderInitWarning {
+            provider_id: "fireworks".to_string(),
+            env_var: "FIREWORKS_API_KEY".to_string(),
+            reason: crate::provider::ProviderInitReason::MissingEnvVar,
+        }];
+        let input = DiagnosticInput {
+            agents_md: Some("# AGENTS.md\n"),
+            system_prompt_len: 1000,
+            config: &config,
+            lsp_servers: &[],
+            total_tokens: 10_000,
+            exchange_count: 1,
+            cache_hits: 0,
+            cache_misses: 0,
+            compaction_count: 0,
+            session_cost: None,
+            mcp_configured: &[],
+            mcp_connected: &[],
+            missing_api_keys: &missing,
+        };
+
+        let checks = run_diagnostics(&input);
+        let api_key_check = checks
+            .iter()
+            .find(|c| c.label.contains("fireworks"))
+            .expect("api key check for fireworks should be produced");
+        assert_eq!(api_key_check.severity, Severity::Error);
+        assert_eq!(api_key_check.category, Category::AiEnvironment);
     }
 
     #[test]
@@ -163,6 +202,7 @@ mod tests {
             session_cost: None,
             mcp_configured: &[],
             mcp_connected: &[],
+            missing_api_keys: &[],
         };
         let checks = run_diagnostics(&input);
         assert!(!checks.is_empty());

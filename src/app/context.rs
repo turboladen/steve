@@ -148,6 +148,7 @@ impl App {
             session_cost: self.sidebar_state.session_cost,
             mcp_configured: &mcp_configured,
             mcp_connected: &mcp_connected,
+            missing_api_keys: &self.missing_api_keys,
         };
         crate::diagnostics::run_diagnostics(&input)
     }
