@@ -89,7 +89,6 @@ async fn main() -> Result<()> {
     let (provider_registry, missing_api_keys) =
         steve::provider::ProviderRegistry::from_config(&cfg);
     tracing::info!(
-        providers = provider_registry.len(),
         missing = missing_api_keys.len(),
         "provider registry initialized",
     );

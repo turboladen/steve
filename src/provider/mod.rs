@@ -91,6 +91,10 @@ impl ProviderRegistry {
             }
         }
 
+        // HashMap iteration is non-deterministic; sort so startup messages
+        // and overlay entries appear in stable order across runs.
+        warnings.sort_by(|a, b| a.provider_id.cmp(&b.provider_id));
+
         (Self { providers }, warnings)
     }
 
@@ -147,9 +151,9 @@ impl ProviderRegistry {
         self.providers.is_empty()
     }
 
-    /// Number of providers that successfully initialized.
-    pub fn len(&self) -> usize {
-        self.providers.len()
+    /// Iterator over the provider IDs that successfully initialized.
+    pub fn provider_ids(&self) -> impl Iterator<Item = &str> {
+        self.providers.keys().map(String::as_str)
     }
 
     /// Build a registry from pre-constructed entries (no env var lookups).
@@ -278,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn from_config_returns_empty_registry_when_all_env_vars_unset() {
+    fn from_config_returns_empty_registry_when_all_env_vars_unset_and_sorts_warnings() {
         const UNSET_A: &str = "STEVE_TEST_ITZF_UNSET_A";
         const UNSET_B: &str = "STEVE_TEST_ITZF_UNSET_B";
 
@@ -288,8 +292,10 @@ mod tests {
         }
 
         let mut providers = HashMap::new();
-        providers.insert("a".to_string(), make_provider(UNSET_A));
-        providers.insert("b".to_string(), make_provider(UNSET_B));
+        // Deliberately insert in reverse alpha order — from_config should
+        // still emit warnings sorted by provider_id for stable startup output.
+        providers.insert("zeta".to_string(), make_provider(UNSET_B));
+        providers.insert("alpha".to_string(), make_provider(UNSET_A));
 
         let config = Config {
             providers,
@@ -300,8 +306,10 @@ mod tests {
 
         assert!(registry.is_empty());
         assert_eq!(warnings.len(), 2);
-        let mut env_vars: Vec<&str> = warnings.iter().map(|w| w.env_var.as_str()).collect();
-        env_vars.sort();
-        assert_eq!(env_vars, vec![UNSET_A, UNSET_B]);
+        assert_eq!(
+            warnings[0].provider_id, "alpha",
+            "warnings must be sorted by provider_id for deterministic startup output",
+        );
+        assert_eq!(warnings[1].provider_id, "zeta");
     }
 }
