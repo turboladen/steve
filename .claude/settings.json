@@ -1,4 +1,62 @@
 {
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "rustfmt +nightly \"$TOOL_INPUT_file_path\" 2\u003e/dev/null || true",
+            "type": "command"
+          },
+          {
+            "command": "echo \"$TOOL_INPUT_file_path\" | grep -qE '\\.rs$' \u0026\u0026 cargo clippy --quiet --message-format=short 2\u003e\u00261 | head -20 || true",
+            "type": "command"
+          },
+          {
+            "command": "echo \"$TOOL_INPUT_file_path\" | grep -q 'stream.rs' \u0026\u0026 grep -n 'unreachable!' \"$TOOL_INPUT_file_path\" \u0026\u0026 echo 'WARNING: unreachable!() found in stream.rs — panics in spawned tokio tasks crash silently. Use tracing::error! instead.' || true",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write"
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "command": "bd prime",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "echo \"$TOOL_INPUT_file_path\" | grep -q 'Cargo.lock' \u0026\u0026 echo 'BLOCK: Do not edit Cargo.lock directly. Use cargo commands instead.' \u0026\u0026 exit 1 || exit 0",
+            "type": "command"
+          },
+          {
+            "command": "echo \"$TOOL_INPUT_file_path\" | grep -qF '.steve.jsonc' \u0026\u0026 echo 'BLOCK: Do not edit .steve.jsonc — this is a user config file, not source code.' \u0026\u0026 exit 1 || exit 0",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "bd prime",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ]
+  },
   "permissions": {
     "allow": [
       "Bash(cargo:*)",
@@ -9,42 +67,6 @@
       "Bash(ls:*)",
       "Bash(wc:*)",
       "Bash(find:*)"
-    ]
-  },
-  "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "rustfmt +nightly \"$TOOL_INPUT_file_path\" 2>/dev/null || true"
-          },
-          {
-            "type": "command",
-            "command": "echo \"$TOOL_INPUT_file_path\" | grep -qE '\\.rs$' && cargo clippy --quiet --message-format=short 2>&1 | head -20 || true"
-          },
-          {
-            "type": "command",
-            "command": "echo \"$TOOL_INPUT_file_path\" | grep -q 'stream.rs' && grep -n 'unreachable!' \"$TOOL_INPUT_file_path\" && echo 'WARNING: unreachable!() found in stream.rs — panics in spawned tokio tasks crash silently. Use tracing::error! instead.' || true"
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "echo \"$TOOL_INPUT_file_path\" | grep -q 'Cargo.lock' && echo 'BLOCK: Do not edit Cargo.lock directly. Use cargo commands instead.' && exit 1 || exit 0"
-          },
-          {
-            "type": "command",
-            "command": "echo \"$TOOL_INPUT_file_path\" | grep -qF '.steve.jsonc' && echo 'BLOCK: Do not edit .steve.jsonc — this is a user config file, not source code.' && exit 1 || exit 0"
-          }
-        ]
-      }
     ]
   }
 }
