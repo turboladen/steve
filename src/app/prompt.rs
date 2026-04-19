@@ -115,28 +115,11 @@ impl App {
             - **Plan mode**: Read-only. Write tools are unavailable. Use this for analysis and planning.\n\
             - The user sees your tool calls and results in the TUI. Be concise — tool output consumes context window space.\n\
             - When context runs low, the conversation may be automatically compacted into a summary.\n\
-            - Use the `memory` tool to persist important discoveries across sessions.");
+            - Durable project knowledge lives in AGENTS.md files; suggest updates to the user rather than trying to persist it yourself.");
 
         parts.push(identity);
 
         parts.push(TOOL_GUIDANCE.to_string());
-
-        // Load project memory if it exists (with shared lock for safe concurrent access)
-        let memory_path = self.storage.base_dir().join("memory.md");
-        if let Ok(memory) = Self::read_memory_file(&memory_path)
-            && !memory.trim().is_empty()
-        {
-            let truncated = if memory.len() > 2000 {
-                let end = memory.floor_char_boundary(2000);
-                format!(
-                    "{}...\n(use memory tool to read full content)",
-                    &memory[..end]
-                )
-            } else {
-                memory
-            };
-            parts.push(format!("\n## Project Memory\n\n{truncated}"));
-        }
 
         // Inject open tasks summary
         let session_id = self
@@ -208,17 +191,6 @@ impl App {
         }
 
         Some(parts.join("\n"))
-    }
-
-    /// Read the memory file with a shared lock for safe concurrent access.
-    pub(super) fn read_memory_file(path: &std::path::Path) -> Result<String, std::io::Error> {
-        use std::io::Read;
-        let file = std::fs::File::open(path)?;
-        file.lock_shared()?;
-        let mut content = String::new();
-        (&file).read_to_string(&mut content)?;
-        let _ = file.unlock();
-        Ok(content)
     }
 
     /// Determine which model ref to use for compaction/summarization.
