@@ -7,6 +7,15 @@ use anyhow::{Context, Result};
 use crate::config::{Config, ModelConfig, ProviderConfig};
 use client::LlmClient;
 
+/// A provider that could not be initialized because its API key env var was unset.
+/// Surfaced as a diagnostic so users see *which* provider is disabled and *which*
+/// env var to set, instead of an opaque "provider setup failed" chat message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderInitWarning {
+    pub provider_id: String,
+    pub env_var: String,
+}
+
 /// A resolved model with its provider context.
 #[derive(Debug, Clone)]
 pub struct ResolvedModel {
@@ -52,30 +61,37 @@ struct ProviderEntry {
 
 impl ProviderRegistry {
     /// Build the registry from configuration.
-    pub fn from_config(config: &Config) -> Result<Self> {
+    ///
+    /// Providers whose `api_key_env` variable is not set are **skipped** and
+    /// reported in the returned warnings list. Previously a single missing env
+    /// var aborted registry construction entirely, making all providers
+    /// unavailable (steve-itzf).
+    pub fn from_config(config: &Config) -> (Self, Vec<ProviderInitWarning>) {
         let mut providers = HashMap::new();
+        let mut warnings = Vec::new();
 
         for (provider_id, provider_config) in &config.providers {
-            // Resolve the API key from the environment
-            let api_key = env::var(&provider_config.api_key_env).with_context(|| {
-                format!(
-                    "environment variable '{}' not set for provider '{}'",
-                    provider_config.api_key_env, provider_id
-                )
-            })?;
-
-            let client = LlmClient::new(&provider_config.base_url, &api_key);
-
-            providers.insert(
-                provider_id.clone(),
-                ProviderEntry {
-                    config: provider_config.clone(),
-                    client,
-                },
-            );
+            match env::var(&provider_config.api_key_env) {
+                Ok(api_key) => {
+                    let client = LlmClient::new(&provider_config.base_url, &api_key);
+                    providers.insert(
+                        provider_id.clone(),
+                        ProviderEntry {
+                            config: provider_config.clone(),
+                            client,
+                        },
+                    );
+                }
+                Err(_) => {
+                    warnings.push(ProviderInitWarning {
+                        provider_id: provider_id.clone(),
+                        env_var: provider_config.api_key_env.clone(),
+                    });
+                }
+            }
         }
 
-        Ok(Self { providers })
+        (Self { providers }, warnings)
     }
 
     /// Resolve a model reference like "provider/model" to a ResolvedModel.
@@ -129,6 +145,11 @@ impl ProviderRegistry {
     /// Check if the registry has any providers configured.
     pub fn is_empty(&self) -> bool {
         self.providers.is_empty()
+    }
+
+    /// Number of providers that successfully initialized.
+    pub fn len(&self) -> usize {
+        self.providers.len()
     }
 
     /// Build a registry from pre-constructed entries (no env var lookups).
@@ -196,5 +217,91 @@ mod tests {
         });
         // Zero tokens should return None (N/A), not Some(0.0)
         assert!(model.session_cost(0, 0).is_none());
+    }
+
+    /// Build a `ProviderConfig` wired to the given `api_key_env` name.
+    fn make_provider(api_key_env: &str) -> ProviderConfig {
+        ProviderConfig {
+            base_url: "https://api.test.com/v1".to_string(),
+            api_key_env: api_key_env.to_string(),
+            models: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn from_config_keeps_providers_with_set_env_vars_and_warns_for_unset() {
+        // Use test-specific env var names so parallel tests don't clash, and
+        // so we never depend on the developer's actual API-key env vars.
+        const SET_VAR: &str = "STEVE_TEST_ITZF_SET";
+        const UNSET_VAR: &str = "STEVE_TEST_ITZF_UNSET";
+
+        // SAFETY: single-threaded per-test and these env var names are
+        // namespaced to this test — no cross-test pollution.
+        // (`set_var` is unsafe in Rust 2024 edition due to process-global
+        // state; acceptable here because the name is unique.)
+        unsafe {
+            env::set_var(SET_VAR, "fake-key-value");
+            env::remove_var(UNSET_VAR);
+        }
+
+        let mut providers = HashMap::new();
+        providers.insert("good".to_string(), make_provider(SET_VAR));
+        providers.insert("bad".to_string(), make_provider(UNSET_VAR));
+
+        let config = Config {
+            providers,
+            ..Config::default()
+        };
+
+        let (registry, warnings) = ProviderRegistry::from_config(&config);
+
+        assert!(
+            registry.providers.contains_key("good"),
+            "provider 'good' with set env var should be registered",
+        );
+        assert!(
+            !registry.providers.contains_key("bad"),
+            "provider 'bad' with unset env var must be skipped, not registered with an empty key",
+        );
+        assert_eq!(
+            warnings.len(),
+            1,
+            "exactly one missing-env-var warning expected"
+        );
+        assert_eq!(warnings[0].provider_id, "bad");
+        assert_eq!(warnings[0].env_var, UNSET_VAR);
+
+        // Cleanup — avoid leaking the env var into sibling tests.
+        unsafe {
+            env::remove_var(SET_VAR);
+        }
+    }
+
+    #[test]
+    fn from_config_returns_empty_registry_when_all_env_vars_unset() {
+        const UNSET_A: &str = "STEVE_TEST_ITZF_UNSET_A";
+        const UNSET_B: &str = "STEVE_TEST_ITZF_UNSET_B";
+
+        unsafe {
+            env::remove_var(UNSET_A);
+            env::remove_var(UNSET_B);
+        }
+
+        let mut providers = HashMap::new();
+        providers.insert("a".to_string(), make_provider(UNSET_A));
+        providers.insert("b".to_string(), make_provider(UNSET_B));
+
+        let config = Config {
+            providers,
+            ..Config::default()
+        };
+
+        let (registry, warnings) = ProviderRegistry::from_config(&config);
+
+        assert!(registry.is_empty());
+        assert_eq!(warnings.len(), 2);
+        let mut env_vars: Vec<&str> = warnings.iter().map(|w| w.env_var.as_str()).collect();
+        env_vars.sort();
+        assert_eq!(env_vars, vec![UNSET_A, UNSET_B]);
     }
 }

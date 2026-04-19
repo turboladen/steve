@@ -1,8 +1,29 @@
 //! Pure diagnostic check functions — each takes typed inputs and returns findings.
 
-use crate::config::Config;
+use crate::{config::Config, provider::ProviderInitWarning};
 
 use super::types::{Category, DiagnosticCheck, Severity};
+
+/// Surface per-provider missing `api_key_env` failures as AI-environment errors.
+/// One check per affected provider so the overlay shows each env var by name.
+pub fn api_key_env_checks(missing: &[ProviderInitWarning]) -> Vec<DiagnosticCheck> {
+    missing
+        .iter()
+        .map(|w| DiagnosticCheck {
+            severity: Severity::Error,
+            category: Category::AiEnvironment,
+            label: format!("Missing API key for provider '{}'", w.provider_id),
+            detail: format!(
+                "${} is not set — provider '{}' is disabled",
+                w.env_var, w.provider_id,
+            ),
+            recommendation: Some(format!(
+                "Set ${} in your shell environment and restart steve",
+                w.env_var
+            )),
+        })
+        .collect()
+}
 
 /// Static project-health checks for the AI environment.
 pub fn ai_environment_checks(
@@ -455,5 +476,51 @@ mod tests {
         assert_eq!(checks[0].severity, Severity::Warning);
         assert!(checks[0].label.contains("no tools"));
         assert_eq!(checks[0].category, Category::McpHealth);
+    }
+
+    // -- api_key_env_checks tests --
+
+    #[test]
+    fn api_key_env_checks_empty_input_produces_no_checks() {
+        assert!(api_key_env_checks(&[]).is_empty());
+    }
+
+    #[test]
+    fn api_key_env_checks_one_per_missing_provider() {
+        let missing = vec![
+            ProviderInitWarning {
+                provider_id: "fireworks".to_string(),
+                env_var: "FIREWORKS_API_KEY".to_string(),
+            },
+            ProviderInitWarning {
+                provider_id: "anthropic".to_string(),
+                env_var: "ANTHROPIC_API_KEY".to_string(),
+            },
+        ];
+
+        let checks = api_key_env_checks(&missing);
+
+        assert_eq!(checks.len(), 2);
+        for check in &checks {
+            assert_eq!(check.severity, Severity::Error);
+            assert_eq!(check.category, Category::AiEnvironment);
+        }
+
+        let fireworks = checks
+            .iter()
+            .find(|c| c.label.contains("fireworks"))
+            .expect("fireworks check present");
+        assert!(
+            fireworks.detail.contains("$FIREWORKS_API_KEY"),
+            "detail should name the env var so user knows what to set: {}",
+            fireworks.detail,
+        );
+        assert!(
+            fireworks
+                .recommendation
+                .as_ref()
+                .is_some_and(|r| r.contains("FIREWORKS_API_KEY")),
+            "recommendation must reference the specific env var",
+        );
     }
 }

@@ -83,18 +83,23 @@ async fn main() -> Result<()> {
         tracing::info!(count = agents_files.len(), "AGENTS.md file(s) loaded");
     }
 
-    // Build provider registry (may fail if env vars not set)
-    let (provider_registry, provider_error) =
-        match steve::provider::ProviderRegistry::from_config(&cfg) {
-            Ok(registry) => {
-                tracing::info!("provider registry initialized");
-                (Some(registry), None)
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "provider registry failed");
-                (None, Some(e.to_string()))
-            }
-        };
+    // Build provider registry. Providers whose api_key env var is unset are
+    // skipped and reported as warnings — the registry still contains any
+    // provider whose env var IS set, so partial failures don't disable steve.
+    let (provider_registry, missing_api_keys) =
+        steve::provider::ProviderRegistry::from_config(&cfg);
+    tracing::info!(
+        providers = provider_registry.len(),
+        missing = missing_api_keys.len(),
+        "provider registry initialized",
+    );
+    for warning in &missing_api_keys {
+        tracing::warn!(
+            provider = %warning.provider_id,
+            env_var = %warning.env_var,
+            "provider disabled: api key env var not set",
+        );
+    }
 
     // Initialize usage analytics (SQLite background writer)
     let data_dir = directories::ProjectDirs::from("", "", "steve")
@@ -119,8 +124,8 @@ async fn main() -> Result<()> {
         cfg,
         store,
         agents_files,
-        provider_registry,
-        provider_error,
+        Some(provider_registry),
+        missing_api_keys,
         config_warnings,
         usage_handle.writer.clone(),
     );

@@ -60,7 +60,7 @@ fn make_test_app() -> App {
         storage,
         Vec::new(),
         None,
-        None,
+        Vec::new(),
         Vec::new(),
         usage_writer,
     )
