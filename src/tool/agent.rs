@@ -80,7 +80,6 @@ impl AgentType {
                 ToolName::Question,
                 ToolName::Task,
                 ToolName::Webfetch,
-                ToolName::Memory,
                 // Agent is deliberately excluded — no recursive spawning.
             ],
         }

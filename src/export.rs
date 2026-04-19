@@ -194,7 +194,7 @@ fn extract_tool_summary(tool_name: ToolName, input: &serde_json::Value) -> Strin
             ToolName::Webfetch => "(no url)".to_string(),
             ToolName::Move | ToolName::Copy => "(no path) \u{2192} (no path)".to_string(),
             ToolName::Agent => "(no task)".to_string(),
-            ToolName::Question | ToolName::Task | ToolName::Memory => String::new(),
+            ToolName::Question | ToolName::Task => String::new(),
         }
     } else {
         summary
@@ -403,7 +403,7 @@ mod tests {
         let args = json!({});
         for tool in ToolName::iter() {
             let result = extract_tool_summary(tool, &args);
-            if matches!(tool, ToolName::Question | ToolName::Task | ToolName::Memory) {
+            if matches!(tool, ToolName::Question | ToolName::Task) {
                 assert_eq!(
                     result, "",
                     "{tool} with empty args should return empty string"

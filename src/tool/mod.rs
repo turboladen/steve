@@ -8,7 +8,6 @@ pub mod glob;
 pub mod grep;
 pub mod list;
 pub mod lsp;
-pub mod memory;
 pub mod mkdir;
 pub mod move_;
 pub mod patch;
@@ -36,7 +35,7 @@ use crate::{lsp::LspManager, task::TaskStore};
 pub enum ToolVisualCategory {
     /// Read-only + webfetch + lsp — uses `tool_read` color, `·` marker.
     Read,
-    /// Write tools + memory — uses `tool_write` color, `✎` marker.
+    /// Write tools — uses `tool_write` color, `✎` marker.
     Write,
     /// Bash, question, task — uses `accent` color, `$`/`?`/`!` gutter chars.
     Accent,
@@ -50,7 +49,7 @@ pub enum ToolVisualCategory {
 pub enum IntentCategory {
     /// Read-only observation (read, grep, glob, list, webfetch).
     Exploring,
-    /// File mutations (edit, write, patch, memory).
+    /// File mutations (edit, write, patch).
     Editing,
     /// Shell commands (bash).
     Executing,
@@ -95,7 +94,6 @@ pub enum ToolName {
     Question,
     Task,
     Webfetch,
-    Memory,
     Symbols,
     Lsp,
     #[strum(serialize = "find_symbol")]
@@ -145,11 +143,6 @@ impl ToolName {
         self.is_read_only() || matches!(self, ToolName::Lsp)
     }
 
-    /// Whether this is the memory tool.
-    pub fn is_memory(self) -> bool {
-        matches!(self, ToolName::Memory)
-    }
-
     /// Whether this is the task tool (writes to disk via storage).
     pub fn is_task(self) -> bool {
         matches!(self, ToolName::Task)
@@ -176,7 +169,6 @@ impl ToolName {
             | ToolName::Question
             | ToolName::Task
             | ToolName::Webfetch
-            | ToolName::Memory
             | ToolName::FindSymbol
             | ToolName::Agent => &[],
         }
@@ -201,8 +193,7 @@ impl ToolName {
             | ToolName::Move
             | ToolName::Copy
             | ToolName::Delete
-            | ToolName::Mkdir
-            | ToolName::Memory => IntentCategory::Editing,
+            | ToolName::Mkdir => IntentCategory::Editing,
             ToolName::Bash => IntentCategory::Executing,
             ToolName::Question | ToolName::Task => IntentCategory::Asking,
             ToolName::Agent => IntentCategory::Delegating,
@@ -228,8 +219,7 @@ impl ToolName {
             | ToolName::Move
             | ToolName::Copy
             | ToolName::Delete
-            | ToolName::Mkdir
-            | ToolName::Memory => ToolVisualCategory::Write,
+            | ToolName::Mkdir => ToolVisualCategory::Write,
             ToolName::Bash | ToolName::Question | ToolName::Task | ToolName::Agent => {
                 ToolVisualCategory::Accent
             }
@@ -256,8 +246,7 @@ impl ToolName {
             | ToolName::Move
             | ToolName::Copy
             | ToolName::Delete
-            | ToolName::Mkdir
-            | ToolName::Memory => "\u{270e}", // ✎ (1 col)
+            | ToolName::Mkdir => "\u{270e}", // ✎ (1 col)
             ToolName::Bash => "$",
             ToolName::Question | ToolName::Task => "!",
             ToolName::Agent => ">",
@@ -285,8 +274,7 @@ impl ToolName {
             | ToolName::Move
             | ToolName::Copy
             | ToolName::Delete
-            | ToolName::Mkdir
-            | ToolName::Memory => "\u{270e}", // ✎
+            | ToolName::Mkdir => "\u{270e}", // ✎
             ToolName::Bash => "$",
             ToolName::Question | ToolName::Task => "\u{26a1}", // ⚡
             ToolName::Agent => ">",
@@ -343,16 +331,6 @@ pub enum FindSymbolOperation {
     Overview,
 }
 
-/// Actions supported by the `memory` tool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
-#[serde(rename_all = "snake_case")]
-#[strum(serialize_all = "snake_case")]
-pub enum MemoryAction {
-    Read,
-    Append,
-    Replace,
-}
-
 /// Actions supported by the `task` tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, EnumString, Display)]
 #[serde(rename_all = "snake_case")]
@@ -386,7 +364,7 @@ pub struct ToolOutput {
 pub struct ToolContext {
     /// The project root directory.
     pub project_root: PathBuf,
-    /// The storage directory for this project (for memory tool).
+    /// The storage directory for this project.
     pub storage_dir: Option<PathBuf>,
     /// The task store for persistent task management.
     pub task_store: Option<Arc<TaskStore>>,
@@ -456,7 +434,6 @@ impl ToolRegistry {
         registry.register(question::tool());
         registry.register(task::tool());
         registry.register(webfetch::tool());
-        registry.register(memory::tool());
 
         // Register agent tool (sub-agent delegation)
         registry.register(agent::tool());
@@ -534,7 +511,6 @@ impl ToolRegistry {
                 ToolName::Question => question::tool(),
                 ToolName::Task => task::tool(),
                 ToolName::Webfetch => webfetch::tool(),
-                ToolName::Memory => memory::tool(),
                 ToolName::Agent => unreachable!("Agent is filtered above"),
             };
             registry.register(entry);
@@ -711,7 +687,6 @@ mod tests {
             ToolName::Copy,
             ToolName::Delete,
             ToolName::Mkdir,
-            ToolName::Memory,
         ] {
             assert_eq!(
                 t.tool_marker(),
@@ -736,8 +711,8 @@ mod tests {
         assert_eq!(ToolName::Agent.tool_marker(), ">");
     }
 
-    /// Read-only tools get the read marker, write tools + memory get the
-    /// write marker, and remaining tools get execute/interactive markers.
+    /// Read-only tools get the read marker, write tools get the write
+    /// marker, and remaining tools get execute/interactive markers.
     /// Webfetch gets the read marker despite is_read_only() == false (UI-only divergence).
     #[test]
     fn tool_marker_categories_consistent() {
@@ -748,14 +723,14 @@ mod tests {
                     "\u{00b7}",
                     "{t} is read-only but doesn't have read marker"
                 );
-            } else if t.is_write_tool() || t.is_memory() {
+            } else if t.is_write_tool() {
                 assert_eq!(
                     t.tool_marker(),
                     "\u{270e}",
-                    "{t} is write/memory but doesn't have write marker"
+                    "{t} is a write tool but doesn't have write marker"
                 );
             } else {
-                // Bash, Question, Task, Webfetch, Agent — not covered by predicates
+                // Bash, Question, Task, Webfetch, Lsp, Symbols, FindSymbol, Agent — not covered by predicates
                 assert!(
                     ["\u{00b7}", "$", "\u{26a1}", ">"].contains(&t.tool_marker()),
                     "{t} has unexpected marker '{}'",
@@ -780,7 +755,7 @@ mod tests {
             let cat = t.intent_category();
             if t.is_read_only() || matches!(t, ToolName::Webfetch | ToolName::Lsp) {
                 assert_eq!(cat, IntentCategory::Exploring, "{t} should be Exploring");
-            } else if t.is_write_tool() || t.is_memory() {
+            } else if t.is_write_tool() {
                 assert_eq!(cat, IntentCategory::Editing, "{t} should be Editing");
             } else if t == ToolName::Bash {
                 assert_eq!(cat, IntentCategory::Executing, "{t} should be Executing");
@@ -811,7 +786,7 @@ mod tests {
             let cat = t.visual_category();
             if t.is_read_only() || matches!(t, ToolName::Webfetch | ToolName::Lsp) {
                 assert_eq!(cat, ToolVisualCategory::Read, "{t} should be Read");
-            } else if t.is_write_tool() || t.is_memory() {
+            } else if t.is_write_tool() {
                 assert_eq!(cat, ToolVisualCategory::Write, "{t} should be Write");
             } else {
                 assert_eq!(cat, ToolVisualCategory::Accent, "{t} should be Accent");

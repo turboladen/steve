@@ -190,15 +190,14 @@ pub(super) async fn partition_tool_calls(
     }
 
     // Partition: auto-allowed read-only tools can run in parallel.
-    // Write tools (edit, write, patch), memory tool (append action),
-    // task tool (writes to storage), and LSP rename (heavier mutex hold)
-    // always go to sequential phase. LSP read operations (diagnostics,
-    // definition, references) are safe for parallel execution.
+    // Write tools (edit, write, patch), task tool (writes to storage),
+    // and LSP rename (heavier mutex hold) always go to sequential phase.
+    // LSP read operations (diagnostics, definition, references) are safe
+    // for parallel execution.
     let (auto_allowed, needs_interaction): (Vec<_>, Vec<_>) =
         prepared.into_iter().partition(|tc| {
             matches!(tc.action, PermissionAction::Allow)
                 && !tc.tool_name.is_write_tool()
-                && !tc.tool_name.is_memory()
                 && !tc.tool_name.is_task()
                 && !matches!(tc.tool_name, ToolName::Question | ToolName::Agent)
                 && (tc.tool_name != ToolName::Lsp || is_lsp_read_op(&tc.args))
@@ -1379,13 +1378,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn partition_memory_and_task_need_interaction() {
-        let calls: HashMap<u32, PendingToolCall> = [
-            make_pending(0, "memory", r#"{"action":"append","content":"x"}"#),
-            make_pending(1, "task", r#"{"action":"create","title":"t"}"#),
-        ]
+    async fn partition_task_needs_interaction() {
+        // Task tool writes to storage — must go to sequential phase, never parallel.
+        let calls: HashMap<u32, PendingToolCall> = [make_pending(
+            0,
+            "task",
+            r#"{"action":"create","title":"t"}"#,
+        )]
         .into();
-        let indices = vec![0, 1];
+        let indices = vec![0];
         let mut messages = Vec::new();
         let mut counters = make_counters();
 
@@ -1401,7 +1402,8 @@ mod tests {
         .await;
 
         assert!(result.auto_allowed.is_empty());
-        assert_eq!(result.needs_interaction.len(), 2);
+        assert_eq!(result.needs_interaction.len(), 1);
+        assert_eq!(result.needs_interaction[0].tool_name, ToolName::Task);
     }
 
     #[tokio::test]

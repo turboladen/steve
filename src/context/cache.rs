@@ -396,7 +396,6 @@ impl ToolResultCache {
             | ToolName::Question
             | ToolName::Task
             | ToolName::Webfetch
-            | ToolName::Memory
             | ToolName::Agent => None,
         }
     }
@@ -429,7 +428,6 @@ impl ToolResultCache {
             | ToolName::Question
             | ToolName::Task
             | ToolName::Webfetch
-            | ToolName::Memory
             | ToolName::FindSymbol
             | ToolName::Agent => None,
         }

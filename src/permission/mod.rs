@@ -402,7 +402,6 @@ fn always_allowed_rules() -> Vec<PermissionRule> {
         rule(ToolName::Lsp, Allow),
         rule(ToolName::FindSymbol, Allow),
         // Utility tools (no filesystem side effects)
-        rule(ToolName::Memory, Allow),
         rule(ToolName::Task, Allow),
         rule(ToolName::Question, Allow),
     ]
@@ -482,10 +481,6 @@ mod tests {
             PermissionAction::Allow
         );
         // Utility tools also auto-allowed
-        assert_eq!(
-            engine.check(ToolName::Memory, None, None),
-            PermissionAction::Allow
-        );
         assert_eq!(
             engine.check(ToolName::Task, None, None),
             PermissionAction::Allow
