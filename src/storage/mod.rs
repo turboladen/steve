@@ -171,22 +171,21 @@ fn sweep_legacy_memory_files_in(storage_root: &std::path::Path) -> Result<usize>
             continue;
         }
         let memory_file = entry.path().join("memory.md");
-        if memory_file.exists() {
-            match std::fs::remove_file(&memory_file) {
-                Ok(()) => {
-                    tracing::info!(
-                        path = %memory_file.display(),
-                        "removed legacy memory.md"
-                    );
-                    removed += 1;
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        path = %memory_file.display(),
-                        error = %err,
-                        "failed to remove legacy memory.md",
-                    );
-                }
+        match std::fs::remove_file(&memory_file) {
+            Ok(()) => {
+                tracing::info!(
+                    path = %memory_file.display(),
+                    "removed legacy memory.md"
+                );
+                removed += 1;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                tracing::warn!(
+                    path = %memory_file.display(),
+                    error = %err,
+                    "failed to remove legacy memory.md",
+                );
             }
         }
     }
