@@ -90,7 +90,7 @@ inside `mod tests`, which is private and inaccessible from other modules).
 ### Enums over Strings
 
 Tool operations use typed enums (`EditOperation`, `SymbolsOperation`, `LspOperation`,
-`FindSymbolOperation`, `MemoryAction`, `TaskAction`) instead of string matching. Tree-sitter languages use
+`FindSymbolOperation`, `TaskAction`) instead of string matching. Tree-sitter languages use
 `TreeSitterLang` enum. Parse from JSON args with `.parse()`, match exhaustively — adding
 a variant produces compiler errors at every unhandled site.
 
@@ -117,7 +117,7 @@ suffix, used across tool display, export, and session modules.
 
 - **Tool call detection**: Check for valid data (non-empty `id` + `function_name`), NOT
   `finish_reason` — providers vary
-- **Sequential-only tools**: Write tools, `memory`, `lsp`, `question`, and MCP tools must
+- **Sequential-only tools**: Write tools, `lsp`, `question`, and MCP tools must
   never run in parallel. `agent` calls for Explore/Plan types are pre-spawned in parallel
   via `tokio::spawn`; General agents needing permission remain sequential
 - **No `unreachable!()` in stream tasks** — panics crash silently. Use `tracing::error!`
