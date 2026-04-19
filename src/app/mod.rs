@@ -226,18 +226,19 @@ pub struct App {
 ///
 /// Two presentation modes:
 /// - **Loud** (one consolidated multi-line message) when either nothing works
-///   (empty registry) or the default model's provider isn't usable. In both
-///   cases the user's typical first action — typing a message — would fail, so
-///   the warning must be impossible to miss.
+///   (empty registry), the default model's provider isn't usable, or
+///   `config.model` is malformed (missing the required `provider/model` slash).
+///   In each case the user's typical first action — typing a message — would
+///   fail, so the warning must be impossible to miss.
 /// - **Terse** (one short line per disabled provider) when the default still
 ///   works but some non-default providers are disabled. The user can proceed;
 ///   the full detail lives in the diagnostics overlay.
 ///
 /// `available_providers` is the set of provider IDs that successfully
 /// initialized. "Default disabled" means the default model's provider is
-/// **not** in this set — which catches both missing-env-var cases *and*
-/// configs where the default points at a provider ID that was never
-/// configured at all (typo, stale config).
+/// **not** in this set — which catches both env-var failures *and* configs
+/// where the default points at a provider ID that was never configured at all
+/// (typo, stale config).
 ///
 /// Caller must already have checked that `config.providers` is non-empty.
 fn build_missing_provider_messages(
@@ -245,23 +246,34 @@ fn build_missing_provider_messages(
     default_model: Option<&str>,
     missing: &[crate::provider::ProviderInitWarning],
 ) -> Vec<String> {
+    use crate::provider::ProviderInitReason;
+
     let registry_empty = available_providers.is_empty();
-    let default_provider_id = default_model.and_then(|m| m.split('/').next());
+
+    // Parse default model. `split_once` treats "no slash" as malformed rather
+    // than silently using the whole string as a provider id — otherwise a
+    // config like `model: "qwen3-coder"` (missing provider) would render a
+    // misleading "default model's provider is disabled" message.
+    let default_parse = default_model.map(|m| m.split_once('/'));
+    let default_malformed = matches!(default_parse, Some(None));
+    let default_provider_id = default_parse.and_then(|p| p.map(|(pid, _)| pid));
     let default_disabled =
         default_provider_id.is_some_and(|pid| !available_providers.contains(pid));
 
-    // Nothing to report: registry is healthy and no disabled providers.
-    if missing.is_empty() && !default_disabled {
+    // Nothing to report: registry healthy, no disabled providers, default is
+    // either absent or well-formed-and-available.
+    if missing.is_empty() && !default_disabled && !default_malformed {
         return Vec::new();
     }
 
-    if !(registry_empty || default_disabled) {
+    if !(registry_empty || default_disabled || default_malformed) {
         return missing
             .iter()
             .map(|w| {
                 format!(
-                    "Provider '{}' disabled: ${} is not set (see diagnostics for details)",
-                    w.provider_id, w.env_var,
+                    "Provider '{}' disabled: {} (see diagnostics for details)",
+                    w.provider_id,
+                    reason_phrase(w),
                 )
             })
             .collect();
@@ -269,13 +281,20 @@ fn build_missing_provider_messages(
 
     let headline = if registry_empty {
         "STEVE CANNOT SEND MESSAGES — no working providers"
+    } else if default_malformed {
+        "STEVE CANNOT SEND MESSAGES — default model ref is malformed"
     } else {
         "STEVE CANNOT SEND MESSAGES — default model's provider is disabled"
     };
     let mut text = String::from(headline);
     text.push_str("\n\n");
-    if default_disabled && let Some(model) = default_model {
+    if let Some(model) = default_model
+        && (default_disabled || default_malformed)
+    {
         text.push_str(&format!("Default model: {model}\n"));
+    }
+    if default_malformed {
+        text.push_str("Expected 'provider/model' format (e.g. 'fireworks/qwen3-coder').\n");
     }
     // If the default points at a provider that was *never configured* (typo,
     // stale config), it won't appear in `missing`. Call that out explicitly so
@@ -292,14 +311,30 @@ fn build_missing_provider_messages(
     if !missing.is_empty() {
         text.push_str("Disabled providers:\n");
         for w in missing {
+            let short = match w.reason {
+                ProviderInitReason::MissingEnvVar => "not set",
+                ProviderInitReason::NonUtf8EnvVar => "not valid UTF-8",
+            };
             text.push_str(&format!(
-                "  • ${}  (provider '{}')\n",
-                w.env_var, w.provider_id
+                "  • ${}  (provider '{}'): {short}\n",
+                w.env_var, w.provider_id,
             ));
         }
     }
-    text.push_str("\nSet the env var(s) and restart steve, or adjust your config.");
+    text.push_str("\nFix the env var(s) or config and restart steve.");
     vec![text]
+}
+
+/// Human-readable "why" phrase for a single provider's init failure.
+fn reason_phrase(w: &crate::provider::ProviderInitWarning) -> String {
+    match w.reason {
+        crate::provider::ProviderInitReason::MissingEnvVar => {
+            format!("${} is not set", w.env_var)
+        }
+        crate::provider::ProviderInitReason::NonUtf8EnvVar => {
+            format!("${} is set but not valid UTF-8", w.env_var)
+        }
+    }
 }
 
 impl App {
@@ -500,12 +535,21 @@ pub(crate) mod tests {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::provider::ProviderInitWarning;
+    use crate::provider::{ProviderInitReason, ProviderInitWarning};
 
     fn warn(provider: &str, env_var: &str) -> ProviderInitWarning {
         ProviderInitWarning {
             provider_id: provider.to_string(),
             env_var: env_var.to_string(),
+            reason: ProviderInitReason::MissingEnvVar,
+        }
+    }
+
+    fn warn_non_utf8(provider: &str, env_var: &str) -> ProviderInitWarning {
+        ProviderInitWarning {
+            provider_id: provider.to_string(),
+            env_var: env_var.to_string(),
+            reason: ProviderInitReason::NonUtf8EnvVar,
         }
     }
 
@@ -542,7 +586,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn default_providers_provider_disabled_produces_loud_message_even_if_others_work() {
+    fn default_model_provider_disabled_produces_loud_message_even_if_others_work() {
         // fireworks is the default *and* broken; anthropic works.
         let missing = vec![warn("fireworks", "FIREWORKS_API_KEY")];
         let avail = available(&["anthropic"]);
@@ -557,6 +601,47 @@ pub(crate) mod tests {
             "must name the default model so user knows what's broken: {msg}",
         );
         assert!(msg.contains("$FIREWORKS_API_KEY"));
+    }
+
+    #[test]
+    fn malformed_default_model_ref_is_loud_with_format_hint() {
+        // config.model is missing the required 'provider/' prefix — without
+        // split_once this would silently appear as "provider 'no-slash-here'
+        // disabled", which is wrong: the config itself is the problem.
+        let avail = available(&["fireworks"]);
+        let out = build_missing_provider_messages(&avail, Some("no-slash-here"), &[]);
+
+        assert_eq!(out.len(), 1);
+        let msg = &out[0];
+        assert!(msg.contains("STEVE CANNOT SEND MESSAGES"));
+        assert!(msg.contains("malformed"));
+        assert!(
+            msg.contains("provider/model"),
+            "must tell the user the expected format: {msg}",
+        );
+        assert!(msg.contains("no-slash-here"));
+        assert!(
+            !msg.contains("is disabled"),
+            "should not claim a provider is disabled when the ref is malformed: {msg}",
+        );
+    }
+
+    #[test]
+    fn terse_message_reflects_non_utf8_reason() {
+        // Default works; one non-default provider has non-UTF-8 env var.
+        // Message should say "not valid UTF-8", not "not set".
+        let missing = vec![warn_non_utf8("anthropic", "ANTHROPIC_API_KEY")];
+        let avail = available(&["fireworks"]);
+        let out = build_missing_provider_messages(&avail, Some("fireworks/qwen3-coder"), &missing);
+
+        assert_eq!(out.len(), 1);
+        let msg = &out[0];
+        assert!(msg.contains("Provider 'anthropic' disabled"));
+        assert!(
+            msg.contains("not valid UTF-8"),
+            "must surface the actual failure mode, not 'not set': {msg}",
+        );
+        assert!(!msg.contains("is not set"));
     }
 
     #[test]

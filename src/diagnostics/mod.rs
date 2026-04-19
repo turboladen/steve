@@ -111,6 +111,7 @@ mod tests {
         let missing = vec![ProviderInitWarning {
             provider_id: "fireworks".to_string(),
             env_var: "FIREWORKS_API_KEY".to_string(),
+            reason: crate::provider::ProviderInitReason::MissingEnvVar,
         }];
         let input = DiagnosticInput {
             agents_md: Some("# AGENTS.md\n"),

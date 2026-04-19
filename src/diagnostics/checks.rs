@@ -1,26 +1,51 @@
 //! Pure diagnostic check functions — each takes typed inputs and returns findings.
 
-use crate::{config::Config, provider::ProviderInitWarning};
+use crate::{
+    config::Config,
+    provider::{ProviderInitReason, ProviderInitWarning},
+};
 
 use super::types::{Category, DiagnosticCheck, Severity};
 
-/// Surface per-provider missing `api_key_env` failures as AI-environment errors.
-/// One check per affected provider so the overlay shows each env var by name.
+/// Surface per-provider `api_key_env` failures as AI-environment errors.
+/// One check per affected provider so the overlay shows each env var by name,
+/// with wording that reflects the specific failure mode ("not set" vs
+/// "set but not valid UTF-8") — the remediation differs.
 pub fn api_key_env_checks(missing: &[ProviderInitWarning]) -> Vec<DiagnosticCheck> {
     missing
         .iter()
-        .map(|w| DiagnosticCheck {
-            severity: Severity::Error,
-            category: Category::AiEnvironment,
-            label: format!("Missing API key for provider '{}'", w.provider_id),
-            detail: format!(
-                "${} is not set — provider '{}' is disabled",
-                w.env_var, w.provider_id,
-            ),
-            recommendation: Some(format!(
-                "Set ${} in your shell environment and restart steve",
-                w.env_var
-            )),
+        .map(|w| {
+            let (label, detail, recommendation) = match w.reason {
+                ProviderInitReason::MissingEnvVar => (
+                    format!("Missing API key for provider '{}'", w.provider_id),
+                    format!(
+                        "${} is not set — provider '{}' is disabled",
+                        w.env_var, w.provider_id,
+                    ),
+                    format!(
+                        "Set ${} in your shell environment and restart steve",
+                        w.env_var
+                    ),
+                ),
+                ProviderInitReason::NonUtf8EnvVar => (
+                    format!("Corrupt API key for provider '{}'", w.provider_id),
+                    format!(
+                        "${} is set but contains non-UTF-8 bytes — provider '{}' is disabled",
+                        w.env_var, w.provider_id,
+                    ),
+                    format!(
+                        "Re-export ${} with a valid UTF-8 value and restart steve",
+                        w.env_var
+                    ),
+                ),
+            };
+            DiagnosticCheck {
+                severity: Severity::Error,
+                category: Category::AiEnvironment,
+                label,
+                detail,
+                recommendation: Some(recommendation),
+            }
         })
         .collect()
 }
@@ -491,10 +516,12 @@ mod tests {
             ProviderInitWarning {
                 provider_id: "fireworks".to_string(),
                 env_var: "FIREWORKS_API_KEY".to_string(),
+                reason: ProviderInitReason::MissingEnvVar,
             },
             ProviderInitWarning {
                 provider_id: "anthropic".to_string(),
                 env_var: "ANTHROPIC_API_KEY".to_string(),
+                reason: ProviderInitReason::MissingEnvVar,
             },
         ];
 
@@ -521,6 +548,36 @@ mod tests {
                 .as_ref()
                 .is_some_and(|r| r.contains("FIREWORKS_API_KEY")),
             "recommendation must reference the specific env var",
+        );
+    }
+
+    #[test]
+    fn api_key_env_checks_distinguishes_non_utf8_from_missing() {
+        let missing = vec![ProviderInitWarning {
+            provider_id: "fireworks".to_string(),
+            env_var: "FIREWORKS_API_KEY".to_string(),
+            reason: ProviderInitReason::NonUtf8EnvVar,
+        }];
+
+        let check = api_key_env_checks(&missing).pop().expect("one check");
+
+        assert_eq!(check.severity, Severity::Error);
+        assert!(
+            check.label.contains("Corrupt"),
+            "label must distinguish from plain 'missing': {}",
+            check.label,
+        );
+        assert!(
+            check.detail.contains("non-UTF-8"),
+            "detail must tell the user the var IS set, just unreadable: {}",
+            check.detail,
+        );
+        assert!(
+            check
+                .recommendation
+                .as_ref()
+                .is_some_and(|r| r.contains("Re-export")),
+            "recommendation must not just say 'set the var' — it's already set",
         );
     }
 }

@@ -7,13 +7,25 @@ use anyhow::{Context, Result};
 use crate::config::{Config, ModelConfig, ProviderConfig};
 use client::LlmClient;
 
-/// A provider that could not be initialized because its API key env var was unset.
-/// Surfaced as a diagnostic so users see *which* provider is disabled and *which*
-/// env var to set, instead of an opaque "provider setup failed" chat message.
+/// Why a provider could not be initialized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderInitReason {
+    /// `api_key_env` is unset in the environment.
+    MissingEnvVar,
+    /// `api_key_env` is set but its value is not valid UTF-8. Distinct from
+    /// `MissingEnvVar` so the user isn't told to "set" a variable that's
+    /// already set — the remediation is to re-export it with a valid value.
+    NonUtf8EnvVar,
+}
+
+/// A provider that could not be initialized. Surfaced as a diagnostic so users
+/// see *which* provider is disabled, *which* env var is involved, and *why*,
+/// instead of an opaque "provider setup failed" chat message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderInitWarning {
     pub provider_id: String,
     pub env_var: String,
+    pub reason: ProviderInitReason,
 }
 
 /// A resolved model with its provider context.
@@ -82,10 +94,15 @@ impl ProviderRegistry {
                         },
                     );
                 }
-                Err(_) => {
+                Err(e) => {
+                    let reason = match e {
+                        env::VarError::NotPresent => ProviderInitReason::MissingEnvVar,
+                        env::VarError::NotUnicode(_) => ProviderInitReason::NonUtf8EnvVar,
+                    };
                     warnings.push(ProviderInitWarning {
                         provider_id: provider_id.clone(),
                         env_var: provider_config.api_key_env.clone(),
+                        reason,
                     });
                 }
             }
@@ -274,10 +291,52 @@ mod tests {
         );
         assert_eq!(warnings[0].provider_id, "bad");
         assert_eq!(warnings[0].env_var, UNSET_VAR);
+        assert_eq!(warnings[0].reason, ProviderInitReason::MissingEnvVar);
 
         // Cleanup — avoid leaking the env var into sibling tests.
         unsafe {
             env::remove_var(SET_VAR);
+        }
+    }
+
+    /// `env::var` can return `VarError::NotUnicode` when the env var *is* set
+    /// but contains bytes that aren't valid UTF-8 — a distinct failure mode
+    /// from "not set" that the user needs to fix differently. Only runs on
+    /// Unix where we can construct an `OsString` from raw bytes.
+    #[cfg(unix)]
+    #[test]
+    fn from_config_distinguishes_non_utf8_env_var_from_missing() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        const NON_UTF8_VAR: &str = "STEVE_TEST_ITZF_BADUTF8";
+
+        // SAFETY: test-unique name, same rationale as the other env tests.
+        unsafe {
+            // 0xFF is not valid UTF-8.
+            env::set_var(
+                NON_UTF8_VAR,
+                OsString::from_vec(vec![0xFF, b'k', b'e', b'y']),
+            );
+        }
+
+        let mut providers = HashMap::new();
+        providers.insert("broken".to_string(), make_provider(NON_UTF8_VAR));
+        let config = Config {
+            providers,
+            ..Config::default()
+        };
+
+        let (registry, warnings) = ProviderRegistry::from_config(&config);
+
+        assert!(
+            registry.is_empty(),
+            "provider with bad UTF-8 must be skipped"
+        );
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].reason, ProviderInitReason::NonUtf8EnvVar);
+
+        unsafe {
+            env::remove_var(NON_UTF8_VAR);
         }
     }
 

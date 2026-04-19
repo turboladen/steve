@@ -93,10 +93,14 @@ async fn main() -> Result<()> {
         "provider registry initialized",
     );
     for warning in &missing_api_keys {
+        let reason = match warning.reason {
+            steve::provider::ProviderInitReason::MissingEnvVar => "env var not set",
+            steve::provider::ProviderInitReason::NonUtf8EnvVar => "env var is not valid UTF-8",
+        };
         tracing::warn!(
             provider = %warning.provider_id,
             env_var = %warning.env_var,
-            "provider disabled: api key env var not set",
+            "provider disabled: {reason}",
         );
     }
 
