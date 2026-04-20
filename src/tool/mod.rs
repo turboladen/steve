@@ -745,6 +745,13 @@ mod tests {
             "\u{00b7}",
             "Webfetch should have read marker (UI-only, not in is_read_only() group)"
         );
+
+        // Lsp specifically: also gets the read marker despite is_read_only() == false
+        assert_eq!(
+            ToolName::Lsp.tool_marker(),
+            "\u{00b7}",
+            "Lsp should have read marker (read-like, not in is_read_only() group)"
+        );
     }
 
     /// Every variant maps to the expected intent category.

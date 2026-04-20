@@ -148,34 +148,63 @@ impl Storage {
     }
 }
 
-/// Delete orphan `memory.md` files left behind by the removed memory tool.
-///
-/// Sweeps every subdirectory of the storage root. Idempotent — safe to run
-/// every startup. Errors from individual file removals are swallowed
-/// (logged) so one permission problem doesn't block other cleanups.
-pub fn sweep_legacy_memory_files() -> Result<usize> {
-    let Ok(storage_root) = data_dir() else {
-        return Ok(0);
+/// Delete orphan `memory.md` files from the removed memory tool. Idempotent.
+pub fn sweep_legacy_memory_files() -> usize {
+    let storage_root = match data_dir() {
+        Ok(dir) => dir,
+        Err(err) => {
+            tracing::debug!(error = %err, "sweep skipped: could not determine data dir");
+            return 0;
+        }
     };
     sweep_legacy_memory_files_in(&storage_root)
 }
 
-/// Testable form — takes an explicit storage root.
-fn sweep_legacy_memory_files_in(storage_root: &std::path::Path) -> Result<usize> {
-    let Ok(entries) = std::fs::read_dir(storage_root) else {
-        return Ok(0);
+fn sweep_legacy_memory_files_in(storage_root: &std::path::Path) -> usize {
+    let entries = match std::fs::read_dir(storage_root) {
+        Ok(e) => e,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return 0,
+        Err(err) => {
+            tracing::warn!(
+                path = %storage_root.display(),
+                error = %err,
+                "sweep skipped: could not read storage root",
+            );
+            return 0;
+        }
     };
+
     let mut removed = 0;
-    for entry in entries.flatten() {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+    for result in entries {
+        let entry = match result {
+            Ok(e) => e,
+            Err(err) => {
+                tracing::debug!(error = %err, "skipping unreadable directory entry");
+                continue;
+            }
+        };
+
+        let is_dir = match entry.file_type() {
+            Ok(ft) => ft.is_dir(),
+            Err(err) => {
+                tracing::debug!(
+                    path = %entry.path().display(),
+                    error = %err,
+                    "could not determine file type, skipping",
+                );
+                continue;
+            }
+        };
+        if !is_dir {
             continue;
         }
+
         let memory_file = entry.path().join("memory.md");
         match std::fs::remove_file(&memory_file) {
             Ok(()) => {
                 tracing::info!(
                     path = %memory_file.display(),
-                    "removed legacy memory.md"
+                    "removed legacy memory.md",
                 );
                 removed += 1;
             }
@@ -189,7 +218,7 @@ fn sweep_legacy_memory_files_in(storage_root: &std::path::Path) -> Result<usize>
             }
         }
     }
-    Ok(removed)
+    removed
 }
 
 /// Get the base data directory: `~/.local/share/steve/storage/`
@@ -351,7 +380,7 @@ mod tests {
             std::fs::write(p.join("keep.txt"), "should remain").unwrap();
         }
 
-        let removed = sweep_legacy_memory_files_in(storage_root).unwrap();
+        let removed = sweep_legacy_memory_files_in(storage_root);
         assert_eq!(removed, 2, "should remove both memory.md files");
 
         for proj in ["proj-alpha", "proj-beta"] {
@@ -361,7 +390,7 @@ mod tests {
         }
 
         // Second call is idempotent.
-        let removed_again = sweep_legacy_memory_files_in(storage_root).unwrap();
+        let removed_again = sweep_legacy_memory_files_in(storage_root);
         assert_eq!(removed_again, 0, "second sweep finds nothing");
     }
 
@@ -369,8 +398,47 @@ mod tests {
     fn sweep_handles_missing_storage_dir() {
         let dir = tempdir().unwrap();
         let missing = dir.path().join("does-not-exist");
-        let removed = sweep_legacy_memory_files_in(&missing).unwrap();
+        let removed = sweep_legacy_memory_files_in(&missing);
         assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn sweep_skips_files_at_storage_root() {
+        // A `memory.md` directly at the storage root (not inside a project dir)
+        // must NOT be removed — the sweep only targets `{project}/memory.md`.
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("memory.md"), "stray file at root").unwrap();
+
+        let removed = sweep_legacy_memory_files_in(root);
+        assert_eq!(removed, 0, "file at storage root must not be swept");
+        assert!(root.join("memory.md").exists(), "stray file must remain");
+    }
+
+    #[test]
+    fn sweep_continues_after_remove_failure() {
+        // If one project's memory.md can't be removed (simulated by making it
+        // a directory, which triggers EISDIR on remove_file), the sweep must
+        // log and continue — other projects still get cleaned.
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // proj-a: memory.md is a DIRECTORY — remove_file fails with EISDIR
+        let proj_a_memory = root.join("proj-a").join("memory.md");
+        std::fs::create_dir_all(&proj_a_memory).unwrap();
+
+        // proj-b: memory.md is a regular file — normal success path
+        let proj_b = root.join("proj-b");
+        std::fs::create_dir_all(&proj_b).unwrap();
+        std::fs::write(proj_b.join("memory.md"), "stale").unwrap();
+
+        let removed = sweep_legacy_memory_files_in(root);
+        assert_eq!(removed, 1, "only proj-b's file should count as removed");
+        assert!(proj_a_memory.is_dir(), "proj-a's directory must survive");
+        assert!(
+            !proj_b.join("memory.md").exists(),
+            "proj-b file must be gone"
+        );
     }
 
     #[test]
