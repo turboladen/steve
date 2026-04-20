@@ -723,7 +723,6 @@ mod tests {
             ToolName::Question,
             ToolName::Task,
             ToolName::Webfetch,
-            ToolName::Memory,
         ] {
             let mut block = MessageBlock::Assistant {
                 thinking: None,

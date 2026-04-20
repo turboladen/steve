@@ -1534,7 +1534,6 @@ mod tests {
             ToolName::Copy,
             ToolName::Delete,
             ToolName::Mkdir,
-            ToolName::Memory,
         ] {
             let group = make_tool_group(&[tool]);
             assert_eq!(

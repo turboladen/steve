@@ -157,7 +157,6 @@ fn compress_tool_output(
         | ToolName::Question
         | ToolName::Task
         | ToolName::Webfetch
-        | ToolName::Memory
         | ToolName::Symbols
         | ToolName::Lsp
         | ToolName::FindSymbol

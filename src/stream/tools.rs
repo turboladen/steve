@@ -126,7 +126,6 @@ pub(super) fn build_permission_summary(tool_name: ToolName, args: &Value) -> Str
         | ToolName::Question
         | ToolName::Task
         | ToolName::Webfetch
-        | ToolName::Memory
         | ToolName::Symbols
         | ToolName::Lsp
         | ToolName::FindSymbol => {

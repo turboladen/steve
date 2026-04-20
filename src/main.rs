@@ -51,6 +51,12 @@ async fn main() -> Result<()> {
 
     tracing::info!("steve starting up");
 
+    // Idempotent sweep of orphan memory.md files left by the removed memory tool.
+    let removed = steve::storage::sweep_legacy_memory_files();
+    if removed > 0 {
+        tracing::info!(count = removed, "removed legacy memory.md files");
+    }
+
     // Handle subcommands that don't need the full chat TUI setup
     match cli.command {
         Some(Commands::Data) => {

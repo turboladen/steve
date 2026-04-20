@@ -90,11 +90,6 @@ pub fn extract_args_summary(tool_name: ToolName, args: &Value) -> String {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
-        ToolName::Memory => args
-            .get("action")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
         ToolName::Lsp => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let op: LspOperation = args
@@ -266,7 +261,6 @@ pub(super) fn extract_diff_content(tool_name: ToolName, args: &Value) -> Option<
         | ToolName::Question
         | ToolName::Task
         | ToolName::Webfetch
-        | ToolName::Memory
         | ToolName::Move
         | ToolName::Copy
         | ToolName::Delete
@@ -419,7 +413,6 @@ mod tests {
         assert_eq!(extract_args_summary(ToolName::Bash, &args), "");
         assert_eq!(extract_args_summary(ToolName::Question, &args), "");
         assert_eq!(extract_args_summary(ToolName::Webfetch, &args), "");
-        assert_eq!(extract_args_summary(ToolName::Memory, &args), "");
     }
 
     #[test]
