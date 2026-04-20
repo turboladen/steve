@@ -202,7 +202,17 @@ impl LspManager {
         let (mainloop, server_socket) =
             create_client(diagnostics.clone(), self.status.clone(), lang);
 
+        // Hold a sender clone inside the mainloop task so `rx` stays open for
+        // the entire lifetime of the mainloop future. Our Router service
+        // (`create_client`) does not capture the server socket, so without
+        // this keepalive the only senders live in `LspServer` + its shutdown
+        // task; when those drop after `transport_shutdown`, async-lsp's
+        // `rx.next() => event.expect("Sender is alive")` races the abort and
+        // panics. The keepalive drops with the task, after the mainloop is
+        // done polling.
+        let mainloop_keepalive = server_socket.clone();
         let mainloop_handle = self.handle.spawn(async move {
+            let _keepalive = mainloop_keepalive;
             tracing::debug!("LSP MainLoop starting for {binary_for_log}");
             match mainloop
                 .run_buffered(stdout.compat(), stdin.compat_write())
