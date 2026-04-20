@@ -88,21 +88,10 @@ In `src/app/prompt.rs`:
 Add a new helper to `src/storage/mod.rs`:
 
 ```rust
-/// Delete orphan `memory.md` files left behind by the removed memory tool.
-/// Idempotent — safe to run every startup.
-pub fn sweep_legacy_memory_files() -> Result<usize> {
-    let Ok(storage_root) = data_dir() else { return Ok(0) };
-    let Ok(entries) = std::fs::read_dir(&storage_root) else { return Ok(0) };
-    let mut removed = 0;
-    for entry in entries.flatten() {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) { continue; }
-        let memory_file = entry.path().join("memory.md");
-        if memory_file.exists() && std::fs::remove_file(&memory_file).is_ok() {
-            tracing::info!(path = %memory_file.display(), "removed legacy memory.md");
-            removed += 1;
-        }
-    }
-    Ok(removed)
+/// Delete orphan `memory.md` files from the removed memory tool. Idempotent.
+pub fn sweep_legacy_memory_files() -> usize {
+    // full impl per src/storage/mod.rs — logs data_dir/read_dir failures at
+    // debug/warn, continues past per-file errors, silent on NotFound.
 }
 ```
 

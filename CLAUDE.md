@@ -117,7 +117,7 @@ suffix, used across tool display, export, and session modules.
 
 - **Tool call detection**: Check for valid data (non-empty `id` + `function_name`), NOT
   `finish_reason` — providers vary
-- **Sequential-only tools**: Write tools, `lsp`, `question`, and MCP tools must
+- **Sequential-only tools**: Write tools, `lsp` rename (read ops like diagnostics/definition/references stay parallel), `question`, and MCP tools must
   never run in parallel. `agent` calls for Explore/Plan types are pre-spawned in parallel
   via `tokio::spawn`; General agents needing permission remain sequential
 - **No `unreachable!()` in stream tasks** — panics crash silently. Use `tracing::error!`
