@@ -171,7 +171,9 @@ impl Language {
     /// Phase 1 checks the project root (zero overhead for single-project repos).
     /// Phase 2 walks subdirectories for any languages not yet found (monorepo support).
     /// Files up to 3 directories deep are detected (`max_depth(4)`, root = depth 0).
-    /// The walk respects `.gitignore` via `WalkBuilder`.
+    /// The walk respects `.gitignore` via `WalkBuilder` and skips `.git/` explicitly
+    /// but otherwise traverses hidden directories, so trigger files under
+    /// `.github/workflows/`, `.circleci/`, etc. are visible.
     ///
     /// Marker-filename languages (Rust/Python/TypeScript/Ruby) trigger on specific
     /// filenames; extension-only languages (Lua/Bash/YAML/TOML/Fish) trigger on
@@ -212,9 +214,10 @@ impl Language {
             || !found_fish;
         if any_missing {
             let walker = ignore::WalkBuilder::new(root)
-                .hidden(true)
+                .hidden(false)
                 .git_ignore(true)
                 .max_depth(Some(4))
+                .filter_entry(|e| e.file_name() != ".git")
                 .build();
 
             for entry in walker.flatten() {
@@ -509,6 +512,37 @@ mod tests {
         ] {
             assert!(langs.contains(&lang), "{lang} not detected");
         }
+    }
+
+    #[test]
+    fn detect_from_project_github_workflows_yaml() {
+        // Regression (steve-h7da): .github/ is a hidden dir, but its contents
+        // must still be visible to the walker so GH Actions workflows trigger YAML.
+        let dir = tempdir().unwrap();
+        let workflows = dir.path().join(".github").join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(workflows.join("ci.yml"), "").unwrap();
+        let langs = Language::detect_from_project(dir.path());
+        assert!(
+            langs.contains(&Language::Yaml),
+            "YAML should be detected via .github/workflows/*.yml"
+        );
+    }
+
+    #[test]
+    fn detect_from_project_skips_dot_git() {
+        // Regression (steve-h7da): the walker must NOT descend into .git/, since
+        // it contains arbitrary packed objects that can have any extension.
+        let dir = tempdir().unwrap();
+        let git_dir = dir.path().join(".git").join("hooks");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        // A stray .yml inside .git/ should NOT trigger YAML.
+        std::fs::write(git_dir.join("config.yml"), "").unwrap();
+        let langs = Language::detect_from_project(dir.path());
+        assert!(
+            !langs.contains(&Language::Yaml),
+            "YAML should NOT fire on files inside .git/"
+        );
     }
 
     #[test]
