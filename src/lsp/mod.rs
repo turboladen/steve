@@ -133,6 +133,11 @@ pub struct ServerCandidate {
 
 impl Language {
     /// The LSP language identifier string (used in `textDocument/didOpen`).
+    ///
+    /// Kept as an explicit match (rather than delegating to strum's `IntoStaticStr`)
+    /// because the LSP protocol identifier diverges from the user-facing Display
+    /// name for Bash (`"shellscript"` vs `"bash"`), and strum shares the
+    /// `to_string` attribute across both derives.
     pub fn language_id(self) -> &'static str {
         match self {
             Language::Rust => "rust",
