@@ -171,18 +171,25 @@ impl Language {
         }
     }
 
-    /// Detect which languages are used in a project by scanning for marker files.
+    /// Detect which languages are used in a project by scanning for marker files
+    /// and source file extensions.
     ///
-    /// Phase 1 checks the project root (zero overhead for single-project repos).
-    /// Phase 2 walks subdirectories for any languages not yet found (monorepo support).
-    /// Files up to 3 directories deep are detected (`max_depth(4)`, root = depth 0).
-    /// The walk respects `.gitignore` via `WalkBuilder` and skips `.git/` explicitly
-    /// but otherwise traverses hidden directories, so trigger files under
-    /// `.github/workflows/`, `.circleci/`, etc. are visible.
+    /// Phase 1 does quick root-level checks for specific marker filenames
+    /// (Cargo.toml, package.json, Gemfile, etc.) so the common "Rust at root"
+    /// case is trivially set before the walk even starts.
     ///
-    /// Marker-filename languages (Rust/Python/TypeScript/Ruby) trigger on specific
-    /// filenames; extension-only languages (Lua/Bash/YAML/TOML/Fish) trigger on
-    /// the presence of any tracked file extension in the walk.
+    /// Phase 2 walks subdirectories up to `max_depth(4)` (root = depth 0),
+    /// picking up both marker filenames in nested monorepo crates and the
+    /// extension-only languages (Lua/Bash/YAML/TOML/Fish) which have no
+    /// canonical project marker to check for at root. The walk respects
+    /// `.gitignore` via `WalkBuilder` and skips `.git/` explicitly, but
+    /// otherwise traverses hidden directories so trigger files under
+    /// `.github/workflows/`, `.circleci/`, etc. remain visible.
+    ///
+    /// Marker-filename languages (Rust/Python/TypeScript/Ruby) trigger on
+    /// specific filenames; extension-only languages trigger on any file with
+    /// a matching extension (`.lua`, `.sh`/`.bash`/`.zsh`, `.yml`/`.yaml`,
+    /// `.toml`, `.fish`) encountered during the walk.
     pub fn detect_from_project(root: &Path) -> Vec<Language> {
         // Phase 1: fast root-level checks
         let mut found_rust = root.join("Cargo.toml").exists();
@@ -207,60 +214,52 @@ impl Language {
         let mut found_yaml = false;
         let mut found_fish = false;
 
-        // Phase 2: subdirectory walk for any languages still undetected
-        let any_missing = !found_rust
-            || !found_python
-            || !found_ts
-            || !found_ruby
-            || !found_lua
-            || !found_bash
-            || !found_yaml
-            || !found_toml
-            || !found_fish;
-        if any_missing {
-            let walker = ignore::WalkBuilder::new(root)
-                .hidden(false)
-                .git_ignore(true)
-                .max_depth(Some(4))
-                .filter_entry(|e| e.file_name() != ".git")
-                .build();
+        // Phase 2: always runs — extension-only languages (Lua/Bash/YAML/Fish
+        // and TOML in non-Cargo/pyproject projects) can't be detected without
+        // the walk. The inner break short-circuits once every language flag
+        // flips, which happens in well-populated monorepos.
+        let walker = ignore::WalkBuilder::new(root)
+            .hidden(false)
+            .git_ignore(true)
+            .max_depth(Some(4))
+            .filter_entry(|e| e.file_name() != ".git")
+            .build();
 
-            for entry in walker.flatten() {
-                let path = entry.path();
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    match name {
-                        "Cargo.toml" if !found_rust => found_rust = true,
-                        "pyproject.toml" | "setup.py" | "requirements.txt" if !found_python => {
-                            found_python = true;
-                        }
-                        "package.json" | "tsconfig.json" if !found_ts => found_ts = true,
-                        "Gemfile" if !found_ruby => found_ruby = true,
-                        _ if !found_ruby && name.ends_with(".gemspec") => found_ruby = true,
-                        _ => {}
+        for entry in walker.flatten() {
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                match name {
+                    "Cargo.toml" if !found_rust => found_rust = true,
+                    "pyproject.toml" | "setup.py" | "requirements.txt" if !found_python => {
+                        found_python = true;
                     }
+                    "package.json" | "tsconfig.json" if !found_ts => found_ts = true,
+                    "Gemfile" if !found_ruby => found_ruby = true,
+                    _ if !found_ruby && name.ends_with(".gemspec") => found_ruby = true,
+                    _ => {}
                 }
-                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    match ext {
-                        "lua" if !found_lua => found_lua = true,
-                        "sh" | "bash" | "zsh" if !found_bash => found_bash = true,
-                        "yml" | "yaml" if !found_yaml => found_yaml = true,
-                        "toml" if !found_toml => found_toml = true,
-                        "fish" if !found_fish => found_fish = true,
-                        _ => {}
-                    }
+            }
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                match ext {
+                    "lua" if !found_lua => found_lua = true,
+                    "sh" | "bash" | "zsh" if !found_bash => found_bash = true,
+                    "yml" | "yaml" if !found_yaml => found_yaml = true,
+                    "toml" if !found_toml => found_toml = true,
+                    "fish" if !found_fish => found_fish = true,
+                    _ => {}
                 }
-                if found_rust
-                    && found_python
-                    && found_ts
-                    && found_ruby
-                    && found_lua
-                    && found_bash
-                    && found_yaml
-                    && found_toml
-                    && found_fish
-                {
-                    break;
-                }
+            }
+            if found_rust
+                && found_python
+                && found_ts
+                && found_ruby
+                && found_lua
+                && found_bash
+                && found_yaml
+                && found_toml
+                && found_fish
+            {
+                break;
             }
         }
 
