@@ -118,6 +118,11 @@ pub enum Language {
     TypeScript,
     Json,
     Ruby,
+    Lua,
+    Bash,
+    Yaml,
+    Toml,
+    Fish,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +133,11 @@ pub struct ServerCandidate {
 
 impl Language {
     /// The LSP language identifier string (used in `textDocument/didOpen`).
+    ///
+    /// Kept as an explicit match (rather than delegating to strum's `IntoStaticStr`)
+    /// because the LSP protocol identifier diverges from the user-facing Display
+    /// name for Bash (`"shellscript"` vs `"bash"`), and strum shares the
+    /// `to_string` attribute across both derives.
     pub fn language_id(self) -> &'static str {
         match self {
             Language::Rust => "rust",
@@ -135,6 +145,12 @@ impl Language {
             Language::TypeScript => "typescript",
             Language::Json => "json",
             Language::Ruby => "ruby",
+            Language::Lua => "lua",
+            // LSP spec identifier for bash/sh/zsh is "shellscript".
+            Language::Bash => "shellscript",
+            Language::Yaml => "yaml",
+            Language::Toml => "toml",
+            Language::Fish => "fish",
         }
     }
 
@@ -146,16 +162,34 @@ impl Language {
             "ts" | "tsx" | "js" | "jsx" => Some(Language::TypeScript),
             "json" | "jsonc" => Some(Language::Json),
             "rb" => Some(Language::Ruby),
+            "lua" => Some(Language::Lua),
+            "sh" | "bash" | "zsh" => Some(Language::Bash),
+            "yml" | "yaml" => Some(Language::Yaml),
+            "toml" => Some(Language::Toml),
+            "fish" => Some(Language::Fish),
             _ => None,
         }
     }
 
-    /// Detect which languages are used in a project by scanning for marker files.
+    /// Detect which languages are used in a project by scanning for marker files
+    /// and source file extensions.
     ///
-    /// Phase 1 checks the project root (zero overhead for single-project repos).
-    /// Phase 2 walks subdirectories for any languages not yet found (monorepo support).
-    /// Files up to 3 directories deep are detected (`max_depth(4)`, root = depth 0).
-    /// The walk respects `.gitignore` via `WalkBuilder`.
+    /// Phase 1 does quick root-level checks for specific marker filenames
+    /// (Cargo.toml, package.json, Gemfile, etc.) so the common "Rust at root"
+    /// case is trivially set before the walk even starts.
+    ///
+    /// Phase 2 walks subdirectories up to `max_depth(4)` (root = depth 0),
+    /// picking up both marker filenames in nested monorepo crates and the
+    /// extension-only languages (Lua/Bash/YAML/TOML/Fish) which have no
+    /// canonical project marker to check for at root. The walk respects
+    /// `.gitignore` via `WalkBuilder` and skips `.git/` explicitly, but
+    /// otherwise traverses hidden directories so trigger files under
+    /// `.github/workflows/`, `.circleci/`, etc. remain visible.
+    ///
+    /// Marker-filename languages (Rust/Python/TypeScript/Ruby) trigger on
+    /// specific filenames; extension-only languages trigger on any file with
+    /// a matching extension (`.lua`, `.sh`/`.bash`/`.zsh`, `.yml`/`.yaml`,
+    /// `.toml`, `.fish`) encountered during the walk.
     pub fn detect_from_project(root: &Path) -> Vec<Language> {
         // Phase 1: fast root-level checks
         let mut found_rust = root.join("Cargo.toml").exists();
@@ -173,19 +207,27 @@ impl Language {
                         .any(|e| e.path().extension().is_some_and(|ext| ext == "gemspec"))
                 })
                 .unwrap_or(false);
+        // Cargo.toml / pyproject.toml imply TOML content even before the walk.
+        let mut found_toml = found_rust || root.join("pyproject.toml").exists();
+        let mut found_lua = false;
+        let mut found_bash = false;
+        let mut found_yaml = false;
+        let mut found_fish = false;
 
-        // Phase 2: subdirectory walk for any languages still undetected
-        if !found_rust || !found_python || !found_ts || !found_ruby {
-            let walker = ignore::WalkBuilder::new(root)
-                .hidden(true)
-                .git_ignore(true)
-                .max_depth(Some(4))
-                .build();
+        // Phase 2: always runs — extension-only languages (Lua/Bash/YAML/Fish
+        // and TOML in non-Cargo/pyproject projects) can't be detected without
+        // the walk. The inner break short-circuits once every language flag
+        // flips, which happens in well-populated monorepos.
+        let walker = ignore::WalkBuilder::new(root)
+            .hidden(false)
+            .git_ignore(true)
+            .max_depth(Some(4))
+            .filter_entry(|e| e.file_name() != ".git")
+            .build();
 
-            for entry in walker.flatten() {
-                let Some(name) = entry.file_name().to_str() else {
-                    continue;
-                };
+        for entry in walker.flatten() {
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 match name {
                     "Cargo.toml" if !found_rust => found_rust = true,
                     "pyproject.toml" | "setup.py" | "requirements.txt" if !found_python => {
@@ -196,9 +238,28 @@ impl Language {
                     _ if !found_ruby && name.ends_with(".gemspec") => found_ruby = true,
                     _ => {}
                 }
-                if found_rust && found_python && found_ts && found_ruby {
-                    break;
+            }
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                match ext {
+                    "lua" if !found_lua => found_lua = true,
+                    "sh" | "bash" | "zsh" if !found_bash => found_bash = true,
+                    "yml" | "yaml" if !found_yaml => found_yaml = true,
+                    "toml" if !found_toml => found_toml = true,
+                    "fish" if !found_fish => found_fish = true,
+                    _ => {}
                 }
+            }
+            if found_rust
+                && found_python
+                && found_ts
+                && found_ruby
+                && found_lua
+                && found_bash
+                && found_yaml
+                && found_toml
+                && found_fish
+            {
+                break;
             }
         }
 
@@ -216,6 +277,21 @@ impl Language {
         langs.push(Language::Json);
         if found_ruby {
             langs.push(Language::Ruby);
+        }
+        if found_lua {
+            langs.push(Language::Lua);
+        }
+        if found_bash {
+            langs.push(Language::Bash);
+        }
+        if found_yaml {
+            langs.push(Language::Yaml);
+        }
+        if found_toml {
+            langs.push(Language::Toml);
+        }
+        if found_fish {
+            langs.push(Language::Fish);
         }
         langs
     }
@@ -263,6 +339,26 @@ impl Language {
                     args: &["stdio"],
                 },
             ],
+            Language::Lua => &[ServerCandidate {
+                binary: "lua-language-server",
+                args: &[],
+            }],
+            Language::Bash => &[ServerCandidate {
+                binary: "bash-language-server",
+                args: &["start"],
+            }],
+            Language::Yaml => &[ServerCandidate {
+                binary: "yaml-language-server",
+                args: &["--stdio"],
+            }],
+            Language::Toml => &[ServerCandidate {
+                binary: "taplo",
+                args: &["lsp", "stdio"],
+            }],
+            Language::Fish => &[ServerCandidate {
+                binary: "fish-lsp",
+                args: &["start"],
+            }],
         }
     }
 
@@ -299,6 +395,14 @@ mod tests {
             ("json", Language::Json),
             ("jsonc", Language::Json),
             ("rb", Language::Ruby),
+            ("lua", Language::Lua),
+            ("sh", Language::Bash),
+            ("bash", Language::Bash),
+            ("zsh", Language::Bash),
+            ("yml", Language::Yaml),
+            ("yaml", Language::Yaml),
+            ("toml", Language::Toml),
+            ("fish", Language::Fish),
         ];
         for (ext, expected) in cases {
             assert_eq!(
@@ -347,6 +451,112 @@ mod tests {
         let dir = tempdir().unwrap();
         let langs = Language::detect_from_project(dir.path());
         assert_eq!(langs, vec![Language::Json]);
+    }
+
+    #[test]
+    fn detect_from_project_lua() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("init.lua"), "").unwrap();
+        let langs = Language::detect_from_project(dir.path());
+        assert!(langs.contains(&Language::Lua), "Lua not detected");
+    }
+
+    #[test]
+    fn detect_from_project_bash() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("setup.sh"), "").unwrap();
+        let langs = Language::detect_from_project(dir.path());
+        assert!(langs.contains(&Language::Bash), "Bash not detected");
+    }
+
+    #[test]
+    fn detect_from_project_yaml() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("ci.yml"), "").unwrap();
+        let langs = Language::detect_from_project(dir.path());
+        assert!(langs.contains(&Language::Yaml), "YAML not detected");
+    }
+
+    #[test]
+    fn detect_from_project_toml_without_rust() {
+        // .toml files that aren't Cargo.toml/pyproject.toml still trigger TOML.
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("taplo.toml"), "").unwrap();
+        let langs = Language::detect_from_project(dir.path());
+        assert!(langs.contains(&Language::Toml), "TOML not detected");
+        assert!(
+            !langs.contains(&Language::Rust),
+            "Rust should NOT be detected from a non-Cargo.toml"
+        );
+    }
+
+    #[test]
+    fn detect_from_project_fish() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("config.fish"), "").unwrap();
+        let langs = Language::detect_from_project(dir.path());
+        assert!(langs.contains(&Language::Fish), "Fish not detected");
+    }
+
+    #[test]
+    fn detect_from_project_all_new_languages() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("init.lua"), "").unwrap();
+        std::fs::write(dir.path().join("setup.sh"), "").unwrap();
+        std::fs::write(dir.path().join("ci.yml"), "").unwrap();
+        std::fs::write(dir.path().join("taplo.toml"), "").unwrap();
+        std::fs::write(dir.path().join("config.fish"), "").unwrap();
+        let langs = Language::detect_from_project(dir.path());
+        for lang in [
+            Language::Lua,
+            Language::Bash,
+            Language::Yaml,
+            Language::Toml,
+            Language::Fish,
+        ] {
+            assert!(langs.contains(&lang), "{lang} not detected");
+        }
+    }
+
+    #[test]
+    fn detect_from_project_github_workflows_yaml() {
+        // Regression (steve-h7da): .github/ is a hidden dir, but its contents
+        // must still be visible to the walker so GH Actions workflows trigger YAML.
+        let dir = tempdir().unwrap();
+        let workflows = dir.path().join(".github").join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(workflows.join("ci.yml"), "").unwrap();
+        let langs = Language::detect_from_project(dir.path());
+        assert!(
+            langs.contains(&Language::Yaml),
+            "YAML should be detected via .github/workflows/*.yml"
+        );
+    }
+
+    #[test]
+    fn detect_from_project_skips_dot_git() {
+        // Regression (steve-h7da): the walker must NOT descend into .git/, since
+        // it contains arbitrary packed objects that can have any extension.
+        let dir = tempdir().unwrap();
+        let git_dir = dir.path().join(".git").join("hooks");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        // A stray .yml inside .git/ should NOT trigger YAML.
+        std::fs::write(git_dir.join("config.yml"), "").unwrap();
+        let langs = Language::detect_from_project(dir.path());
+        assert!(
+            !langs.contains(&Language::Yaml),
+            "YAML should NOT fire on files inside .git/"
+        );
+    }
+
+    #[test]
+    fn detect_from_project_rust_implies_toml() {
+        // Cargo.toml triggers both Rust and TOML (auto-format/schema for Cargo manifests).
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();
+        let langs = Language::detect_from_project(dir.path());
+        assert!(langs.contains(&Language::Rust));
+        assert!(langs.contains(&Language::Toml));
     }
 
     #[test]
