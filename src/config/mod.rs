@@ -63,8 +63,11 @@ pub struct ProviderConfig {
     /// Base URL for the OpenAI-compatible API (e.g., "https://api.openai.com/v1").
     pub base_url: String,
 
-    /// Name of the environment variable containing the API key.
-    pub api_key_env: String,
+    /// Name of the environment variable containing the API key. Optional — omit
+    /// for keyless local providers (Ollama, LM Studio, llama.cpp, vLLM); when
+    /// `None`, requests are sent without an `Authorization` header.
+    #[serde(default)]
+    pub api_key_env: Option<String>,
 
     /// Models available from this provider, keyed by model ID.
     #[serde(default)]
@@ -180,7 +183,12 @@ impl ProviderConfig {
     fn merge(&mut self, project: ProviderConfig) {
         // Provider-level fields: project overrides
         self.base_url = project.base_url;
-        self.api_key_env = project.api_key_env;
+        // Only override when the project actually specified a value, so a
+        // project config that omits `api_key_env` doesn't accidentally erase
+        // the global key.
+        if project.api_key_env.is_some() {
+            self.api_key_env = project.api_key_env;
+        }
 
         // Models: project overrides per model ID
         for (model_id, project_model) in project.models {
@@ -384,6 +392,29 @@ mod tests {
         assert!(config.providers.is_empty());
     }
 
+    #[test]
+    fn provider_config_parses_without_api_key_env() {
+        // Keyless local providers (Ollama, LM Studio, llama.cpp, vLLM) must be
+        // configurable without forcing the user to invent a dummy env var.
+        let json = r#"{
+            "providers": {
+                "ollama": {
+                    "base_url": "http://localhost:11434/v1",
+                    "models": {
+                        "llama3": { "id": "llama3", "name": "Llama 3" }
+                    }
+                }
+            }
+        }"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        let ollama = &config.providers["ollama"];
+        assert!(
+            ollama.api_key_env.is_none(),
+            "omitted api_key_env must deserialize as None, not error",
+        );
+        assert!(ollama.models.contains_key("llama3"));
+    }
+
     // -- Config::merge tests --
 
     #[test]
@@ -421,7 +452,7 @@ mod tests {
             "openai".into(),
             ProviderConfig {
                 base_url: "https://api.openai.com/v1".into(),
-                api_key_env: "OPENAI_API_KEY".into(),
+                api_key_env: Some("OPENAI_API_KEY".into()),
                 models: HashMap::new(),
             },
         );
@@ -448,7 +479,7 @@ mod tests {
             "openai".into(),
             ProviderConfig {
                 base_url: "https://api.openai.com/v1".into(),
-                api_key_env: "OPENAI_API_KEY".into(),
+                api_key_env: Some("OPENAI_API_KEY".into()),
                 models: global_models,
             },
         );
@@ -470,7 +501,7 @@ mod tests {
             "openai".into(),
             ProviderConfig {
                 base_url: "https://custom.proxy/v1".into(),
-                api_key_env: "CUSTOM_KEY".into(),
+                api_key_env: Some("CUSTOM_KEY".into()),
                 models: project_models,
             },
         );
@@ -479,7 +510,7 @@ mod tests {
         let openai = &merged.providers["openai"];
         // Provider-level fields come from project
         assert_eq!(openai.base_url, "https://custom.proxy/v1");
-        assert_eq!(openai.api_key_env, "CUSTOM_KEY");
+        assert_eq!(openai.api_key_env.as_deref(), Some("CUSTOM_KEY"));
         // Both models present
         assert!(
             openai.models.contains_key("gpt-4o"),
@@ -488,6 +519,42 @@ mod tests {
         assert!(
             openai.models.contains_key("gpt-4o-mini"),
             "project model added"
+        );
+    }
+
+    #[test]
+    fn merge_provider_keyless_project_preserves_global_api_key_env() {
+        // Regression guard: a project that omits api_key_env (because it just
+        // wants to override base_url or add a model) must NOT erase the global
+        // env var name. Otherwise project configs would silently turn
+        // configured providers into keyless ones.
+        let mut global = Config::default();
+        global.providers.insert(
+            "openai".into(),
+            ProviderConfig {
+                base_url: "https://api.openai.com/v1".into(),
+                api_key_env: Some("OPENAI_API_KEY".into()),
+                models: HashMap::new(),
+            },
+        );
+
+        let mut project = Config::default();
+        project.providers.insert(
+            "openai".into(),
+            ProviderConfig {
+                base_url: "https://proxy.example/v1".into(),
+                api_key_env: None,
+                models: HashMap::new(),
+            },
+        );
+
+        let merged = global.merge(project);
+        let openai = &merged.providers["openai"];
+        assert_eq!(openai.base_url, "https://proxy.example/v1");
+        assert_eq!(
+            openai.api_key_env.as_deref(),
+            Some("OPENAI_API_KEY"),
+            "project None must not clobber global Some",
         );
     }
 
@@ -510,7 +577,7 @@ mod tests {
             "openai".into(),
             ProviderConfig {
                 base_url: "https://api.openai.com/v1".into(),
-                api_key_env: "OPENAI_API_KEY".into(),
+                api_key_env: Some("OPENAI_API_KEY".into()),
                 models: global_models,
             },
         );
@@ -532,7 +599,7 @@ mod tests {
             "openai".into(),
             ProviderConfig {
                 base_url: "https://api.openai.com/v1".into(),
-                api_key_env: "OPENAI_API_KEY".into(),
+                api_key_env: Some("OPENAI_API_KEY".into()),
                 models: project_models,
             },
         );

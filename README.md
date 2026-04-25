@@ -74,13 +74,17 @@ environment variable holds each provider's API key.
 
 **Using a different provider (e.g. Ollama, OpenRouter, any OpenAI-compatible API):**
 
+For local/keyless servers like Ollama, LM Studio, llama.cpp server, or vLLM,
+omit `api_key_env` entirely — Steve will send requests without an
+`Authorization` header.
+
 ```jsonc
 {
   "model": "ollama/llama3",
   "providers": {
     "ollama": {
       "base_url": "http://localhost:11434/v1",
-      "api_key_env": "OLLAMA_API_KEY",
+      // No api_key_env: Ollama is keyless, no env var required.
       "models": {
         "llama3": {
           "id": "llama3",
@@ -160,7 +164,7 @@ export OPENAI_API_KEY="sk-..."
 | `theme`                   | No       | `"auto"` (default), `"dark"`, or `"light"`                                      |
 | `providers`               | Yes      | Map of provider configurations                                                  |
 | `providers.*.base_url`    | Yes      | OpenAI-compatible API endpoint                                                  |
-| `providers.*.api_key_env` | Yes      | Name of the env var holding the API key                                         |
+| `providers.*.api_key_env` | No       | Env var holding the API key. Omit for keyless local providers (Ollama, etc.)    |
 | `providers.*.models`      | Yes      | Map of available models for this provider                                       |
 
 ## Usage

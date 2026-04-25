@@ -478,10 +478,11 @@ mod tests {
         );
         let provider_config = crate::config::ProviderConfig {
             base_url: "https://api.test.com/v1".to_string(),
-            api_key_env: "TEST_KEY".to_string(),
+            api_key_env: Some("TEST_KEY".to_string()),
             models,
         };
-        let client = crate::provider::client::LlmClient::new("https://api.test.com/v1", "fake");
+        let client =
+            crate::provider::client::LlmClient::with_key("https://api.test.com/v1", "fake");
         app.provider_registry = Some(crate::provider::ProviderRegistry::from_entries(vec![(
             "test".to_string(),
             provider_config,

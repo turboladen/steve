@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use async_openai::{
     Client,
-    config::OpenAIConfig,
     types::chat::{
         ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
         ChatCompletionRequestSystemMessageContent, ChatCompletionRequestUserMessage,
@@ -10,20 +9,31 @@ use async_openai::{
     },
 };
 
-/// Wrapper around async-openai's Client with custom base URL support.
+use super::config::LlmEndpointConfig;
+
+/// Wrapper around async-openai's Client with custom base URL support and
+/// optional keyless mode (no `Authorization` header) for local providers.
 #[derive(Clone)]
 pub struct LlmClient {
-    client: Client<OpenAIConfig>,
+    client: Client<LlmEndpointConfig>,
 }
 
 impl LlmClient {
-    /// Create a new client pointing at an OpenAI-compatible API.
-    pub fn new(base_url: &str, api_key: &str) -> Self {
-        let config = OpenAIConfig::new()
-            .with_api_base(base_url)
-            .with_api_key(api_key);
-        let client = Client::with_config(config);
-        Self { client }
+    /// Create a client that authenticates with `api_key` via `Authorization: Bearer`.
+    pub fn with_key(base_url: &str, api_key: &str) -> Self {
+        let config = LlmEndpointConfig::with_key(base_url, api_key);
+        Self {
+            client: Client::with_config(config),
+        }
+    }
+
+    /// Create a client for a keyless local provider (Ollama, LM Studio, etc.).
+    /// Requests are sent without an `Authorization` header.
+    pub fn keyless(base_url: &str) -> Self {
+        let config = LlmEndpointConfig::keyless(base_url);
+        Self {
+            client: Client::with_config(config),
+        }
     }
 
     /// Non-streaming chat completion.
@@ -80,7 +90,7 @@ impl LlmClient {
     }
 
     /// Get a reference to the underlying async-openai client (for streaming in Phase 4).
-    pub fn inner(&self) -> &Client<OpenAIConfig> {
+    pub fn inner(&self) -> &Client<LlmEndpointConfig> {
         &self.client
     }
 }

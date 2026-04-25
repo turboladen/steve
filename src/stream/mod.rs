@@ -15,7 +15,6 @@ use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
 use async_openai::{
     Client,
-    config::OpenAIConfig,
     types::chat::{
         ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
         ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageContent,
@@ -37,6 +36,7 @@ use crate::{
     context::cache::ToolResultCache,
     event::{AppEvent, StreamUsage},
     permission::PermissionEngine,
+    provider::config::LlmEndpointConfig,
     tool::{ToolContext, ToolName, ToolRegistry},
     usage::{UsageWriter, types::ApiCallRecord},
 };
@@ -64,11 +64,11 @@ pub trait ChatStreamProvider: Send + Sync {
 
 /// Production implementation wrapping async-openai's Client.
 pub struct OpenAIChatStream {
-    client: Client<OpenAIConfig>,
+    client: Client<LlmEndpointConfig>,
 }
 
 impl OpenAIChatStream {
-    pub fn new(client: Client<OpenAIConfig>) -> Self {
+    pub fn new(client: Client<LlmEndpointConfig>) -> Self {
         Self { client }
     }
 }

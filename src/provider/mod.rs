@@ -1,4 +1,5 @@
 pub mod client;
+pub mod config;
 
 use std::{collections::HashMap, env};
 
@@ -74,18 +75,37 @@ struct ProviderEntry {
 impl ProviderRegistry {
     /// Build the registry from configuration.
     ///
-    /// Providers whose `api_key_env` variable is not set are **skipped** and
-    /// reported in the returned warnings list. Previously a single missing env
-    /// var aborted registry construction entirely, making all providers
-    /// unavailable (steve-itzf).
+    /// - When `api_key_env` is `None`, the provider is registered in **keyless
+    ///   mode** — requests go out without an `Authorization` header (steve-jhhw,
+    ///   for Ollama / LM Studio / llama.cpp / vLLM).
+    /// - When `api_key_env` is `Some(name)` but the env var is unset or
+    ///   non-UTF-8, the provider is **skipped** and reported in the returned
+    ///   warnings list. (Previously a single missing env var aborted registry
+    ///   construction entirely, making all providers unavailable — steve-itzf.)
     pub fn from_config(config: &Config) -> (Self, Vec<ProviderInitWarning>) {
         let mut providers = HashMap::new();
         let mut warnings = Vec::new();
 
         for (provider_id, provider_config) in &config.providers {
-            match env::var(&provider_config.api_key_env) {
-                Ok(api_key) => {
-                    let client = LlmClient::new(&provider_config.base_url, &api_key);
+            let client_result = match &provider_config.api_key_env {
+                None => Ok(LlmClient::keyless(&provider_config.base_url)),
+                Some(env_name) => match env::var(env_name) {
+                    Ok(api_key) => Ok(LlmClient::with_key(&provider_config.base_url, &api_key)),
+                    Err(env::VarError::NotPresent) => Err(ProviderInitWarning {
+                        provider_id: provider_id.clone(),
+                        env_var: env_name.clone(),
+                        reason: ProviderInitReason::MissingEnvVar,
+                    }),
+                    Err(env::VarError::NotUnicode(_)) => Err(ProviderInitWarning {
+                        provider_id: provider_id.clone(),
+                        env_var: env_name.clone(),
+                        reason: ProviderInitReason::NonUtf8EnvVar,
+                    }),
+                },
+            };
+
+            match client_result {
+                Ok(client) => {
                     providers.insert(
                         provider_id.clone(),
                         ProviderEntry {
@@ -94,17 +114,7 @@ impl ProviderRegistry {
                         },
                     );
                 }
-                Err(e) => {
-                    let reason = match e {
-                        env::VarError::NotPresent => ProviderInitReason::MissingEnvVar,
-                        env::VarError::NotUnicode(_) => ProviderInitReason::NonUtf8EnvVar,
-                    };
-                    warnings.push(ProviderInitWarning {
-                        provider_id: provider_id.clone(),
-                        env_var: provider_config.api_key_env.clone(),
-                        reason,
-                    });
-                }
+                Err(warning) => warnings.push(warning),
             }
         }
 
@@ -206,7 +216,7 @@ mod tests {
             },
             provider_config: ProviderConfig {
                 base_url: "https://api.test.com/v1".to_string(),
-                api_key_env: "TEST_API_KEY".to_string(),
+                api_key_env: Some("TEST_API_KEY".to_string()),
                 models: HashMap::new(),
             },
         }
@@ -244,7 +254,16 @@ mod tests {
     fn make_provider(api_key_env: &str) -> ProviderConfig {
         ProviderConfig {
             base_url: "https://api.test.com/v1".to_string(),
-            api_key_env: api_key_env.to_string(),
+            api_key_env: Some(api_key_env.to_string()),
+            models: HashMap::new(),
+        }
+    }
+
+    /// Build a `ProviderConfig` for a keyless local provider (no env var).
+    fn make_keyless_provider() -> ProviderConfig {
+        ProviderConfig {
+            base_url: "http://localhost:11434/v1".to_string(),
+            api_key_env: None,
             models: HashMap::new(),
         }
     }
@@ -338,6 +357,67 @@ mod tests {
         unsafe {
             env::remove_var(NON_UTF8_VAR);
         }
+    }
+
+    #[test]
+    fn from_config_registers_keyless_provider_when_api_key_env_omitted() {
+        // steve-jhhw: providers with `api_key_env: None` are keyless local
+        // servers. They must register without ever touching the environment.
+        let mut providers = HashMap::new();
+        providers.insert("ollama".to_string(), make_keyless_provider());
+        let config = Config {
+            providers,
+            ..Config::default()
+        };
+
+        let (registry, warnings) = ProviderRegistry::from_config(&config);
+
+        assert!(
+            registry.providers.contains_key("ollama"),
+            "keyless provider must be registered, got: {:?}",
+            registry.providers.keys().collect::<Vec<_>>(),
+        );
+        assert!(
+            warnings.is_empty(),
+            "keyless mode must produce no missing-env-var warnings, got: {warnings:?}",
+        );
+    }
+
+    #[test]
+    fn from_config_keyless_skips_env_lookup_independently_of_keyed_providers() {
+        // Mixed config: a keyless provider should never block on (or cross-pollute)
+        // the env var lookup of a keyed sibling. Only the keyed provider with
+        // an unset env var should warn.
+        const UNSET_VAR: &str = "STEVE_TEST_JHHW_UNSET";
+        unsafe {
+            env::remove_var(UNSET_VAR);
+        }
+
+        let mut providers = HashMap::new();
+        providers.insert("ollama".to_string(), make_keyless_provider());
+        providers.insert("openai".to_string(), make_provider(UNSET_VAR));
+
+        let config = Config {
+            providers,
+            ..Config::default()
+        };
+
+        let (registry, warnings) = ProviderRegistry::from_config(&config);
+
+        assert!(
+            registry.providers.contains_key("ollama"),
+            "keyless provider must register even when a sibling has a missing env var",
+        );
+        assert!(
+            !registry.providers.contains_key("openai"),
+            "keyed provider with unset env var must still be skipped",
+        );
+        assert_eq!(
+            warnings.len(),
+            1,
+            "exactly one warning expected — for the keyed provider only"
+        );
+        assert_eq!(warnings[0].provider_id, "openai");
     }
 
     #[test]
