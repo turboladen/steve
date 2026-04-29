@@ -124,7 +124,15 @@ pub fn ai_environment_checks(
 }
 
 /// LSP server health checks.
-pub fn lsp_health_checks(servers: &[(&str, bool)]) -> Vec<DiagnosticCheck> {
+///
+/// `servers` carries `(binary, running, error_reason)` per detected
+/// language. `error_reason` is the `LspServerState::Error { reason }`
+/// reason verbatim when present, otherwise `None`. The recommendation
+/// branches on the reason so a server that crashed post-spawn (e.g.
+/// `"initialize failed: ..."` or `"mainloop exited"`) is not blamed on
+/// missing PATH — that has been a misleading recommendation source for
+/// users with the binary correctly installed.
+pub fn lsp_health_checks(servers: &[(&str, bool, Option<&str>)]) -> Vec<DiagnosticCheck> {
     let mut checks = Vec::new();
 
     if servers.is_empty() {
@@ -132,7 +140,7 @@ pub fn lsp_health_checks(servers: &[(&str, bool)]) -> Vec<DiagnosticCheck> {
         return checks;
     }
 
-    let running_count = servers.iter().filter(|(_, running)| *running).count();
+    let running_count = servers.iter().filter(|(_, running, _)| *running).count();
 
     if running_count == 0 {
         checks.push(DiagnosticCheck {
@@ -140,23 +148,63 @@ pub fn lsp_health_checks(servers: &[(&str, bool)]) -> Vec<DiagnosticCheck> {
             category: Category::LspHealth,
             label: "No LSP servers running".into(),
             detail: "Code intelligence unavailable".into(),
-            recommendation: Some("Install language servers or check PATH".into()),
+            recommendation: Some(
+                "Check per-server warnings below for the specific failure mode".into(),
+            ),
         });
     }
 
-    for (name, running) in servers {
+    for (name, running, reason) in servers {
         if !running {
             checks.push(DiagnosticCheck {
                 severity: Severity::Warning,
                 category: Category::LspHealth,
                 label: format!("{name} server not running"),
-                detail: format!("{name} detected in project but server not available"),
-                recommendation: Some(format!("Install {name} language server or check PATH")),
+                detail: lsp_unavailable_detail(name, *reason),
+                recommendation: Some(lsp_recommendation_for_reason(name, *reason)),
             });
         }
     }
 
     checks
+}
+
+/// Heuristic: does this `LspServerState::Error` reason indicate the
+/// binary itself wasn't found / failed to launch (in which case the
+/// user genuinely needs to install it or fix `PATH`)?
+fn reason_is_install_path_issue(reason: &str) -> bool {
+    let r = reason.to_ascii_lowercase();
+    // Phrases produced by start_server when resolve_server returns None
+    // ("no … language server found on PATH") or when Command::spawn
+    // itself fails with a "No such file or directory" or permission error.
+    r.contains("not found on path")
+        || r.contains("found on path")
+        || r.contains("no such file")
+        || r.contains("failed to spawn")
+}
+
+fn lsp_unavailable_detail(name: &str, reason: Option<&str>) -> String {
+    match reason {
+        None => format!("{name} detected in project but server not available"),
+        Some(r) => format!("{name} unavailable: {r}"),
+    }
+}
+
+fn lsp_recommendation_for_reason(name: &str, reason: Option<&str>) -> String {
+    match reason {
+        None => format!(
+            "Install {name} language server or check PATH (status pending — \
+             rerun if the server is still starting up)"
+        ),
+        Some(r) if reason_is_install_path_issue(r) => {
+            format!("Install {name} language server or check PATH")
+        }
+        Some(r) => format!(
+            "{name} crashed or failed to handshake — not a PATH issue. \
+             Reason: {r}. Try `RUST_LOG=steve=debug` for transport-level \
+             detail; consider re-installing or version-pinning {name}."
+        ),
+    }
 }
 
 /// Live session efficiency checks.
@@ -362,14 +410,14 @@ mod tests {
 
     #[test]
     fn lsp_all_running_no_warnings() {
-        let servers = vec![("rust-analyzer", true), ("ty", true)];
+        let servers = vec![("rust-analyzer", true, None), ("ty", true, None)];
         let checks = lsp_health_checks(&servers);
         assert!(checks.is_empty());
     }
 
     #[test]
     fn lsp_detected_not_running_warns() {
-        let servers = vec![("rust-analyzer", true), ("ty", false)];
+        let servers = vec![("rust-analyzer", true, None), ("ty", false, None)];
         let checks = lsp_health_checks(&servers);
         assert_eq!(checks.len(), 1);
         assert!(checks[0].label.contains("ty"));
@@ -378,7 +426,7 @@ mod tests {
 
     #[test]
     fn lsp_zero_running_error() {
-        let servers = vec![("rust-analyzer", false), ("ty", false)];
+        let servers = vec![("rust-analyzer", false, None), ("ty", false, None)];
         let checks = lsp_health_checks(&servers);
         // Should have 1 error (no servers) + 2 warnings (per-server)
         assert!(checks.iter().any(|c| c.severity == Severity::Error));
@@ -393,6 +441,122 @@ mod tests {
     fn lsp_no_languages_detected_no_checks() {
         let checks = lsp_health_checks(&[]);
         assert!(checks.is_empty());
+    }
+
+    #[test]
+    fn lsp_recommendation_path_reason_suggests_install() {
+        // Reason from start_server line 187: "no yaml language server
+        // found on PATH" — install/PATH advice is correct here.
+        let servers = vec![(
+            "yaml-language-server",
+            false,
+            Some("no yaml language server found on PATH"),
+        )];
+        let checks = lsp_health_checks(&servers);
+        let warning = checks
+            .iter()
+            .find(|c| c.label.contains("yaml-language-server"))
+            .expect("warning for yaml-language-server");
+        let rec = warning.recommendation.as_deref().unwrap_or("");
+        assert!(
+            rec.starts_with("Install yaml-language-server"),
+            "PATH-failure should recommend Install/check PATH, got: {rec}"
+        );
+    }
+
+    #[test]
+    fn lsp_recommendation_initialize_failure_does_not_blame_path() {
+        // Regression for steve-dbzv: the user has yaml-language-server
+        // installed and on PATH; it's being spawned but crashing during
+        // Initialize. The recommendation must NOT tell them to install
+        // it or check PATH — that's the misleading message we're fixing.
+        let servers = vec![(
+            "yaml-language-server",
+            false,
+            Some("initialize failed: ResponseError { code: -32001 }"),
+        )];
+        let checks = lsp_health_checks(&servers);
+        let warning = checks
+            .iter()
+            .find(|c| c.label.contains("yaml-language-server"))
+            .expect("warning for yaml-language-server");
+        let rec = warning.recommendation.as_deref().unwrap_or("");
+        assert!(
+            !rec.starts_with("Install"),
+            "post-Initialize failure must NOT recommend Install, got: {rec}"
+        );
+        assert!(
+            rec.contains("crashed or failed to handshake"),
+            "should describe the actual failure mode, got: {rec}"
+        );
+        assert!(
+            rec.contains("initialize failed"),
+            "should surface the underlying reason verbatim, got: {rec}"
+        );
+        assert!(
+            rec.contains("RUST_LOG=steve=debug"),
+            "should point at the debug log for transport-level detail, got: {rec}"
+        );
+    }
+
+    #[test]
+    fn lsp_recommendation_mainloop_exit_does_not_blame_path() {
+        // Same pattern, different reason variant — crash watcher writes
+        // "mainloop exited" / "mainloop panicked: ..." for post-Initialize
+        // crashes.
+        let servers = vec![("typescript-language-server", false, Some("mainloop exited"))];
+        let checks = lsp_health_checks(&servers);
+        let warning = checks
+            .iter()
+            .find(|c| c.label.contains("typescript-language-server"))
+            .expect("warning for typescript-language-server");
+        let rec = warning.recommendation.as_deref().unwrap_or("");
+        assert!(!rec.starts_with("Install"), "got: {rec}");
+        assert!(rec.contains("mainloop exited"), "got: {rec}");
+    }
+
+    #[test]
+    fn lsp_recommendation_failed_to_spawn_blames_path() {
+        // start_server line 196: Command::spawn failure (binary on PATH
+        // but not executable, or transient FS error). PATH advice IS
+        // appropriate here — the user needs to fix the binary.
+        let servers = vec![(
+            "yaml-language-server",
+            false,
+            Some("failed to spawn yaml-language-server: permission denied"),
+        )];
+        let checks = lsp_health_checks(&servers);
+        let warning = checks
+            .iter()
+            .find(|c| c.label.contains("yaml-language-server"))
+            .expect("warning for yaml-language-server");
+        let rec = warning.recommendation.as_deref().unwrap_or("");
+        assert!(
+            rec.starts_with("Install yaml-language-server"),
+            "spawn-failure should recommend Install/check PATH, got: {rec}"
+        );
+    }
+
+    #[test]
+    fn lsp_detail_surfaces_reason_when_present() {
+        // The `detail` field should also carry the reason so the
+        // diagnostic panel displays it without the user having to expand
+        // recommendations.
+        let servers = vec![(
+            "basedpyright-langserver",
+            false,
+            Some("mainloop panicked: JoinError"),
+        )];
+        let checks = lsp_health_checks(&servers);
+        let warning = checks
+            .iter()
+            .find(|c| c.label.contains("basedpyright-langserver"))
+            .expect("warning for basedpyright-langserver");
+        assert!(
+            warning.detail.contains("mainloop panicked"),
+            "detail should surface the reason verbatim, got: {}",
+            warning.detail
+        );
     }
 
     // -- session_efficiency_checks tests --

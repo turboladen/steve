@@ -97,7 +97,7 @@ impl App {
     pub(super) fn collect_diagnostics(&self) -> Vec<crate::diagnostics::DiagnosticCheck> {
         let (cache_hits, cache_misses) =
             self.tool_cache.lock().expect("lock poisoned").cache_stats();
-        let lsp_servers: Vec<(&str, bool)> = self
+        let lsp_servers: Vec<(&str, bool, Option<&str>)> = self
             .sidebar_state
             .lsp_servers
             .iter()
@@ -106,7 +106,11 @@ impl App {
                     s.state,
                     crate::lsp::LspServerState::Ready | crate::lsp::LspServerState::Indexing
                 );
-                (s.binary.as_str(), running)
+                let reason = match &s.state {
+                    crate::lsp::LspServerState::Error { reason } => Some(reason.as_str()),
+                    _ => None,
+                };
+                (s.binary.as_str(), running, reason)
             })
             .collect();
         let system_prompt_len = self.build_system_prompt().map(|s| s.len()).unwrap_or(0);
