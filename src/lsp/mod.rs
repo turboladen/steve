@@ -79,7 +79,11 @@ pub struct LspStatusEntry {
     /// When the entry was last mutated. Not currently rendered; enables
     /// future "indexing for Ns" UX without a schema change.
     pub updated_at: Instant,
-    /// Number of restart attempts since the last successful Ready state.
+    /// Number of restart attempts since the last *stable* Ready run, where
+    /// "stable" means the server was Ready/Indexing for at least
+    /// `STABILITY_WINDOW` before its next crash. `plan_crash_restart` only
+    /// resets this when the stability gate fires — otherwise it accumulates
+    /// across restart cycles and trips `MAX_RESTART_ATTEMPTS` normally.
     pub restart_attempts: u8,
     /// When the next restart attempt should fire (backoff timer).
     pub next_restart_at: Option<Instant>,
@@ -101,9 +105,15 @@ pub const MAX_RESTART_ATTEMPTS: u8 = 3;
 
 /// Minimum continuous Ready/Indexing uptime required before a subsequent
 /// crash counts as "stable run completed" and resets the restart budget.
-/// Crashes within this window of `ready_since` accumulate against the
-/// previous budget, so a server that fails Initialize then immediately
-/// crashes still hits MAX_RESTART_ATTEMPTS and stops retrying.
+/// A server that reaches Ready and then crashes within this window keeps
+/// its accumulated `restart_attempts` and ultimately hits
+/// `MAX_RESTART_ATTEMPTS` — without this gate, every post-`Initialize`
+/// Ready transition would zero the budget and a server that consistently
+/// crashes seconds after Initialize would restart-loop forever.
+///
+/// Initialize-failure paths never set `ready_since` in the first place,
+/// so they are bounded by `MAX_RESTART_ATTEMPTS` directly without the
+/// gate ever firing.
 pub const STABILITY_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Backoff duration before the Nth restart attempt.

@@ -34,19 +34,26 @@ pub struct LspManager {
 }
 
 /// Pure scheduling logic for the crash watcher. Given the current status
-/// entry and whether a restart can actually be notified, this transitions
-/// the entry to Error (always) and optionally to Restarting with a computed
-/// backoff delay. Returns `Some(delay)` iff a restart should be scheduled.
+/// entry, whether a restart can actually be notified, and a `now`
+/// timestamp, this transitions the entry to Error (always) and optionally
+/// to Restarting with a computed backoff delay. Returns `Some(delay)` iff
+/// a restart should be scheduled.
 ///
 /// Extracted as a free function so the decision logic can be unit-tested
-/// without spawning real LSP processes or waiting for crashes. The caller
-/// is responsible for holding the status-mutex critical section around the
-/// call and for actually sending the `LspRestartNeeded` event after the
-/// returned delay has elapsed.
+/// without spawning real LSP processes or waiting for crashes. `now` is
+/// threaded through (rather than calling `Instant::now()` internally) so
+/// tests can construct deterministic time scenarios without subtracting
+/// from a real `Instant::now()` — `Instant`'s origin is platform-defined
+/// and `checked_sub` is not guaranteed to succeed for arbitrary deltas.
+///
+/// The caller is responsible for holding the status-mutex critical
+/// section around the call and for actually sending the
+/// `LspRestartNeeded` event after the returned delay has elapsed.
 pub(super) fn plan_crash_restart(
     entry: &mut LspStatusEntry,
     reason: String,
     can_notify: bool,
+    now: Instant,
 ) -> Option<std::time::Duration> {
     // Stability gate: only reset the retry budget if the server was
     // continuously Ready/Indexing for at least STABILITY_WINDOW before
@@ -54,7 +61,7 @@ pub(super) fn plan_crash_restart(
     // (yaml-language-server schema-fetch crashes, etc.) keep their
     // accumulated attempts so the budget cap actually trips.
     if let Some(ready_since) = entry.ready_since
-        && ready_since.elapsed() >= crate::lsp::STABILITY_WINDOW
+        && now.saturating_duration_since(ready_since) >= crate::lsp::STABILITY_WINDOW
     {
         entry.restart_attempts = 0;
     }
@@ -63,7 +70,7 @@ pub(super) fn plan_crash_restart(
     entry.active_progress = 0;
     entry.progress_message = None;
     entry.ready_since = None;
-    entry.updated_at = Instant::now();
+    entry.updated_at = now;
 
     let attempt = entry.restart_attempts;
     if !can_notify || attempt >= crate::lsp::MAX_RESTART_ATTEMPTS {
@@ -72,8 +79,8 @@ pub(super) fn plan_crash_restart(
     let delay = crate::lsp::restart_backoff(attempt);
     entry.restart_attempts = attempt + 1;
     entry.state = LspServerState::Restarting;
-    entry.next_restart_at = Some(Instant::now() + delay);
-    entry.updated_at = Instant::now();
+    entry.next_restart_at = Some(now + delay);
+    entry.updated_at = now;
     Some(delay)
 }
 
@@ -263,8 +270,9 @@ impl LspManager {
 
                 let restart_delay = {
                     let mut map = status.lock().unwrap_or_else(|p| p.into_inner());
+                    let now = Instant::now();
                     map.get_mut(&lang).and_then(|entry| {
-                        plan_crash_restart(entry, reason.clone(), event_tx.is_some())
+                        plan_crash_restart(entry, reason.clone(), event_tx.is_some(), now)
                     })
                 };
 
@@ -1222,7 +1230,7 @@ mod tests {
     #[test]
     fn plan_crash_restart_first_crash_schedules_zero_delay() {
         let mut entry = restart_entry(0);
-        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), true);
+        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), true, Instant::now());
         assert_eq!(delay, Some(std::time::Duration::ZERO));
         assert_eq!(entry.state, LspServerState::Restarting);
         assert_eq!(entry.restart_attempts, 1);
@@ -1234,7 +1242,8 @@ mod tests {
     #[test]
     fn plan_crash_restart_second_crash_schedules_one_second() {
         let mut entry = restart_entry(1);
-        let delay = plan_crash_restart(&mut entry, "mainloop panicked".into(), true);
+        let delay =
+            plan_crash_restart(&mut entry, "mainloop panicked".into(), true, Instant::now());
         assert_eq!(delay, Some(std::time::Duration::from_secs(1)));
         assert_eq!(entry.state, LspServerState::Restarting);
         assert_eq!(entry.restart_attempts, 2);
@@ -1243,7 +1252,7 @@ mod tests {
     #[test]
     fn plan_crash_restart_third_crash_schedules_five_seconds() {
         let mut entry = restart_entry(2);
-        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), true);
+        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), true, Instant::now());
         assert_eq!(delay, Some(std::time::Duration::from_secs(5)));
         assert_eq!(entry.state, LspServerState::Restarting);
         assert_eq!(entry.restart_attempts, 3);
@@ -1252,7 +1261,7 @@ mod tests {
     #[test]
     fn plan_crash_restart_budget_exhausted_stays_error() {
         let mut entry = restart_entry(crate::lsp::MAX_RESTART_ATTEMPTS);
-        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), true);
+        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), true, Instant::now());
         assert_eq!(delay, None, "no more retries once budget is exhausted");
         assert!(
             matches!(entry.state, LspServerState::Error { .. }),
@@ -1272,7 +1281,7 @@ mod tests {
         // Test mode (event_tx absent): plan must NOT transition to
         // Restarting, because no LspRestartNeeded event will ever be sent.
         let mut entry = restart_entry(0);
-        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), false);
+        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), false, Instant::now());
         assert_eq!(delay, None);
         assert!(
             matches!(entry.state, LspServerState::Error { .. }),
@@ -1294,13 +1303,18 @@ mod tests {
         // is what makes Error useful if the user happens to see it.
         let mut entry = restart_entry(0);
         let reason = "mainloop panicked: JoinError".to_string();
-        let _ = plan_crash_restart(&mut entry, reason, true);
+        let _ = plan_crash_restart(&mut entry, reason, true, Instant::now());
         // After a successful schedule the state is Restarting (confirmed
         // in other tests). This test documents the intent of the reason
         // path — covered via the budget-exhausted test, which lands in
         // Error with the reason set.
         let mut exhausted = restart_entry(crate::lsp::MAX_RESTART_ATTEMPTS);
-        plan_crash_restart(&mut exhausted, "specific reason".into(), true);
+        plan_crash_restart(
+            &mut exhausted,
+            "specific reason".into(),
+            true,
+            Instant::now(),
+        );
         match &exhausted.state {
             LspServerState::Error { reason } => {
                 assert_eq!(reason, "specific reason");
@@ -1317,7 +1331,7 @@ mod tests {
         // that reaches Ready before crashing during schema fetch / first
         // didOpen) loops forever because each cycle zeroes attempts.
         let mut entry = restart_entry_with_ready(2, Some(Instant::now()));
-        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), true);
+        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), true, Instant::now());
         assert_eq!(
             entry.restart_attempts, 3,
             "attempts should increment from 2, NOT reset to 1, when ready_since is recent"
@@ -1333,7 +1347,7 @@ mod tests {
         // permanent Error — the eager reset is what was breaking this.
         let mut entry =
             restart_entry_with_ready(crate::lsp::MAX_RESTART_ATTEMPTS, Some(Instant::now()));
-        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), true);
+        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), true, Instant::now());
         assert_eq!(delay, None, "no retry once budget exhausted, even if Ready");
         assert!(matches!(entry.state, LspServerState::Error { .. }));
         assert_eq!(
@@ -1348,13 +1362,15 @@ mod tests {
         // A server that has been continuously Ready for at least
         // STABILITY_WINDOW before crashing IS treated as a stable run —
         // its retry budget resets so the next crash gets the full cap.
-        // Construct ready_since just past the window.
-        let stable_since = Instant::now()
-            .checked_sub(crate::lsp::STABILITY_WINDOW + std::time::Duration::from_secs(1))
-            .expect("subtracting from process-start Instant should succeed in tests");
+        // Construct `now` *forward* from the ready_since baseline rather
+        // than backward via `checked_sub`: `Instant`'s origin is platform-
+        // defined, so subtracting an arbitrary delta from `Instant::now()`
+        // is not guaranteed to succeed.
+        let stable_since = Instant::now();
+        let now = stable_since + crate::lsp::STABILITY_WINDOW + std::time::Duration::from_secs(1);
         let mut entry =
             restart_entry_with_ready(crate::lsp::MAX_RESTART_ATTEMPTS, Some(stable_since));
-        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), true);
+        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), true, now);
         assert_eq!(
             delay,
             Some(std::time::Duration::ZERO),
@@ -1374,7 +1390,7 @@ mod tests {
         // stable run. The default behavior (no reset) applies and the
         // existing budget logic counts every crash.
         let mut entry = restart_entry_with_ready(2, None);
-        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), true);
+        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), true, Instant::now());
         assert_eq!(entry.restart_attempts, 3);
         assert_eq!(delay, Some(std::time::Duration::from_secs(5)));
     }
