@@ -950,6 +950,7 @@ mod tests {
                     next_restart_at: Some(
                         std::time::Instant::now() + std::time::Duration::from_secs(3),
                     ),
+                    ready_since: None,
                 },
             );
         }

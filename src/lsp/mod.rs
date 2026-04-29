@@ -79,14 +79,42 @@ pub struct LspStatusEntry {
     /// When the entry was last mutated. Not currently rendered; enables
     /// future "indexing for Ns" UX without a schema change.
     pub updated_at: Instant,
-    /// Number of restart attempts since the last successful Ready state.
+    /// Number of restart attempts since the last *stable* Ready run, where
+    /// "stable" means the server was Ready/Indexing for at least
+    /// `STABILITY_WINDOW` before its next crash. `plan_crash_restart` only
+    /// resets this when the stability gate fires — otherwise it accumulates
+    /// across restart cycles and trips `MAX_RESTART_ATTEMPTS` normally.
     pub restart_attempts: u8,
     /// When the next restart attempt should fire (backoff timer).
     pub next_restart_at: Option<Instant>,
+    /// Set to `Some(Instant::now())` when the server transitions to
+    /// `Ready`/`Indexing` after a successful `Initialize`. Cleared when the
+    /// server transitions to `Error` or `Restarting`. Used by
+    /// `plan_crash_restart` as a stability gate: a crash that happens at
+    /// least `STABILITY_WINDOW` after `ready_since` resets the retry budget,
+    /// while a crash that happens sooner accumulates against the previous
+    /// budget. This prevents infinite retry loops when a server reaches
+    /// `Ready` then crashes immediately (a common yaml-language-server
+    /// failure mode — the Node process passes `Initialize` but dies during
+    /// schema resolution).
+    pub ready_since: Option<Instant>,
 }
 
 /// Maximum number of restart attempts before `Error` becomes terminal.
 pub const MAX_RESTART_ATTEMPTS: u8 = 3;
+
+/// Minimum continuous Ready/Indexing uptime required before a subsequent
+/// crash counts as "stable run completed" and resets the restart budget.
+/// A server that reaches Ready and then crashes within this window keeps
+/// its accumulated `restart_attempts` and ultimately hits
+/// `MAX_RESTART_ATTEMPTS` — without this gate, every post-`Initialize`
+/// Ready transition would zero the budget and a server that consistently
+/// crashes seconds after Initialize would restart-loop forever.
+///
+/// Initialize-failure paths never set `ready_since` in the first place,
+/// so they are bounded by `MAX_RESTART_ATTEMPTS` directly without the
+/// gate ever firing.
+pub const STABILITY_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Backoff duration before the Nth restart attempt.
 pub fn restart_backoff(attempt: u8) -> std::time::Duration {
@@ -707,6 +735,7 @@ mod tests {
             updated_at: std::time::Instant::now(),
             restart_attempts: 2,
             next_restart_at: Some(std::time::Instant::now()),
+            ready_since: Some(std::time::Instant::now()),
         };
         let cloned = original.clone();
         assert_eq!(cloned.binary, original.binary);
@@ -716,6 +745,7 @@ mod tests {
         assert_eq!(cloned.updated_at, original.updated_at);
         assert_eq!(cloned.restart_attempts, original.restart_attempts);
         assert_eq!(cloned.next_restart_at, original.next_restart_at);
+        assert_eq!(cloned.ready_since, original.ready_since);
     }
 
     #[test]
