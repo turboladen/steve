@@ -1,5 +1,36 @@
 use super::*;
 
+/// Split a System message text into `(base, count)` if it ends with a
+/// `" (×N)"` counter suffix written by the `StreamNotice` dedupe path.
+/// Returns `(s, 1)` for any string that doesn't match the exact format.
+///
+/// The suffix is matched on the LAST `" (×"` occurrence, so a base text that
+/// happens to contain the prefix earlier is preserved. The closing `)` must
+/// terminate the string with no trailing content, and the digits must be a
+/// well-formed `usize`.
+fn split_count_suffix(s: &str) -> (&str, usize) {
+    const COUNT_PREFIX: &str = " (×";
+    let Some(idx) = s.rfind(COUNT_PREFIX) else {
+        return (s, 1);
+    };
+    let after = &s[idx + COUNT_PREFIX.len()..];
+    let Some(close) = after.find(')') else {
+        return (s, 1);
+    };
+    let trailing = &after[close + 1..];
+    if !trailing.is_empty() {
+        return (s, 1);
+    }
+    let digits = &after[..close];
+    if digits.is_empty() {
+        return (s, 1);
+    }
+    let Ok(n) = digits.parse::<usize>() else {
+        return (s, 1);
+    };
+    (&s[..idx], n)
+}
+
 impl App {
     pub async fn run(&mut self) -> Result<()> {
         // Try to resume the last session
@@ -434,7 +465,26 @@ impl App {
                 self.message_area_state.scroll_to_bottom();
             }
             AppEvent::StreamNotice { text } => {
-                self.messages.push(MessageBlock::System { text });
+                // Coalesce identical consecutive System notices into a single
+                // block with a "(×N)" counter. Without this, a noisy LSP
+                // restart loop (or any other source of repeated transient
+                // notices) appends a fresh block each time and quickly scrolls
+                // earlier user/assistant content out of view.
+                let folded = match self.messages.last_mut() {
+                    Some(MessageBlock::System { text: prev }) => {
+                        let (base, count) = split_count_suffix(prev);
+                        if base == text {
+                            *prev = format!("{base} (×{})", count + 1);
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
+                if !folded {
+                    self.messages.push(MessageBlock::System { text });
+                }
                 self.message_area_state.scroll_to_bottom();
             }
             AppEvent::AgentProgress {
@@ -813,6 +863,135 @@ mod tests {
         .unwrap();
 
         assert!(has_system_message(&app, "LSP started"));
+    }
+
+    #[tokio::test]
+    async fn event_stream_notice_coalesces_consecutive_identical_text() {
+        // Regression for steve-5taz: a noisy LSP restart loop must not flood
+        // the messages window with N copies of the same notice. The first
+        // notice pushes a fresh System block; subsequent identical notices
+        // update that block in place with a "(×N)" counter.
+        let mut app = make_test_app();
+        let baseline = app.messages.len();
+
+        for _ in 0..5 {
+            app.handle_event(AppEvent::StreamNotice {
+                text: "LSP yaml server restarted successfully".into(),
+            })
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(
+            app.messages.len(),
+            baseline + 1,
+            "five identical notices should collapse to a single block"
+        );
+        match app.messages.last() {
+            Some(MessageBlock::System { text }) => {
+                assert_eq!(text, "LSP yaml server restarted successfully (×5)");
+            }
+            other => panic!("expected coalesced System block, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn event_stream_notice_does_not_coalesce_distinct_text() {
+        let mut app = make_test_app();
+        let baseline = app.messages.len();
+
+        app.handle_event(AppEvent::StreamNotice {
+            text: "alpha".into(),
+        })
+        .await
+        .unwrap();
+        app.handle_event(AppEvent::StreamNotice {
+            text: "beta".into(),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            app.messages.len(),
+            baseline + 2,
+            "distinct notices should produce distinct blocks"
+        );
+        assert!(has_system_message(&app, "alpha"));
+        assert!(has_system_message(&app, "beta"));
+    }
+
+    #[tokio::test]
+    async fn event_stream_notice_does_not_coalesce_through_other_block() {
+        // If a non-System block lands between two identical notices, the
+        // second notice creates a fresh System block (it can't reach back
+        // past the intervening block).
+        let mut app = make_test_app();
+        let baseline = app.messages.len();
+
+        app.handle_event(AppEvent::StreamNotice { text: "X".into() })
+            .await
+            .unwrap();
+        app.messages.push(MessageBlock::User {
+            text: "user typed something".into(),
+        });
+        app.handle_event(AppEvent::StreamNotice { text: "X".into() })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            app.messages.len(),
+            baseline + 3,
+            "intervening non-System block prevents coalescing"
+        );
+    }
+
+    #[test]
+    fn split_count_suffix_no_suffix() {
+        assert_eq!(split_count_suffix("Hello"), ("Hello", 1));
+    }
+
+    #[test]
+    fn split_count_suffix_basic_count() {
+        assert_eq!(split_count_suffix("Hello (×2)"), ("Hello", 2));
+        assert_eq!(split_count_suffix("Hello (×42)"), ("Hello", 42));
+    }
+
+    #[test]
+    fn split_count_suffix_rejects_invalid_shapes() {
+        // Missing close paren
+        assert_eq!(split_count_suffix("Hello (×2"), ("Hello (×2", 1));
+        // Trailing content after the close paren
+        assert_eq!(
+            split_count_suffix("Hello (×2) more"),
+            ("Hello (×2) more", 1)
+        );
+        // Non-digit content
+        assert_eq!(split_count_suffix("Hello (×x)"), ("Hello (×x)", 1));
+        // Empty digits
+        assert_eq!(split_count_suffix("Hello (×)"), ("Hello (×)", 1));
+        // Plain "x" not "×" (multiplication sign)
+        assert_eq!(split_count_suffix("Hello (x2)"), ("Hello (x2)", 1));
+    }
+
+    #[test]
+    fn split_count_suffix_handles_utf8_base() {
+        // The base text contains multi-byte characters — slicing must land
+        // on a UTF-8 boundary, not split a character.
+        assert_eq!(split_count_suffix("café (×3)"), ("café", 3));
+        assert_eq!(
+            split_count_suffix("LSP yaml server restarted successfully (×100)"),
+            ("LSP yaml server restarted successfully", 100)
+        );
+    }
+
+    #[test]
+    fn split_count_suffix_uses_last_prefix_match() {
+        // A base text that itself contains " (×" should split on the LAST
+        // occurrence so the count parses against the genuine suffix.
+        assert_eq!(
+            split_count_suffix("inner (×note) (×4)"),
+            ("inner (×note)", 4)
+        );
     }
 
     #[tokio::test]
