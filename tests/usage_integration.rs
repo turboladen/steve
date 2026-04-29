@@ -134,7 +134,7 @@ fn make_resolved_model(cost: Option<ModelCost>) -> ResolvedModel {
         },
         provider_config: ProviderConfig {
             base_url: "https://api.openai.com/v1".into(),
-            api_key_env: "OPENAI_API_KEY".into(),
+            api_key_env: Some("OPENAI_API_KEY".into()),
             models: Default::default(),
         },
     }

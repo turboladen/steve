@@ -26,6 +26,11 @@ serde_json = "1"
 
 # LLM Client
 async-openai = { version = "0.34", features = ["chat-completion"] }
+# `async-openai`'s `Config` trait returns `&secrecy::SecretString` from `api_key()`.
+# Steve's keyless-provider Config impl needs to name that type explicitly, so
+# `secrecy` is a direct dep — not just a transitive. Pin to the same version
+# `async-openai` uses to avoid a duplicate-dep clippy warning.
+secrecy = "0.10"
 
 # Search tools (ripgrep ecosystem)
 glob = "0.3"
