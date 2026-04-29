@@ -83,10 +83,28 @@ pub struct LspStatusEntry {
     pub restart_attempts: u8,
     /// When the next restart attempt should fire (backoff timer).
     pub next_restart_at: Option<Instant>,
+    /// Set to `Some(Instant::now())` when the server transitions to
+    /// `Ready`/`Indexing` after a successful `Initialize`. Cleared when the
+    /// server transitions to `Error` or `Restarting`. Used by
+    /// `plan_crash_restart` as a stability gate: a crash that happens at
+    /// least `STABILITY_WINDOW` after `ready_since` resets the retry budget,
+    /// while a crash that happens sooner accumulates against the previous
+    /// budget. This prevents infinite retry loops when a server reaches
+    /// `Ready` then crashes immediately (a common yaml-language-server
+    /// failure mode — the Node process passes `Initialize` but dies during
+    /// schema resolution).
+    pub ready_since: Option<Instant>,
 }
 
 /// Maximum number of restart attempts before `Error` becomes terminal.
 pub const MAX_RESTART_ATTEMPTS: u8 = 3;
+
+/// Minimum continuous Ready/Indexing uptime required before a subsequent
+/// crash counts as "stable run completed" and resets the restart budget.
+/// Crashes within this window of `ready_since` accumulate against the
+/// previous budget, so a server that fails Initialize then immediately
+/// crashes still hits MAX_RESTART_ATTEMPTS and stops retrying.
+pub const STABILITY_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Backoff duration before the Nth restart attempt.
 pub fn restart_backoff(attempt: u8) -> std::time::Duration {
@@ -707,6 +725,7 @@ mod tests {
             updated_at: std::time::Instant::now(),
             restart_attempts: 2,
             next_restart_at: Some(std::time::Instant::now()),
+            ready_since: Some(std::time::Instant::now()),
         };
         let cloned = original.clone();
         assert_eq!(cloned.binary, original.binary);
@@ -716,6 +735,7 @@ mod tests {
         assert_eq!(cloned.updated_at, original.updated_at);
         assert_eq!(cloned.restart_attempts, original.restart_attempts);
         assert_eq!(cloned.next_restart_at, original.next_restart_at);
+        assert_eq!(cloned.ready_since, original.ready_since);
     }
 
     #[test]

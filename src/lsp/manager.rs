@@ -48,9 +48,21 @@ pub(super) fn plan_crash_restart(
     reason: String,
     can_notify: bool,
 ) -> Option<std::time::Duration> {
+    // Stability gate: only reset the retry budget if the server was
+    // continuously Ready/Indexing for at least STABILITY_WINDOW before
+    // crashing. Servers that pass Initialize but crash within seconds
+    // (yaml-language-server schema-fetch crashes, etc.) keep their
+    // accumulated attempts so the budget cap actually trips.
+    if let Some(ready_since) = entry.ready_since
+        && ready_since.elapsed() >= crate::lsp::STABILITY_WINDOW
+    {
+        entry.restart_attempts = 0;
+    }
+
     entry.state = LspServerState::Error { reason };
     entry.active_progress = 0;
     entry.progress_message = None;
+    entry.ready_since = None;
     entry.updated_at = Instant::now();
 
     let attempt = entry.restart_attempts;
@@ -113,6 +125,7 @@ impl LspManager {
                 updated_at: Instant::now(),
                 restart_attempts: 0,
                 next_restart_at: None,
+                ready_since: None,
             });
         }
     }
@@ -191,6 +204,7 @@ impl LspManager {
                 updated_at: Instant::now(),
                 restart_attempts: 0,
                 next_restart_at: None,
+                ready_since: None,
             });
             entry.binary = binary.clone();
             entry.state = LspServerState::Starting;
@@ -335,6 +349,7 @@ impl LspManager {
                     entry.active_progress = 0;
                     entry.progress_message = None;
                     entry.next_restart_at = None;
+                    entry.ready_since = None;
                     entry.updated_at = Instant::now();
                 }
                 return Err(anyhow::anyhow!("initialize request failed: {e:?}"));
@@ -347,9 +362,12 @@ impl LspManager {
 
         // Transition Starting → Ready (or Indexing if `$/progress` Begin
         // notifications arrived during init — rust-analyzer does this).
-        // Reset restart-budget fields in the same critical section as the
-        // state transition so a rapid re-crash cannot race between the
-        // Ready write and the budget reset.
+        // Stamp `ready_since` so the next crash watcher can decide via the
+        // STABILITY_WINDOW gate whether this run was stable enough to reset
+        // the retry budget. Crucially, do NOT reset `restart_attempts` here:
+        // a server that passes Initialize but crashes within seconds (e.g.
+        // yaml-language-server failing during schema fetch) would otherwise
+        // restart-loop forever as each Initialize success zeroes the budget.
         {
             let mut map = self.status.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(entry) = map.get_mut(&lang) {
@@ -366,8 +384,8 @@ impl LspManager {
                     entry.active_progress,
                 );
                 entry.state = new_state;
-                entry.restart_attempts = 0;
                 entry.next_restart_at = None;
+                entry.ready_since = Some(Instant::now());
                 entry.updated_at = Instant::now();
             }
         }
@@ -494,14 +512,15 @@ impl LspManager {
     ///    this is a cheap no-op; it defends against future callers
     ///    invoking restart on a healthy server.
     /// 2. Calls `start_server` to spawn a fresh process + Initialize.
-    ///    `restart_attempts` is reset to 0 inside `start_server`'s
-    ///    post-Initialize critical section, so the reset is atomic with
-    ///    the Ready transition.
+    ///    `start_server` stamps `ready_since` on the post-Initialize
+    ///    transition; the next crash watcher uses STABILITY_WINDOW to
+    ///    decide whether the run was stable enough to reset the retry
+    ///    budget (see `plan_crash_restart`).
     /// 3. On init failure, leaves `restart_attempts` untouched (already
     ///    incremented by the crash watcher before `LspRestartNeeded` was
-    ///    sent). Clears `next_restart_at` and — if `start_server` didn't
-    ///    already write a specific Error — flips the entry to Error so
-    ///    the sidebar shows the failure.
+    ///    sent). Clears `next_restart_at` and `ready_since` and — if
+    ///    `start_server` didn't already write a specific Error — flips
+    ///    the entry to Error so the sidebar shows the failure.
     pub fn restart_server(&mut self, lang: Language) -> Result<()> {
         if let Some(old_server) = self.servers.remove(&lang)
             && let Err(e) = old_server.transport_shutdown()
@@ -522,6 +541,7 @@ impl LspManager {
                 let mut map = self.status.lock().unwrap_or_else(|p| p.into_inner());
                 if let Some(entry) = map.get_mut(&lang) {
                     entry.next_restart_at = None;
+                    entry.ready_since = None;
                     // If `start_server`'s Initialize-failure branch already
                     // wrote a specific Error, preserve it. Otherwise (e.g.
                     // resolve_server returned None, spawn failed), flip the
@@ -707,6 +727,7 @@ mod tests {
             updated_at: Instant::now(),
             restart_attempts: 0,
             next_restart_at: None,
+            ready_since: None,
         }
     }
 
@@ -1008,6 +1029,7 @@ mod tests {
                 updated_at: Instant::now(),
                 restart_attempts: 0,
                 next_restart_at: None,
+                ready_since: None,
             },
         );
 
@@ -1138,6 +1160,7 @@ mod tests {
                     updated_at: Instant::now(),
                     restart_attempts: 1,
                     next_restart_at: Some(Instant::now()),
+                    ready_since: None,
                 },
             );
             let err = mgr.restart_server(Language::Ruby);
@@ -1180,6 +1203,10 @@ mod tests {
     // LSP processes — they test the decision table directly.
 
     fn restart_entry(attempts: u8) -> LspStatusEntry {
+        restart_entry_with_ready(attempts, None)
+    }
+
+    fn restart_entry_with_ready(attempts: u8, ready_since: Option<Instant>) -> LspStatusEntry {
         LspStatusEntry {
             binary: "fake-ls".into(),
             state: LspServerState::Ready,
@@ -1188,6 +1215,7 @@ mod tests {
             updated_at: Instant::now(),
             restart_attempts: attempts,
             next_restart_at: None,
+            ready_since,
         }
     }
 
@@ -1279,5 +1307,75 @@ mod tests {
             }
             other => panic!("expected Error state with reason, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn plan_crash_restart_recent_ready_does_not_reset_budget() {
+        // Regression for steve-ooox: a server that passes Initialize and
+        // crashes within STABILITY_WINDOW must NOT have its retry budget
+        // reset. Without this, yaml-language-server (and any other server
+        // that reaches Ready before crashing during schema fetch / first
+        // didOpen) loops forever because each cycle zeroes attempts.
+        let mut entry = restart_entry_with_ready(2, Some(Instant::now()));
+        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), true);
+        assert_eq!(
+            entry.restart_attempts, 3,
+            "attempts should increment from 2, NOT reset to 1, when ready_since is recent"
+        );
+        assert_eq!(delay, Some(std::time::Duration::from_secs(5)));
+        assert!(entry.ready_since.is_none(), "ready_since cleared on crash");
+    }
+
+    #[test]
+    fn plan_crash_restart_recent_ready_at_exhausted_budget_stays_error() {
+        // The combined behavior: a server that has already exhausted its
+        // budget and crashes again within STABILITY_WINDOW lands in
+        // permanent Error — the eager reset is what was breaking this.
+        let mut entry =
+            restart_entry_with_ready(crate::lsp::MAX_RESTART_ATTEMPTS, Some(Instant::now()));
+        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), true);
+        assert_eq!(delay, None, "no retry once budget exhausted, even if Ready");
+        assert!(matches!(entry.state, LspServerState::Error { .. }));
+        assert_eq!(
+            entry.restart_attempts,
+            crate::lsp::MAX_RESTART_ATTEMPTS,
+            "attempts should stay at MAX, not reset"
+        );
+    }
+
+    #[test]
+    fn plan_crash_restart_stable_uptime_resets_budget() {
+        // A server that has been continuously Ready for at least
+        // STABILITY_WINDOW before crashing IS treated as a stable run —
+        // its retry budget resets so the next crash gets the full cap.
+        // Construct ready_since just past the window.
+        let stable_since = Instant::now()
+            .checked_sub(crate::lsp::STABILITY_WINDOW + std::time::Duration::from_secs(1))
+            .expect("subtracting from process-start Instant should succeed in tests");
+        let mut entry =
+            restart_entry_with_ready(crate::lsp::MAX_RESTART_ATTEMPTS, Some(stable_since));
+        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), true);
+        assert_eq!(
+            delay,
+            Some(std::time::Duration::ZERO),
+            "stable run grants a fresh budget — first crash schedules zero-delay restart"
+        );
+        assert_eq!(
+            entry.restart_attempts, 1,
+            "attempts reset to 0 then incremented for this crash"
+        );
+        assert!(entry.ready_since.is_none(), "ready_since cleared on crash");
+    }
+
+    #[test]
+    fn plan_crash_restart_no_ready_since_does_not_reset() {
+        // Defensive: the very first crash (ready_since=None — server never
+        // reached Ready, e.g. Initialize failed) must not be treated as a
+        // stable run. The default behavior (no reset) applies and the
+        // existing budget logic counts every crash.
+        let mut entry = restart_entry_with_ready(2, None);
+        let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), true);
+        assert_eq!(entry.restart_attempts, 3);
+        assert_eq!(delay, Some(std::time::Duration::from_secs(5)));
     }
 }

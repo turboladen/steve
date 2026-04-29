@@ -185,6 +185,7 @@ mod tests {
             updated_at: Instant::now(),
             restart_attempts: 0,
             next_restart_at: None,
+            ready_since: None,
         }
     }
 
