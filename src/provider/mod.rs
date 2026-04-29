@@ -90,6 +90,16 @@ impl ProviderRegistry {
             let client_result = match &provider_config.api_key_env {
                 None => Ok(LlmClient::keyless(&provider_config.base_url)),
                 Some(env_name) => match env::var(env_name) {
+                    // Treat empty / whitespace-only values the same as
+                    // `NotPresent` — otherwise we'd register a keyed provider
+                    // that ships `Authorization: Bearer ` and 401s on every
+                    // request, surfacing as opaque auth errors instead of the
+                    // clear "missing API key" diagnostic users need.
+                    Ok(api_key) if api_key.trim().is_empty() => Err(ProviderInitWarning {
+                        provider_id: provider_id.clone(),
+                        env_var: env_name.clone(),
+                        reason: ProviderInitReason::MissingEnvVar,
+                    }),
                     Ok(api_key) => Ok(LlmClient::with_key(&provider_config.base_url, &api_key)),
                     Err(env::VarError::NotPresent) => Err(ProviderInitWarning {
                         provider_id: provider_id.clone(),
@@ -418,6 +428,50 @@ mod tests {
             "exactly one warning expected — for the keyed provider only"
         );
         assert_eq!(warnings[0].provider_id, "openai");
+    }
+
+    #[test]
+    fn from_config_treats_empty_env_var_as_missing() {
+        // Regression guard for Copilot review on PR #42: an env var that's
+        // *set* but empty (or whitespace-only) must not register a keyed
+        // provider with an empty bearer token. That path produces opaque 401s
+        // at first request; we want the clear "missing API key" diagnostic
+        // at startup instead.
+        const EMPTY_VAR: &str = "STEVE_TEST_JHHW_EMPTY";
+        const WHITESPACE_VAR: &str = "STEVE_TEST_JHHW_WHITESPACE";
+
+        unsafe {
+            env::set_var(EMPTY_VAR, "");
+            env::set_var(WHITESPACE_VAR, "   \t  ");
+        }
+
+        let mut providers = HashMap::new();
+        providers.insert("blank".to_string(), make_provider(EMPTY_VAR));
+        providers.insert("ws".to_string(), make_provider(WHITESPACE_VAR));
+        let config = Config {
+            providers,
+            ..Config::default()
+        };
+
+        let (registry, warnings) = ProviderRegistry::from_config(&config);
+
+        assert!(
+            registry.is_empty(),
+            "providers with empty/whitespace env vars must be skipped, not registered with empty keys",
+        );
+        assert_eq!(warnings.len(), 2);
+        for w in &warnings {
+            assert_eq!(
+                w.reason,
+                ProviderInitReason::MissingEnvVar,
+                "empty env vars should reuse MissingEnvVar so the user sees the same 'set this var' guidance",
+            );
+        }
+
+        unsafe {
+            env::remove_var(EMPTY_VAR);
+            env::remove_var(WHITESPACE_VAR);
+        }
     }
 
     #[test]
