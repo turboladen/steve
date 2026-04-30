@@ -1,23 +1,38 @@
 use super::*;
 
-/// Split a System message text into `(base, count)` if it ends with a
-/// `" (×N)"` counter suffix written by the `StreamNotice` dedupe path.
-/// Returns `(s, 1)` for any string that doesn't match the exact format.
+/// Prefix and suffix of the `" (×N)"` counter that the StreamNotice dedupe
+/// path appends when folding repeated identical notices into a single
+/// MessageBlock. Hoisted to module scope so the writer (`format_with_count`)
+/// and parser (`split_count_suffix`) share a single source of truth — if
+/// the cosmetic format ever changes, both sides update together.
+const COUNT_PREFIX: &str = " (×";
+const COUNT_SUFFIX: &str = ")";
+
+/// Render a System message text with an explicit count suffix. Inverse of
+/// `split_count_suffix`: `split_count_suffix(&format_with_count(base, n))`
+/// always returns `(base, n)` for any non-empty `base` that doesn't itself
+/// end with a count suffix.
+fn format_with_count(base: &str, count: usize) -> String {
+    format!("{base}{COUNT_PREFIX}{count}{COUNT_SUFFIX}")
+}
+
+/// Split a System message text into `(base, count)` if it ends with the
+/// `" (×N)"` counter suffix written by `format_with_count`. Returns
+/// `(s, 1)` for any string that doesn't match the exact format.
 ///
-/// The suffix is matched on the LAST `" (×"` occurrence, so a base text that
-/// happens to contain the prefix earlier is preserved. The closing `)` must
-/// terminate the string with no trailing content, and the digits must be a
-/// well-formed `usize`.
+/// The suffix is matched on the LAST `" (×"` occurrence, so a base text
+/// that happens to contain the prefix earlier is preserved. The closing
+/// `)` must terminate the string with no trailing content, and the digits
+/// must be a well-formed `usize`.
 fn split_count_suffix(s: &str) -> (&str, usize) {
-    const COUNT_PREFIX: &str = " (×";
     let Some(idx) = s.rfind(COUNT_PREFIX) else {
         return (s, 1);
     };
     let after = &s[idx + COUNT_PREFIX.len()..];
-    let Some(close) = after.find(')') else {
+    let Some(close) = after.find(COUNT_SUFFIX) else {
         return (s, 1);
     };
-    let trailing = &after[close + 1..];
+    let trailing = &after[close + COUNT_SUFFIX.len()..];
     if !trailing.is_empty() {
         return (s, 1);
     }
@@ -474,7 +489,15 @@ impl App {
                     Some(MessageBlock::System { text: prev }) => {
                         let (base, count) = split_count_suffix(prev);
                         if base == text {
-                            *prev = format!("{base} (×{})", count + 1);
+                            // saturating_add: a counter that pins at usize::MAX
+                            // is correct degenerate behavior — additional folds
+                            // become silent no-ops and the display freezes,
+                            // rather than panicking (debug) or wrapping
+                            // (release). In practice impossible to hit; this is
+                            // defense against malformed input that already has
+                            // a near-MAX count baked in.
+                            let next = count.saturating_add(1);
+                            *prev = format_with_count(base, next);
                             true
                         } else {
                             false
@@ -992,6 +1015,59 @@ mod tests {
             split_count_suffix("inner (×note) (×4)"),
             ("inner (×note)", 4)
         );
+    }
+
+    #[test]
+    fn format_with_count_and_split_roundtrip() {
+        // Property: parse(format(base, n)) == (base, n) for any base that
+        // doesn't already end with the count format. Locks the writer and
+        // parser to a single source-of-truth pair.
+        for &(base, n) in &[
+            ("Hello", 2usize),
+            ("LSP yaml server restarted successfully", 12),
+            ("café", 999),
+            ("", 1),
+        ] {
+            let rendered = format_with_count(base, n);
+            assert_eq!(
+                split_count_suffix(&rendered),
+                (base, n),
+                "roundtrip failed for ({base:?}, {n})"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn event_stream_notice_count_saturates_at_usize_max() {
+        // Defense-in-depth: a malformed/synthetic prior block whose count
+        // is already `usize::MAX` must not panic on an additional fold.
+        // saturating_add freezes the counter and the next event becomes a
+        // silent no-op (the displayed text doesn't change).
+        let mut app = make_test_app();
+        let already_max = format_with_count("X", usize::MAX);
+        app.messages.push(MessageBlock::System {
+            text: already_max.clone(),
+        });
+        let baseline = app.messages.len();
+
+        app.handle_event(AppEvent::StreamNotice { text: "X".into() })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            app.messages.len(),
+            baseline,
+            "saturated fold must not push a new block"
+        );
+        match app.messages.last() {
+            Some(MessageBlock::System { text }) => {
+                assert_eq!(
+                    text, &already_max,
+                    "saturated count display should not change"
+                );
+            }
+            other => panic!("expected System block, got {other:?}"),
+        }
     }
 
     #[tokio::test]
