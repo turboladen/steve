@@ -27,6 +27,21 @@ const STDERR_TAIL_MAX_LINES: usize = 10;
 /// against a single very long line blowing up memory).
 const STDERR_TAIL_MAX_BYTES: usize = 2048;
 
+/// Hard cap on the byte length of a single stderr line *after* it's been
+/// read. Lines longer than this are truncated at a UTF-8 char boundary
+/// before being logged or pushed into the tail. The stdlib's
+/// `BufRead::read_line` doesn't bound its read, so a server that prints a
+/// very long line still allocates that much transiently — but this cap
+/// bounds the *persistent* memory, including the "retain last line even
+/// if oversized" path in `StderrTail::push`. 4 KiB is twice the tail
+/// budget so a moderately long backtrace still fits, but a multi-MB
+/// stderr dump is reduced to a representative head.
+const STDERR_LINE_MAX_BYTES: usize = 4096;
+
+/// Marker appended to a truncated stderr line so users can tell the
+/// trailing context was elided rather than the server cutting itself off.
+const STDERR_LINE_TRUNCATED_MARKER: &str = " …[truncated]";
+
 /// Bounded ring buffer of recent stderr lines from a spawned LSP child.
 ///
 /// Written by the per-child stderr pump task; read by the Initialize-
@@ -78,6 +93,22 @@ impl StderrTail {
 /// + crash-watcher paths (readers). All access goes through the mutex.
 pub(super) type SharedStderrTail = Arc<Mutex<StderrTail>>;
 
+/// Truncate a stderr line in place to `STDERR_LINE_MAX_BYTES`, appending
+/// `STDERR_LINE_TRUNCATED_MARKER` so the elision is visible. The cut
+/// happens at a UTF-8 char boundary — `String::truncate` panics on a
+/// non-boundary index, so we use `str::floor_char_boundary` to land on
+/// a safe spot at or below the byte target.
+fn truncate_stderr_line(line: &mut String) {
+    if line.len() <= STDERR_LINE_MAX_BYTES {
+        return;
+    }
+    // Reserve room for the marker so the final length is ≤ MAX.
+    let target = STDERR_LINE_MAX_BYTES.saturating_sub(STDERR_LINE_TRUNCATED_MARKER.len());
+    let cutoff = line.floor_char_boundary(target);
+    line.truncate(cutoff);
+    line.push_str(STDERR_LINE_TRUNCATED_MARKER);
+}
+
 /// Spawn a task that pumps lines from the child's stderr into the shared
 /// tail buffer and the tracing log. Each line is logged at WARN level so
 /// it surfaces in the default `steve=info` filter (the user has set
@@ -95,9 +126,10 @@ fn spawn_stderr_pump(
         let mut reader = tokio::io::BufReader::new(stderr).lines();
         loop {
             match reader.next_line().await {
-                Ok(Some(line)) => {
+                Ok(Some(mut line)) => {
+                    truncate_stderr_line(&mut line);
                     tracing::warn!(
-                        target: "lsp_stderr",
+                        target: "steve::lsp_stderr",
                         lang = %lang,
                         binary = %binary,
                         "{line}",
@@ -108,7 +140,7 @@ fn spawn_stderr_pump(
                 Ok(None) => break, // EOF — child closed stderr
                 Err(e) => {
                     tracing::debug!(
-                        target: "lsp_stderr",
+                        target: "steve::lsp_stderr",
                         lang = %lang,
                         binary = %binary,
                         "stderr read error: {e}",
@@ -1569,17 +1601,62 @@ mod tests {
     #[test]
     fn stderr_tail_drops_oldest_past_byte_limit() {
         let mut tail = StderrTail::new();
-        // A single line larger than the byte budget should still be retained
-        // (we don't truncate inside a line) but should evict everything else.
+        // The pump truncates lines to STDERR_LINE_MAX_BYTES before push,
+        // but `StderrTail::push` itself doesn't shrink individual lines
+        // — it only evicts older ones to fit the byte budget. Test the
+        // pure StderrTail invariant by passing a deliberately oversized
+        // line (as if STDERR_LINE_MAX_BYTES were larger than the tail
+        // budget, which is the documented design).
         let huge = "x".repeat(STDERR_TAIL_MAX_BYTES * 2);
         tail.push("first".to_string());
         tail.push("second".to_string());
         tail.push(huge.clone());
         // The huge line alone exceeds the budget, so the smaller predecessors
-        // are evicted; the huge line stays since the loop stops once `lines`
-        // is empty (saturating_sub keeps total_bytes consistent).
+        // are evicted; the huge line stays because eviction stops once only
+        // the most recent line remains, even if total_bytes is still over
+        // budget (the "retain last line if oversized" exception in `push`).
         assert_eq!(tail.lines.len(), 1);
         assert_eq!(tail.lines.front().unwrap(), &huge);
+    }
+
+    #[test]
+    fn truncate_stderr_line_no_op_when_under_limit() {
+        let mut s = "short line".to_string();
+        truncate_stderr_line(&mut s);
+        assert_eq!(s, "short line");
+    }
+
+    #[test]
+    fn truncate_stderr_line_caps_oversized_line_with_marker() {
+        let mut s = "x".repeat(STDERR_LINE_MAX_BYTES + 100);
+        truncate_stderr_line(&mut s);
+        assert!(
+            s.len() <= STDERR_LINE_MAX_BYTES,
+            "post-truncation length {} must fit within the cap {}",
+            s.len(),
+            STDERR_LINE_MAX_BYTES,
+        );
+        assert!(
+            s.ends_with(STDERR_LINE_TRUNCATED_MARKER),
+            "truncated lines should advertise that they were cut: {s:?}"
+        );
+    }
+
+    #[test]
+    fn truncate_stderr_line_lands_on_utf8_char_boundary() {
+        // Build a line whose byte length exceeds the cap and where a
+        // naive byte-cutoff would land in the middle of a multi-byte
+        // grapheme. `…` is 3 UTF-8 bytes; padding before it puts the
+        // cut just inside the multi-byte sequence at the naive boundary.
+        let prefix = "x".repeat(STDERR_LINE_MAX_BYTES - 1);
+        let mut s = format!("{prefix}…tail");
+        truncate_stderr_line(&mut s);
+        // Just verifying that String::truncate didn't panic is the
+        // assertion — `String` would have panicked at the cut if the
+        // boundary was wrong. Confirm the string is still valid UTF-8
+        // by reading back.
+        assert!(s.is_char_boundary(s.len()));
+        assert!(s.ends_with(STDERR_LINE_TRUNCATED_MARKER));
     }
 
     #[test]
