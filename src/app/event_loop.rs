@@ -487,20 +487,31 @@ impl App {
                 // earlier user/assistant content out of view.
                 let folded = match self.messages.last_mut() {
                     Some(MessageBlock::System { text: prev }) => {
-                        let (base, count) = split_count_suffix(prev);
-                        if base == text {
-                            // saturating_add: a counter that pins at usize::MAX
-                            // is correct degenerate behavior — additional folds
-                            // become silent no-ops and the display freezes,
-                            // rather than panicking (debug) or wrapping
-                            // (release). In practice impossible to hit; this is
-                            // defense against malformed input that already has
-                            // a near-MAX count baked in.
-                            let next = count.saturating_add(1);
-                            *prev = format_with_count(base, next);
+                        // Belt-and-suspenders: try literal equality first so a
+                        // notice whose text itself ends with `" (×N)"` still
+                        // coalesces correctly when repeated verbatim, without
+                        // depending on the parser's interpretation of that
+                        // tail. Falls back to the parse-and-fold path for the
+                        // common `"X" → "X (×2)"` transition.
+                        if *prev == text {
+                            *prev = format_with_count(&text, 2);
                             true
                         } else {
-                            false
+                            let (base, count) = split_count_suffix(prev);
+                            if base == text {
+                                // saturating_add: a counter that pins at
+                                // usize::MAX is correct degenerate behavior —
+                                // additional folds become silent no-ops and
+                                // the display freezes, rather than panicking
+                                // (debug) or wrapping (release). Defense
+                                // against malformed input that already has a
+                                // near-MAX count baked in.
+                                let next = count.saturating_add(1);
+                                *prev = format_with_count(base, next);
+                                true
+                            } else {
+                                false
+                            }
                         }
                     }
                     _ => false,
@@ -1015,6 +1026,16 @@ mod tests {
             split_count_suffix("inner (×note) (×4)"),
             ("inner (×note)", 4)
         );
+        // Multiple valid-looking suffixes — `rfind` must grab the rightmost.
+        assert_eq!(
+            split_count_suffix("a (×1) b (×2) c (×3)"),
+            ("a (×1) b (×2) c", 3)
+        );
+        // A genuine count to the right of an invalid `" (×note)"` cluster.
+        assert_eq!(
+            split_count_suffix("first (×nope) middle (×7)"),
+            ("first (×nope) middle", 7)
+        );
     }
 
     #[test]
@@ -1034,6 +1055,79 @@ mod tests {
                 (base, n),
                 "roundtrip failed for ({base:?}, {n})"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn event_stream_notice_coalesces_empty_text() {
+        // Defense-in-depth: emit sites are not expected to send empty
+        // notices, but the dedupe path should still behave correctly if
+        // they do — `("", 2)` round-trips through format/split, and the
+        // handler folds two empty notices into a single block displaying
+        // the suffix only (`" (×2)"`).
+        let mut app = make_test_app();
+        let baseline = app.messages.len();
+
+        app.handle_event(AppEvent::StreamNotice {
+            text: String::new(),
+        })
+        .await
+        .unwrap();
+        app.handle_event(AppEvent::StreamNotice {
+            text: String::new(),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            app.messages.len(),
+            baseline + 1,
+            "two empty notices should collapse to a single block"
+        );
+        match app.messages.last() {
+            Some(MessageBlock::System { text }) => {
+                assert_eq!(text, &format_with_count("", 2));
+            }
+            other => panic!("expected System block, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn event_stream_notice_coalesces_text_that_looks_like_count_suffix() {
+        // Regression for a latent footgun (Medium finding M2): if a notice
+        // text happens to END with `" (×N)"` as part of its literal content
+        // (not as a counter), repeated identical notices must still
+        // coalesce. The literal-equality early-out in the handler catches
+        // this case before the parser can interpret the trailing `(×N)`
+        // as a counter, which would otherwise drop into `format!`'s
+        // weirder branches and produce `"… (×N) (×M)"` displays.
+        let mut app = make_test_app();
+        let baseline = app.messages.len();
+        let trailing_count_text = "Multiplied by (×100)".to_string();
+
+        app.handle_event(AppEvent::StreamNotice {
+            text: trailing_count_text.clone(),
+        })
+        .await
+        .unwrap();
+        app.handle_event(AppEvent::StreamNotice {
+            text: trailing_count_text.clone(),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            app.messages.len(),
+            baseline + 1,
+            "literal text ending in `(×N)` must still coalesce on repeat"
+        );
+        match app.messages.last() {
+            Some(MessageBlock::System { text }) => {
+                // Display is `"Multiplied by (×100) (×2)"` — the original
+                // literal, then our actual repeat counter.
+                assert_eq!(text, &format_with_count(&trailing_count_text, 2));
+            }
+            other => panic!("expected System block, got {other:?}"),
         }
     }
 
