@@ -13,7 +13,12 @@ pub struct DiagnosticInput<'a> {
     pub agents_md: Option<&'a str>,
     pub system_prompt_len: usize,
     pub config: &'a Config,
-    pub lsp_servers: &'a [(&'a str, bool)],
+    /// Per-language LSP status: `(binary, running, error_reason)`.
+    /// `error_reason` is `Some` iff the server's state is `Error { reason }`,
+    /// otherwise `None`. Used by `lsp_health_checks` to differentiate
+    /// "binary not on PATH" (recommend install) from "binary found but
+    /// crashed" (surface the underlying reason).
+    pub lsp_servers: &'a [(&'a str, bool, Option<&'a str>)],
     pub total_tokens: u64,
     pub exchange_count: usize,
     pub cache_hits: u32,
@@ -80,7 +85,7 @@ mod tests {
     fn run_diagnostics_returns_checks_from_all_categories() {
         // Use a config that triggers some checks (default has no costs, no small_model)
         let config = Config::default();
-        let lsp = [("rust-analyzer", false)];
+        let lsp = [("rust-analyzer", false, None)];
         let input = DiagnosticInput {
             agents_md: None, // triggers AI env warning
             system_prompt_len: 1000,
