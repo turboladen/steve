@@ -13,8 +13,10 @@ use std::{
 };
 
 use async_lsp::{
-    MainLoop, ServerSocket,
-    lsp_types::{Diagnostic, ProgressParamsValue, Url, WorkDoneProgress, notification, request},
+    ErrorCode, MainLoop, ResponseError, ServerSocket,
+    lsp_types::{
+        Diagnostic, MessageType, ProgressParamsValue, Url, WorkDoneProgress, notification, request,
+    },
     router::Router,
 };
 
@@ -83,6 +85,40 @@ pub(crate) fn apply_progress_update(entry: &mut LspStatusEntry, value: ProgressP
             entry.updated_at = Instant::now();
         }
     }
+}
+
+/// Surface an LSP `window/logMessage` / `window/showMessage` /
+/// `window/showMessageRequest` payload via `tracing` at a level matching
+/// the LSP message type. The macro form is required because `tracing`'s
+/// `target:` clause needs a literal at the macro call site — a runtime
+/// `&'static str` parameter would not work.
+///
+/// `MessageType` is a transparent newtype around `i32` (not a Rust
+/// enum), so the spec-defined variants are constants and the `_` arm
+/// is required for forward-compatibility with any unknown values a
+/// non-conforming server might send.
+macro_rules! log_lsp_at_typ_level {
+    ($target:literal, $lang:expr, $typ:expr, $message:expr) => {{
+        let lang = $lang;
+        let message = $message;
+        match $typ {
+            MessageType::ERROR => {
+                tracing::error!(target: $target, lang = %lang, "{}", message)
+            }
+            MessageType::WARNING => {
+                tracing::warn!(target: $target, lang = %lang, "{}", message)
+            }
+            MessageType::INFO => {
+                tracing::info!(target: $target, lang = %lang, "{}", message)
+            }
+            MessageType::LOG => {
+                tracing::debug!(target: $target, lang = %lang, "{}", message)
+            }
+            other => {
+                tracing::info!(target: $target, lang = %lang, type_ = ?other, "{}", message)
+            }
+        }
+    }};
 }
 
 /// Create an async-lsp client MainLoop + ServerSocket pair.
@@ -171,28 +207,22 @@ pub(crate) fn create_client(
         // server, basedpyright-langserver) emit logMessage during or
         // immediately after Initialize, so the absence of this handler
         // crashed every such server within ~ms of reaching Ready.
+        //
+        // Tracing level mirrors `params.typ`: an ERROR-level logMessage
+        // (e.g. yaml-language-server's "schema fetch failed") shows up at
+        // tracing::error, so users running with `RUST_LOG=steve=warn`
+        // still see it. INFO and LOG variants use proportionally lower
+        // levels.
         router.notification::<notification::LogMessage>(|state, params| {
-            tracing::info!(
-                target: "lsp_log",
-                lang = %state.language,
-                type_ = ?params.typ,
-                "{}",
-                params.message,
-            );
+            log_lsp_at_typ_level!("lsp_log", state.language, params.typ, &params.message);
             ControlFlow::Continue(())
         });
 
         // Handle window/showMessage — like logMessage but conventionally
         // user-visible. We don't have UX to surface a popup, so log it at
-        // the same level so users can grep for both.
+        // a level matching the message's typ so users can grep for both.
         router.notification::<notification::ShowMessage>(|state, params| {
-            tracing::info!(
-                target: "lsp_show",
-                lang = %state.language,
-                type_ = ?params.typ,
-                "{}",
-                params.message,
-            );
+            log_lsp_at_typ_level!("lsp_show", state.language, params.typ, &params.message);
             ControlFlow::Continue(())
         });
 
@@ -201,34 +231,27 @@ pub(crate) fn create_client(
         // respond with None (no action selected). The message itself is
         // logged so it's still visible.
         router.request::<request::ShowMessageRequest, _>(|state, params| {
-            tracing::info!(
-                target: "lsp_show",
-                lang = %state.language,
-                type_ = ?params.typ,
-                actions = ?params.actions,
-                "{} (no UX to prompt user — responding with None)",
-                params.message,
+            let augmented = format!(
+                "{} (no UX to prompt user — responding with None; actions={:?})",
+                params.message, params.actions,
             );
+            log_lsp_at_typ_level!("lsp_show", state.language, params.typ, &augmented);
             futures_util::future::ready(Ok(None))
         });
 
-        // Handle telemetry/event — silently drop. We don't ship analytics
-        // anywhere, but the Router still needs an acknowledgement so it
-        // doesn't terminate the mainloop on receipt.
-        router.notification::<notification::TelemetryEvent>(|_state, _params| {
-            ControlFlow::Continue(())
-        });
-
         // Catch-all fallback for any other server-to-client notifications
-        // we don't have an explicit handler for. async-lsp's default is to
-        // terminate the mainloop with `Error::Routing`, which would mean
-        // every new server-side notification an LSP starts emitting (or
-        // any server-vendor extension) crashes us. The official docs
-        // warn this is unsafe for *client-to-server* notifications where
-        // missing didChange handling causes state desync — but server-to-
-        // client notifications are advisory by design (logs, telemetry,
-        // status pings). Dropping them silently is the right default;
-        // the explicit handlers above cover the ones we want to act on.
+        // we don't have an explicit handler for. async-lsp's default does
+        // nothing for `$/`-prefixed methods and terminates the mainloop
+        // with `Error::Routing` for everything else — including
+        // `telemetry/event`, vendor extensions like
+        // `rust-analyzer/serverStatus`, and any future LSP additions our
+        // code hasn't been updated for. The official docs warn the
+        // catch-all is unsafe for *client-to-server* notifications where
+        // missing `didChange` handling causes state desync — but
+        // server-to-client notifications are advisory by design (logs,
+        // telemetry, status pings). Dropping them silently is the right
+        // default; the explicit handlers above cover the ones we want to
+        // act on.
         router.unhandled_notification(|_state, notification| {
             tracing::debug!(
                 target: "lsp_unhandled",
@@ -236,6 +259,26 @@ pub(crate) fn create_client(
                 "dropping unhandled server-to-client notification",
             );
             ControlFlow::Continue(())
+        });
+
+        // Catch-all for unhandled server-to-client *requests*. async-lsp's
+        // default already returns METHOD_NOT_FOUND (so it doesn't crash
+        // the mainloop), but it does so without logging — and some
+        // servers complain noisily on receiving the error. Replace it
+        // with a logging variant so the rejection is visible at debug
+        // level and the user can see which extension methods their
+        // server is asking about.
+        router.unhandled_request(|_state, req| {
+            tracing::debug!(
+                target: "lsp_unhandled",
+                method = %req.method,
+                "rejecting unhandled server-to-client request with METHOD_NOT_FOUND",
+            );
+            let method = req.method.clone();
+            futures_util::future::ready(Err(ResponseError::new(
+                ErrorCode::METHOD_NOT_FOUND,
+                format!("No such method {method}"),
+            )))
         });
 
         router
@@ -453,6 +496,11 @@ mod tests {
     /// `Err(Routing(...))` — that's the failure mode we're guarding
     /// against. `Err(Eof)` is the *expected* terminal state once we drop
     /// the pipe (async-lsp surfaces EOF as an error, not as `Ok`).
+    ///
+    /// `tokio::io::duplex` is an in-memory pipe, so the mainloop's
+    /// read+dispatch is synchronous w.r.t. the test's `write_all`+`flush`
+    /// — there's no race window between the framed write and the
+    /// subsequent EOF signal that would require a sleep to bridge.
     async fn drive_mainloop_with_notification(
         method: &str,
         params: serde_json::Value,
@@ -483,12 +531,9 @@ mod tests {
         stdout_server.write_all(frame.as_bytes()).await.unwrap();
         stdout_server.flush().await.unwrap();
 
-        // Give the mainloop a moment to process the notification before we
-        // close the pipe — otherwise we race with EOF and might exit before
-        // dispatching the message to a handler.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Close the server side so the mainloop reaches stdout EOF.
+        // Close the server side so the mainloop reaches stdout EOF and
+        // returns Err(Eof). The flushed frame is already in the pipe
+        // buffer; the mainloop reads it before observing EOF.
         drop(stdout_server);
 
         tokio::time::timeout(std::time::Duration::from_secs(2), mainloop_handle)
@@ -560,5 +605,81 @@ mod tests {
         )
         .await;
         assert_not_routing_error("rust-analyzer/serverStatus", result);
+    }
+
+    #[tokio::test]
+    async fn typed_show_message_request_handler_responds_with_null_result() {
+        // Closes the L5 coverage gap: the four "does_not_terminate" tests
+        // above prove the mainloop survives, but they CANNOT distinguish
+        // the typed `ShowMessageRequest` handler from the catch-all
+        // `unhandled_request` (both keep the loop alive). This test
+        // observes the *response side*: the typed handler returns
+        // `Ok(None)` which serializes as `"result": null`, whereas the
+        // catch-all returns `Err(METHOD_NOT_FOUND)` which serializes as
+        // `"error": {"code": -32601, ...}`. Reading the response off
+        // the server-side stdin pipe lets us assert which path ran,
+        // catching a regression where someone drops the typed handler
+        // and accidentally relies on the fallback.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+
+        let (mut stdout_server, stdout_client) = tokio::io::duplex(8192);
+        let (stdin_client, mut stdin_server) = tokio::io::duplex(8192);
+
+        let diagnostics: SharedDiagnostics = Arc::new(Mutex::new(HashMap::new()));
+        let status: SharedLspStatus = Arc::new(Mutex::new(HashMap::new()));
+        let (mainloop, _socket) = create_client(diagnostics, status, Language::Rust);
+
+        let mainloop_handle = tokio::spawn(async move {
+            mainloop
+                .run_buffered(stdout_client.compat(), stdin_client.compat_write())
+                .await
+        });
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 42,
+            "method": "window/showMessageRequest",
+            "params": {
+                "type": 3,
+                "message": "Pick one",
+                "actions": [{"title": "Yes"}, {"title": "No"}],
+            },
+        })
+        .to_string();
+        let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        stdout_server.write_all(frame.as_bytes()).await.unwrap();
+        stdout_server.flush().await.unwrap();
+
+        // Read the response off the client-to-server pipe (which is what
+        // we'd see on stdin if this were a real LSP child). 4 KB is
+        // ample headroom for a JSON-RPC response with a `null` result.
+        let mut buf = vec![0u8; 4096];
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stdin_server.read(&mut buf),
+        )
+        .await
+        .expect("response timeout — handler likely never ran")
+        .expect("stdin read error");
+        let response = std::str::from_utf8(&buf[..n]).expect("response is UTF-8");
+
+        // Cleanup: close stdout to let the mainloop exit; ignore the
+        // terminal Result (we already verified what we cared about).
+        drop(stdout_server);
+        let _ = mainloop_handle.await;
+
+        assert!(
+            response.contains("\"id\":42"),
+            "response should reference id=42; got: {response}"
+        );
+        assert!(
+            response.contains("\"result\":null"),
+            "typed showMessageRequest handler should respond with null; got: {response}"
+        );
+        assert!(
+            !response.contains("-32601"),
+            "should NOT be METHOD_NOT_FOUND (which would mean unhandled_request fallback ran instead of the typed handler); got: {response}"
+        );
     }
 }
