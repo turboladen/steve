@@ -71,7 +71,14 @@ pub enum AppEvent {
     /// LLM error (stream failure or API error).
     LlmError { error: String },
     /// System-level notification from the stream task (e.g., tool loop warnings).
-    /// Displayed as a MessageBlock::System in the TUI.
+    /// Displayed as a `MessageBlock::System` in the TUI. Identical consecutive
+    /// `text` values fold into a single block with a `" (×N)"` repeat counter.
+    ///
+    /// Emit-site convention: avoid endings of the form `" (×N)"` in `text`,
+    /// since the renderer reserves that exact suffix for the dedupe counter.
+    /// A literal trailing `" (×N)"` won't crash anything, but may produce a
+    /// cosmetically odd `"… (×N) (×M)"` display when the same literal
+    /// notice repeats. Every current emit site is safe by construction.
     StreamNotice { text: String },
     /// Progress update from a sub-agent — updates the agent tool call's inline progress.
     /// Unlike `StreamNotice`, this does NOT push a new `MessageBlock::System` — it

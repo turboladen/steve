@@ -1,5 +1,51 @@
 use super::*;
 
+/// Prefix and suffix of the `" (×N)"` counter that the StreamNotice dedupe
+/// path appends when folding repeated identical notices into a single
+/// MessageBlock. Hoisted to module scope so the writer (`format_with_count`)
+/// and parser (`split_count_suffix`) share a single source of truth — if
+/// the cosmetic format ever changes, both sides update together.
+const COUNT_PREFIX: &str = " (×";
+const COUNT_SUFFIX: &str = ")";
+
+/// Render a System message text with an explicit count suffix. Inverse of
+/// `split_count_suffix`: `split_count_suffix(&format_with_count(base, n))`
+/// always returns `(base, n)` for any non-empty `base` that doesn't itself
+/// end with a count suffix.
+fn format_with_count(base: &str, count: usize) -> String {
+    format!("{base}{COUNT_PREFIX}{count}{COUNT_SUFFIX}")
+}
+
+/// Split a System message text into `(base, count)` if it ends with the
+/// `" (×N)"` counter suffix written by `format_with_count`. Returns
+/// `(s, 1)` for any string that doesn't match the exact format.
+///
+/// The suffix is matched on the LAST `" (×"` occurrence, so a base text
+/// that happens to contain the prefix earlier is preserved. The closing
+/// `)` must terminate the string with no trailing content, and the digits
+/// must be a well-formed `usize`.
+fn split_count_suffix(s: &str) -> (&str, usize) {
+    let Some(idx) = s.rfind(COUNT_PREFIX) else {
+        return (s, 1);
+    };
+    let after = &s[idx + COUNT_PREFIX.len()..];
+    let Some(close) = after.find(COUNT_SUFFIX) else {
+        return (s, 1);
+    };
+    let trailing = &after[close + COUNT_SUFFIX.len()..];
+    if !trailing.is_empty() {
+        return (s, 1);
+    }
+    let digits = &after[..close];
+    if digits.is_empty() {
+        return (s, 1);
+    }
+    let Ok(n) = digits.parse::<usize>() else {
+        return (s, 1);
+    };
+    (&s[..idx], n)
+}
+
 impl App {
     pub async fn run(&mut self) -> Result<()> {
         // Try to resume the last session
@@ -434,7 +480,45 @@ impl App {
                 self.message_area_state.scroll_to_bottom();
             }
             AppEvent::StreamNotice { text } => {
-                self.messages.push(MessageBlock::System { text });
+                // Coalesce identical consecutive System notices into a single
+                // block with a "(×N)" counter. Without this, a noisy LSP
+                // restart loop (or any other source of repeated transient
+                // notices) appends a fresh block each time and quickly scrolls
+                // earlier user/assistant content out of view.
+                let folded = match self.messages.last_mut() {
+                    Some(MessageBlock::System { text: prev }) => {
+                        // Belt-and-suspenders: try literal equality first so a
+                        // notice whose text itself ends with `" (×N)"` still
+                        // coalesces correctly when repeated verbatim, without
+                        // depending on the parser's interpretation of that
+                        // tail. Falls back to the parse-and-fold path for the
+                        // common `"X" → "X (×2)"` transition.
+                        if *prev == text {
+                            *prev = format_with_count(&text, 2);
+                            true
+                        } else {
+                            let (base, count) = split_count_suffix(prev);
+                            if base == text {
+                                // saturating_add: a counter that pins at
+                                // usize::MAX is correct degenerate behavior —
+                                // additional folds become silent no-ops and
+                                // the display freezes, rather than panicking
+                                // (debug) or wrapping (release). Defense
+                                // against malformed input that already has a
+                                // near-MAX count baked in.
+                                let next = count.saturating_add(1);
+                                *prev = format_with_count(base, next);
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                    }
+                    _ => false,
+                };
+                if !folded {
+                    self.messages.push(MessageBlock::System { text });
+                }
                 self.message_area_state.scroll_to_bottom();
             }
             AppEvent::AgentProgress {
@@ -813,6 +897,271 @@ mod tests {
         .unwrap();
 
         assert!(has_system_message(&app, "LSP started"));
+    }
+
+    #[tokio::test]
+    async fn event_stream_notice_coalesces_consecutive_identical_text() {
+        // Regression for steve-5taz: a noisy LSP restart loop must not flood
+        // the messages window with N copies of the same notice. The first
+        // notice pushes a fresh System block; subsequent identical notices
+        // update that block in place with a "(×N)" counter.
+        let mut app = make_test_app();
+        let baseline = app.messages.len();
+
+        for _ in 0..5 {
+            app.handle_event(AppEvent::StreamNotice {
+                text: "LSP yaml server restarted successfully".into(),
+            })
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(
+            app.messages.len(),
+            baseline + 1,
+            "five identical notices should collapse to a single block"
+        );
+        match app.messages.last() {
+            Some(MessageBlock::System { text }) => {
+                assert_eq!(text, "LSP yaml server restarted successfully (×5)");
+            }
+            other => panic!("expected coalesced System block, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn event_stream_notice_does_not_coalesce_distinct_text() {
+        let mut app = make_test_app();
+        let baseline = app.messages.len();
+
+        app.handle_event(AppEvent::StreamNotice {
+            text: "alpha".into(),
+        })
+        .await
+        .unwrap();
+        app.handle_event(AppEvent::StreamNotice {
+            text: "beta".into(),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            app.messages.len(),
+            baseline + 2,
+            "distinct notices should produce distinct blocks"
+        );
+        assert!(has_system_message(&app, "alpha"));
+        assert!(has_system_message(&app, "beta"));
+    }
+
+    #[tokio::test]
+    async fn event_stream_notice_does_not_coalesce_through_other_block() {
+        // If a non-System block lands between two identical notices, the
+        // second notice creates a fresh System block (it can't reach back
+        // past the intervening block).
+        let mut app = make_test_app();
+        let baseline = app.messages.len();
+
+        app.handle_event(AppEvent::StreamNotice { text: "X".into() })
+            .await
+            .unwrap();
+        app.messages.push(MessageBlock::User {
+            text: "user typed something".into(),
+        });
+        app.handle_event(AppEvent::StreamNotice { text: "X".into() })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            app.messages.len(),
+            baseline + 3,
+            "intervening non-System block prevents coalescing"
+        );
+    }
+
+    #[test]
+    fn split_count_suffix_no_suffix() {
+        assert_eq!(split_count_suffix("Hello"), ("Hello", 1));
+    }
+
+    #[test]
+    fn split_count_suffix_basic_count() {
+        assert_eq!(split_count_suffix("Hello (×2)"), ("Hello", 2));
+        assert_eq!(split_count_suffix("Hello (×42)"), ("Hello", 42));
+    }
+
+    #[test]
+    fn split_count_suffix_rejects_invalid_shapes() {
+        // Missing close paren
+        assert_eq!(split_count_suffix("Hello (×2"), ("Hello (×2", 1));
+        // Trailing content after the close paren
+        assert_eq!(
+            split_count_suffix("Hello (×2) more"),
+            ("Hello (×2) more", 1)
+        );
+        // Non-digit content
+        assert_eq!(split_count_suffix("Hello (×x)"), ("Hello (×x)", 1));
+        // Empty digits
+        assert_eq!(split_count_suffix("Hello (×)"), ("Hello (×)", 1));
+        // Plain "x" not "×" (multiplication sign)
+        assert_eq!(split_count_suffix("Hello (x2)"), ("Hello (x2)", 1));
+    }
+
+    #[test]
+    fn split_count_suffix_handles_utf8_base() {
+        // The base text contains multi-byte characters — slicing must land
+        // on a UTF-8 boundary, not split a character.
+        assert_eq!(split_count_suffix("café (×3)"), ("café", 3));
+        assert_eq!(
+            split_count_suffix("LSP yaml server restarted successfully (×100)"),
+            ("LSP yaml server restarted successfully", 100)
+        );
+    }
+
+    #[test]
+    fn split_count_suffix_uses_last_prefix_match() {
+        // A base text that itself contains " (×" should split on the LAST
+        // occurrence so the count parses against the genuine suffix.
+        assert_eq!(
+            split_count_suffix("inner (×note) (×4)"),
+            ("inner (×note)", 4)
+        );
+        // Multiple valid-looking suffixes — `rfind` must grab the rightmost.
+        assert_eq!(
+            split_count_suffix("a (×1) b (×2) c (×3)"),
+            ("a (×1) b (×2) c", 3)
+        );
+        // A genuine count to the right of an invalid `" (×note)"` cluster.
+        assert_eq!(
+            split_count_suffix("first (×nope) middle (×7)"),
+            ("first (×nope) middle", 7)
+        );
+    }
+
+    #[test]
+    fn format_with_count_and_split_roundtrip() {
+        // Property: parse(format(base, n)) == (base, n) for any base that
+        // doesn't already end with the count format. Locks the writer and
+        // parser to a single source-of-truth pair.
+        for &(base, n) in &[
+            ("Hello", 2usize),
+            ("LSP yaml server restarted successfully", 12),
+            ("café", 999),
+            ("", 1),
+        ] {
+            let rendered = format_with_count(base, n);
+            assert_eq!(
+                split_count_suffix(&rendered),
+                (base, n),
+                "roundtrip failed for ({base:?}, {n})"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn event_stream_notice_coalesces_empty_text() {
+        // Defense-in-depth: emit sites are not expected to send empty
+        // notices, but the dedupe path should still behave correctly if
+        // they do — `("", 2)` round-trips through format/split, and the
+        // handler folds two empty notices into a single block displaying
+        // the suffix only (`" (×2)"`).
+        let mut app = make_test_app();
+        let baseline = app.messages.len();
+
+        app.handle_event(AppEvent::StreamNotice {
+            text: String::new(),
+        })
+        .await
+        .unwrap();
+        app.handle_event(AppEvent::StreamNotice {
+            text: String::new(),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            app.messages.len(),
+            baseline + 1,
+            "two empty notices should collapse to a single block"
+        );
+        match app.messages.last() {
+            Some(MessageBlock::System { text }) => {
+                assert_eq!(text, &format_with_count("", 2));
+            }
+            other => panic!("expected System block, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn event_stream_notice_coalesces_text_that_looks_like_count_suffix() {
+        // Regression for a latent footgun (Medium finding M2): if a notice
+        // text happens to END with `" (×N)"` as part of its literal content
+        // (not as a counter), repeated identical notices must still
+        // coalesce. The literal-equality early-out in the handler catches
+        // this case before the parser can interpret the trailing `(×N)`
+        // as a counter, which would otherwise drop into `format!`'s
+        // weirder branches and produce `"… (×N) (×M)"` displays.
+        let mut app = make_test_app();
+        let baseline = app.messages.len();
+        let trailing_count_text = "Multiplied by (×100)".to_string();
+
+        app.handle_event(AppEvent::StreamNotice {
+            text: trailing_count_text.clone(),
+        })
+        .await
+        .unwrap();
+        app.handle_event(AppEvent::StreamNotice {
+            text: trailing_count_text.clone(),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            app.messages.len(),
+            baseline + 1,
+            "literal text ending in `(×N)` must still coalesce on repeat"
+        );
+        match app.messages.last() {
+            Some(MessageBlock::System { text }) => {
+                // Display is `"Multiplied by (×100) (×2)"` — the original
+                // literal, then our actual repeat counter.
+                assert_eq!(text, &format_with_count(&trailing_count_text, 2));
+            }
+            other => panic!("expected System block, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn event_stream_notice_count_saturates_at_usize_max() {
+        // Defense-in-depth: a malformed/synthetic prior block whose count
+        // is already `usize::MAX` must not panic on an additional fold.
+        // saturating_add freezes the counter and the next event becomes a
+        // silent no-op (the displayed text doesn't change).
+        let mut app = make_test_app();
+        let already_max = format_with_count("X", usize::MAX);
+        app.messages.push(MessageBlock::System {
+            text: already_max.clone(),
+        });
+        let baseline = app.messages.len();
+
+        app.handle_event(AppEvent::StreamNotice { text: "X".into() })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            app.messages.len(),
+            baseline,
+            "saturated fold must not push a new block"
+        );
+        match app.messages.last() {
+            Some(MessageBlock::System { text }) => {
+                assert_eq!(
+                    text, &already_max,
+                    "saturated count display should not change"
+                );
+            }
+            other => panic!("expected System block, got {other:?}"),
+        }
     }
 
     #[tokio::test]
