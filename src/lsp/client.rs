@@ -214,7 +214,12 @@ pub(crate) fn create_client(
         // still see it. INFO and LOG variants use proportionally lower
         // levels.
         router.notification::<notification::LogMessage>(|state, params| {
-            log_lsp_at_typ_level!("lsp_log", state.language, params.typ, &params.message);
+            log_lsp_at_typ_level!(
+                "steve::lsp_log",
+                state.language,
+                params.typ,
+                &params.message
+            );
             ControlFlow::Continue(())
         });
 
@@ -222,7 +227,12 @@ pub(crate) fn create_client(
         // user-visible. We don't have UX to surface a popup, so log it at
         // a level matching the message's typ so users can grep for both.
         router.notification::<notification::ShowMessage>(|state, params| {
-            log_lsp_at_typ_level!("lsp_show", state.language, params.typ, &params.message);
+            log_lsp_at_typ_level!(
+                "steve::lsp_show",
+                state.language,
+                params.typ,
+                &params.message
+            );
             ControlFlow::Continue(())
         });
 
@@ -235,7 +245,7 @@ pub(crate) fn create_client(
                 "{} (no UX to prompt user — responding with None; actions={:?})",
                 params.message, params.actions,
             );
-            log_lsp_at_typ_level!("lsp_show", state.language, params.typ, &augmented);
+            log_lsp_at_typ_level!("steve::lsp_show", state.language, params.typ, &augmented);
             futures_util::future::ready(Ok(None))
         });
 
@@ -254,7 +264,7 @@ pub(crate) fn create_client(
         // act on.
         router.unhandled_notification(|_state, notification| {
             tracing::debug!(
-                target: "lsp_unhandled",
+                target: "steve::lsp_unhandled",
                 method = %notification.method,
                 "dropping unhandled server-to-client notification",
             );
@@ -270,7 +280,7 @@ pub(crate) fn create_client(
         // server is asking about.
         router.unhandled_request(|_state, req| {
             tracing::debug!(
-                target: "lsp_unhandled",
+                target: "steve::lsp_unhandled",
                 method = %req.method,
                 "rejecting unhandled server-to-client request with METHOD_NOT_FOUND",
             );

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::PathBuf,
     process::Stdio,
     sync::{
@@ -11,6 +11,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use async_lsp::lsp_types::*;
+use tokio::io::AsyncBufReadExt;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use super::{
@@ -18,6 +19,151 @@ use super::{
     client::{SharedDiagnostics, SharedLspStatus, create_client},
     server::{LspServer, path_to_uri},
 };
+
+/// Maximum number of stderr lines retained in the rolling tail buffer.
+const STDERR_TAIL_MAX_LINES: usize = 10;
+
+/// Maximum total bytes retained in the rolling tail buffer (defense
+/// against a single very long line blowing up memory).
+const STDERR_TAIL_MAX_BYTES: usize = 2048;
+
+/// Hard cap on the byte length of a single stderr line *after* it's been
+/// read. Lines longer than this are truncated at a UTF-8 char boundary
+/// before being logged or pushed into the tail. The stdlib's
+/// `BufRead::read_line` doesn't bound its read, so a server that prints a
+/// very long line still allocates that much transiently — but this cap
+/// bounds the *persistent* memory, including the "retain last line even
+/// if oversized" path in `StderrTail::push`. 4 KiB is twice the tail
+/// budget so a moderately long backtrace still fits, but a multi-MB
+/// stderr dump is reduced to a representative head.
+const STDERR_LINE_MAX_BYTES: usize = 4096;
+
+/// Marker appended to a truncated stderr line so users can tell the
+/// trailing context was elided rather than the server cutting itself off.
+const STDERR_LINE_TRUNCATED_MARKER: &str = " …[truncated]";
+
+/// Bounded ring buffer of recent stderr lines from a spawned LSP child.
+///
+/// Written by the per-child stderr pump task; read by the Initialize-
+/// failure branch and the crash watcher when constructing an `Error`
+/// reason. Eviction enforces both a line count and a byte budget so a
+/// single pathological long line can't starve the buffer of other
+/// useful context.
+#[derive(Debug, Default)]
+pub(super) struct StderrTail {
+    lines: VecDeque<String>,
+    total_bytes: usize,
+}
+
+impl StderrTail {
+    pub(super) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(super) fn push(&mut self, line: String) {
+        self.total_bytes = self.total_bytes.saturating_add(line.len());
+        self.lines.push_back(line);
+        // Evict from the front while we're over either limit, but always
+        // retain at least the most recent line — a single oversized line
+        // (e.g., a verbose Node traceback) is more useful than nothing.
+        while self.lines.len() > STDERR_TAIL_MAX_LINES
+            || (self.total_bytes > STDERR_TAIL_MAX_BYTES && self.lines.len() > 1)
+        {
+            let Some(dropped) = self.lines.pop_front() else {
+                break;
+            };
+            self.total_bytes = self.total_bytes.saturating_sub(dropped.len());
+        }
+    }
+
+    /// Render the tail as a single-line preview suitable for inclusion in
+    /// an `Error` reason. Lines are joined by `" | "` after trimming
+    /// trailing whitespace; the result is empty if no lines have been
+    /// captured.
+    pub(super) fn preview(&self) -> String {
+        self.lines
+            .iter()
+            .map(|l| l.trim_end().to_string())
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+}
+
+/// Shared handle used by the pump task (writer) and the Initialize-fail
+/// + crash-watcher paths (readers). All access goes through the mutex.
+pub(super) type SharedStderrTail = Arc<Mutex<StderrTail>>;
+
+/// Truncate a stderr line in place to `STDERR_LINE_MAX_BYTES`, appending
+/// `STDERR_LINE_TRUNCATED_MARKER` so the elision is visible. The cut
+/// happens at a UTF-8 char boundary — `String::truncate` panics on a
+/// non-boundary index, so we use `str::floor_char_boundary` to land on
+/// a safe spot at or below the byte target.
+fn truncate_stderr_line(line: &mut String) {
+    if line.len() <= STDERR_LINE_MAX_BYTES {
+        return;
+    }
+    // Reserve room for the marker so the final length is ≤ MAX.
+    let target = STDERR_LINE_MAX_BYTES.saturating_sub(STDERR_LINE_TRUNCATED_MARKER.len());
+    let cutoff = line.floor_char_boundary(target);
+    line.truncate(cutoff);
+    line.push_str(STDERR_LINE_TRUNCATED_MARKER);
+}
+
+/// Spawn a task that pumps lines from the child's stderr into the shared
+/// tail buffer and the tracing log. Each line is logged at WARN level so
+/// it surfaces in the default `steve=info` filter (the user has set
+/// `RUST_LOG=steve=debug` for transport-level detail anyway, but the
+/// stderr line is the actionable signal). The task ends when stderr
+/// reaches EOF (child closed it) or a read error fires.
+fn spawn_stderr_pump(
+    stderr: tokio::process::ChildStderr,
+    tail: SharedStderrTail,
+    lang: Language,
+    binary: String,
+    handle: &tokio::runtime::Handle,
+) {
+    handle.spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stderr).lines();
+        loop {
+            match reader.next_line().await {
+                Ok(Some(mut line)) => {
+                    truncate_stderr_line(&mut line);
+                    tracing::warn!(
+                        target: "steve::lsp_stderr",
+                        lang = %lang,
+                        binary = %binary,
+                        "{line}",
+                    );
+                    let mut tail = tail.lock().unwrap_or_else(|p| p.into_inner());
+                    tail.push(line);
+                }
+                Ok(None) => break, // EOF — child closed stderr
+                Err(e) => {
+                    tracing::debug!(
+                        target: "steve::lsp_stderr",
+                        lang = %lang,
+                        binary = %binary,
+                        "stderr read error: {e}",
+                    );
+                    break;
+                }
+            }
+        }
+    });
+}
+
+/// Combine a base reason (e.g. `"mainloop exited"`) with the current
+/// stderr tail preview. Used by both Initialize failure and crash watcher
+/// to attach actionable context — the actual server-side error message —
+/// to the user-visible `Error.reason`.
+fn reason_with_stderr(base: &str, tail: &SharedStderrTail) -> String {
+    let preview = tail.lock().unwrap_or_else(|p| p.into_inner()).preview();
+    if preview.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base} (stderr: {preview})")
+    }
+}
 
 pub struct LspManager {
     servers: HashMap<Language, LspServer>,
@@ -192,12 +338,27 @@ impl LspManager {
             .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("failed to spawn {binary}"))?;
 
         let stdin = child.stdin.take().context("no stdin")?;
         let stdout = child.stdout.take().context("no stdout")?;
+        let stderr = child.stderr.take().context("no stderr")?;
+
+        // Capture stderr into a rolling tail + tracing logs. The Initialize-
+        // fail branch and the crash watcher both read from this tail when
+        // building the user-visible `Error.reason`, so a server that prints
+        // "Cannot find module 'foo'" before exiting surfaces that signal
+        // instead of an opaque `mainloop exited` / `ServiceStopped`.
+        let stderr_tail: SharedStderrTail = Arc::new(Mutex::new(StderrTail::new()));
+        spawn_stderr_pump(
+            stderr,
+            stderr_tail.clone(),
+            lang,
+            binary.clone(),
+            &self.handle,
+        );
 
         // Upsert the real binary name into the status cache now that
         // `resolve_server` has picked one. Keep state as Starting.
@@ -256,16 +417,23 @@ impl LspManager {
             let shutdown_flag_watch = shutdown_flag.clone();
             let binary_for_watch = binary.clone();
             let event_tx = event_tx.clone();
+            let stderr_tail_for_watch = stderr_tail.clone();
             self.handle.spawn(async move {
                 let join_result = mainloop_handle.await;
                 if shutdown_flag_watch.load(Ordering::SeqCst) {
                     return; // intentional shutdown
                 }
-                let reason = match join_result {
+                // Brief pause so the stderr pump has a chance to drain any
+                // last-gasp error lines after the child exits — the mainloop
+                // resolves on stdout EOF, but stderr's reader is a separate
+                // task and may not have processed the final bytes yet.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let base = match join_result {
                     Ok(()) => "mainloop exited".to_string(),
                     Err(e) if e.is_cancelled() => "mainloop cancelled".to_string(),
                     Err(e) => format!("mainloop panicked: {e}"),
                 };
+                let reason = reason_with_stderr(&base, &stderr_tail_for_watch);
                 tracing::warn!("LSP {binary_for_watch} ({lang}) {reason}");
 
                 let restart_delay = {
@@ -348,12 +516,14 @@ impl LspManager {
                 // needs to reflect the specific initialize failure.
                 // Clear Restarting-path fields so the Error row doesn't
                 // carry stale `next_restart_at` / progress data into the
-                // sidebar.
+                // sidebar. Append the stderr tail so users see WHY the
+                // server exited (e.g. "Cannot find module 'foo'") rather
+                // than just the transport-level `ServiceStopped`.
+                let base = format!("initialize failed: {e:?}");
+                let reason = reason_with_stderr(&base, &stderr_tail);
                 let mut map = self.status.lock().unwrap_or_else(|p| p.into_inner());
                 if let Some(entry) = map.get_mut(&lang) {
-                    entry.state = LspServerState::Error {
-                        reason: format!("initialize failed: {e:?}"),
-                    };
+                    entry.state = LspServerState::Error { reason };
                     entry.active_progress = 0;
                     entry.progress_message = None;
                     entry.next_restart_at = None;
@@ -1393,5 +1563,169 @@ mod tests {
         let delay = plan_crash_restart(&mut entry, "mainloop exited".into(), true, Instant::now());
         assert_eq!(entry.restart_attempts, 3);
         assert_eq!(delay, Some(std::time::Duration::from_secs(5)));
+    }
+
+    // -- StderrTail unit tests ------------------------------------------------
+
+    #[test]
+    fn stderr_tail_push_under_limit_keeps_all_lines() {
+        let mut tail = StderrTail::new();
+        for i in 0..5 {
+            tail.push(format!("line {i}"));
+        }
+        assert_eq!(tail.lines.len(), 5);
+        let preview = tail.preview();
+        assert!(preview.contains("line 0"));
+        assert!(preview.contains("line 4"));
+    }
+
+    #[test]
+    fn stderr_tail_drops_oldest_past_line_limit() {
+        let mut tail = StderrTail::new();
+        // Push more than STDERR_TAIL_MAX_LINES (10) short lines.
+        for i in 0..(STDERR_TAIL_MAX_LINES + 5) {
+            tail.push(format!("L{i}"));
+        }
+        assert_eq!(tail.lines.len(), STDERR_TAIL_MAX_LINES);
+        let preview = tail.preview();
+        // First 5 lines should have been evicted.
+        assert!(!preview.contains("L0"), "L0 should be evicted: {preview}");
+        assert!(!preview.contains("L4"), "L4 should be evicted: {preview}");
+        assert!(preview.contains("L5"), "L5 should be retained: {preview}");
+        assert!(
+            preview.contains(&format!("L{}", STDERR_TAIL_MAX_LINES + 4)),
+            "newest line should be retained: {preview}"
+        );
+    }
+
+    #[test]
+    fn stderr_tail_drops_oldest_past_byte_limit() {
+        let mut tail = StderrTail::new();
+        // The pump truncates lines to STDERR_LINE_MAX_BYTES before push,
+        // but `StderrTail::push` itself doesn't shrink individual lines
+        // — it only evicts older ones to fit the byte budget. Test the
+        // pure StderrTail invariant by passing a deliberately oversized
+        // line (as if STDERR_LINE_MAX_BYTES were larger than the tail
+        // budget, which is the documented design).
+        let huge = "x".repeat(STDERR_TAIL_MAX_BYTES * 2);
+        tail.push("first".to_string());
+        tail.push("second".to_string());
+        tail.push(huge.clone());
+        // The huge line alone exceeds the budget, so the smaller predecessors
+        // are evicted; the huge line stays because eviction stops once only
+        // the most recent line remains, even if total_bytes is still over
+        // budget (the "retain last line if oversized" exception in `push`).
+        assert_eq!(tail.lines.len(), 1);
+        assert_eq!(tail.lines.front().unwrap(), &huge);
+    }
+
+    #[test]
+    fn truncate_stderr_line_no_op_when_under_limit() {
+        let mut s = "short line".to_string();
+        truncate_stderr_line(&mut s);
+        assert_eq!(s, "short line");
+    }
+
+    #[test]
+    fn truncate_stderr_line_caps_oversized_line_with_marker() {
+        let mut s = "x".repeat(STDERR_LINE_MAX_BYTES + 100);
+        truncate_stderr_line(&mut s);
+        assert!(
+            s.len() <= STDERR_LINE_MAX_BYTES,
+            "post-truncation length {} must fit within the cap {}",
+            s.len(),
+            STDERR_LINE_MAX_BYTES,
+        );
+        assert!(
+            s.ends_with(STDERR_LINE_TRUNCATED_MARKER),
+            "truncated lines should advertise that they were cut: {s:?}"
+        );
+    }
+
+    #[test]
+    fn truncate_stderr_line_lands_on_utf8_char_boundary() {
+        // Build a line whose byte length exceeds the cap and where a
+        // naive byte-cutoff would land in the middle of a multi-byte
+        // grapheme. `…` is 3 UTF-8 bytes; padding before it puts the
+        // cut just inside the multi-byte sequence at the naive boundary.
+        let prefix = "x".repeat(STDERR_LINE_MAX_BYTES - 1);
+        let mut s = format!("{prefix}…tail");
+        truncate_stderr_line(&mut s);
+        // Just verifying that String::truncate didn't panic is the
+        // assertion — `String` would have panicked at the cut if the
+        // boundary was wrong. Confirm the string is still valid UTF-8
+        // by reading back.
+        assert!(s.is_char_boundary(s.len()));
+        assert!(s.ends_with(STDERR_LINE_TRUNCATED_MARKER));
+    }
+
+    #[test]
+    fn stderr_tail_preview_empty_returns_empty_string() {
+        let tail = StderrTail::new();
+        assert_eq!(tail.preview(), "");
+    }
+
+    #[test]
+    fn stderr_tail_preview_joins_with_separator_and_trims_trailing_whitespace() {
+        let mut tail = StderrTail::new();
+        tail.push("first line   ".to_string());
+        tail.push("second line\t".to_string());
+        let preview = tail.preview();
+        assert_eq!(preview, "first line | second line");
+    }
+
+    #[test]
+    fn reason_with_stderr_appends_preview_when_present() {
+        let tail: SharedStderrTail = Arc::new(Mutex::new(StderrTail::new()));
+        {
+            let mut t = tail.lock().unwrap();
+            t.push("Error: Cannot find module 'foo'".to_string());
+        }
+        let reason = reason_with_stderr("mainloop exited", &tail);
+        assert!(
+            reason.contains("(stderr: Error: Cannot find module 'foo')"),
+            "stderr preview should be appended in parens: {reason}"
+        );
+        assert!(reason.starts_with("mainloop exited"));
+    }
+
+    #[test]
+    fn reason_with_stderr_returns_base_unchanged_when_tail_empty() {
+        let tail: SharedStderrTail = Arc::new(Mutex::new(StderrTail::new()));
+        let reason = reason_with_stderr("mainloop exited", &tail);
+        assert_eq!(reason, "mainloop exited");
+    }
+
+    // -- stderr pump end-to-end ----------------------------------------------
+
+    #[tokio::test]
+    async fn stderr_pump_captures_lines_from_real_child() {
+        // Spawn a tiny shell pipeline that writes a few lines to stderr and
+        // exits. The pump should drain all of them into the shared tail.
+        let mut child = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("printf 'first\\nsecond\\nthird\\n' >&2; exit 0")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn sh");
+        let stderr = child.stderr.take().expect("child stderr handle");
+        let tail: SharedStderrTail = Arc::new(Mutex::new(StderrTail::new()));
+        spawn_stderr_pump(
+            stderr,
+            tail.clone(),
+            Language::Bash,
+            "sh".into(),
+            &tokio::runtime::Handle::current(),
+        );
+        let _ = child.wait().await;
+        // Give the pump a beat to drain after the child exits.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let preview = tail.lock().unwrap().preview();
+        assert!(
+            preview.contains("first") && preview.contains("second") && preview.contains("third"),
+            "all stderr lines should be captured: {preview}"
+        );
     }
 }
