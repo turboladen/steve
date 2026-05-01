@@ -174,19 +174,58 @@ pub fn lsp_health_checks(servers: &[(&str, bool, Option<&str>)]) -> Vec<Diagnost
 /// user genuinely needs to install it or fix `PATH`)?
 fn reason_is_install_path_issue(reason: &str) -> bool {
     let r = reason.to_ascii_lowercase();
-    // Phrases produced by start_server when resolve_server returns None
-    // ("no … language server found on PATH") or when Command::spawn
-    // itself fails with a "No such file or directory" or permission error.
-    r.contains("not found on path")
-        || r.contains("found on path")
-        || r.contains("no such file")
-        || r.contains("failed to spawn")
+    // Match the specific start_server wording for a missing resolved
+    // binary ("no … language server found on PATH") via three distinct
+    // tokens — substring "found on path" alone is too broad and would
+    // misclassify any unrelated error that merely mentions PATH (e.g.
+    // "config file not found on path").
+    let missing_server_on_path =
+        r.contains("no ") && r.contains("language server") && r.contains("found on path");
+
+    // Also treat spawn-time launch failures as install/PATH issues:
+    // start_server's `with_context("failed to spawn ...")` and the
+    // OS-level "No such file or directory" both mean the binary is
+    // unreachable from Steve's runtime.
+    missing_server_on_path || r.contains("no such file") || r.contains("failed to spawn")
+}
+
+/// Collapse all whitespace runs (including newlines from `anyhow`'s
+/// `{:#}` chain formatting) into single spaces so the result renders
+/// cleanly on a single line in the diagnostics overlay.
+///
+/// `format!("{e:#}")` in `LspManager::start_server` produces multi-line
+/// strings like:
+///
+/// ```text
+/// initialize failed: Some Error
+/// Caused by:
+///     inner error
+/// ```
+///
+/// The overlay builds one `Line` per `detail` / `recommendation`, so
+/// embedded newlines wrap incorrectly or render as literal control
+/// characters depending on the renderer. Flatten before embedding.
+fn flatten_reason(reason: &str) -> String {
+    let mut out = String::with_capacity(reason.len());
+    let mut last_was_space = false;
+    for ch in reason.chars() {
+        if ch.is_whitespace() {
+            if !last_was_space {
+                out.push(' ');
+                last_was_space = true;
+            }
+        } else {
+            out.push(ch);
+            last_was_space = false;
+        }
+    }
+    out.trim().to_string()
 }
 
 fn lsp_unavailable_detail(name: &str, reason: Option<&str>) -> String {
     match reason {
         None => format!("{name} detected in project but server not available"),
-        Some(r) => format!("{name} unavailable: {r}"),
+        Some(r) => format!("{name} unavailable: {}", flatten_reason(r)),
     }
 }
 
@@ -201,8 +240,9 @@ fn lsp_recommendation_for_reason(name: &str, reason: Option<&str>) -> String {
         }
         Some(r) => format!(
             "{name} crashed or failed to handshake — not a PATH issue. \
-             Reason: {r}. Try `RUST_LOG=steve=debug` for transport-level \
-             detail; consider re-installing or version-pinning {name}."
+             Reason: {}. Try `RUST_LOG=steve=debug` for transport-level \
+             detail; consider re-installing or version-pinning {name}.",
+            flatten_reason(r),
         ),
     }
 }
@@ -462,6 +502,81 @@ mod tests {
             rec.starts_with("Install yaml-language-server"),
             "PATH-failure should recommend Install/check PATH, got: {rec}"
         );
+    }
+
+    #[test]
+    fn reason_is_install_path_issue_does_not_match_unrelated_path_text() {
+        // Defensive: the heuristic's "found on path" phrase used to
+        // match any reason that happened to contain those words. A
+        // reason like "config file not found on path" is NOT an
+        // install/PATH issue — it's a server-side error that just
+        // happens to mention PATH. Tightening to require all three
+        // tokens (no … language server … found on path) prevents
+        // misclassification.
+        assert!(!reason_is_install_path_issue(
+            "config file not found on path"
+        ));
+        assert!(!reason_is_install_path_issue(
+            "schema file: not found on path /etc/config"
+        ));
+        // The genuine start_server wording is still recognized.
+        assert!(reason_is_install_path_issue(
+            "no yaml language server found on PATH"
+        ));
+        // Spawn-time failures still count as install/PATH issues.
+        assert!(reason_is_install_path_issue(
+            "failed to spawn yaml-language-server: permission denied"
+        ));
+        assert!(reason_is_install_path_issue("No such file or directory"));
+    }
+
+    #[test]
+    fn flatten_reason_collapses_newlines_and_runs() {
+        // anyhow's `{:#}` chain formatting puts each "Caused by:" on
+        // its own line. The diagnostics overlay renders one Line per
+        // detail/recommendation — flatten everything to a single line.
+        let multiline =
+            "initialize failed: Some Error\nCaused by:\n    inner error\n    deeper inner";
+        let flat = flatten_reason(multiline);
+        assert!(!flat.contains('\n'), "no newlines: {flat}");
+        assert_eq!(
+            flat,
+            "initialize failed: Some Error Caused by: inner error deeper inner"
+        );
+    }
+
+    #[test]
+    fn flatten_reason_trims_leading_and_trailing_whitespace() {
+        assert_eq!(flatten_reason("   spaced   \n\n"), "spaced");
+        assert_eq!(flatten_reason(""), "");
+    }
+
+    #[test]
+    fn lsp_detail_and_recommendation_flatten_multiline_reason() {
+        // End-to-end: a multi-line reason from start_server's
+        // anyhow chain produces single-line detail and recommendation
+        // suitable for the diagnostics overlay.
+        let multiline = "initialize failed: ServiceStopped\nCaused by:\n    pipe closed";
+        let servers = vec![("yaml-language-server", false, Some(multiline))];
+        let checks = lsp_health_checks(&servers);
+        let warning = checks
+            .iter()
+            .find(|c| c.label.contains("yaml-language-server"))
+            .expect("warning for yaml-language-server");
+        assert!(
+            !warning.detail.contains('\n'),
+            "detail must be single-line: {:?}",
+            warning.detail
+        );
+        let rec = warning.recommendation.as_deref().unwrap_or("");
+        assert!(
+            !rec.contains('\n'),
+            "recommendation must be single-line: {rec:?}"
+        );
+        // The reason content survives, just on one line.
+        assert!(warning.detail.contains("ServiceStopped"));
+        assert!(warning.detail.contains("pipe closed"));
+        assert!(rec.contains("ServiceStopped"));
     }
 
     #[test]
