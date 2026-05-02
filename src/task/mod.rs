@@ -473,25 +473,33 @@ fn truncate_summary(out: &mut String, max: usize) {
 /// Generate a short project-scoped ID using time + atomic counter for uniqueness.
 ///
 /// Format: `{project_prefix}-{kind_char}{4_hex_chars}` (e.g., `steve-ta3f0`).
-/// Combines subsecond nanos with a process-local atomic counter to reduce
-/// collision probability. With 16 bits (65536 values per kind), birthday
-/// paradox gives ~50% collision chance at ~256 IDs — sufficient for typical
-/// task counts but not guaranteed unique.
+/// A per-process salt (sampled once at first call) is XOR'd with the
+/// Knuth-multiplicative-hash of a monotonic counter, then masked to 16 bits.
+/// Within a single process, sequential `seq` values map to distinct 16-bit
+/// outputs (the multiplicative-hash by an odd constant is a bijection mod
+/// 2^16), so the first 65536 IDs are guaranteed unique. Across processes,
+/// the salt varies, so two separate sessions are unlikely to collide.
 fn generate_id(project_prefix: &str, kind_char: char) -> String {
     use std::{
-        sync::atomic::{AtomicU32, Ordering},
+        sync::{
+            OnceLock,
+            atomic::{AtomicU32, Ordering},
+        },
         time::{SystemTime, UNIX_EPOCH},
     };
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
+    static SALT: OnceLock<u32> = OnceLock::new();
 
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
+    let salt = *SALT.get_or_init(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos()
+            ^ std::process::id().wrapping_mul(2654435761)
+    });
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    // Mix nanos and counter, mask to 16 bits (4 hex chars = 65536 values)
-    let mixed = nanos.wrapping_add(seq.wrapping_mul(2654435761)); // Knuth multiplicative hash
+    let mixed = salt.wrapping_add(seq.wrapping_mul(2654435761)); // Knuth multiplicative hash
     let short_hash = mixed & 0xFFFF;
     format!("{project_prefix}-{kind_char}{short_hash:04x}")
 }

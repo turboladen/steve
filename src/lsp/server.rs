@@ -31,8 +31,42 @@ pub struct LspServer {
     pub(super) language: Language,
     pub binary: String,
     pub(super) capabilities: ServerCapabilities,
+    /// Position encoding negotiated during `initialize`. Defaults to UTF-16
+    /// per LSP spec when the server omits it. Steve internally treats
+    /// `character` as a UTF-8 byte offset (tree-sitter's convention); this
+    /// field lets request sites convert at the wire boundary.
+    pub(super) position_encoding: PositionEncodingKind,
     pub(super) open_files: Mutex<HashMap<Url, i32>>,
     pub(super) diagnostics: SharedDiagnostics,
+}
+
+/// Convert a UTF-8 byte offset within `line_text` into the column units the
+/// LSP server expects per the negotiated `positionEncoding`. Steve's internal
+/// `character` is always a UTF-8 byte offset (matches tree-sitter and what an
+/// LLM can actually compute from raw text); the conversion happens here so
+/// the rest of the codebase stays encoding-agnostic.
+///
+/// Slice safety: `byte_col` is clamped to `line_text.len()` and we use
+/// `get(..end)` rather than direct slicing, so a non-char-boundary offset
+/// returns `None` and we fall back to counting the whole line — a safe
+/// over-count beats a panic when an upstream caller mis-counts bytes.
+fn byte_offset_to_lsp_character(
+    line_text: &str,
+    byte_col: u32,
+    encoding: &PositionEncodingKind,
+) -> u32 {
+    if encoding == &PositionEncodingKind::UTF8 {
+        return byte_col;
+    }
+    let end = (byte_col as usize).min(line_text.len());
+    let prefix = line_text.get(..end).unwrap_or(line_text);
+    if encoding == &PositionEncodingKind::UTF32 {
+        prefix.chars().count() as u32
+    } else {
+        // UTF-16 (the LSP default) and any other unrecognized encoding —
+        // treat as UTF-16, which is the spec-mandatory baseline.
+        prefix.encode_utf16().count() as u32
+    }
 }
 
 impl LspServer {
@@ -73,6 +107,36 @@ impl LspServer {
         }
 
         Ok(uri)
+    }
+
+    /// Read a single 0-indexed line from disk. Used to convert UTF-8 byte
+    /// offsets to the negotiated LSP encoding before issuing position-bearing
+    /// requests. We intentionally read fresh rather than caching: file
+    /// content was already sent via `didOpen`/`didChange`, and the cost of
+    /// one read per request is negligible against the LSP roundtrip.
+    fn read_line_text(&self, path: &Path, line_0idx: u32) -> Result<String> {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        Ok(content
+            .lines()
+            .nth(line_0idx as usize)
+            .unwrap_or("")
+            .to_string())
+    }
+
+    /// Convert a UTF-8 byte offset on `line` to the column the LSP server
+    /// expects per the negotiated `positionEncoding`. UTF-8 servers
+    /// (typically tree-sitter-aligned ones if any) skip the file read.
+    fn convert_character(&self, path: &Path, line: u32, byte_col: u32) -> Result<u32> {
+        if self.position_encoding == PositionEncodingKind::UTF8 {
+            return Ok(byte_col);
+        }
+        let line_text = self.read_line_text(path, line)?;
+        Ok(byte_offset_to_lsp_character(
+            &line_text,
+            byte_col,
+            &self.position_encoding,
+        ))
     }
 
     /// Notify the language server that a file's content has changed (full sync).
@@ -236,6 +300,8 @@ impl LspServer {
             return Err(anyhow::anyhow!("server does not support go-to-definition"));
         }
 
+        let character = self.convert_character(path, line, character)?;
+
         let params = GotoDefinitionParams {
             text_document_position_params: TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier { uri },
@@ -272,6 +338,8 @@ impl LspServer {
         if self.capabilities.references_provider.is_none() {
             return Err(anyhow::anyhow!("server does not support find-references"));
         }
+
+        let character = self.convert_character(path, line, character)?;
 
         let params = ReferenceParams {
             text_document_position: TextDocumentPositionParams {
@@ -317,6 +385,8 @@ impl LspServer {
         if self.capabilities.rename_provider.is_none() {
             return Err(anyhow::anyhow!("server does not support rename"));
         }
+
+        let character = self.convert_character(path, line, character)?;
 
         let params = RenameParams {
             text_document_position: TextDocumentPositionParams {
@@ -570,6 +640,91 @@ mod tests {
     #[test]
     fn uri_to_path_non_file_returns_none() {
         assert!(uri_to_path("https://example.com").is_none());
+    }
+
+    // ── Position encoding conversion ───────────────────────────────────
+
+    #[test]
+    fn byte_offset_utf8_passthrough() {
+        // UTF-8 servers want the byte offset unchanged.
+        assert_eq!(
+            byte_offset_to_lsp_character("abc fn target", 7, &PositionEncodingKind::UTF8),
+            7
+        );
+    }
+
+    #[test]
+    fn byte_offset_utf16_ascii_identity() {
+        // ASCII content: byte offset == UTF-16 code unit count.
+        assert_eq!(
+            byte_offset_to_lsp_character("fn target() {}", 3, &PositionEncodingKind::UTF16),
+            3
+        );
+    }
+
+    #[test]
+    fn byte_offset_utf16_two_byte_codepoint() {
+        // `é` is 2 bytes UTF-8, 1 UTF-16 code unit.
+        // "// é fn x" — bytes: '/' '/' ' ' 0xC3 0xA9 ' ' 'f' 'n' ' ' 'x' (10 bytes total)
+        // byte_col=6 lands just before 'f'; UTF-16 cu count of "// é " is 5.
+        assert_eq!(
+            byte_offset_to_lsp_character("// é fn x", 6, &PositionEncodingKind::UTF16),
+            5
+        );
+    }
+
+    #[test]
+    fn byte_offset_utf16_three_byte_codepoint() {
+        // `中` is 3 bytes UTF-8, 1 UTF-16 code unit.
+        // "// 中 fn x" — '/' '/' ' ' [3-byte 中] ' ' 'f' 'n' ' ' 'x'
+        // byte_col=7 lands just before 'f'; UTF-16 cu count of "// 中 " is 5.
+        assert_eq!(
+            byte_offset_to_lsp_character("// 中 fn x", 7, &PositionEncodingKind::UTF16),
+            5
+        );
+    }
+
+    #[test]
+    fn byte_offset_utf16_surrogate_pair() {
+        // `🎉` is 4 bytes UTF-8 and 2 UTF-16 code units (surrogate pair).
+        // "// 🎉 fn x" — '/' '/' ' ' [4-byte 🎉] ' ' 'f' 'n' ' ' 'x'
+        // byte_col=8 lands just before 'f'; UTF-16 cu count of "// 🎉 " is 6.
+        assert_eq!(
+            byte_offset_to_lsp_character("// 🎉 fn x", 8, &PositionEncodingKind::UTF16),
+            6
+        );
+    }
+
+    #[test]
+    fn byte_offset_utf32_counts_codepoints() {
+        // UTF-32 = code points. `🎉` is 1 codepoint.
+        // "// 🎉 fn x" — byte_col=8 just before 'f'; codepoint count of "// 🎉 " is 5.
+        assert_eq!(
+            byte_offset_to_lsp_character("// 🎉 fn x", 8, &PositionEncodingKind::UTF32),
+            5
+        );
+    }
+
+    #[test]
+    fn byte_offset_clamped_when_out_of_bounds() {
+        // Over-large byte_col must not panic; clamp to line length and count.
+        // "abc" is 3 bytes / 3 UTF-16 code units.
+        assert_eq!(
+            byte_offset_to_lsp_character("abc", 99, &PositionEncodingKind::UTF16),
+            3
+        );
+    }
+
+    #[test]
+    fn byte_offset_non_char_boundary_falls_back() {
+        // Mid-codepoint slice via `get(..end)` returns None and falls back to
+        // counting the full line. `é` = 2 bytes / 1 UTF-16 cu, byte_col=1
+        // lands inside the codepoint — fall back yields the full line's UTF-16
+        // count (1), preferring a safe over-count to a panic.
+        assert_eq!(
+            byte_offset_to_lsp_character("é", 1, &PositionEncodingKind::UTF16),
+            1
+        );
     }
 
     #[test]
