@@ -11,146 +11,143 @@
 //!       .env.tpl
 //! ```
 //!
-//! The manifest enumerates fixture files to copy (paths relative to the scenario dir),
-//! shell commands to run after copying, the scripted user turns, and the expectations
-//! to evaluate.
-//!
-//! v1 message-content assertions are substring-based (`final_message_contains` /
-//! `final_message_not_contains`), not regex. Anything fuzzy goes through the `Judge`
-//! variant. This keeps the dep surface off the `regex` crate (CLAUDE.md guidance) and
-//! steers authors toward the more durable judge-based check for behavioral phrasing.
+//! Substring (not regex) keeps `regex` out of the dep tree; behavioral checks
+//! go through the `Judge` variant.
 
-use std::path::{Path, PathBuf};
+use std::{
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// One scenario manifest, parsed from `scenario.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Scenario {
-    /// Human-readable identifier — must match the scenario directory name.
+    /// Must match the scenario directory name; mismatch is treated as rename drift.
     pub name: String,
-    /// One-line description of what failure mode this scenario tests.
     pub description: String,
-    /// Number of independent runs per (scenario, model). Default 1. Increase for known-flaky
-    /// scenarios; pass criterion is then `>= ceil(runs / 2)` passes.
+    /// Pass criterion across multi-run scenarios is `>= ceil(runs / 2)` passes.
     #[serde(default = "default_runs")]
-    pub runs: usize,
-    /// Filesystem setup applied before the conversation starts.
+    pub runs: NonZeroUsize,
     #[serde(default)]
     pub setup: Setup,
-    /// Scripted user turns. The first is the initial prompt; subsequent entries are sent
-    /// in order, each after the previous assistant response completes. v1 has no
-    /// trigger-based scheduling — straight FIFO.
+    /// First entry is the initial prompt; rest are FIFO follow-ups, one per
+    /// completed assistant response. v1 has no trigger-based scheduling.
     pub user_turns: Vec<String>,
-    /// Assertions evaluated against the captured run.
     pub expectations: Vec<Expectation>,
 }
 
-fn default_runs() -> usize {
-    1
+fn default_runs() -> NonZeroUsize {
+    NonZeroUsize::new(1).expect("1 != 0")
 }
 
-/// Filesystem setup: copy fixtures into the scenario tempdir and optionally run shell
-/// commands (e.g., `git init`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Setup {
-    /// Paths relative to the scenario directory. Each path is copied into the tempdir,
-    /// preserving its directory structure relative to the scenario root.
+    /// Paths relative to the scenario directory; copied into the tempdir
+    /// preserving their relative directory structure.
     #[serde(default)]
     pub copy_fixtures: Vec<PathBuf>,
-    /// Shell commands run inside the tempdir, in order, after fixtures are copied.
+    /// Run inside the tempdir, in order, AFTER `copy_fixtures` is applied.
     #[serde(default)]
     pub shell: Vec<String>,
 }
 
-/// One assertion to evaluate against a captured run.
-///
-/// Tagged enum: TOML authors write `kind = "tool_called"` (etc.) to select a variant.
-/// Variants are split into rule-based (structural checks on the trace) and judge-based
-/// (LLM evaluation against a plain-English rubric).
+/// Tagged enum: TOML authors write `kind = "tool_called"` (snake_case) to select
+/// a variant. Unknown kinds are rejected at parse time by serde.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Expectation {
-    /// Tool name appears in the tool-call sequence at least once.
-    ToolCalled { tool: String },
-    /// Tool name never appears in the tool-call sequence.
-    ToolNotCalled { tool: String },
-    /// `tool` was called, AND at least one of `must_read_one_of` paths was the target
-    /// of a `read`/`grep`/`list`/`glob`/`symbols`/`find_symbol` call before `tool`'s
-    /// first invocation. Ordering uses the sequential ordering of *completed* tool
-    /// calls (parallel reads in stream Phase 2 are ordered by completion time).
-    ToolCalledBefore {
+    ToolCalled {
+        tool: String,
+    },
+    ToolNotCalled {
+        tool: String,
+    },
+    /// "Before" uses completion-time ordering of read-class tools
+    /// (read/grep/list/glob/symbols/find_symbol), not call-start time, because
+    /// those execute in parallel.
+    RequiresPriorRead {
         tool: String,
         must_read_one_of: Vec<PathBuf>,
     },
-    /// File content at scenario end matches the initial fixture content byte-for-byte.
-    FileUnchanged { path: PathBuf },
-    /// File at scenario end contains `substring`. Substring match, not regex.
+    FileUnchanged {
+        path: PathBuf,
+    },
     FileContains {
         path: PathBuf,
         substring: String,
         #[serde(default)]
         case_insensitive: bool,
     },
-    /// Last assistant message contains `substring`. Substring match — for fuzzier checks
-    /// use `Judge`.
     FinalMessageContains {
         substring: String,
         #[serde(default)]
         case_insensitive: bool,
     },
-    /// Last assistant message does NOT contain `substring`. The "surrender" check.
-    /// For phrasing-robust variants, use `Judge`.
+    /// The "surrender" check — assert the assistant did not give up
+    /// (e.g., emit "no way to recover").
     FinalMessageNotContains {
         substring: String,
         #[serde(default)]
         case_insensitive: bool,
     },
-    /// Same `(tool, args_hash)` invocation appears at most `max` times in the sequence.
-    /// For the "stop guessing after failures" pattern.
-    MaxRepeatAttempts { tool: String, max: usize },
-    /// LLM-as-judge: a small judge model (default Haiku 4.5, temperature 0) evaluates
-    /// the rubric against the final message + tool-call summary. Judge inputs and outputs
-    /// are recorded in the JSONL output for reproducibility.
+    /// Dedup key is `(tool, args_hash)`; identical-arg invocations count toward
+    /// the limit, distinct-arg calls reset it.
+    MaxRepeatAttempts {
+        tool: String,
+        max: usize,
+    },
+    /// LLM-as-judge: small judge model (default Haiku 4.5, temperature 0)
+    /// evaluates the rubric. Inputs and outputs are recorded into the JSONL run
+    /// record for reproducibility.
     Judge {
-        /// Plain-English rubric. Should explicitly state PASS and FAIL conditions.
+        /// Should explicitly state PASS and FAIL conditions.
         rubric: String,
-        /// Override the global judge model for this expectation. Format: `provider/model_id`.
+        /// Format: `provider/model_id`.
         #[serde(default)]
         judge_model: Option<String>,
     },
 }
 
 impl Scenario {
-    /// Parse a scenario manifest from a TOML file.
-    ///
-    /// `path` should point to the `scenario.toml` file inside a scenario directory.
-    /// The scenario `name` field is validated against the parent directory name to catch
-    /// rename drift early.
     pub fn from_file(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("reading scenario manifest at {}", path.display()))?;
         let scenario: Scenario = toml::from_str(&raw)
             .with_context(|| format!("parsing scenario manifest at {}", path.display()))?;
-        scenario.validate(path)?;
+        scenario.validate()?;
+        // Parent-directory match is a filesystem-only invariant; not part of
+        // `validate()` so the Phase 7 generator can validate without a path.
+        let parent_name = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str());
+        if let Some(dir_name) = parent_name
+            && dir_name != scenario.name
+        {
+            anyhow::bail!(
+                "scenario name {:?} does not match parent directory {:?} ({})",
+                scenario.name,
+                dir_name,
+                path.display()
+            );
+        }
         Ok(scenario)
     }
 
-    /// Parse a scenario manifest from a TOML string. Skips parent-directory validation —
-    /// useful for tests and for in-memory scenarios.
-    ///
-    /// Named `from_toml_str` (not `from_str`) to avoid ambiguity with `std::str::FromStr`,
-    /// which has different error semantics and would constrain the error type.
+    /// Skips the parent-directory match check — useful for in-memory scenarios
+    /// (tests, the Phase 7 debug-export generator).
     pub fn from_toml_str(toml_src: &str) -> Result<Self> {
         let scenario: Scenario =
             toml::from_str(toml_src).context("parsing scenario manifest from string")?;
-        scenario.validate_self_only()?;
+        scenario.validate()?;
         Ok(scenario)
     }
 
-    /// Self-consistency checks that don't depend on filesystem state.
-    fn validate_self_only(&self) -> Result<()> {
+    /// Self-consistency checks that don't depend on filesystem state. Public so
+    /// the Phase 7 generator can run validation after struct-literal construction.
+    pub fn validate(&self) -> Result<()> {
         if self.name.trim().is_empty() {
             anyhow::bail!("scenario name must not be empty");
         }
@@ -163,28 +160,70 @@ impl Scenario {
         if self.expectations.is_empty() {
             anyhow::bail!("scenario {} must have at least one expectation", self.name);
         }
-        if self.runs == 0 {
-            anyhow::bail!("scenario {} runs must be >= 1", self.name);
+        for fixture in &self.setup.copy_fixtures {
+            if fixture.is_absolute() {
+                anyhow::bail!(
+                    "scenario {} setup.copy_fixtures path {:?} must be relative to the scenario dir",
+                    self.name,
+                    fixture
+                );
+            }
+        }
+        for (idx, expectation) in self.expectations.iter().enumerate() {
+            expectation
+                .validate()
+                .with_context(|| format!("scenario {} expectation #{}", self.name, idx + 1))?;
         }
         Ok(())
     }
+}
 
-    /// Full validation including parent-directory name check.
-    fn validate(&self, manifest_path: &Path) -> Result<()> {
-        self.validate_self_only()?;
-        let parent_name = manifest_path
-            .parent()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str());
-        if let Some(dir_name) = parent_name
-            && dir_name != self.name
-        {
-            anyhow::bail!(
-                "scenario name {:?} does not match parent directory {:?} ({})",
-                self.name,
-                dir_name,
-                manifest_path.display()
-            );
+impl Expectation {
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::ToolCalled { tool } | Self::ToolNotCalled { tool } => {
+                if tool.trim().is_empty() {
+                    anyhow::bail!("tool name must not be empty");
+                }
+            }
+            Self::RequiresPriorRead {
+                tool,
+                must_read_one_of,
+            } => {
+                if tool.trim().is_empty() {
+                    anyhow::bail!("tool name must not be empty");
+                }
+                if must_read_one_of.is_empty() {
+                    anyhow::bail!("must_read_one_of must contain at least one path");
+                }
+            }
+            Self::FileUnchanged { .. } => {}
+            Self::FileContains { substring, .. } => {
+                if substring.is_empty() {
+                    anyhow::bail!("file_contains substring must not be empty");
+                }
+            }
+            Self::FinalMessageContains { substring, .. }
+            | Self::FinalMessageNotContains { substring, .. } => {
+                if substring.is_empty() {
+                    anyhow::bail!("final_message substring must not be empty");
+                }
+            }
+            Self::MaxRepeatAttempts { tool, max } => {
+                if tool.trim().is_empty() {
+                    anyhow::bail!("tool name must not be empty");
+                }
+                if *max == 0 {
+                    anyhow::bail!(
+                        "max_repeat_attempts max must be >= 1 (use tool_not_called for max=0 semantics)"
+                    );
+                }
+            }
+            Self::Judge { rubric, .. } => {
+                if rubric.trim().is_empty() {
+                    anyhow::bail!("judge rubric must not be empty");
+                }
+            }
         }
         Ok(())
     }
@@ -206,25 +245,8 @@ tool = "read"
 "#
     }
 
-    #[test]
-    fn parse_minimal_scenario() {
-        let s = Scenario::from_toml_str(minimal_scenario_toml()).unwrap();
-        assert_eq!(s.name, "minimal");
-        assert_eq!(s.description, "smallest valid scenario");
-        assert_eq!(s.runs, 1, "default runs = 1 when omitted");
-        assert!(s.setup.copy_fixtures.is_empty());
-        assert!(s.setup.shell.is_empty());
-        assert_eq!(s.user_turns, vec!["hello"]);
-        assert_eq!(s.expectations.len(), 1);
-        assert!(matches!(
-            s.expectations[0],
-            Expectation::ToolCalled { ref tool } if tool == "read"
-        ));
-    }
-
-    #[test]
-    fn parse_full_scenario_with_all_expectation_kinds() {
-        let toml_src = r#"
+    fn kitchen_sink_toml() -> &'static str {
+        r#"
 name = "kitchen-sink"
 description = "exercise every expectation kind"
 runs = 3
@@ -243,7 +265,7 @@ kind = "tool_not_called"
 tool = "bash"
 
 [[expectations]]
-kind = "tool_called_before"
+kind = "requires_prior_read"
 tool = "edit"
 must_read_one_of = [".teller.yml", "AGENTS.md"]
 
@@ -284,25 +306,46 @@ rubric = "Did the assistant attempt reconstruction?"
 kind = "judge"
 rubric = "Was the change minimal and on-topic?"
 judge_model = "anthropic/claude-haiku-4-5"
-"#;
-        let s = Scenario::from_toml_str(toml_src).unwrap();
+"#
+    }
+
+    #[test]
+    fn parse_minimal_scenario() {
+        let s = Scenario::from_toml_str(minimal_scenario_toml()).unwrap();
+        assert_eq!(s.name, "minimal");
+        assert_eq!(s.description, "smallest valid scenario");
+        assert_eq!(s.runs.get(), 1, "default runs = 1 when omitted");
+        assert!(s.setup.copy_fixtures.is_empty());
+        assert!(s.setup.shell.is_empty());
+        assert_eq!(s.user_turns, vec!["hello"]);
+        assert_eq!(s.expectations.len(), 1);
+        assert!(matches!(
+            s.expectations[0],
+            Expectation::ToolCalled { ref tool } if tool == "read"
+        ));
+    }
+
+    #[test]
+    fn parse_full_scenario_with_all_expectation_kinds() {
+        let s = Scenario::from_toml_str(kitchen_sink_toml()).unwrap();
         assert_eq!(s.name, "kitchen-sink");
-        assert_eq!(s.runs, 3);
+        assert_eq!(s.runs.get(), 3);
         assert_eq!(s.setup.copy_fixtures.len(), 2);
         assert_eq!(s.setup.shell.len(), 2);
         assert_eq!(s.user_turns.len(), 3);
         assert_eq!(s.expectations.len(), 11);
 
-        // Spot-check non-trivial variants.
+        // Spot-check non-trivial variants — order matters because the parser is
+        // expected to preserve TOML array order.
         match &s.expectations[2] {
-            Expectation::ToolCalledBefore {
+            Expectation::RequiresPriorRead {
                 tool,
                 must_read_one_of,
             } => {
                 assert_eq!(tool, "edit");
                 assert_eq!(must_read_one_of.len(), 2);
             }
-            other => panic!("expected ToolCalledBefore, got {other:?}"),
+            other => panic!("expected RequiresPriorRead, got {other:?}"),
         }
         match &s.expectations[5] {
             Expectation::FileContains {
@@ -320,7 +363,7 @@ judge_model = "anthropic/claude-haiku-4-5"
     }
 
     #[test]
-    fn round_trip_serialize_deserialize() {
+    fn round_trip_minimal_scenario() {
         let original = Scenario::from_toml_str(minimal_scenario_toml()).unwrap();
         let serialized = toml::to_string(&original).unwrap();
         let reparsed = Scenario::from_toml_str(&serialized).unwrap();
@@ -328,9 +371,60 @@ judge_model = "anthropic/claude-haiku-4-5"
     }
 
     #[test]
+    fn round_trip_kitchen_sink_scenario() {
+        // Phase 7 generator emits TOML — round-tripping the full variant set
+        // is the only thing standing between it and silently dropping fields.
+        let original = Scenario::from_toml_str(kitchen_sink_toml()).unwrap();
+        let serialized = toml::to_string(&original).unwrap();
+        let reparsed = Scenario::from_toml_str(&serialized).unwrap();
+        assert_eq!(original, reparsed);
+    }
+
+    #[test]
+    fn setup_omitted_equals_setup_explicit_empty() {
+        // Both forms must produce an equivalent Setup so the Phase 2 runner
+        // doesn't branch on author style.
+        let omitted = Scenario::from_toml_str(minimal_scenario_toml()).unwrap();
+        let explicit = Scenario::from_toml_str(
+            r#"
+name = "minimal"
+description = "smallest valid scenario"
+user_turns = ["hello"]
+
+[setup]
+copy_fixtures = []
+shell = []
+
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+"#,
+        )
+        .unwrap();
+        assert_eq!(omitted.setup, explicit.setup);
+    }
+
+    #[test]
     fn rejects_empty_name() {
         let toml_src = r#"
 name = ""
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        assert!(
+            err.to_string().contains("name must not be empty"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_whitespace_only_name() {
+        let toml_src = r#"
+name = "   "
 description = "x"
 user_turns = ["hi"]
 [[expectations]]
@@ -387,10 +481,13 @@ user_turns = ["hi"]
 kind = "tool_called"
 tool = "read"
 "#;
+        // NonZeroUsize rejects 0 at the deserialization layer — the error
+        // surfaces in the toml::from_str step, not our validate().
         let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
         assert!(
-            err.to_string().contains("runs must be >= 1"),
-            "unexpected error: {err}"
+            chain.contains("zero") || chain.contains("0") || chain.contains("non-zero"),
+            "unexpected error: {chain}"
         );
     }
 
@@ -404,11 +501,16 @@ user_turns = ["hi"]
 kind = "this_does_not_exist"
 "#;
         let err = Scenario::from_toml_str(toml_src).unwrap_err();
-        // {:#} dumps the full anyhow source chain — the serde rejection lives there.
+        // {:#} dumps the full anyhow source chain — without it, only the outer
+        // context "parsing scenario manifest from string" shows up.
         let chain = format!("{err:#}");
         assert!(
-            chain.contains("this_does_not_exist") || chain.contains("unknown variant"),
-            "unexpected error: {chain}"
+            chain.contains("unknown variant"),
+            "expected 'unknown variant' in chain: {chain}"
+        );
+        assert!(
+            chain.contains("this_does_not_exist"),
+            "expected unknown-variant name in chain: {chain}"
         );
     }
 
@@ -421,12 +523,103 @@ user_turns = ["hi"]
 [[expectations]]
 kind = "tool_called"
 "#;
-        // missing `tool` field
+        // missing `tool` field on ToolCalled
         let err = Scenario::from_toml_str(toml_src).unwrap_err();
         let chain = format!("{err:#}");
         assert!(
-            chain.contains("missing field") || chain.contains("tool"),
+            chain.contains("missing field") && chain.contains("tool"),
+            "expected both 'missing field' and 'tool' in chain: {chain}"
+        );
+    }
+
+    #[test]
+    fn rejects_max_repeat_attempts_zero() {
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "max_repeat_attempts"
+tool = "edit"
+max = 0
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(chain.contains("must be >= 1"), "unexpected error: {chain}");
+    }
+
+    #[test]
+    fn rejects_empty_must_read_one_of() {
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "requires_prior_read"
+tool = "edit"
+must_read_one_of = []
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("must contain at least one path"),
             "unexpected error: {chain}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_substring_in_file_contains() {
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "file_contains"
+path = "foo"
+substring = ""
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("substring must not be empty"),
+            "unexpected error: {chain}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_judge_rubric() {
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "judge"
+rubric = "   "
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("rubric must not be empty"),
+            "unexpected error: {chain}"
+        );
+    }
+
+    #[test]
+    fn rejects_absolute_copy_fixture_path() {
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[setup]
+copy_fixtures = ["/etc/passwd"]
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        assert!(
+            err.to_string().contains("must be relative"),
+            "unexpected error: {err}"
         );
     }
 
