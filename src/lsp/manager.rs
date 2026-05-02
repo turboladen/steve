@@ -500,6 +500,16 @@ impl LspManager {
                     work_done_progress: Some(true),
                     ..Default::default()
                 }),
+                // Offer UTF-8 first so byte offsets from tree-sitter pass
+                // through unchanged when the server agrees; UTF-16 is the
+                // protocol baseline and stays in the list for compliance.
+                general: Some(GeneralClientCapabilities {
+                    position_encodings: Some(vec![
+                        PositionEncodingKind::UTF8,
+                        PositionEncodingKind::UTF16,
+                    ]),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -568,6 +578,15 @@ impl LspManager {
             }
         }
 
+        // Per LSP spec: when the server omits `positionEncoding` it defaults
+        // to UTF-16. We keep that field on the server struct so the request
+        // sites can convert byte offsets without re-reading capabilities.
+        let position_encoding = init_result
+            .capabilities
+            .position_encoding
+            .clone()
+            .unwrap_or(PositionEncodingKind::UTF16);
+
         Ok(LspServer {
             process: child,
             mainloop_abort,
@@ -577,6 +596,7 @@ impl LspManager {
             language: lang,
             binary: binary.clone(),
             capabilities: init_result.capabilities,
+            position_encoding,
             open_files: std::sync::Mutex::new(std::collections::HashMap::new()),
             diagnostics,
         })

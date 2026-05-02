@@ -572,9 +572,10 @@ fn extract_name_node<'a>(node: Node<'a>) -> Option<Node<'a>> {
 
 /// Resolve a symbol name to its (line_0indexed, column_0indexed) position in a file.
 /// Returns the position of the name identifier node, suitable for LSP operations.
-/// Note: column is a byte offset within the line (from tree-sitter), which equals
-/// the character offset for ASCII identifiers. This matches the existing `character`
-/// parameter convention in the LSP tool.
+/// Note: `column` is a UTF-8 byte offset within the line (tree-sitter's
+/// convention) — Steve treats `character` as a byte offset everywhere
+/// internally, and `lsp::server` converts to the server-negotiated
+/// `positionEncoding` (typically UTF-16) at the wire boundary.
 pub(crate) fn resolve_symbol_position(
     path: &Path,
     symbol_name: &str,
