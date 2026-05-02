@@ -165,6 +165,19 @@ fn reason_with_stderr(base: &str, tail: &SharedStderrTail) -> String {
     }
 }
 
+/// Extract the negotiated position encoding from a server's `InitializeResult`
+/// capabilities. Per LSP spec, when the server omits `positionEncoding` it
+/// defaults to UTF-16 (the only encoding servers must always support). When
+/// the server returns an unknown encoding kind we pass it through — Steve's
+/// conversion helper falls back to UTF-16 semantics for any unrecognized
+/// value, so the request side stays correct regardless.
+fn negotiated_position_encoding(capabilities: &ServerCapabilities) -> PositionEncodingKind {
+    capabilities
+        .position_encoding
+        .clone()
+        .unwrap_or(PositionEncodingKind::UTF16)
+}
+
 pub struct LspManager {
     servers: HashMap<Language, LspServer>,
     detected_languages: Vec<Language>,
@@ -578,14 +591,7 @@ impl LspManager {
             }
         }
 
-        // Per LSP spec: when the server omits `positionEncoding` it defaults
-        // to UTF-16. We keep that field on the server struct so the request
-        // sites can convert byte offsets without re-reading capabilities.
-        let position_encoding = init_result
-            .capabilities
-            .position_encoding
-            .clone()
-            .unwrap_or(PositionEncodingKind::UTF16);
+        let position_encoding = negotiated_position_encoding(&init_result.capabilities);
 
         Ok(LspServer {
             process: child,
@@ -914,6 +920,57 @@ mod tests {
             None,
         );
         assert_eq!(mgr.running_servers().count(), 0);
+    }
+
+    // ── Position encoding negotiation ──────────────────────────────────
+
+    #[test]
+    fn negotiated_encoding_defaults_to_utf16_when_server_omits_field() {
+        // Per LSP spec, when a server doesn't advertise a positionEncoding
+        // it must support UTF-16. This guards against future regressions
+        // (e.g. someone "fixing" the unwrap_or to return UTF-8).
+        let caps = ServerCapabilities::default();
+        assert!(caps.position_encoding.is_none());
+        assert_eq!(
+            negotiated_position_encoding(&caps),
+            PositionEncodingKind::UTF16
+        );
+    }
+
+    #[test]
+    fn negotiated_encoding_returns_utf8_when_server_chooses_it() {
+        let caps = ServerCapabilities {
+            position_encoding: Some(PositionEncodingKind::UTF8),
+            ..Default::default()
+        };
+        assert_eq!(
+            negotiated_position_encoding(&caps),
+            PositionEncodingKind::UTF8
+        );
+    }
+
+    #[test]
+    fn negotiated_encoding_returns_utf16_when_server_chooses_it() {
+        let caps = ServerCapabilities {
+            position_encoding: Some(PositionEncodingKind::UTF16),
+            ..Default::default()
+        };
+        assert_eq!(
+            negotiated_position_encoding(&caps),
+            PositionEncodingKind::UTF16
+        );
+    }
+
+    #[test]
+    fn negotiated_encoding_passes_through_utf32() {
+        let caps = ServerCapabilities {
+            position_encoding: Some(PositionEncodingKind::UTF32),
+            ..Default::default()
+        };
+        assert_eq!(
+            negotiated_position_encoding(&caps),
+            PositionEncodingKind::UTF32
+        );
     }
 
     fn sample_entry(state: LspServerState, binary: &str) -> LspStatusEntry {
