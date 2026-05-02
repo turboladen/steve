@@ -582,9 +582,9 @@ impl StreamRequest {
                                 for choice in &response.choices {
                                     // TODO: Emit AppEvent::LlmReasoning for reasoning/thinking tokens.
                                     // OpenAI o1/o3 models send reasoning content via a `reasoning_content`
-                                    // field on the stream delta, but async-openai 0.34 does not expose this
-                                    // field on ChatCompletionStreamResponseDelta. When async-openai adds
-                                    // support (or if we switch to raw JSON parsing), add:
+                                    // field on the stream delta, but async-openai 0.36 still does not
+                                    // expose this field on ChatCompletionStreamResponseDelta. When
+                                    // async-openai adds support (or if we switch to raw JSON parsing), add:
                                     //
                                     //   if let Some(reasoning) = &choice.delta.reasoning_content {
                                     //       if !reasoning.is_empty() {

@@ -248,7 +248,7 @@ possible, prefer reordering over rewriting, and test with local models.
 ## Key Dependency Gotchas
 
 - **strum 0.28**: Use `IntoStaticStr` (not `AsRefStr`) for `&'static str`
-- **async-openai 0.34**: Types under `async_openai::types::chat::`, not `async_openai::types::`.
+- **async-openai 0.36**: Types under `async_openai::types::chat::`, not `async_openai::types::`.
   `ChatCompletionRequestAssistantMessage` requires `audio: None` and `function_call: None`. Must set
   `stream_options` with `include_usage: Some(true)` or token usage never reports.
   `reasoning_content` still NOT exposed on `ChatCompletionStreamResponseDelta` — TODO in stream/mod.rs
