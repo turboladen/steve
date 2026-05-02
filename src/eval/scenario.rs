@@ -16,13 +16,17 @@
 
 use std::{
     num::NonZeroUsize,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// `deny_unknown_fields` makes typos like `case_insenstive` or `judge_modle`
+/// hard errors at parse time instead of silently parsing as default — for a
+/// regression-manifest format, silent acceptance defeats the entire point.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Scenario {
     /// Must match the scenario directory name; mismatch is treated as rename drift.
     pub name: String,
@@ -43,6 +47,7 @@ fn default_runs() -> NonZeroUsize {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Setup {
     /// Paths relative to the scenario directory; copied into the tempdir
     /// preserving their relative directory structure.
@@ -54,9 +59,10 @@ pub struct Setup {
 }
 
 /// Tagged enum: TOML authors write `kind = "tool_called"` (snake_case) to select
-/// a variant. Unknown kinds are rejected at parse time by serde.
+/// a variant. Unknown kinds are rejected at parse time by serde, and
+/// `deny_unknown_fields` rejects typos in variant fields too.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Expectation {
     ToolCalled {
         tool: String,
@@ -99,15 +105,32 @@ pub enum Expectation {
         max: usize,
     },
     /// LLM-as-judge: small judge model (default Haiku 4.5, temperature 0)
-    /// evaluates the rubric. Inputs and outputs are recorded into the JSONL run
-    /// record for reproducibility.
+    /// evaluates the structured PASS/FAIL criteria. Inputs and outputs are
+    /// recorded into the JSONL run record for reproducibility.
+    ///
+    /// `pass_when` and `fail_when` are separate fields (not a single freeform
+    /// rubric) so the judge prompt template can construct a structured prompt
+    /// and so authors don't have to remember the PASS=/FAIL= convention.
     Judge {
-        /// Should explicitly state PASS and FAIL conditions.
-        rubric: String,
+        pass_when: String,
+        fail_when: String,
         /// Format: `provider/model_id`.
         #[serde(default)]
         judge_model: Option<String>,
     },
+}
+
+/// Reject paths that escape the scenario workspace — absolute paths and any
+/// `..` components. Symlink resolution is a runtime concern; this is the
+/// parse-time gate.
+fn validate_workspace_relative_path(path: &Path, label: &str) -> Result<()> {
+    if path.is_absolute() {
+        anyhow::bail!("{label} {path:?} must be relative to the scenario dir (got absolute path)");
+    }
+    if path.components().any(|c| matches!(c, Component::ParentDir)) {
+        anyhow::bail!("{label} {path:?} must not contain `..` segments (would escape workspace)");
+    }
+    Ok(())
 }
 
 impl Scenario {
@@ -161,13 +184,8 @@ impl Scenario {
             anyhow::bail!("scenario {} must have at least one expectation", self.name);
         }
         for fixture in &self.setup.copy_fixtures {
-            if fixture.is_absolute() {
-                anyhow::bail!(
-                    "scenario {} setup.copy_fixtures path {:?} must be relative to the scenario dir",
-                    self.name,
-                    fixture
-                );
-            }
+            validate_workspace_relative_path(fixture, "setup.copy_fixtures path")
+                .with_context(|| format!("scenario {}", self.name))?;
         }
         for (idx, expectation) in self.expectations.iter().enumerate() {
             expectation
@@ -196,9 +214,17 @@ impl Expectation {
                 if must_read_one_of.is_empty() {
                     anyhow::bail!("must_read_one_of must contain at least one path");
                 }
+                for p in must_read_one_of {
+                    validate_workspace_relative_path(p, "must_read_one_of path")?;
+                }
             }
-            Self::FileUnchanged { .. } => {}
-            Self::FileContains { substring, .. } => {
+            Self::FileUnchanged { path } => {
+                validate_workspace_relative_path(path, "file_unchanged path")?;
+            }
+            Self::FileContains {
+                path, substring, ..
+            } => {
+                validate_workspace_relative_path(path, "file_contains path")?;
                 if substring.is_empty() {
                     anyhow::bail!("file_contains substring must not be empty");
                 }
@@ -219,9 +245,16 @@ impl Expectation {
                     );
                 }
             }
-            Self::Judge { rubric, .. } => {
-                if rubric.trim().is_empty() {
-                    anyhow::bail!("judge rubric must not be empty");
+            Self::Judge {
+                pass_when,
+                fail_when,
+                ..
+            } => {
+                if pass_when.trim().is_empty() {
+                    anyhow::bail!("judge pass_when must not be empty");
+                }
+                if fail_when.trim().is_empty() {
+                    anyhow::bail!("judge fail_when must not be empty");
                 }
             }
         }
@@ -300,11 +333,13 @@ max = 2
 
 [[expectations]]
 kind = "judge"
-rubric = "Did the assistant attempt reconstruction?"
+pass_when = "Assistant attempted reconstruction using available tools and adjacent files."
+fail_when = "Assistant emitted surrender language like 'no way to recover' or asked the user to provide content from memory."
 
 [[expectations]]
 kind = "judge"
-rubric = "Was the change minimal and on-topic?"
+pass_when = "Change is minimal and on-topic."
+fail_when = "Unrelated files were touched."
 judge_model = "anthropic/claude-haiku-4-5"
 "#
     }
@@ -587,20 +622,156 @@ substring = ""
     }
 
     #[test]
-    fn rejects_empty_judge_rubric() {
+    fn rejects_empty_judge_pass_when() {
         let toml_src = r#"
 name = "x"
 description = "x"
 user_turns = ["hi"]
 [[expectations]]
 kind = "judge"
-rubric = "   "
+pass_when = "   "
+fail_when = "concrete fail"
 "#;
         let err = Scenario::from_toml_str(toml_src).unwrap_err();
         let chain = format!("{err:#}");
         assert!(
-            chain.contains("rubric must not be empty"),
+            chain.contains("pass_when must not be empty"),
             "unexpected error: {chain}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_judge_fail_when() {
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "judge"
+pass_when = "concrete pass"
+fail_when = ""
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("fail_when must not be empty"),
+            "unexpected error: {chain}"
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_field_typo_in_file_contains() {
+        // `case_insenstive` (typo) should be rejected, not silently default.
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "file_contains"
+path = "foo"
+substring = "bar"
+case_insenstive = true
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("unknown field") && chain.contains("case_insenstive"),
+            "expected serde 'unknown field' rejection: {chain}"
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_field_typo_at_scenario_level() {
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+runss = 3
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("unknown field") && chain.contains("runss"),
+            "expected serde 'unknown field' rejection: {chain}"
+        );
+    }
+
+    #[test]
+    fn rejects_parent_dir_in_copy_fixtures() {
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[setup]
+copy_fixtures = ["../../etc/passwd"]
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("must not contain `..`"),
+            "expected `..` rejection: {chain}"
+        );
+    }
+
+    #[test]
+    fn rejects_absolute_path_in_must_read_one_of() {
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "requires_prior_read"
+tool = "edit"
+must_read_one_of = ["/etc/passwd"]
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("must be relative"),
+            "expected absolute-path rejection: {chain}"
+        );
+    }
+
+    #[test]
+    fn rejects_parent_dir_in_file_contains_path() {
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "file_contains"
+path = "../outside"
+substring = "x"
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("must not contain `..`"),
+            "expected `..` rejection: {chain}"
+        );
+    }
+
+    #[test]
+    fn rejects_absolute_path_in_file_unchanged() {
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "file_unchanged"
+path = "/etc/hosts"
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("must be relative"),
+            "expected absolute-path rejection: {chain}"
         );
     }
 
@@ -617,9 +788,10 @@ kind = "tool_called"
 tool = "read"
 "#;
         let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
         assert!(
-            err.to_string().contains("must be relative"),
-            "unexpected error: {err}"
+            chain.contains("must be relative"),
+            "unexpected error: {chain}"
         );
     }
 
