@@ -6,5 +6,7 @@
 //! LLM-as-judge handles behavioral checks where idiom drift makes regex matching brittle.
 
 pub mod scenario;
+pub mod workspace;
 
 pub use scenario::{Expectation, Scenario, Setup};
+pub use workspace::{ScenarioWorkspace, WorkspaceSnapshot};
