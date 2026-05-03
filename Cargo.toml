@@ -132,5 +132,6 @@ urlencoding = "2"
 gethostname = "1.1.0"
 regex-syntax = "0.8.10"
 
-[dev-dependencies]
+# Scenario tempdir setup for the eval harness (used in src/eval/workspace.rs);
+# also used in tests across the crate.
 tempfile = "3"

@@ -22,6 +22,15 @@ enum Commands {
         #[command(subcommand)]
         command: steve::cli::TaskCommand,
     },
+    /// Run one eval scenario end-to-end and emit the captured trace as JSON
+    /// (chat/coding regression harness — see `eval/scenarios/_smoke/`).
+    Eval {
+        /// Path to the `scenario.toml` file inside a scenario directory.
+        scenario: std::path::PathBuf,
+        /// Model to run against, in `provider/model_id` format.
+        #[arg(long)]
+        model: String,
+    },
 }
 
 #[tokio::main]
@@ -68,6 +77,9 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Task { command }) => {
             return steve::cli::run_task(command);
+        }
+        Some(Commands::Eval { scenario, model }) => {
+            return steve::eval::cli::run_one(&scenario, &model).await;
         }
         None => {}
     }

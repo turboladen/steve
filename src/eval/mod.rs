@@ -5,6 +5,13 @@
 //! rule-based assertions handle structural facts (tool-call sequence, file diffs); a small
 //! LLM-as-judge handles behavioral checks where idiom drift makes regex matching brittle.
 
+pub mod capture;
+pub mod cli;
+pub mod runner;
 pub mod scenario;
+pub mod workspace;
 
+pub use capture::{CapturedRun, RecordedToolCall};
+pub use runner::Runner;
 pub use scenario::{Expectation, Scenario, Setup};
+pub use workspace::{ScenarioWorkspace, WorkspaceSnapshot};

@@ -528,6 +528,24 @@ impl App {
         app.sync_context_window();
         app
     }
+
+    /// Whether a stream is currently in flight. Used by the eval harness to
+    /// distinguish "input was accepted and stream started" from "input was
+    /// silently rejected" (e.g. unresolvable model — `handle_input` returns
+    /// `Ok(())` in that case but never flips `streaming_active`).
+    pub fn is_streaming(&self) -> bool {
+        self.streaming_active
+    }
+
+    /// Best-effort: text of the most recent `MessageBlock::Error` pushed to
+    /// `messages`, if any. Used by the eval harness to surface why
+    /// `handle_input` accepted the call but didn't start a stream.
+    pub fn last_error_message(&self) -> Option<&str> {
+        self.messages.iter().rev().find_map(|m| match m {
+            MessageBlock::Error { text } => Some(text.as_str()),
+            _ => None,
+        })
+    }
 }
 
 #[cfg(test)]
