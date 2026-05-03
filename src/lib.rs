@@ -82,6 +82,7 @@ pub mod config;
 pub mod context;
 pub mod data;
 pub mod diagnostics;
+pub mod eval;
 pub mod event;
 pub mod export;
 pub mod file_ref;
