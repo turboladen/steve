@@ -125,6 +125,20 @@ impl Runner {
                 .handle_input(turn.clone())
                 .await
                 .with_context(|| format!("submitting user_turn #{}", idx + 1))?;
+            // handle_input returns Ok(()) on silent rejection (e.g. model not
+            // resolvable). Detect that here so the eval surfaces a clear
+            // error rather than producing an empty trace.
+            if !self.app.is_streaming() {
+                let why = self
+                    .app
+                    .last_error_message()
+                    .map(|s| format!(": {s}"))
+                    .unwrap_or_else(|| {
+                        " (no error message — likely model not resolvable from the user's config)"
+                            .into()
+                    });
+                anyhow::bail!("user_turn #{} did not start a stream{}", idx + 1, why);
+            }
             self.app
                 .run_until_idle(|event| captured.observe(event))
                 .await

@@ -130,7 +130,7 @@ pub enum AppEvent {
 }
 
 /// Token usage reported at the end of a streaming response.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct StreamUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,

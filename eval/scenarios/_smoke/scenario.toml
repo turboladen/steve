@@ -1,0 +1,17 @@
+name = "_smoke"
+description = "Phase 2 smoke: agent should read the lone file and report its contents."
+user_turns = [
+  "There's one file in this directory. Read it and tell me what it says.",
+]
+
+[setup]
+copy_fixtures = ["greeting.txt"]
+
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+
+[[expectations]]
+kind = "final_message_contains"
+substring = "hello"
+case_insensitive = true

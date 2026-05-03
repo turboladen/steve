@@ -10,6 +10,7 @@
 use std::{path::PathBuf, time::Duration};
 
 use crossterm::event::Event;
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
@@ -38,7 +39,7 @@ pub struct CapturedRun {
     pending_assistant_text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RecordedToolCall {
     pub call_id: String,
     pub tool_name: ToolName,

@@ -6,6 +6,7 @@
 //! LLM-as-judge handles behavioral checks where idiom drift makes regex matching brittle.
 
 pub mod capture;
+pub mod cli;
 pub mod runner;
 pub mod scenario;
 pub mod workspace;
