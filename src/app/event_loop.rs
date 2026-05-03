@@ -157,19 +157,18 @@ impl App {
         Ok(())
     }
 
-    /// Drive the event loop without TUI rendering. Returns when the active
-    /// stream completes — i.e. `streaming_active` becomes `false` after at
-    /// least one event has been processed (typically `LlmFinish` or
-    /// `LlmError` reaching `finish_stream`).
+    /// Drive the event loop without TUI rendering. Loops while
+    /// `streaming_active` is `true`, returning as soon as it flips to `false`
+    /// (typically when `LlmFinish` or `LlmError` reaches `finish_stream`,
+    /// but also returns immediately if `streaming_active` is already `false`
+    /// on entry — there is no stream to wait for).
     ///
     /// `observer` is invoked for each `AppEvent` BEFORE `handle_event`
     /// processes it, so callers can record the event without racing the
     /// internal state updates that follow.
     ///
-    /// Caller must have already kicked off a stream (e.g. via
-    /// `App::handle_input`) so `streaming_active` is `true` on entry.
-    /// Returning immediately when `streaming_active` is already `false` is
-    /// the correct behavior — there is no stream to wait for.
+    /// Caller is expected to kick off a stream first (e.g. via
+    /// `App::handle_input`) so the loop has something to drain.
     pub async fn run_until_idle<F>(&mut self, mut observer: F) -> Result<()>
     where
         F: FnMut(&AppEvent),

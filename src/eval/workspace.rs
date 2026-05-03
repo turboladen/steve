@@ -44,6 +44,18 @@ impl ScenarioWorkspace {
         for fixture in &setup.copy_fixtures {
             let src = scenario_dir.join(fixture);
             let dst = root.join(fixture);
+            // Reject symlink fixtures BEFORE copying — `std::fs::copy` follows
+            // symlinks, so a scenario could commit a symlink to /etc/passwd
+            // or CI secrets and have those contents copied into the workspace
+            // for the LLM to read/exfiltrate.
+            let src_meta = std::fs::symlink_metadata(&src)
+                .with_context(|| format!("statting fixture source {}", src.display()))?;
+            if src_meta.file_type().is_symlink() {
+                anyhow::bail!(
+                    "fixture {} is a symlink — refusing to copy (would let the workspace exfiltrate file content from outside the scenario dir)",
+                    src.display()
+                );
+            }
             if let Some(parent) = dst.parent() {
                 std::fs::create_dir_all(parent).with_context(|| {
                     format!("creating parent dir for fixture {}", dst.display())
@@ -223,9 +235,17 @@ mod tests {
         };
         let err = ScenarioWorkspace::build(scenario_dir.path(), &setup).unwrap_err();
         let chain = format!("{err:#}");
+        // After the symlink-rejection check, missing-fixture surfaces as a
+        // stat failure on the source path. Either the operation context
+        // ("statting fixture source" or the legacy "copying fixture") plus
+        // the missing path name is sufficient to confirm we got the right error.
         assert!(
-            chain.contains("copying fixture") && chain.contains("does-not-exist.txt"),
-            "expected fixture-copy error: {chain}"
+            chain.contains("does-not-exist.txt"),
+            "expected missing-fixture error mentioning the path: {chain}"
+        );
+        assert!(
+            chain.contains("statting fixture source") || chain.contains("copying fixture"),
+            "expected fixture-stage error: {chain}"
         );
     }
 
@@ -250,6 +270,33 @@ mod tests {
         let h_c = ws.baseline.files.get(Path::new("c.txt")).unwrap();
         assert_eq!(h_a, h_b, "identical content must produce identical hashes");
         assert_ne!(h_a, h_c, "different content must produce different hashes");
+    }
+
+    #[test]
+    fn build_rejects_symlink_fixture() {
+        // Security: fixture symlinks would be followed by std::fs::copy,
+        // letting a scenario exfiltrate file content from outside its dir.
+        #[cfg(unix)]
+        {
+            let scenario_dir = tempfile::tempdir().unwrap();
+            // Create a real file that a malicious symlink would point at.
+            let secret = scenario_dir.path().join("secret-target.txt");
+            write_file(&secret, "sensitive\n");
+            // Symlink the fixture to the secret.
+            let fixture_link = scenario_dir.path().join("evil.txt");
+            std::os::unix::fs::symlink(&secret, &fixture_link).unwrap();
+
+            let setup = Setup {
+                copy_fixtures: vec![PathBuf::from("evil.txt")],
+                shell: vec![],
+            };
+            let err = ScenarioWorkspace::build(scenario_dir.path(), &setup).unwrap_err();
+            let chain = format!("{err:#}");
+            assert!(
+                chain.contains("symlink") && chain.contains("refusing to copy"),
+                "expected symlink rejection: {chain}"
+            );
+        }
     }
 
     #[test]
