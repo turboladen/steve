@@ -157,6 +157,33 @@ impl App {
         Ok(())
     }
 
+    /// Drive the event loop without TUI rendering. Returns when the active
+    /// stream completes — i.e. `streaming_active` becomes `false` after at
+    /// least one event has been processed (typically `LlmFinish` or
+    /// `LlmError` reaching `finish_stream`).
+    ///
+    /// `observer` is invoked for each `AppEvent` BEFORE `handle_event`
+    /// processes it, so callers can record the event without racing the
+    /// internal state updates that follow.
+    ///
+    /// Caller must have already kicked off a stream (e.g. via
+    /// `App::handle_input`) so `streaming_active` is `true` on entry.
+    /// Returning immediately when `streaming_active` is already `false` is
+    /// the correct behavior — there is no stream to wait for.
+    pub async fn run_until_idle<F>(&mut self, mut observer: F) -> Result<()>
+    where
+        F: FnMut(&AppEvent),
+    {
+        while self.streaming_active {
+            let event = self.event_rx.recv().await.ok_or_else(|| {
+                anyhow::anyhow!("event channel closed mid-stream during run_until_idle")
+            })?;
+            observer(&event);
+            self.handle_event(event).await?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn handle_event(&mut self, event: AppEvent) -> Result<()> {
         match event {
             AppEvent::Input(Event::Key(key)) => self.handle_key(key).await?,
