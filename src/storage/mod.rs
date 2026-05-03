@@ -24,8 +24,9 @@ impl Storage {
         Ok(Self { base_dir: base })
     }
 
-    /// Create storage at an explicit base directory (for tests).
-    #[cfg(test)]
+    /// Create storage at an explicit base directory. Used by the eval harness
+    /// to keep scenario session state inside the workspace tempdir, and by
+    /// tests for hermetic per-test storage.
     pub fn with_base(base_dir: PathBuf) -> Result<Self> {
         fs::create_dir_all(&base_dir)
             .with_context(|| format!("failed to create storage dir: {}", base_dir.display()))?;

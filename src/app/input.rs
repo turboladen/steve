@@ -1,7 +1,10 @@
 use super::*;
 
 impl App {
-    pub(super) async fn handle_input(&mut self, text: String) -> Result<()> {
+    /// Programmatic entry point for submitting a user message. Used by both
+    /// the TUI key handler and the eval harness's headless driver. Sets
+    /// `streaming_active = true` synchronously and spawns the stream task.
+    pub async fn handle_input(&mut self, text: String) -> Result<()> {
         if text.starts_with('/') {
             return self.handle_command(&text).await;
         }
