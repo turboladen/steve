@@ -1,20 +1,16 @@
 //! `steve eval` subcommand entry points.
-//!
-//! v1: a single command — `steve eval <scenario.toml> --model <provider/id>` —
-//! that runs one scenario end-to-end and prints the captured trace as
-//! pretty JSON to stdout. Phase 6 expands this into suite execution +
-//! `compare` + structured JSONL output.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde_json::json;
 
-use crate::eval::{Runner, Scenario};
+use crate::eval::{Runner, Scenario, evaluate};
 
-/// Run a single scenario and emit the captured trace as pretty JSON to
-/// stdout. Returns `Ok(())` when the run completes regardless of whether
-/// any expectations would have passed (assertion eval is Phase 3).
+/// Run a single scenario and emit the captured trace + assertion report as
+/// pretty JSON to stdout. Exit code stays 0 even when expectations fail —
+/// the JSON's `passed` field carries the verdict, and we don't want to
+/// lose the trace in the user's pipeline on a failed run.
 pub async fn run_one(scenario_path: &Path, model: &str) -> Result<()> {
     let scenario = Scenario::from_file(scenario_path)
         .with_context(|| format!("loading scenario from {}", scenario_path.display()))?;
@@ -27,13 +23,19 @@ pub async fn run_one(scenario_path: &Path, model: &str) -> Result<()> {
 
     let runner = Runner::build(&scenario, scenario_dir, model)?;
     let captured = runner.run(&scenario).await?;
+    let report = evaluate(&scenario, &captured);
 
-    // Custom output shape (not just `serde_json::to_string(&captured)`) so
-    // we can hide internal scratch fields, surface the duration as ms, and
-    // include the scenario name + model up-front for human readability.
+    // Top-level verdict combines BOTH expectation outcomes AND run
+    // completion. A scenario that aborts via LlmError or hits a per-turn
+    // timeout must NOT report passed=true even if an early expectation was
+    // satisfied before the abort — `errors` and `timed_out` are not just
+    // a side channel for diagnostics.
+    let passed = report.passed() && captured.completed_normally();
     let output = json!({
         "scenario": scenario.name,
         "model": model,
+        "passed": passed,
+        "results": report.results,
         "tool_calls": captured.tool_calls,
         "assistant_messages": captured.assistant_messages,
         "usage": captured.usage,

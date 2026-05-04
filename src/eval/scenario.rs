@@ -17,10 +17,14 @@
 use std::{
     num::NonZeroUsize,
     path::{Component, Path, PathBuf},
+    str::FromStr,
 };
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use strum::IntoEnumIterator;
+
+use crate::tool::ToolName;
 
 /// `deny_unknown_fields` makes typos like `case_insenstive` or `judge_modle`
 /// hard errors at parse time instead of silently parsing as default — for a
@@ -121,6 +125,46 @@ pub enum Expectation {
         #[serde(default)]
         judge_model: Option<String>,
     },
+}
+
+/// Reject tool names that aren't a known builtin. Catches typos like
+/// `"raed"` at parse time so they don't silently pass evaluation (a
+/// misspelled `tool_not_called` / `requires_prior_read` / etc. would
+/// vacuously match the never-called branch and report green forever).
+///
+/// MCP tool names (containing `__`) are also rejected — even though they
+/// look "valid by convention," the upstream capture pipeline cannot
+/// observe MCP calls (`execute_mcp_tools` emits `StreamNotice`, not
+/// `LlmToolCall`/`ToolResult`, and `RecordedToolCall.tool_name` is
+/// `ToolName` which has no MCP variant). Accepting MCP names here would
+/// silently pass scenarios whose assertions can never succeed.
+/// Tracked: steve-ap0q (capture MCP tool calls in CapturedRun).
+fn validate_tool_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("tool name must not be empty");
+    }
+    // Reject leading/trailing whitespace (or whitespace-only) outright rather
+    // than silently trimming — the value is compared against ToolName::as_str()
+    // verbatim at runtime, so " read " would never match `read` and the
+    // assertion would silently report green forever.
+    if name != name.trim() || name.trim().is_empty() {
+        anyhow::bail!(
+            "tool {name:?} must not have leading/trailing whitespace; \
+             runtime comparison is exact"
+        );
+    }
+    if name.contains("__") {
+        anyhow::bail!(
+            "tool {name:?} looks like an MCP tool name, but MCP capture is not yet \
+             implemented — assertions on MCP calls would never succeed. \
+             Tracked: steve-ap0q. Use a builtin tool name instead."
+        );
+    }
+    if ToolName::from_str(name).is_err() {
+        let known: Vec<&'static str> = ToolName::iter().map(|t| t.as_str()).collect();
+        anyhow::bail!("tool {name:?} is not a known builtin (one of {known:?})");
+    }
+    Ok(())
 }
 
 /// Reject paths that escape the scenario workspace, contain garbage that
@@ -226,17 +270,13 @@ impl Expectation {
     fn validate(&self) -> Result<()> {
         match self {
             Self::ToolCalled { tool } | Self::ToolNotCalled { tool } => {
-                if tool.trim().is_empty() {
-                    anyhow::bail!("tool name must not be empty");
-                }
+                validate_tool_name(tool)?;
             }
             Self::RequiresPriorRead {
                 tool,
                 must_read_one_of,
             } => {
-                if tool.trim().is_empty() {
-                    anyhow::bail!("tool name must not be empty");
-                }
+                validate_tool_name(tool)?;
                 if must_read_one_of.is_empty() {
                     anyhow::bail!("must_read_one_of must contain at least one path");
                 }
@@ -262,9 +302,7 @@ impl Expectation {
                 }
             }
             Self::MaxRepeatAttempts { tool, max } => {
-                if tool.trim().is_empty() {
-                    anyhow::bail!("tool name must not be empty");
-                }
+                validate_tool_name(tool)?;
                 if *max == 0 {
                     anyhow::bail!(
                         "max_repeat_attempts max must be >= 1 (use tool_not_called for max=0 semantics)"
@@ -624,6 +662,118 @@ must_read_one_of = []
         let chain = format!("{err:#}");
         assert!(
             chain.contains("must contain at least one path"),
+            "unexpected error: {chain}"
+        );
+    }
+
+    #[test]
+    fn rejects_typoed_tool_name_in_tool_called() {
+        // A misspelled tool name (`raed` for `read`) would silently never
+        // match any tool call, vacuously passing tool_not_called and
+        // requires_prior_read while reporting green forever. Catch at parse.
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "tool_called"
+tool = "raed"
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("not a known builtin") && chain.contains("raed"),
+            "unexpected error: {chain}"
+        );
+    }
+
+    #[test]
+    fn rejects_typoed_tool_name_in_max_repeat_attempts() {
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "max_repeat_attempts"
+tool = "edti"
+max = 2
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("not a known builtin") && chain.contains("edti"),
+            "unexpected error: {chain}"
+        );
+    }
+
+    #[test]
+    fn accepts_all_builtin_tool_names() {
+        // Sanity: every ToolName variant should round-trip through the
+        // validator. Iterates the strum enum so adding a new variant is
+        // automatically covered.
+        use crate::tool::ToolName;
+        use strum::IntoEnumIterator;
+        for name in ToolName::iter() {
+            let toml_src = format!(
+                r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "tool_called"
+tool = "{}"
+"#,
+                name.as_str()
+            );
+            Scenario::from_toml_str(&toml_src)
+                .unwrap_or_else(|e| panic!("builtin {} rejected: {e:#}", name.as_str()));
+        }
+    }
+
+    #[test]
+    fn rejects_tool_name_with_leading_or_trailing_whitespace() {
+        // ToolName::from_str(name.trim()) succeeds for " read ", but the
+        // scenario stores the un-trimmed string and the runtime comparison
+        // against ToolName::as_str() ("read") would never match — silent
+        // false negative. Reject at parse.
+        for bad in [" read", "read ", "  edit  ", "\tbash"] {
+            let toml_src = format!(
+                r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "tool_called"
+tool = "{bad}"
+"#
+            );
+            let err = Scenario::from_toml_str(&toml_src).unwrap_err();
+            let chain = format!("{err:#}");
+            assert!(
+                chain.contains("must not have leading/trailing whitespace"),
+                "expected whitespace rejection for {bad:?}: {chain}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_mcp_tool_name_until_capture_supports_it() {
+        // MCP tool names parse "looking valid by convention" but capture
+        // can't see MCP calls (execute_mcp_tools emits StreamNotice, not
+        // LlmToolCall) — so the assertion would silently pass forever.
+        // Reject at parse with a pointer to the tracking issue.
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "tool_called"
+tool = "mcp__github__create_issue"
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("MCP capture is not yet implemented") && chain.contains("steve-ap0q"),
             "unexpected error: {chain}"
         );
     }

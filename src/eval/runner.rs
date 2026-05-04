@@ -54,6 +54,20 @@ impl Runner {
     /// must be in `provider/model_id` format and the provider must be
     /// resolvable from the user's global config.
     pub fn build(scenario: &Scenario, scenario_dir: &Path, cli_model: &str) -> Result<Self> {
+        // Multi-run support (`runs > 1` with majority-pass semantics) lands
+        // alongside Phase 6's JSONL+compare work — the output shape for N
+        // captures + N reports is a Phase 6 design decision. Until then,
+        // fail loudly so a `runs = 3` scenario doesn't silently report a
+        // single-run verdict as if it were the majority result.
+        if scenario.runs.get() > 1 {
+            anyhow::bail!(
+                "scenario {:?} sets runs={} but multi-run execution is not yet implemented \
+                 (tracked as steve-paeu, blocks Phase 6); rerun with runs=1 or omit the field",
+                scenario.name,
+                scenario.runs.get()
+            );
+        }
+
         let workspace = ScenarioWorkspace::build(scenario_dir, &scenario.setup)
             .with_context(|| format!("building workspace for scenario {}", scenario.name))?;
 
@@ -187,13 +201,48 @@ impl Runner {
 mod tests {
     use std::collections::HashMap;
 
+    use std::num::NonZeroUsize;
+
     use super::*;
-    use crate::config::{Config, ModelCapabilities, ModelConfig, ProviderConfig};
+    use crate::{
+        config::{Config, ModelCapabilities, ModelConfig, ProviderConfig},
+        eval::scenario::{Expectation, Setup},
+    };
 
     // End-to-end Runner coverage requires lifting MockChatStream out of
     // `#[cfg(test)]` in src/stream/mod.rs — deferred until Phase 4 (judge)
     // forces it. The smoke test (`cargo run -- eval`) is the ecologically-
     // valid gate for v1.
+
+    fn scenario_with_runs(runs: usize) -> Scenario {
+        Scenario {
+            name: "x".into(),
+            description: "x".into(),
+            runs: NonZeroUsize::new(runs).unwrap(),
+            setup: Setup::default(),
+            user_turns: vec!["hi".into()],
+            expectations: vec![Expectation::ToolCalled {
+                tool: "read".into(),
+            }],
+        }
+    }
+
+    /// Multi-run scenarios fail loud at build time so a `runs = 3` scenario
+    /// can't silently report a single-run verdict as if it were the
+    /// majority. Tracked as steve-paeu (Phase 6 work).
+    #[test]
+    fn build_bails_when_runs_greater_than_one() {
+        let scenario_dir = tempfile::tempdir().unwrap();
+        let scenario = scenario_with_runs(3);
+        let chain = match Runner::build(&scenario, scenario_dir.path(), "fake/model") {
+            Ok(_) => panic!("expected runs=3 to bail at build time"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(
+            chain.contains("runs=3") && chain.contains("multi-run"),
+            "expected multi-run bail message: {chain}"
+        );
+    }
 
     #[test]
     fn eval_mode_config_overrides_take_effect() {
