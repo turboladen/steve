@@ -607,6 +607,7 @@ mod tests {
             arguments,
             output: Some("ok".into()),
             is_error: false,
+            turn_index: 0,
         }
     }
 
@@ -833,6 +834,7 @@ mod tests {
             arguments: json!({"path": ".teller.yml"}),
             output: Some("file not found".into()),
             is_error: true,
+            turn_index: 0,
         });
         cap.tool_calls.push(call(
             "c2",

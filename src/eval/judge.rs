@@ -103,11 +103,6 @@ const MAX_ASSISTANT_MSGS_HEAD: usize = 10;
 const MAX_ASSISTANT_MSGS_TAIL: usize = 15;
 const MAX_TOOL_ARGS_CHARS: usize = 1024;
 const MAX_TOOL_OUTPUT_CHARS: usize = 2048;
-/// Same head + tail rationale as the assistant-message constants — a
-/// recovery loop's final tool calls are exactly what proves the agent
-/// recovered. Total budget (head + tail) preserves the prior 50-call cap.
-const MAX_TOOL_CALLS_HEAD: usize = 15;
-const MAX_TOOL_CALLS_TAIL: usize = 35;
 const MAX_RAW_RESPONSE_IN_REASON: usize = 500;
 /// Cap on the number of validate_judge_config failures shown verbatim
 /// before a "... (N more truncated)" sentinel kicks in. Prevents a
@@ -455,17 +450,23 @@ pub(crate) fn strip_markdown_fences(s: &str) -> &str {
         .trim()
 }
 
-/// Build the user prompt for the judge. Truncates assistant messages and
-/// per-tool-call args/output to keep the prompt bounded even on scenarios
-/// with very large tool output.
+/// Build the user prompt for the judge. Truncates per-tool-call args/output
+/// and per-message body to keep the prompt bounded.
 ///
-/// Section order matches execution order within each turn: a turn fires
-/// its tool calls FIRST, then emits the final assistant message. Layout
-/// order in the prompt mirrors that — tool calls before assistant
-/// messages — because judges have been observed to infer temporal order
-/// from layout when no explicit timestamps are present, leading to false
-/// "agent reported contents before reading the file" verdicts when the
-/// final message was placed above the tool-call list.
+/// Layout matches real execution order **per turn**: each turn shows its
+/// tool calls (in emit order) followed by the assistant's final message.
+/// Turns appear in chronological order. Round-3 fixed the within-turn
+/// layout (tool calls before message); this rendering also fixes
+/// across-turn layout (turn N's calls before turn N+1's calls), which a
+/// flat "all tool calls then all messages" presentation broke for
+/// multi-turn scenarios.
+///
+/// Truncation happens at the TURN level — when a run has more turns than
+/// fit, the head and tail turns are shown with a sentinel naming the
+/// elided range. Within a kept turn, every tool call is rendered (the
+/// per-tool-call args/output truncation still bounds individual entries).
+/// This is simpler than two-tier truncation and handles the common case
+/// (1-10 turns, 1-20 calls each) well.
 pub(crate) fn build_user_prompt(
     pass_when: &str,
     fail_when: &str,
@@ -476,107 +477,102 @@ pub(crate) fn build_user_prompt(
     out.push_str(pass_when);
     out.push_str("\nFAIL_WHEN: ");
     out.push_str(fail_when);
-    out.push_str("\n\nCAPTURED RUN — events listed in EXECUTION ORDER. ");
+    out.push_str("\n\nCAPTURED RUN — turns in chronological order. ");
     out.push_str(
-        "Within each turn the assistant fires its tool calls FIRST and then emits its final \
-         message; the sections below preserve that ordering.\n\n",
+        "Each turn shows its tool calls (in emit order) FIRST, then the assistant's \
+         final message for that turn.\n",
     );
 
-    let total_calls = captured.tool_calls.len();
-    let format_tool_call = |i: usize, call: &RecordedToolCall, out: &mut String| {
-        let args = truncate_chars(&call.arguments.to_string(), MAX_TOOL_ARGS_CHARS);
-        let output = match &call.output {
-            Some(o) if call.is_error => {
-                format!("(error) {}", truncate_chars(o, MAX_TOOL_OUTPUT_CHARS))
-            }
-            Some(o) => truncate_chars(o, MAX_TOOL_OUTPUT_CHARS),
-            None => "(no output recorded)".to_string(),
-        };
-        out.push_str(&format!(
-            "{}. {}({}) -> {}\n",
-            i + 1,
-            call.tool_name.as_str(),
-            args,
-            output
-        ));
-    };
-    if total_calls == 0 {
-        out.push_str("Tool calls (BEFORE the final assistant messages): (none)\n\n");
-    } else {
-        out.push_str(
-            "Tool calls (in execution order, BEFORE the final assistant messages below):\n",
-        );
-        if total_calls <= MAX_TOOL_CALLS_HEAD + MAX_TOOL_CALLS_TAIL {
-            for (i, call) in captured.tool_calls.iter().enumerate() {
-                format_tool_call(i, call, &mut out);
-            }
-        } else {
-            for (i, call) in captured
-                .tool_calls
-                .iter()
-                .take(MAX_TOOL_CALLS_HEAD)
-                .enumerate()
-            {
-                format_tool_call(i, call, &mut out);
-            }
-            let dropped = total_calls - MAX_TOOL_CALLS_HEAD - MAX_TOOL_CALLS_TAIL;
-            out.push_str(&format!(
-                "... ({} more tool call{} truncated between call {} and call {}) ...\n",
-                dropped,
-                if dropped == 1 { "" } else { "s" },
-                MAX_TOOL_CALLS_HEAD,
-                total_calls - MAX_TOOL_CALLS_TAIL + 1
-            ));
-            let tail_start = total_calls - MAX_TOOL_CALLS_TAIL;
-            for (offset, call) in captured.tool_calls.iter().skip(tail_start).enumerate() {
-                format_tool_call(tail_start + offset, call, &mut out);
-            }
-        }
-        out.push('\n');
-    }
+    // Group tool calls by their turn_index. We may also see "orphan"
+    // calls (turn_index >= assistant_messages.len()) when the final turn
+    // never finished — their bucket has no message but is still rendered
+    // so the trace stays complete.
+    let max_finished_turn = captured.assistant_messages.len();
+    let max_observed_turn = captured
+        .tool_calls
+        .iter()
+        .map(|c| c.turn_index + 1)
+        .max()
+        .unwrap_or(0)
+        .max(max_finished_turn);
 
-    let total_msgs = captured.assistant_messages.len();
-    let format_msg = |idx: usize, msg: &str, out: &mut String| {
-        out.push_str(&format!("\nTurn {}:\n", idx + 1));
-        out.push_str(&truncate_chars(msg, MAX_ASSISTANT_MSG_CHARS));
-        out.push('\n');
-    };
-    if total_msgs == 0 {
-        out.push_str("Final assistant messages: (none)\n\n");
+    if max_observed_turn == 0 {
+        out.push_str("\n(no turns recorded)\n\n");
     } else {
-        out.push_str(
-            "Final assistant messages (one per completed turn, AFTER any tool calls in that \
-             turn):\n",
-        );
-        if total_msgs <= MAX_ASSISTANT_MSGS_HEAD + MAX_ASSISTANT_MSGS_TAIL {
-            for (idx, msg) in captured.assistant_messages.iter().enumerate() {
-                format_msg(idx, msg, &mut out);
+        let mut by_turn: Vec<Vec<&RecordedToolCall>> =
+            (0..max_observed_turn).map(|_| Vec::new()).collect();
+        for call in &captured.tool_calls {
+            // Defensive: a malformed capture with turn_index past the
+            // end shouldn't panic — drop it into the last bucket so the
+            // call is still visible.
+            let bucket = call.turn_index.min(max_observed_turn - 1);
+            by_turn[bucket].push(call);
+        }
+
+        let render_turn = |turn_idx: usize,
+                           calls: &[&RecordedToolCall],
+                           message: Option<&String>,
+                           out: &mut String| {
+            out.push_str(&format!("\nTurn {}:\n", turn_idx + 1));
+            if calls.is_empty() {
+                out.push_str("  Tool calls: (none)\n");
+            } else {
+                out.push_str("  Tool calls (in emit order):\n");
+                for (i, call) in calls.iter().enumerate() {
+                    let args = truncate_chars(&call.arguments.to_string(), MAX_TOOL_ARGS_CHARS);
+                    let output = match &call.output {
+                        Some(o) if call.is_error => {
+                            format!("(error) {}", truncate_chars(o, MAX_TOOL_OUTPUT_CHARS))
+                        }
+                        Some(o) => truncate_chars(o, MAX_TOOL_OUTPUT_CHARS),
+                        None => "(no output recorded)".to_string(),
+                    };
+                    out.push_str(&format!(
+                        "    {}. {}({}) -> {}\n",
+                        i + 1,
+                        call.tool_name.as_str(),
+                        args,
+                        output
+                    ));
+                }
+            }
+            match message {
+                Some(msg) => {
+                    out.push_str("  Final assistant message:\n    ");
+                    let truncated = truncate_chars(msg, MAX_ASSISTANT_MSG_CHARS);
+                    // Indent continuation lines under "    " for readability.
+                    out.push_str(&truncated.replace('\n', "\n    "));
+                    out.push('\n');
+                }
+                None => {
+                    out.push_str("  (turn did not finish; no final assistant message recorded)\n");
+                }
+            }
+        };
+
+        let head = MAX_ASSISTANT_MSGS_HEAD;
+        let tail = MAX_ASSISTANT_MSGS_TAIL;
+        let render = |i: usize, out: &mut String| {
+            render_turn(i, &by_turn[i], captured.assistant_messages.get(i), out);
+        };
+        if max_observed_turn <= head + tail {
+            for i in 0..max_observed_turn {
+                render(i, &mut out);
             }
         } else {
-            for (idx, msg) in captured
-                .assistant_messages
-                .iter()
-                .take(MAX_ASSISTANT_MSGS_HEAD)
-                .enumerate()
-            {
-                format_msg(idx, msg, &mut out);
+            for i in 0..head {
+                render(i, &mut out);
             }
-            let dropped = total_msgs - MAX_ASSISTANT_MSGS_HEAD - MAX_ASSISTANT_MSGS_TAIL;
+            let dropped = max_observed_turn - head - tail;
             out.push_str(&format!(
                 "\n... ({} more turn{} truncated between Turn {} and Turn {}) ...\n",
                 dropped,
                 if dropped == 1 { "" } else { "s" },
-                MAX_ASSISTANT_MSGS_HEAD,
-                total_msgs - MAX_ASSISTANT_MSGS_TAIL + 1
+                head,
+                max_observed_turn - tail + 1
             ));
-            let tail_start = total_msgs - MAX_ASSISTANT_MSGS_TAIL;
-            for (offset, msg) in captured
-                .assistant_messages
-                .iter()
-                .skip(tail_start)
-                .enumerate()
-            {
-                format_msg(tail_start + offset, msg, &mut out);
+            for i in (max_observed_turn - tail)..max_observed_turn {
+                render(i, &mut out);
             }
         }
         out.push('\n');
@@ -944,6 +940,7 @@ mod tests {
             arguments: json!({"path": "foo"}),
             output: Some("X".repeat(100_000)),
             is_error: false,
+            turn_index: 0,
         });
         let out = build_user_prompt("p", "f", &cap);
         // The full 100k bytes of output must NOT be in the prompt — the
@@ -954,111 +951,6 @@ mod tests {
             out.len()
         );
         assert!(out.contains("read("), "tool call header should appear");
-    }
-
-    #[test]
-    fn prompt_caps_tool_call_count_with_head_tail_window() {
-        // Total = HEAD + TAIL + 25 over-budget calls. Verify (a) the head
-        // segment shows the first MAX_TOOL_CALLS_HEAD calls, (b) the
-        // truncation sentinel reports the dropped count, (c) the tail
-        // segment shows the last MAX_TOOL_CALLS_TAIL calls including the
-        // very last call (which proves the agent's resolution is visible
-        // to the judge — the whole point of the head+tail strategy).
-        let total = MAX_TOOL_CALLS_HEAD + MAX_TOOL_CALLS_TAIL + 25;
-        let mut cap = empty_capture();
-        for i in 0..total {
-            cap.tool_calls.push(RecordedToolCall {
-                call_id: i.to_string(),
-                tool_name: ToolName::Read,
-                arguments: json!({"path": format!("f{i}")}),
-                output: Some("ok".into()),
-                is_error: false,
-            });
-        }
-        let out = build_user_prompt("p", "f", &cap);
-        assert!(
-            out.contains("25 more tool calls truncated between call"),
-            "expected head+tail truncation sentinel; got tail:\n{}",
-            out.lines().rev().take(15).collect::<Vec<_>>().join("\n")
-        );
-        // First listed call must appear (1-indexed in display).
-        assert!(
-            out.contains(r#""path":"f0""#),
-            "first call must be in the head window"
-        );
-        // Last call must appear — the resolution context the judge needs.
-        let last_idx = total - 1;
-        assert!(
-            out.contains(&format!(r#""path":"f{last_idx}""#)),
-            "last call must be in the tail window so the judge sees the resolution"
-        );
-        // A call from the elided middle must NOT appear.
-        let middle_idx = MAX_TOOL_CALLS_HEAD + 5;
-        assert!(
-            !out.contains(&format!(r#""path":"f{middle_idx}""#)),
-            "middle call f{middle_idx} should have been truncated"
-        );
-    }
-
-    #[test]
-    fn prompt_no_truncation_at_head_plus_tail_boundary() {
-        // Exactly HEAD + TAIL items: the simple-loop branch must run; no
-        // truncation sentinel should appear. Off-by-one regressions on
-        // the `<=` boundary check would land here.
-        let total = MAX_TOOL_CALLS_HEAD + MAX_TOOL_CALLS_TAIL;
-        let mut cap = empty_capture();
-        for i in 0..total {
-            cap.tool_calls.push(RecordedToolCall {
-                call_id: i.to_string(),
-                tool_name: ToolName::Read,
-                arguments: json!({"path": format!("f{i}")}),
-                output: Some("ok".into()),
-                is_error: false,
-            });
-        }
-        let out = build_user_prompt("p", "f", &cap);
-        assert!(
-            !out.contains("tool calls truncated") && !out.contains("tool call truncated"),
-            "no sentinel expected at the HEAD+TAIL boundary, got: {}",
-            out.lines()
-                .filter(|l| l.contains("truncated"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
-        // Every call must appear, including the head/tail boundary items.
-        assert!(out.contains(r#""path":"f0""#));
-        let last = total - 1;
-        assert!(out.contains(&format!(r#""path":"f{last}""#)));
-    }
-
-    #[test]
-    fn prompt_singular_sentinel_for_one_extra_tool_call() {
-        // HEAD + TAIL + 1: exactly one tool call truncated. The sentinel
-        // must say "1 more tool call truncated" (singular) — a regression
-        // to plural would print "1 more tool calls truncated" which reads
-        // broken. This is the same singular-form invariant the
-        // validate_judge_config tests pin for its own truncation.
-        let total = MAX_TOOL_CALLS_HEAD + MAX_TOOL_CALLS_TAIL + 1;
-        let mut cap = empty_capture();
-        for i in 0..total {
-            cap.tool_calls.push(RecordedToolCall {
-                call_id: i.to_string(),
-                tool_name: ToolName::Read,
-                arguments: json!({"path": format!("f{i}")}),
-                output: Some("ok".into()),
-                is_error: false,
-            });
-        }
-        let out = build_user_prompt("p", "f", &cap);
-        assert!(
-            out.contains("1 more tool call truncated"),
-            "singular form for exactly 1 truncated, got prompt tail:\n{}",
-            out.lines().rev().take(20).collect::<Vec<_>>().join("\n")
-        );
-        assert!(
-            !out.contains("1 more tool calls truncated"),
-            "must not pluralize when count == 1"
-        );
     }
 
     #[test]
@@ -1102,57 +994,13 @@ mod tests {
     }
 
     #[test]
-    fn prompt_lists_tool_calls_before_assistant_messages_under_truncation() {
-        // Round-3 head+tail refactor split section emission across two
-        // branches. The original ordering test (`_before_assistant_messages`)
-        // uses 1 message + 1 tool call → only exercises the simple-loop
-        // branch. This sibling pins ordering when both sections invoke
-        // their truncation branches.
-        let mut cap = empty_capture();
-        for i in 0..(MAX_TOOL_CALLS_HEAD + MAX_TOOL_CALLS_TAIL + 1) {
-            cap.tool_calls.push(RecordedToolCall {
-                call_id: i.to_string(),
-                tool_name: ToolName::Read,
-                arguments: json!({"path": format!("f{i}")}),
-                output: Some("ok".into()),
-                is_error: false,
-            });
-        }
-        for i in 0..(MAX_ASSISTANT_MSGS_HEAD + MAX_ASSISTANT_MSGS_TAIL + 1) {
-            cap.assistant_messages.push(format!("MSG_{i}_body"));
-        }
-        let out = build_user_prompt("p", "f", &cap);
-        let tool_section_idx = out
-            .find("Tool calls (in execution order")
-            .expect("tool calls header missing");
-        let msgs_section_idx = out
-            .find("Final assistant messages")
-            .expect("assistant messages header missing");
-        assert!(
-            tool_section_idx < msgs_section_idx,
-            "section order must hold under truncation; tool_idx={tool_section_idx}, msgs_idx={msgs_section_idx}"
-        );
-        // Both truncation sentinels must appear, and the tool sentinel
-        // must precede the messages sentinel.
-        let tool_sentinel = out
-            .find("more tool call")
-            .expect("tool truncation sentinel missing");
-        let msg_sentinel = out
-            .find("more turn")
-            .expect("messages truncation sentinel missing");
-        assert!(
-            tool_sentinel < msg_sentinel,
-            "tool sentinel must precede message sentinel under truncation"
-        );
-    }
-
-    #[test]
-    fn prompt_lists_tool_calls_before_assistant_messages() {
-        // Judges have been observed inferring temporal order from layout
-        // order — placing assistant messages above tool calls caused the
-        // smoke judge to conclude the agent "reported contents before
-        // reading the file." Pin the layout invariant: tool calls section
-        // MUST appear before final-messages section.
+    fn prompt_lists_tool_calls_before_assistant_message_within_a_turn() {
+        // The smoke-test failure that motivated this layout invariant: a
+        // judge reading layout order as temporal order concluded the
+        // agent "reported contents before reading the file" because the
+        // assistant text appeared above the tool calls. Pin the
+        // within-turn ordering: a turn's tool calls must precede its
+        // final assistant message in the rendered prompt.
         let mut cap = empty_capture();
         cap.assistant_messages.push("ASSISTANT_TURN_TEXT".into());
         cap.tool_calls.push(RecordedToolCall {
@@ -1161,18 +1009,80 @@ mod tests {
             arguments: json!({"path": "facts.txt"}),
             output: Some("phase 4".into()),
             is_error: false,
+            turn_index: 0,
         });
         let out = build_user_prompt("p", "f", &cap);
-        let tool_idx = out
-            .find("Tool calls")
-            .expect("prompt must include tool-calls section");
-        let messages_idx = out
-            .find("Final assistant messages")
-            .expect("prompt must include final-messages section");
+        let tool_calls_header = out
+            .find("Tool calls (in emit order)")
+            .expect("turn must list its tool calls");
+        let final_msg_header = out
+            .find("Final assistant message")
+            .expect("turn must list its final message");
+        let msg_text = out
+            .find("ASSISTANT_TURN_TEXT")
+            .expect("final message text must appear");
         assert!(
-            tool_idx < messages_idx,
-            "tool calls must appear BEFORE assistant messages in the prompt; \
-             got tool_idx={tool_idx}, messages_idx={messages_idx}, prompt:\n{out}"
+            tool_calls_header < final_msg_header && final_msg_header < msg_text,
+            "within a turn, tool calls must precede the final message; \
+             got tool_calls={tool_calls_header}, final_msg={final_msg_header}, \
+             msg_text={msg_text}, prompt:\n{out}"
+        );
+    }
+
+    #[test]
+    fn prompt_attributes_tool_calls_to_their_turns() {
+        // Cross-turn chronology pin: each turn's tool calls render under
+        // that turn's header, and Turn 1 appears before Turn 2 in the
+        // prompt (so the judge cannot infer a turn-2 call preceded
+        // turn-1's final message). Without per-turn rendering, all tool
+        // calls would group at the top, regardless of which turn they
+        // were emitted during.
+        let mut cap = empty_capture();
+        cap.assistant_messages.push("first turn answer".into());
+        cap.assistant_messages.push("second turn answer".into());
+        cap.tool_calls.push(RecordedToolCall {
+            call_id: "a".into(),
+            tool_name: ToolName::Read,
+            arguments: json!({"path": "TURN_1_CALL_A.txt"}),
+            output: Some("ok".into()),
+            is_error: false,
+            turn_index: 0,
+        });
+        cap.tool_calls.push(RecordedToolCall {
+            call_id: "b".into(),
+            tool_name: ToolName::Bash,
+            arguments: json!({"command": "TURN_2_CALL_B"}),
+            output: Some("ok".into()),
+            is_error: false,
+            turn_index: 1,
+        });
+        let out = build_user_prompt("p", "f", &cap);
+
+        let turn1_header = out.find("Turn 1:").expect("Turn 1 header missing");
+        let turn2_header = out.find("Turn 2:").expect("Turn 2 header missing");
+        let call_a_pos = out
+            .find("TURN_1_CALL_A")
+            .expect("turn 1's call must appear");
+        let msg1_pos = out
+            .find("first turn answer")
+            .expect("turn 1's message must appear");
+        let call_b_pos = out
+            .find("TURN_2_CALL_B")
+            .expect("turn 2's call must appear");
+        let msg2_pos = out
+            .find("second turn answer")
+            .expect("turn 2's message must appear");
+
+        assert!(
+            turn1_header < call_a_pos
+                && call_a_pos < msg1_pos
+                && msg1_pos < turn2_header
+                && turn2_header < call_b_pos
+                && call_b_pos < msg2_pos,
+            "events must render in real chronological order: Turn 1 header → call A \
+             → message 1 → Turn 2 header → call B → message 2; got positions \
+             T1={turn1_header}, A={call_a_pos}, M1={msg1_pos}, T2={turn2_header}, \
+             B={call_b_pos}, M2={msg2_pos}\nprompt:\n{out}"
         );
     }
 
@@ -1185,6 +1095,7 @@ mod tests {
             arguments: json!({"command": "false"}),
             output: Some("exit code 1".into()),
             is_error: true,
+            turn_index: 0,
         });
         let out = build_user_prompt("p", "f", &cap);
         assert!(

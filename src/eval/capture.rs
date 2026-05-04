@@ -42,6 +42,11 @@ pub struct CapturedRun {
     /// into `assistant_messages` on `LlmFinish`. Not part of the public
     /// output contract.
     pending_assistant_text: String,
+    /// 0-based index of the turn currently being captured. Stamped onto
+    /// each `RecordedToolCall.turn_index` and incremented on `LlmFinish`
+    /// / `LlmError` (the events that flush a completed turn). Not part
+    /// of the public output contract.
+    current_turn: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -53,6 +58,13 @@ pub struct RecordedToolCall {
     /// for tools whose execution never completed (timeout, panic).
     pub output: Option<String>,
     pub is_error: bool,
+    /// 0-based turn index this call was emitted during. Lets the judge
+    /// prompt render tool calls interleaved with their turn's final
+    /// assistant message rather than grouping all calls before all
+    /// messages — without this, multi-turn scenarios would show turn 2's
+    /// tool calls *before* turn 1's final message in the prompt and the
+    /// judge would infer wrong cross-turn chronology from layout order.
+    pub turn_index: usize,
 }
 
 impl CapturedRun {
@@ -76,6 +88,7 @@ impl CapturedRun {
             timed_out: false,
             errors: Vec::new(),
             pending_assistant_text: String::new(),
+            current_turn: 0,
         }
     }
 
@@ -100,6 +113,7 @@ impl CapturedRun {
                     arguments: arguments.clone(),
                     output: None,
                     is_error: false,
+                    turn_index: self.current_turn,
                 });
             }
             AppEvent::ToolResult {
@@ -127,6 +141,7 @@ impl CapturedRun {
                 if let Some(u) = usage {
                     self.usage = Some(u.clone());
                 }
+                self.current_turn += 1;
             }
             AppEvent::LlmError { error } => {
                 self.errors.push(error.clone());
@@ -137,6 +152,7 @@ impl CapturedRun {
                 // `final_message_*` would evaluate against stale content.
                 let text = std::mem::take(&mut self.pending_assistant_text);
                 self.assistant_messages.push(text);
+                self.current_turn += 1;
             }
 
             AppEvent::Input(Event::Key(_))
