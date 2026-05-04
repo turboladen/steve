@@ -26,6 +26,8 @@
 //!   budget shows the opening AND the resolution with a sentinel marking
 //!   the elided middle (see `MAX_*_HEAD` / `MAX_*_TAIL` constants).
 
+use std::borrow::Cow;
+
 use anyhow::{Context, Result};
 use async_openai::types::chat::{
     ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
@@ -434,6 +436,95 @@ pub(crate) fn resolve_judge_model<'a>(
     cli_override.or(per_expectation).or(scenario_default)
 }
 
+/// Truncate `s` to at most `max` characters with a bounded walk —
+/// `truncate_chars` does an O(n) `chars().count()` up front, so feeding
+/// it a multi-MB string costs O(MB) just to determine the length even
+/// though we only need the first `max` chars. This helper reads at most
+/// `max + 1` chars before deciding, returning a `Cow::Borrowed` when no
+/// truncation is needed (no allocation in the common case).
+///
+/// Used by the JSON-args formatter to avoid serializing the full body
+/// of `edit`/`write` tool arguments whose `content` / `new_string`
+/// fields can be very large.
+fn truncate_str_bounded(s: &str, max: usize) -> Cow<'_, str> {
+    // Byte length is an upper bound on char count (each char ≥ 1 byte),
+    // so a short ASCII string skips all walking.
+    if s.len() <= max {
+        return Cow::Borrowed(s);
+    }
+    let cut_n = if max >= 4 { max - 3 } else { max };
+    let mut iter = s.char_indices();
+    let cut_byte = match iter.by_ref().nth(cut_n) {
+        Some((pos, _)) => pos,
+        None => return Cow::Borrowed(s), // fewer than cut_n+1 chars ≤ max
+    };
+    // Need to see (max - cut_n) more chars to confirm we exceed max total.
+    let extra_needed = max - cut_n;
+    let extra_found = iter.take(extra_needed).count();
+    if extra_found < extra_needed {
+        Cow::Borrowed(s)
+    } else if max >= 4 {
+        Cow::Owned(format!("{}...", &s[..cut_byte]))
+    } else {
+        Cow::Owned(s[..cut_byte].to_string())
+    }
+}
+
+/// Format a tool-call's `arguments` JSON value into a compact string,
+/// truncating each leaf string to `max_str_chars` before serialization.
+///
+/// This avoids `value.to_string()`'s unbounded allocation: an `edit` or
+/// `write` tool with a multi-MB `content`/`new_string` field would
+/// otherwise allocate the full payload as JSON before truncation
+/// discarded all but ~1KB of it. Here, each large string is replaced
+/// with its truncated form before any JSON output is built, so total
+/// allocation is bounded by `num_string_fields × max_str_chars` rather
+/// than the original payload size.
+fn format_args_compact(v: &serde_json::Value, max_str_chars: usize, out: &mut String) {
+    match v {
+        serde_json::Value::String(s) => {
+            let trunc = truncate_str_bounded(s, max_str_chars);
+            // serde_json handles JSON escape correctly. Allocation is
+            // bounded by the truncated string's length.
+            if let Ok(escaped) = serde_json::to_string(trunc.as_ref()) {
+                out.push_str(&escaped);
+            } else {
+                out.push_str("\"\"");
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            out.push('[');
+            for (i, item) in arr.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                format_args_compact(item, max_str_chars, out);
+            }
+            out.push(']');
+        }
+        serde_json::Value::Object(obj) => {
+            out.push('{');
+            for (i, (k, val)) in obj.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                if let Ok(escaped_key) = serde_json::to_string(k) {
+                    out.push_str(&escaped_key);
+                }
+                out.push(':');
+                format_args_compact(val, max_str_chars, out);
+            }
+            out.push('}');
+        }
+        // Number, Bool, Null are bounded — serialize directly.
+        _ => {
+            if let Ok(s) = serde_json::to_string(v) {
+                out.push_str(&s);
+            }
+        }
+    }
+}
+
 /// Strip ` ```json ... ``` ` (or plain ` ``` ... ``` `) fences if the
 /// model wrapped its JSON despite instructions. Returns the original
 /// string when no balanced fence is present.
@@ -519,7 +610,12 @@ pub(crate) fn build_user_prompt(
             } else {
                 out.push_str("  Tool calls (in emit order):\n");
                 for (i, call) in calls.iter().enumerate() {
-                    let args = truncate_chars(&call.arguments.to_string(), MAX_TOOL_ARGS_CHARS);
+                    // format_args_compact bounds per-string allocation; the
+                    // outer truncate_chars adds the "..." sentinel and caps
+                    // the total size when many fields combine.
+                    let mut compact = String::new();
+                    format_args_compact(&call.arguments, MAX_TOOL_ARGS_CHARS, &mut compact);
+                    let args = truncate_chars(&compact, MAX_TOOL_ARGS_CHARS);
                     let output = match &call.output {
                         Some(o) if call.is_error => {
                             format!("(error) {}", truncate_chars(o, MAX_TOOL_OUTPUT_CHARS))
@@ -951,6 +1047,117 @@ mod tests {
             out.len()
         );
         assert!(out.contains("read("), "tool call header should appear");
+    }
+
+    #[test]
+    fn prompt_truncates_huge_string_in_tool_args_without_unbounded_alloc() {
+        // The original `call.arguments.to_string()` would have allocated
+        // a multi-MB JSON string here before truncating. The compact
+        // formatter must bound per-string before serialization, so a
+        // 5MB content payload yields a prompt under the per-call cap.
+        // (This test guards against the regression Copilot caught on
+        // PR #53 where `edit`/`write` tools could OOM the prompt.)
+        let huge = "Y".repeat(5_000_000);
+        let mut cap = empty_capture();
+        cap.tool_calls.push(RecordedToolCall {
+            call_id: "1".into(),
+            tool_name: ToolName::Edit,
+            arguments: json!({"path": "src/foo.rs", "new_string": huge}),
+            output: Some("ok".into()),
+            is_error: false,
+            turn_index: 0,
+        });
+        let out = build_user_prompt("p", "f", &cap);
+        // Total prompt must stay small — well under the original 5MB
+        // payload. With MAX_TOOL_ARGS_CHARS = 1024 and one truncated
+        // string, the args section is ≤ ~1.1KB; the whole prompt
+        // (criteria + turn header + args) lands under a few KB.
+        assert!(
+            out.len() < 5_000,
+            "prompt must stay bounded under multi-MB tool args; got {} bytes",
+            out.len()
+        );
+        // The huge string must show signs of truncation, not 5MB of Y's.
+        let yyy_count = out.matches('Y').count();
+        assert!(
+            yyy_count < 1500,
+            "huge string must be truncated; saw {yyy_count} Y characters in prompt"
+        );
+    }
+
+    #[test]
+    fn prompt_preserves_small_fields_around_huge_one() {
+        // Same scenario as above but with the small field guaranteed to
+        // sort BEFORE the huge field alphabetically (serde_json's Map
+        // serializes BTreeMap-ordered without the `preserve_order`
+        // feature). Pin that small fields render verbatim alongside a
+        // truncated large field as long as they fit in the outer cap.
+        let huge = "Y".repeat(5_000_000);
+        let mut cap = empty_capture();
+        cap.tool_calls.push(RecordedToolCall {
+            call_id: "1".into(),
+            tool_name: ToolName::Edit,
+            // "aa_path" sorts before "z_huge", so it renders first.
+            arguments: json!({"aa_path": "src/foo.rs", "z_huge": huge}),
+            output: Some("ok".into()),
+            is_error: false,
+            turn_index: 0,
+        });
+        let out = build_user_prompt("p", "f", &cap);
+        assert!(
+            out.contains(r#""aa_path":"src/foo.rs""#),
+            "small leading field must render verbatim, got prompt slice:\n{}",
+            &out[..out.len().min(2000)]
+        );
+    }
+
+    #[test]
+    fn truncate_str_bounded_short_string_borrows() {
+        let s = "hello";
+        match truncate_str_bounded(s, 100) {
+            Cow::Borrowed(b) => assert_eq!(b, "hello"),
+            Cow::Owned(_) => panic!("short string should not allocate"),
+        }
+    }
+
+    #[test]
+    fn truncate_str_bounded_long_string_truncates_with_ellipsis() {
+        let s = "abcdefghijklmnop"; // 16 chars
+        let out = truncate_str_bounded(s, 10);
+        // max-3 = 7 chars + "..."
+        assert_eq!(out.as_ref(), "abcdefg...");
+    }
+
+    #[test]
+    fn truncate_str_bounded_exact_cap_borrows() {
+        let s = "abcdefghij"; // exactly 10 chars
+        match truncate_str_bounded(s, 10) {
+            Cow::Borrowed(b) => assert_eq!(b, "abcdefghij"),
+            Cow::Owned(_) => panic!("exact-length string should not allocate"),
+        }
+    }
+
+    #[test]
+    fn truncate_str_bounded_unicode_safe() {
+        // 6 chars of which several are multi-byte. Bounded at 4 chars +
+        // "..." form means we cut at the (max-3)=1st char.
+        let s = "αβγδεζ"; // 6 chars, 12 bytes
+        let out = truncate_str_bounded(s, 4);
+        assert_eq!(out.as_ref(), "α..."); // 1 char + "..."
+    }
+
+    #[test]
+    fn truncate_str_bounded_does_not_walk_full_string() {
+        // Conceptual test: this would OOM or take seconds if the
+        // function walked the full string. Allocating a huge string
+        // and feeding it should return quickly.
+        let huge = "Z".repeat(1_000_000);
+        let out = truncate_str_bounded(&huge, 50);
+        assert!(out.len() <= 60, "truncated form must be small");
+        // Sanity check: the truncation produces "ZZZ...ZZZ..." with 47
+        // Z's followed by "...".
+        assert!(out.starts_with("ZZ"));
+        assert!(out.ends_with("..."));
     }
 
     #[test]
