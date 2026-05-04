@@ -39,6 +39,9 @@ Every change that introduces new types, trait impls, or behavior must include un
 - **Refactors**: Existing tests passing is necessary but not sufficient — new logic paths need
   dedicated tests
 - **Assertions**: Never use trivially-true assertions — verify the specific behavior under test
+- **Anyhow chain assertions**: When asserting on errors wrapped via `with_context` / `Context`,
+  use `format!("{err:#}")` (alternate format) — `err.to_string()` shows only the outermost
+  context and silently masks the inner cause
 
 Run `cargo test` after every change. Run `cargo clippy` and fix all warnings — only use
 `#[allow(clippy::...)]` in rare cases with a justifying comment. The crate enables
@@ -152,6 +155,10 @@ etc.) — do not add directory/scope params here since the permission system exp
 `resolve_path()` in `tool/mod.rs` is the single path resolution helper — do not add private
 copies in individual tool modules. `test_tool_context()` in `tool/mod.rs`'s test block is the
 shared test helper for `ToolContext` construction.
+
+`normalize_tool_path()` in `permission/mod.rs` is the canonical lexical-path helper — collapses
+`..`/`.`, returns `(normalized: String, inside_project: bool)`. Reuse it any time you need to
+compare LLM-emitted paths against scenario/config paths.
 
 When adding edit operations: update `EditOperation` enum in `tool/mod.rs`,
 `extract_diff_content()` in `app/tool_display.rs`, and `build_permission_summary()` in
