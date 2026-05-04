@@ -7,11 +7,13 @@
 
 pub mod capture;
 pub mod cli;
+pub mod expectations;
 pub mod runner;
 pub mod scenario;
 pub mod workspace;
 
 pub use capture::{CapturedRun, RecordedToolCall};
+pub use expectations::{EvalReport, ExpectationResult, Outcome, evaluate};
 pub use runner::Runner;
 pub use scenario::{Expectation, Scenario, Setup};
 pub use workspace::{ScenarioWorkspace, WorkspaceSnapshot};
