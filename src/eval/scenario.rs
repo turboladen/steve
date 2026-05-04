@@ -70,9 +70,9 @@ pub enum Expectation {
     ToolNotCalled {
         tool: String,
     },
-    /// "Before" uses completion-time ordering of read-class tools
-    /// (read/grep/list/glob/symbols/find_symbol), not call-start time, because
-    /// those execute in parallel.
+    /// Asserts that a "read-class" call against one of `must_read_one_of`
+    /// preceded the first invocation of `tool`. The exact set of read-class
+    /// tools is implementation-defined by the evaluator (see expectations.rs).
     RequiresPriorRead {
         tool: String,
         must_read_one_of: Vec<PathBuf>,
@@ -98,19 +98,22 @@ pub enum Expectation {
         #[serde(default)]
         case_insensitive: bool,
     },
-    /// Dedup key is `(tool, args_hash)`; identical-arg invocations count toward
-    /// the limit, distinct-arg calls reset it.
+    /// Asserts that no `(tool, arguments)` pair appears more than `max` times
+    /// in the captured tool-call sequence. Argument equality is structural —
+    /// key ordering doesn't matter — so two calls with the same fields in
+    /// different orderings count as one repeat.
     MaxRepeatAttempts {
         tool: String,
         max: usize,
     },
-    /// LLM-as-judge: small judge model (default Haiku 4.5, temperature 0)
-    /// evaluates the structured PASS/FAIL criteria. Inputs and outputs are
-    /// recorded into the JSONL run record for reproducibility.
+    /// LLM-as-judge expectation. The judge model is configured at the eval
+    /// level; `judge_model` (when set) overrides it for this expectation.
+    /// Phase 4 (steve-bh3r) implements the actual evaluation; until then,
+    /// the evaluator returns `Skipped` for every Judge expectation.
     ///
     /// `pass_when` and `fail_when` are separate fields (not a single freeform
     /// rubric) so the judge prompt template can construct a structured prompt
-    /// and so authors don't have to remember the PASS=/FAIL= convention.
+    /// and so authors don't have to remember a PASS=/FAIL= convention.
     Judge {
         pass_when: String,
         fail_when: String,
@@ -120,15 +123,38 @@ pub enum Expectation {
     },
 }
 
-/// Reject paths that escape the scenario workspace — absolute paths and any
-/// `..` components. Symlink resolution is a runtime concern; this is the
-/// parse-time gate.
+/// Reject paths that escape the scenario workspace, contain garbage that
+/// will fail at the OS layer with useless EINVAL, or vary in spelling from
+/// the canonical workspace-relative form (which would prevent baseline
+/// lookups from matching). Symlink resolution is a runtime concern; this
+/// is the parse-time gate.
 fn validate_workspace_relative_path(path: &Path, label: &str) -> Result<()> {
     if path.is_absolute() {
         anyhow::bail!("{label} {path:?} must be relative to the scenario dir (got absolute path)");
     }
-    if path.components().any(|c| matches!(c, Component::ParentDir)) {
-        anyhow::bail!("{label} {path:?} must not contain `..` segments (would escape workspace)");
+    // Check for NUL bytes (and other non-printable garbage) by round-tripping
+    // through the bytes representation. A NUL byte slips past `is_absolute`
+    // and `.components()` checks but is rejected by syscalls with a useless
+    // EINVAL — fail at parse with a clear reason instead.
+    let lossy = path.to_string_lossy();
+    if lossy.bytes().any(|b| b == 0) {
+        anyhow::bail!("{label} {path:?} must not contain NUL bytes");
+    }
+    for component in path.components() {
+        match component {
+            Component::ParentDir => anyhow::bail!(
+                "{label} {path:?} must not contain `..` segments (would escape workspace)"
+            ),
+            Component::CurDir => anyhow::bail!(
+                "{label} {path:?} must not contain `.` segments — write the path canonically \
+                 (e.g. `foo/bar`, not `./foo/bar`); baseline lookups are key-equality and a \
+                 leading `./` would never match"
+            ),
+            Component::Normal(_) => {}
+            Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!("{label} {path:?} must not contain a root or prefix component")
+            }
+        }
     }
     Ok(())
 }
@@ -696,6 +722,88 @@ tool = "read"
         assert!(
             chain.contains("unknown field") && chain.contains("runss"),
             "expected serde 'unknown field' rejection: {chain}"
+        );
+    }
+
+    #[test]
+    fn rejects_dot_segment_in_copy_fixtures() {
+        // `./foo` slips past `..` and absolute checks but reads as
+        // [CurDir, Normal("foo")] in components — different from the
+        // baseline's `Normal("foo")` key, so file_unchanged would silently
+        // miss-match. Reject at parse time and tell authors to write
+        // canonically.
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[setup]
+copy_fixtures = ["./foo"]
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("must not contain `.` segments"),
+            "expected `./` rejection: {chain}"
+        );
+    }
+
+    #[test]
+    fn rejects_nul_byte_in_path() {
+        // NUL slips past every check that uses Path components but is
+        // rejected by syscalls with EINVAL. Catch at parse with a clear
+        // reason instead of a useless runtime error.
+        let toml_src = "
+name = \"x\"
+description = \"x\"
+user_turns = [\"hi\"]
+[[expectations]]
+kind = \"file_unchanged\"
+path = \"foo\\u0000bar\"
+";
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("must not contain NUL bytes"),
+            "expected NUL-byte rejection: {chain}"
+        );
+    }
+
+    #[test]
+    fn validate_reports_failing_expectation_index() {
+        // The validator wraps per-expectation errors with `expectation #N`
+        // — pin that contract so a future refactor that drops the index
+        // wrapping breaks loudly. Build a scenario with three expectations
+        // where the THIRD is malformed.
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+
+[[expectations]]
+kind = "tool_called"
+tool = "edit"
+
+[[expectations]]
+kind = "max_repeat_attempts"
+tool = "edit"
+max = 0
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("expectation #3"),
+            "must surface failing expectation index: {chain}"
+        );
+        assert!(
+            chain.contains("must be >= 1"),
+            "must surface inner cause: {chain}"
         );
     }
 

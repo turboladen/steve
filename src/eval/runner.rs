@@ -11,7 +11,10 @@
 //! work as expected. Eval-specific fields (model, permission profile, MCP
 //! servers, allow_tools, permission_rules) are overridden after load.
 
-use std::{path::Path, time::Instant};
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result};
 
@@ -26,6 +29,11 @@ use crate::{
     usage::{UsageWriterHandle, spawn_usage_writer},
 };
 
+/// Hard cap per user turn. A wedged stream (LLM stuck in a loop, network
+/// stall, etc.) without this would hang the eval indefinitely. 5 minutes
+/// is conservative for a single Sonnet/Haiku turn with tool calls.
+const PER_TURN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
 pub struct Runner {
     workspace: ScenarioWorkspace,
     app: App,
@@ -33,6 +41,11 @@ pub struct Runner {
     /// Dropped together with `Runner`; the writer thread exits cleanly
     /// once all sender clones (held by App) drop.
     _usage_handle: UsageWriterHandle,
+    /// Holds the eval-infrastructure tempdir (storage + usage db) OUTSIDE
+    /// the scenario workspace so those files don't pollute the workspace's
+    /// baseline snapshot or show up in agent `grep`/`list` traces.
+    /// `Drop` cleans up the tempdir.
+    _infra_tmp: tempfile::TempDir,
 }
 
 impl Runner {
@@ -88,11 +101,17 @@ impl Runner {
             id: project_id,
         };
 
-        let storage = Storage::with_base(workspace.root.join(".eval-storage"))
-            .context("creating workspace-local storage")?;
-
-        let usage_handle = spawn_usage_writer(&workspace.root.join("usage.db"))
-            .context("spawning workspace-local usage writer")?;
+        // Storage and usage DB live in a SEPARATE tempdir, NOT inside the
+        // scenario workspace. Putting them in the workspace would (a)
+        // contaminate the baseline snapshot if added before snapshot, (b)
+        // make agent `grep`/`list` traces surface eval-infra files as if
+        // they were workspace content, and (c) silently fail any future
+        // file_unchanged assertion against `.eval-storage/**`.
+        let infra_tmp = tempfile::tempdir().context("creating eval-infra tempdir")?;
+        let storage = Storage::with_base(infra_tmp.path().join("storage"))
+            .context("creating eval-infra storage")?;
+        let usage_handle = spawn_usage_writer(&infra_tmp.path().join("usage.db"))
+            .context("spawning eval-infra usage writer")?;
 
         let app = App::new(
             project,
@@ -109,12 +128,16 @@ impl Runner {
             workspace,
             app,
             _usage_handle: usage_handle,
+            _infra_tmp: infra_tmp,
         })
     }
 
     /// Drive the conversation: send each `user_turns[i]` and wait for the
     /// stream to go idle before sending the next. Records every event into
-    /// the returned `CapturedRun`.
+    /// the returned `CapturedRun`. A wedged turn (no progress within
+    /// `PER_TURN_TIMEOUT`) sets `captured.timed_out = true` and stops the
+    /// loop — subsequent turns are skipped because the stream task is in
+    /// an unknown state.
     pub async fn run(mut self, scenario: &Scenario) -> Result<CapturedRun> {
         let mut captured =
             CapturedRun::new(self.workspace.root.clone(), self.workspace.baseline.clone());
@@ -139,10 +162,20 @@ impl Runner {
                     });
                 anyhow::bail!("user_turn #{} did not start a stream{}", idx + 1, why);
             }
-            self.app
-                .run_until_idle(|event| captured.observe(event))
-                .await
-                .with_context(|| format!("draining stream for user_turn #{}", idx + 1))?;
+            let drain = self.app.run_until_idle(|event| captured.observe(event));
+            match tokio::time::timeout(PER_TURN_TIMEOUT, drain).await {
+                Ok(result) => {
+                    result.with_context(|| format!("draining stream for user_turn #{}", idx + 1))?
+                }
+                Err(_elapsed) => {
+                    captured.timed_out = true;
+                    // Don't try further turns — the stream task is wedged
+                    // and the next handle_input would race with whatever
+                    // it's stuck doing. The CLI verdict treats timed_out
+                    // as a fail signal via completed_normally().
+                    break;
+                }
+            }
         }
 
         captured.duration = started_at.elapsed();
@@ -157,19 +190,11 @@ mod tests {
     use super::*;
     use crate::config::{Config, ModelCapabilities, ModelConfig, ProviderConfig};
 
-    // Runner::build / Runner::run end-to-end coverage requires either a real
-    // LLM provider (smoke test in `cargo run -- eval`) or stubbing the
-    // `ChatStreamProvider` (would require lifting `MockChatStream` out of
-    // `#[cfg(test)]` in `src/stream/mod.rs`). The smoke test is the
-    // ecologically-valid gate for Phase 2; deeper unit coverage lands later.
-    //
-    // What we *can* test in isolation: the Config-shaping logic, which is
-    // pure data manipulation and protects the eval-mode isolation guarantees.
+    // End-to-end Runner coverage requires lifting MockChatStream out of
+    // `#[cfg(test)]` in src/stream/mod.rs — deferred until Phase 4 (judge)
+    // forces it. The smoke test (`cargo run -- eval`) is the ecologically-
+    // valid gate for v1.
 
-    /// Confirm that the Config overrides Runner::build applies after loading
-    /// the user's config land where expected and survive a Config that
-    /// previously had MCP servers, allow_tools, and a non-trust profile.
-    /// This is the safety net for the eval-isolation invariants.
     #[test]
     fn eval_mode_config_overrides_take_effect() {
         // Simulate what Runner::build does to the Config after load.

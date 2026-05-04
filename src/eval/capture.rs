@@ -116,8 +116,6 @@ impl CapturedRun {
                 self.errors.push(error.clone());
             }
 
-            // Variants that capture intentionally ignores. Listed exhaustively
-            // so adding a new AppEvent variant fails the build here.
             AppEvent::Input(Event::Key(_))
             | AppEvent::Input(Event::Mouse(_))
             | AppEvent::Input(Event::Paste(_))
