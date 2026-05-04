@@ -44,6 +44,13 @@ pub struct Scenario {
     /// completed assistant response. v1 has no trigger-based scheduling.
     pub user_turns: Vec<String>,
     pub expectations: Vec<Expectation>,
+    /// Default judge model for every `Judge` expectation in this scenario,
+    /// in `provider/model_id` format. Per-expectation `judge_model` overrides
+    /// this; the `--judge-model` CLI flag overrides both. When none of the
+    /// three sources is set, Judge expectations fail loudly — there is no
+    /// hardcoded default.
+    #[serde(default)]
+    pub judge_model: Option<String>,
 }
 
 fn default_runs() -> NonZeroUsize {
@@ -477,6 +484,42 @@ judge_model = "anthropic/claude-haiku-4-5"
         let serialized = toml::to_string(&original).unwrap();
         let reparsed = Scenario::from_toml_str(&serialized).unwrap();
         assert_eq!(original, reparsed);
+    }
+
+    #[test]
+    fn scenario_level_judge_model_round_trips() {
+        // Scenario-level `judge_model` is the middle tier of the Phase 4
+        // resolution chain (CLI > per-expectation > scenario > fail). Pin
+        // that it parses, round-trips, and survives in serialized TOML.
+        let toml_src = r#"
+name = "judge-model-pinned"
+description = "scenario pins a judge model for all judges"
+user_turns = ["go"]
+judge_model = "fuel-ix/claude-haiku-4-5"
+
+[[expectations]]
+kind = "judge"
+pass_when = "did the right thing"
+fail_when = "gave up"
+"#;
+        let s = Scenario::from_toml_str(toml_src).unwrap();
+        assert_eq!(s.judge_model.as_deref(), Some("fuel-ix/claude-haiku-4-5"));
+        let serialized = toml::to_string(&s).unwrap();
+        assert!(
+            serialized.contains("judge_model = \"fuel-ix/claude-haiku-4-5\""),
+            "serialized TOML must include judge_model: {serialized}"
+        );
+        let reparsed = Scenario::from_toml_str(&serialized).unwrap();
+        assert_eq!(s, reparsed);
+    }
+
+    #[test]
+    fn scenario_judge_model_omitted_defaults_to_none() {
+        let s = Scenario::from_toml_str(minimal_scenario_toml()).unwrap();
+        assert!(
+            s.judge_model.is_none(),
+            "no scenario-level judge_model means None — not a hardcoded default"
+        );
     }
 
     #[test]

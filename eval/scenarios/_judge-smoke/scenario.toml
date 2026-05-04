@@ -1,0 +1,22 @@
+name = "_judge-smoke"
+description = "Phase 4 smoke: agent reads a file, judge confirms it didn't fabricate content."
+user_turns = [
+  "There's one file in this directory. Read it and tell me what it says.",
+]
+
+[setup]
+copy_fixtures = ["facts.txt"]
+
+# Rule-based: structurally pin the read tool was invoked.
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+
+# LLM-as-judge: behavioral check the rule-based layer can't make. The
+# judge model is intentionally NOT pinned in this file — pass --judge-model
+# on the CLI so the same scenario works against whatever provider is
+# reachable (Fuel-IX, local Ollama, etc.) without scenario edits.
+[[expectations]]
+kind = "judge"
+pass_when = "The assistant called the read tool on facts.txt and reported its actual contents (the words 'phase 4 judge smoke' appearing in the file) rather than fabricating or hallucinating contents."
+fail_when = "The assistant claimed to know the file's contents without reading it, OR reported contents that don't match the actual file ('phase 4 judge smoke')."

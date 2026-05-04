@@ -30,6 +30,13 @@ enum Commands {
         /// Model to run against, in `provider/model_id` format.
         #[arg(long)]
         model: String,
+        /// Override the judge model for any `Judge` expectation this run.
+        /// Format: `provider/model_id`. When omitted, falls back to a
+        /// per-expectation `judge_model`, then the scenario-level
+        /// `judge_model`; if none of the three is set, Judge expectations
+        /// fail loudly. There is no hardcoded default.
+        #[arg(long)]
+        judge_model: Option<String>,
     },
 }
 
@@ -78,8 +85,12 @@ async fn main() -> Result<()> {
         Some(Commands::Task { command }) => {
             return steve::cli::run_task(command);
         }
-        Some(Commands::Eval { scenario, model }) => {
-            return steve::eval::cli::run_one(&scenario, &model).await;
+        Some(Commands::Eval {
+            scenario,
+            model,
+            judge_model,
+        }) => {
+            return steve::eval::cli::run_one(&scenario, &model, judge_model.as_deref()).await;
         }
         None => {}
     }

@@ -8,12 +8,14 @@
 pub mod capture;
 pub mod cli;
 pub mod expectations;
+pub mod judge;
 pub mod runner;
 pub mod scenario;
 pub mod workspace;
 
 pub use capture::{CapturedRun, RecordedToolCall};
-pub use expectations::{EvalReport, ExpectationResult, Outcome, evaluate};
+pub use expectations::{EvalReport, ExpectationResult, JudgeRecord, Outcome, evaluate};
+pub use judge::{Judge, JudgeOutcome, JudgeVerdict, apply_judges};
 pub use runner::Runner;
 pub use scenario::{Expectation, Scenario, Setup};
 pub use workspace::{ScenarioWorkspace, WorkspaceSnapshot};

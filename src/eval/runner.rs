@@ -37,6 +37,13 @@ const PER_TURN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 pub struct Runner {
     workspace: ScenarioWorkspace,
     app: App,
+    /// Second `ProviderRegistry` built from the same `cfg.providers` as the
+    /// agent-under-test's registry, but kept separate so Phase 4's
+    /// LLM-as-judge calls don't share state with the App. Building a second
+    /// registry is cheap (no I/O — just `Client::with_config(...)`
+    /// instances) and avoids retrofitting `Arc<ProviderRegistry>` through
+    /// `App::new` just for the judge boundary.
+    judge_registry: ProviderRegistry,
     /// Held to keep the writer thread alive for the lifetime of the App.
     /// Dropped together with `Runner`; the writer thread exits cleanly
     /// once all sender clones (held by App) drop.
@@ -99,6 +106,12 @@ impl Runner {
             );
         }
 
+        // The judge layer owns its own registry pointed at the same
+        // configured providers. The first `from_config` already validated
+        // that every provider has its env var set, so the second call's
+        // `_warnings` are guaranteed to be empty.
+        let (judge_registry, _) = ProviderRegistry::from_config(&cfg);
+
         // Use the workspace tempdir's UUID-derived id so storage and usage
         // databases land inside the workspace and are reaped on drop.
         let project_id = format!(
@@ -141,9 +154,16 @@ impl Runner {
         Ok(Self {
             workspace,
             app,
+            judge_registry,
             _usage_handle: usage_handle,
             _infra_tmp: infra_tmp,
         })
+    }
+
+    /// Borrow the judge-side `ProviderRegistry` so the CLI's
+    /// `apply_judges` call can resolve the judge model.
+    pub fn judge_registry(&self) -> &ProviderRegistry {
+        &self.judge_registry
     }
 
     /// Drive the conversation: send each `user_turns[i]` and wait for the
@@ -152,7 +172,7 @@ impl Runner {
     /// `PER_TURN_TIMEOUT`) sets `captured.timed_out = true` and stops the
     /// loop — subsequent turns are skipped because the stream task is in
     /// an unknown state.
-    pub async fn run(mut self, scenario: &Scenario) -> Result<CapturedRun> {
+    pub async fn run(&mut self, scenario: &Scenario) -> Result<CapturedRun> {
         let mut captured =
             CapturedRun::new(self.workspace.root.clone(), self.workspace.baseline.clone());
         let started_at = Instant::now();
@@ -224,6 +244,7 @@ mod tests {
             expectations: vec![Expectation::ToolCalled {
                 tool: "read".into(),
             }],
+            judge_model: None,
         }
     }
 
