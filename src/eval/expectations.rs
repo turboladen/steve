@@ -101,12 +101,12 @@ pub fn evaluate(scenario: &Scenario, captured: &CapturedRun) -> EvalReport {
 
 fn evaluate_one(expectation: &Expectation, captured: &CapturedRun) -> ExpectationResult {
     let outcome = match expectation {
-        Expectation::ToolCalled { tool } => check_tool_called(tool, captured),
-        Expectation::ToolNotCalled { tool } => check_tool_not_called(tool, captured),
+        Expectation::ToolCalled { tool } => check_tool_called(*tool, captured),
+        Expectation::ToolNotCalled { tool } => check_tool_not_called(*tool, captured),
         Expectation::RequiresPriorRead {
             tool,
             must_read_one_of,
-        } => check_requires_prior_read(tool, must_read_one_of, captured),
+        } => check_requires_prior_read(*tool, must_read_one_of, captured),
         Expectation::FileUnchanged { path } => check_file_unchanged(path, captured),
         Expectation::FileContains {
             path,
@@ -121,7 +121,7 @@ fn evaluate_one(expectation: &Expectation, captured: &CapturedRun) -> Expectatio
             substring,
             case_insensitive,
         } => check_final_message(substring, *case_insensitive, false, captured),
-        Expectation::MaxRepeatAttempts { tool, max } => check_max_repeat(tool, *max, captured),
+        Expectation::MaxRepeatAttempts { tool, max } => check_max_repeat(*tool, *max, captured),
         Expectation::Judge { .. } => Outcome::Skipped {
             reason: "Phase 4 (LLM-as-judge) not yet implemented".into(),
         },
@@ -133,12 +133,8 @@ fn evaluate_one(expectation: &Expectation, captured: &CapturedRun) -> Expectatio
     }
 }
 
-fn check_tool_called(target: &str, captured: &CapturedRun) -> Outcome {
-    if captured
-        .tool_calls
-        .iter()
-        .any(|c| c.tool_name.as_str() == target)
-    {
+fn check_tool_called(target: ToolName, captured: &CapturedRun) -> Outcome {
+    if captured.tool_calls.iter().any(|c| c.tool_name == target) {
         return Outcome::Passed;
     }
     let actual: Vec<&str> = captured
@@ -147,25 +143,21 @@ fn check_tool_called(target: &str, captured: &CapturedRun) -> Outcome {
         .map(|c| c.tool_name.as_str())
         .collect();
     Outcome::Failed {
-        reason: format!("tool {target:?} never called; saw {actual:?}"),
+        reason: format!("tool {:?} never called; saw {actual:?}", target.as_str()),
     }
 }
 
-fn check_tool_not_called(target: &str, captured: &CapturedRun) -> Outcome {
-    if captured
-        .tool_calls
-        .iter()
-        .any(|c| c.tool_name.as_str() == target)
-    {
+fn check_tool_not_called(target: ToolName, captured: &CapturedRun) -> Outcome {
+    if captured.tool_calls.iter().any(|c| c.tool_name == target) {
         return Outcome::Failed {
-            reason: format!("tool {target:?} was called at least once"),
+            reason: format!("tool {:?} was called at least once", target.as_str()),
         };
     }
     Outcome::Passed
 }
 
 fn check_requires_prior_read(
-    target: &str,
+    target: ToolName,
     must_read_one_of: &[PathBuf],
     captured: &CapturedRun,
 ) -> Outcome {
@@ -177,7 +169,7 @@ fn check_requires_prior_read(
     let Some(first_target_idx) = captured
         .tool_calls
         .iter()
-        .position(|c| c.tool_name.as_str() == target)
+        .position(|c| c.tool_name == target)
     else {
         // If the protected tool was never called, the requirement is vacuously satisfied.
         return Outcome::Passed;
@@ -233,8 +225,9 @@ fn check_requires_prior_read(
         .map(|p| p.display().to_string())
         .collect();
     let mut reason = format!(
-        "tool {target:?} called without first reading any of {required:?}; \
-         read-class tools are read/symbols (v1); actually read: {actually_read:?}"
+        "tool {:?} called without first reading any of {required:?}; \
+         read-class tools are read/symbols (v1); actually read: {actually_read:?}",
+        target.as_str()
     );
     if !failed_reads.is_empty() {
         reason.push_str(&format!(
@@ -492,10 +485,10 @@ fn check_final_message(
     }
 }
 
-fn check_max_repeat(target: &str, max: usize, captured: &CapturedRun) -> Outcome {
+fn check_max_repeat(target: ToolName, max: usize, captured: &CapturedRun) -> Outcome {
     let mut counts: HashMap<String, usize> = HashMap::new();
     for call in &captured.tool_calls {
-        if call.tool_name.as_str() != target {
+        if call.tool_name != target {
             continue;
         }
         let key = canonical_json(&call.arguments);
@@ -506,7 +499,8 @@ fn check_max_repeat(target: &str, max: usize, captured: &CapturedRun) -> Outcome
     {
         return Outcome::Failed {
             reason: format!(
-                "tool {target:?} called {count} times with the same args (max={max}): args={args}"
+                "tool {:?} called {count} times with the same args (max={max}): args={args}",
+                target.as_str()
             ),
         };
     }
@@ -617,21 +611,21 @@ mod tests {
     fn tool_called_passes_when_present() {
         let mut cap = empty_capture(PathBuf::from("/tmp"));
         cap.tool_calls.push(call("c1", ToolName::Read, json!({})));
-        let r = check_tool_called("read", &cap);
+        let r = check_tool_called(ToolName::Read, &cap);
         assert!(r.is_passed());
     }
 
     #[test]
     fn tool_called_fails_when_absent() {
         let cap = empty_capture(PathBuf::from("/tmp"));
-        let r = check_tool_called("read", &cap);
+        let r = check_tool_called(ToolName::Read, &cap);
         assert!(r.is_failed());
     }
 
     #[test]
     fn tool_not_called_passes_when_absent() {
         let cap = empty_capture(PathBuf::from("/tmp"));
-        let r = check_tool_not_called("bash", &cap);
+        let r = check_tool_not_called(ToolName::Bash, &cap);
         assert!(r.is_passed());
     }
 
@@ -639,7 +633,7 @@ mod tests {
     fn tool_not_called_fails_when_present() {
         let mut cap = empty_capture(PathBuf::from("/tmp"));
         cap.tool_calls.push(call("c1", ToolName::Bash, json!({})));
-        let r = check_tool_not_called("bash", &cap);
+        let r = check_tool_not_called(ToolName::Bash, &cap);
         assert!(r.is_failed());
     }
 
@@ -648,7 +642,7 @@ mod tests {
     #[test]
     fn requires_prior_read_passes_when_target_never_called() {
         let cap = empty_capture(PathBuf::from("/tmp"));
-        let r = check_requires_prior_read("edit", &[PathBuf::from(".teller.yml")], &cap);
+        let r = check_requires_prior_read(ToolName::Edit, &[PathBuf::from(".teller.yml")], &cap);
         assert!(r.is_passed());
     }
 
@@ -662,7 +656,7 @@ mod tests {
             ToolName::Edit,
             json!({"file_path": ".teller.yml"}),
         ));
-        let r = check_requires_prior_read("edit", &[PathBuf::from(".teller.yml")], &cap);
+        let r = check_requires_prior_read(ToolName::Edit, &[PathBuf::from(".teller.yml")], &cap);
         assert!(r.is_passed());
     }
 
@@ -674,7 +668,7 @@ mod tests {
             ToolName::Edit,
             json!({"file_path": ".teller.yml"}),
         ));
-        let r = check_requires_prior_read("edit", &[PathBuf::from(".teller.yml")], &cap);
+        let r = check_requires_prior_read(ToolName::Edit, &[PathBuf::from(".teller.yml")], &cap);
         assert!(r.is_failed());
     }
 
@@ -688,7 +682,7 @@ mod tests {
             ToolName::Edit,
             json!({"file_path": ".teller.yml"}),
         ));
-        let r = check_requires_prior_read("edit", &[PathBuf::from(".teller.yml")], &cap);
+        let r = check_requires_prior_read(ToolName::Edit, &[PathBuf::from(".teller.yml")], &cap);
         assert!(r.is_failed());
         // Failure message must list what was actually read so debugging is
         // possible without re-running the scenario.
@@ -712,7 +706,7 @@ mod tests {
             json!({"file_path": ".teller.yml"}),
         ));
         let r = check_requires_prior_read(
-            "edit",
+            ToolName::Edit,
             &[PathBuf::from(".teller.yml"), PathBuf::from("AGENTS.md")],
             &cap,
         );
@@ -732,7 +726,7 @@ mod tests {
             ToolName::Edit,
             json!({"file_path": ".teller.yml"}),
         ));
-        let r = check_requires_prior_read("edit", &[PathBuf::from(".teller.yml")], &cap);
+        let r = check_requires_prior_read(ToolName::Edit, &[PathBuf::from(".teller.yml")], &cap);
         assert!(r.is_passed());
     }
 
@@ -749,7 +743,7 @@ mod tests {
             ToolName::Edit,
             json!({"file_path": ".teller.yml"}),
         ));
-        let r = check_requires_prior_read("edit", &[PathBuf::from(".teller.yml")], &cap);
+        let r = check_requires_prior_read(ToolName::Edit, &[PathBuf::from(".teller.yml")], &cap);
         assert!(r.is_failed());
     }
 
@@ -765,7 +759,7 @@ mod tests {
         ));
         cap.tool_calls
             .push(call("c2", ToolName::Read, json!({"path": ".teller.yml"})));
-        let r = check_requires_prior_read("edit", &[PathBuf::from(".teller.yml")], &cap);
+        let r = check_requires_prior_read(ToolName::Edit, &[PathBuf::from(".teller.yml")], &cap);
         assert!(r.is_failed());
     }
 
@@ -786,7 +780,7 @@ mod tests {
             ToolName::Edit,
             json!({"file_path": ".teller.yml"}),
         ));
-        let r = check_requires_prior_read("edit", &[PathBuf::from(".teller.yml")], &cap);
+        let r = check_requires_prior_read(ToolName::Edit, &[PathBuf::from(".teller.yml")], &cap);
         assert!(r.is_failed());
     }
 
@@ -807,7 +801,7 @@ mod tests {
             ToolName::Edit,
             json!({"file_path": ".teller.yml"}),
         ));
-        let r = check_requires_prior_read("edit", &[PathBuf::from(".teller.yml")], &cap);
+        let r = check_requires_prior_read(ToolName::Edit, &[PathBuf::from(".teller.yml")], &cap);
         assert!(r.is_failed());
         let Outcome::Failed { reason } = &r else {
             panic!("expected Failed");
@@ -841,7 +835,7 @@ mod tests {
             ToolName::Edit,
             json!({"file_path": ".teller.yml"}),
         ));
-        let r = check_requires_prior_read("edit", &[PathBuf::from(".teller.yml")], &cap);
+        let r = check_requires_prior_read(ToolName::Edit, &[PathBuf::from(".teller.yml")], &cap);
         assert!(
             r.is_failed(),
             "failed read must NOT satisfy requires_prior_read"
@@ -870,7 +864,7 @@ mod tests {
             ToolName::Edit,
             json!({"file_path": "config.yml"}),
         ));
-        let r = check_requires_prior_read("edit", &[PathBuf::from("config.yml")], &cap);
+        let r = check_requires_prior_read(ToolName::Edit, &[PathBuf::from("config.yml")], &cap);
         assert!(r.is_passed());
     }
 
@@ -886,8 +880,11 @@ mod tests {
             ToolName::Edit,
             json!({"file_path": "target.yml"}),
         ));
-        let r =
-            check_requires_prior_read("edit", &[PathBuf::from("./required/../target.yml")], &cap);
+        let r = check_requires_prior_read(
+            ToolName::Edit,
+            &[PathBuf::from("./required/../target.yml")],
+            &cap,
+        );
         assert!(r.is_passed());
     }
 
@@ -899,7 +896,7 @@ mod tests {
             .push(call("c1", ToolName::Read, json!({"path": "foo/.//bar"})));
         cap.tool_calls
             .push(call("c2", ToolName::Edit, json!({"file_path": "foo/bar"})));
-        let r = check_requires_prior_read("edit", &[PathBuf::from("foo/bar")], &cap);
+        let r = check_requires_prior_read(ToolName::Edit, &[PathBuf::from("foo/bar")], &cap);
         assert!(r.is_passed());
     }
 
@@ -916,7 +913,7 @@ mod tests {
             ToolName::Edit,
             json!({"file_path": ".teller.yml"}),
         ));
-        let r = check_requires_prior_read("edit", &[PathBuf::from(".teller.yml")], &cap);
+        let r = check_requires_prior_read(ToolName::Edit, &[PathBuf::from(".teller.yml")], &cap);
         assert!(r.is_failed());
         let Outcome::Failed { reason } = &r else {
             panic!("expected Failed");
@@ -1287,7 +1284,7 @@ mod tests {
             cap.tool_calls
                 .push(call(&format!("c{i}"), ToolName::Edit, json!({"x": "same"})));
         }
-        let r = check_max_repeat("edit", 2, &cap);
+        let r = check_max_repeat(ToolName::Edit, 2, &cap);
         assert!(r.is_passed());
     }
 
@@ -1298,7 +1295,7 @@ mod tests {
             cap.tool_calls
                 .push(call(&format!("c{i}"), ToolName::Edit, json!({"x": "same"})));
         }
-        let r = check_max_repeat("edit", 2, &cap);
+        let r = check_max_repeat(ToolName::Edit, 2, &cap);
         assert!(r.is_failed());
     }
 
@@ -1311,7 +1308,7 @@ mod tests {
             .push(call("c2", ToolName::Edit, json!({"x": "b"})));
         cap.tool_calls
             .push(call("c3", ToolName::Edit, json!({"x": "c"})));
-        let r = check_max_repeat("edit", 1, &cap);
+        let r = check_max_repeat(ToolName::Edit, 1, &cap);
         assert!(r.is_passed());
     }
 
@@ -1330,7 +1327,7 @@ mod tests {
         let args_ba: serde_json::Value = serde_json::from_str(r#"{"b":2,"a":1}"#).unwrap();
         cap.tool_calls.push(call("c1", ToolName::Edit, args_ab));
         cap.tool_calls.push(call("c2", ToolName::Edit, args_ba));
-        let r = check_max_repeat("edit", 1, &cap);
+        let r = check_max_repeat(ToolName::Edit, 1, &cap);
         assert!(
             r.is_failed(),
             "two semantically-identical arg orderings must count as a repeat"
@@ -1383,7 +1380,7 @@ mod tests {
             results: vec![
                 ExpectationResult {
                     expectation: Expectation::ToolCalled {
-                        tool: "read".into(),
+                        tool: ToolName::Read,
                     },
                     outcome: Outcome::Passed,
                     judge: None,
@@ -1418,7 +1415,9 @@ mod tests {
         assert!(matches!(reparsed.results[0].outcome, Outcome::Passed));
         assert!(matches!(
             reparsed.results[0].expectation,
-            Expectation::ToolCalled { ref tool } if tool == "read"
+            Expectation::ToolCalled {
+                tool: ToolName::Read
+            }
         ));
         assert!(matches!(
             reparsed.results[1].outcome,
@@ -1471,7 +1470,7 @@ mod tests {
             user_turns: vec!["hi".into()],
             expectations: vec![
                 Expectation::ToolCalled {
-                    tool: "read".into(),
+                    tool: ToolName::Read,
                 },
                 Expectation::FinalMessageContains {
                     substring: "hello".into(),
@@ -1488,7 +1487,9 @@ mod tests {
         assert_eq!(report.results.len(), 2);
         assert!(matches!(
             report.results[0].expectation,
-            Expectation::ToolCalled { ref tool } if tool == "read"
+            Expectation::ToolCalled {
+                tool: ToolName::Read
+            }
         ));
         assert!(matches!(
             report.results[1].expectation,
@@ -1507,10 +1508,10 @@ mod tests {
             user_turns: vec!["hi".into()],
             expectations: vec![
                 Expectation::ToolCalled {
-                    tool: "read".into(),
+                    tool: ToolName::Read,
                 },
                 Expectation::ToolNotCalled {
-                    tool: "bash".into(),
+                    tool: ToolName::Bash,
                 },
             ],
             judge_model: None,
@@ -1532,10 +1533,10 @@ mod tests {
             user_turns: vec!["hi".into()],
             expectations: vec![
                 Expectation::ToolCalled {
-                    tool: "read".into(),
+                    tool: ToolName::Read,
                 },
                 Expectation::ToolCalled {
-                    tool: "bash".into(),
+                    tool: ToolName::Bash,
                 },
             ],
             judge_model: None,
@@ -1558,7 +1559,7 @@ mod tests {
             user_turns: vec!["hi".into()],
             expectations: vec![
                 Expectation::ToolCalled {
-                    tool: "read".into(),
+                    tool: ToolName::Read,
                 },
                 Expectation::Judge {
                     pass_when: "x".into(),
@@ -1566,7 +1567,7 @@ mod tests {
                     judge_model: None,
                 },
                 Expectation::ToolCalled {
-                    tool: "bash".into(),
+                    tool: ToolName::Bash,
                 },
             ],
             judge_model: None,
@@ -1591,7 +1592,7 @@ mod tests {
         let scenario_no_fail = Scenario {
             expectations: vec![
                 Expectation::ToolCalled {
-                    tool: "read".into(),
+                    tool: ToolName::Read,
                 },
                 Expectation::Judge {
                     pass_when: "x".into(),
@@ -1672,7 +1673,7 @@ mod tests {
         // than seeing a noisy `"judge": null` field on every result.
         let result = ExpectationResult {
             expectation: Expectation::ToolCalled {
-                tool: "read".into(),
+                tool: ToolName::Read,
             },
             outcome: Outcome::Passed,
             judge: None,

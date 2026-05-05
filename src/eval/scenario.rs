@@ -76,16 +76,19 @@ pub struct Setup {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Expectation {
     ToolCalled {
-        tool: String,
+        #[serde(deserialize_with = "deserialize_tool_name")]
+        tool: ToolName,
     },
     ToolNotCalled {
-        tool: String,
+        #[serde(deserialize_with = "deserialize_tool_name")]
+        tool: ToolName,
     },
     /// Asserts that a "read-class" call against one of `must_read_one_of`
     /// preceded the first invocation of `tool`. The exact set of read-class
     /// tools is implementation-defined by the evaluator (see expectations.rs).
     RequiresPriorRead {
-        tool: String,
+        #[serde(deserialize_with = "deserialize_tool_name")]
+        tool: ToolName,
         must_read_one_of: Vec<PathBuf>,
     },
     FileUnchanged {
@@ -114,7 +117,8 @@ pub enum Expectation {
     /// key ordering doesn't matter — so two calls with the same fields in
     /// different orderings count as one repeat.
     MaxRepeatAttempts {
-        tool: String,
+        #[serde(deserialize_with = "deserialize_tool_name")]
+        tool: ToolName,
         max: usize,
     },
     /// LLM-as-judge expectation. The judge model is configured at the eval
@@ -134,44 +138,52 @@ pub enum Expectation {
     },
 }
 
-/// Reject tool names that aren't a known builtin. Catches typos like
-/// `"raed"` at parse time so they don't silently pass evaluation (a
-/// misspelled `tool_not_called` / `requires_prior_read` / etc. would
-/// vacuously match the never-called branch and report green forever).
+/// Custom deserializer for `Expectation` `tool` fields. Reads a string and
+/// maps it to a `ToolName` variant, but layers four pre-checks that produce
+/// friendlier errors than the bare `ToolName::from_str` failure (a strum
+/// `ParseError` with no surrounding context) — and crucially, that catch
+/// failure modes which would otherwise let a misconfigured scenario report
+/// green forever:
 ///
-/// MCP tool names (containing `__`) are also rejected — even though they
-/// look "valid by convention," the upstream capture pipeline cannot
-/// observe MCP calls (`execute_mcp_tools` emits `StreamNotice`, not
-/// `LlmToolCall`/`ToolResult`, and `RecordedToolCall.tool_name` is
-/// `ToolName` which has no MCP variant). Accepting MCP names here would
-/// silently pass scenarios whose assertions can never succeed.
-/// Tracked: steve-ap0q (capture MCP tool calls in CapturedRun).
-fn validate_tool_name(name: &str) -> Result<()> {
-    if name.is_empty() {
-        anyhow::bail!("tool name must not be empty");
+/// 1. Empty string — surface "must not be empty" instead of letting the
+///    strum parse fail with a bare "Matching variant not found".
+/// 2. Leading/trailing whitespace — `" read"` parses fine as a String but
+///    can never match any variant; without this guard the operator would
+///    see only the strum ParseError, hiding the whitespace as the real bug.
+/// 3. MCP-shaped names (containing `__`) — capture cannot observe MCP
+///    calls (`execute_mcp_tools` emits `StreamNotice`, not `LlmToolCall`,
+///    and `RecordedToolCall.tool_name` is `ToolName`, which has no MCP
+///    variant), so an assertion on an MCP tool would silently never match.
+///    Point at the tracking issue (steve-ap0q) instead of just rejecting.
+/// 4. Unknown builtin — surface the full known-variant list in the message
+///    so the operator can see what they meant to type.
+fn deserialize_tool_name<'de, D>(deserializer: D) -> std::result::Result<ToolName, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    if raw.is_empty() {
+        return Err(serde::de::Error::custom("tool name must not be empty"));
     }
-    // Reject leading/trailing whitespace (or whitespace-only) outright rather
-    // than silently trimming — the value is compared against ToolName::as_str()
-    // verbatim at runtime, so " read " would never match `read` and the
-    // assertion would silently report green forever.
-    if name != name.trim() || name.trim().is_empty() {
-        anyhow::bail!(
-            "tool {name:?} must not have leading/trailing whitespace; \
-             runtime comparison is exact"
-        );
+    if raw != raw.trim() || raw.trim().is_empty() {
+        return Err(serde::de::Error::custom(format!(
+            "tool {raw:?} must not have leading/trailing whitespace; \
+             tool names are matched exactly against the builtin enum"
+        )));
     }
-    if name.contains("__") {
-        anyhow::bail!(
-            "tool {name:?} looks like an MCP tool name, but MCP capture is not yet \
+    if raw.contains("__") {
+        return Err(serde::de::Error::custom(format!(
+            "tool {raw:?} looks like an MCP tool name, but MCP capture is not yet \
              implemented — assertions on MCP calls would never succeed. \
              Tracked: steve-ap0q. Use a builtin tool name instead."
-        );
+        )));
     }
-    if ToolName::from_str(name).is_err() {
+    ToolName::from_str(&raw).map_err(|_| {
         let known: Vec<&'static str> = ToolName::iter().map(|t| t.as_str()).collect();
-        anyhow::bail!("tool {name:?} is not a known builtin (one of {known:?})");
-    }
-    Ok(())
+        serde::de::Error::custom(format!(
+            "tool {raw:?} is not a known builtin (one of {known:?})"
+        ))
+    })
 }
 
 /// Reject paths that escape the scenario workspace, contain garbage that
@@ -276,14 +288,13 @@ impl Scenario {
 impl Expectation {
     fn validate(&self) -> Result<()> {
         match self {
-            Self::ToolCalled { tool } | Self::ToolNotCalled { tool } => {
-                validate_tool_name(tool)?;
-            }
+            // tool: ToolName is enforced by serde at parse time via
+            // deserialize_tool_name; nothing left to check on these arms.
+            Self::ToolCalled { .. } | Self::ToolNotCalled { .. } => {}
             Self::RequiresPriorRead {
-                tool,
+                tool: _,
                 must_read_one_of,
             } => {
-                validate_tool_name(tool)?;
                 if must_read_one_of.is_empty() {
                     anyhow::bail!("must_read_one_of must contain at least one path");
                 }
@@ -308,8 +319,7 @@ impl Expectation {
                     anyhow::bail!("final_message substring must not be empty");
                 }
             }
-            Self::MaxRepeatAttempts { tool, max } => {
-                validate_tool_name(tool)?;
+            Self::MaxRepeatAttempts { tool: _, max } => {
                 if *max == 0 {
                     anyhow::bail!(
                         "max_repeat_attempts max must be >= 1 (use tool_not_called for max=0 semantics)"
@@ -427,7 +437,9 @@ judge_model = "anthropic/claude-haiku-4-5"
         assert_eq!(s.expectations.len(), 1);
         assert!(matches!(
             s.expectations[0],
-            Expectation::ToolCalled { ref tool } if tool == "read"
+            Expectation::ToolCalled {
+                tool: ToolName::Read
+            }
         ));
     }
 
@@ -448,7 +460,7 @@ judge_model = "anthropic/claude-haiku-4-5"
                 tool,
                 must_read_one_of,
             } => {
-                assert_eq!(tool, "edit");
+                assert_eq!(*tool, ToolName::Edit);
                 assert_eq!(must_read_one_of.len(), 2);
             }
             other => panic!("expected RequiresPriorRead, got {other:?}"),
@@ -705,6 +717,28 @@ must_read_one_of = []
         let chain = format!("{err:#}");
         assert!(
             chain.contains("must contain at least one path"),
+            "unexpected error: {chain}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_tool_name() {
+        // The empty-string branch in deserialize_tool_name is the friendliest
+        // landing for a TOML author who left `tool = ""` mid-edit; without
+        // this guard they'd see strum's bare "Matching variant not found"
+        // and have to guess what the empty input means.
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "tool_called"
+tool = ""
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("must not be empty"),
             "unexpected error: {chain}"
         );
     }
