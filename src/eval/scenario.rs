@@ -139,18 +139,24 @@ pub enum Expectation {
 }
 
 /// Custom deserializer for `Expectation` `tool` fields. Reads a string and
-/// maps it to a `ToolName` variant, but layers three pre-checks that produce
-/// friendlier errors than serde's default "unknown variant" message — and
-/// crucially, that catch failure modes which would otherwise let a
-/// misconfigured scenario report green forever:
+/// maps it to a `ToolName` variant, but layers four pre-checks that produce
+/// friendlier errors than the bare `ToolName::from_str` failure (a strum
+/// `ParseError` with no surrounding context) — and crucially, that catch
+/// failure modes which would otherwise let a misconfigured scenario report
+/// green forever:
 ///
-/// 1. Leading/trailing whitespace — `" read"` would otherwise dispatch as
-///    "unknown variant ` read`" listing every builtin, hiding the real bug.
-/// 2. MCP-shaped names (containing `__`) — capture cannot observe MCP calls
-///    (`execute_mcp_tools` emits `StreamNotice`, not `LlmToolCall`), so an
-///    assertion on an MCP tool would silently never match. Point at the
-///    tracking issue (steve-ap0q) instead of just rejecting.
-/// 3. Unknown builtin — surface the full known-variant list in the message.
+/// 1. Empty string — surface "must not be empty" instead of letting the
+///    strum parse fail with a bare "Matching variant not found".
+/// 2. Leading/trailing whitespace — `" read"` parses fine as a String but
+///    can never match any variant; without this guard the operator would
+///    see only the strum ParseError, hiding the whitespace as the real bug.
+/// 3. MCP-shaped names (containing `__`) — capture cannot observe MCP
+///    calls (`execute_mcp_tools` emits `StreamNotice`, not `LlmToolCall`,
+///    and `RecordedToolCall.tool_name` is `ToolName`, which has no MCP
+///    variant), so an assertion on an MCP tool would silently never match.
+///    Point at the tracking issue (steve-ap0q) instead of just rejecting.
+/// 4. Unknown builtin — surface the full known-variant list in the message
+///    so the operator can see what they meant to type.
 fn deserialize_tool_name<'de, D>(deserializer: D) -> std::result::Result<ToolName, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -711,6 +717,28 @@ must_read_one_of = []
         let chain = format!("{err:#}");
         assert!(
             chain.contains("must contain at least one path"),
+            "unexpected error: {chain}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_tool_name() {
+        // The empty-string branch in deserialize_tool_name is the friendliest
+        // landing for a TOML author who left `tool = ""` mid-edit; without
+        // this guard they'd see strum's bare "Matching variant not found"
+        // and have to guess what the empty input means.
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "tool_called"
+tool = ""
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("must not be empty"),
             "unexpected error: {chain}"
         );
     }
