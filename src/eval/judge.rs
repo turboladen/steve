@@ -1557,7 +1557,7 @@ mod tests {
             setup: Setup::default(),
             user_turns: vec!["go".into()],
             expectations: vec![Expectation::ToolCalled {
-                tool: "read".into(),
+                tool: ToolName::Read,
             }],
             judge_model: None,
         };
@@ -1883,7 +1883,7 @@ mod tests {
             results: vec![
                 ExpectationResult {
                     expectation: Expectation::ToolCalled {
-                        tool: "read".into(),
+                        tool: ToolName::Read,
                     },
                     outcome: Outcome::Passed,
                     judge: None,
@@ -2004,7 +2004,7 @@ mod tests {
             setup: Setup::default(),
             user_turns: vec!["go".into()],
             expectations: vec![Expectation::ToolCalled {
-                tool: "read".into(),
+                tool: ToolName::Read,
             }],
             judge_model: None,
         };
@@ -2013,7 +2013,7 @@ mod tests {
         let mut report = EvalReport {
             results: vec![ExpectationResult {
                 expectation: Expectation::ToolCalled {
-                    tool: "read".into(),
+                    tool: ToolName::Read,
                 },
                 outcome: Outcome::Passed,
                 judge: None,

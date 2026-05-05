@@ -227,6 +227,7 @@ mod tests {
     use crate::{
         config::{Config, ModelCapabilities, ModelConfig, ProviderConfig},
         eval::scenario::{Expectation, Setup},
+        tool::ToolName,
     };
 
     // End-to-end Runner coverage requires lifting MockChatStream out of
@@ -242,7 +243,7 @@ mod tests {
             setup: Setup::default(),
             user_turns: vec!["hi".into()],
             expectations: vec![Expectation::ToolCalled {
-                tool: "read".into(),
+                tool: ToolName::Read,
             }],
             judge_model: None,
         }
