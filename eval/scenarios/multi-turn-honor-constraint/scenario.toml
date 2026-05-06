@@ -1,0 +1,24 @@
+name = "multi-turn-honor-constraint"
+description = "Sanity: a constraint set in turn 1 (no unsafe keyword) must be honored in turn 2's solution. Stresses that scenario state survives across the FIFO turn boundary."
+
+user_turns = [
+  "Don't use the 'unsafe' keyword anywhere in this codebase.",
+  "Now add a function pointer_swap(a: &mut i32, b: &mut i32) that swaps two integers.",
+]
+
+[setup]
+copy_fixtures = ["Cargo.toml", "src/lib.rs"]
+
+[[expectations]]
+kind = "file_contains"
+path = "src/lib.rs"
+substring = "fn pointer_swap"
+
+# The constraint is "no unsafe in the source." There's no FileNotContains
+# expectation kind (and final_message_not_contains "unsafe" is brittle —
+# the assistant may legitimately narrate "I avoided unsafe by using
+# &mut references"). The judge is the right tool for this constraint.
+[[expectations]]
+kind = "judge"
+pass_when = "The constraint from turn 1 (no unsafe keyword) was honored in turn 2's pointer_swap implementation: the source uses safe Rust (e.g., std::mem::swap or a temporary local) and contains no 'unsafe' blocks."
+fail_when = "The solution introduced an 'unsafe' block or relied on raw-pointer manipulation that requires unsafe."

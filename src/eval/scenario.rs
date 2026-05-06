@@ -1131,6 +1131,137 @@ tool = "read"
     }
 
     #[test]
+    fn all_committed_scenarios_parse_and_validate() {
+        // Walk every directory under `eval/scenarios/` (relative to the
+        // crate root) and round-trip each `scenario.toml` through
+        // `Scenario::from_file`. Catches authoring typos — wrong field
+        // names, unknown tool variants, malformed must_read paths,
+        // typo'd manifest filenames, and missing fixture files — at
+        // `cargo test` time so authors don't have to spend an LLM-bound
+        // smoke run to find them.
+        let scenarios_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("eval/scenarios");
+        let entries =
+            std::fs::read_dir(&scenarios_dir).expect("eval/scenarios/ should exist alongside src/");
+        let mut parsed = Vec::new();
+        for entry in entries {
+            let entry = entry.expect("readable directory entry");
+            let path = entry.path();
+            // Use file_type() (does NOT follow symlinks) rather than
+            // path.is_dir() (follows symlinks). A symlinked entry could
+            // otherwise let the test traverse outside the repo, and
+            // ScenarioWorkspace::build itself rejects symlink fixtures —
+            // mirror that defensive posture here.
+            let file_type = entry
+                .file_type()
+                .unwrap_or_else(|err| panic!("could not stat {}: {err:#}", path.display()));
+            if file_type.is_symlink() {
+                panic!(
+                    "symlink entry {} under eval/scenarios/ is not allowed — the workspace builder rejects symlinks and the walking test must not silently traverse them",
+                    path.display()
+                );
+            }
+            if !file_type.is_dir() {
+                continue;
+            }
+            let manifest = path.join("scenario.toml");
+            // A directory under eval/scenarios/ without a manifest is
+            // never legitimate (no cases like "fixtures dir at the top
+            // level" exist). A typo'd `senario.toml` would otherwise
+            // silently skip and the author wouldn't notice. Use
+            // symlink_metadata (does NOT follow symlinks) so a
+            // symlinked manifest doesn't slip past the top-level
+            // symlink defense.
+            let manifest_meta = std::fs::symlink_metadata(&manifest).unwrap_or_else(|_| {
+                panic!(
+                    "scenario directory {} is missing manifest at {} — likely a typo'd manifest filename",
+                    path.display(),
+                    manifest.display()
+                )
+            });
+            assert!(
+                manifest_meta.file_type().is_file(),
+                "scenario manifest {} must be a regular file (got {}) — symlinked or directory manifests are not allowed",
+                manifest.display(),
+                describe_file_type(manifest_meta.file_type())
+            );
+            let scenario = Scenario::from_file(&manifest).unwrap_or_else(|err| {
+                panic!(
+                    "scenario manifest {} failed to parse: {err:#}",
+                    manifest.display()
+                )
+            });
+            // Verify each fixture file actually exists AND is a regular
+            // file (not a directory or symlink). This mirrors
+            // ScenarioWorkspace::build, which uses std::fs::copy (fails
+            // on directories) and explicitly rejects symlinks. Catching
+            // these mismatches here saves an LLM-bound smoke run.
+            for fixture in &scenario.setup.copy_fixtures {
+                let resolved = path.join(fixture);
+                let meta = std::fs::symlink_metadata(&resolved).unwrap_or_else(|err| {
+                    panic!(
+                        "scenario {}: copy_fixtures entry {} not found at {} ({err})",
+                        scenario.name,
+                        fixture.display(),
+                        resolved.display()
+                    )
+                });
+                assert!(
+                    meta.file_type().is_file(),
+                    "scenario {}: copy_fixtures entry {} at {} must be a regular file (got {})",
+                    scenario.name,
+                    fixture.display(),
+                    resolved.display(),
+                    describe_file_type(meta.file_type())
+                );
+            }
+            parsed.push(scenario.name);
+        }
+        assert!(
+            !parsed.is_empty(),
+            "expected at least one scenario under {}",
+            scenarios_dir.display()
+        );
+        // _smoke is the canonical baseline scenario invoked by the
+        // manual smoke run (`cargo run -- eval
+        // eval/scenarios/_smoke/scenario.toml`). It's a developer
+        // convention, not a hardcoded code path — but pinning its
+        // presence here catches an accidental delete or rename that
+        // the bare !is_empty() guard would miss.
+        assert!(
+            parsed.iter().any(|n| n == "_smoke"),
+            "_smoke scenario missing from {}; parsed scenarios: {parsed:?}",
+            scenarios_dir.display()
+        );
+        // VALIDATION.md tracks per-scenario FAIL-then-PASS validation
+        // results for the modified scenarios. Pin its presence so a
+        // rename/delete trips the test rather than silently losing the
+        // validation history. Not a structural check — just existence.
+        let validation_md =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("eval/VALIDATION.md");
+        assert!(
+            validation_md.is_file(),
+            "eval/VALIDATION.md missing (or not a regular file) at {}",
+            validation_md.display()
+        );
+    }
+
+    /// Render a `FileType` in human-readable form for panic messages.
+    /// `FileType`'s `Debug` impl on Unix prints raw `st_mode` bits
+    /// (`FileType { mode: 0o040755 }`), which doesn't help an author
+    /// diagnose "why is the walking test panicking?"
+    fn describe_file_type(ft: std::fs::FileType) -> &'static str {
+        if ft.is_dir() {
+            "directory"
+        } else if ft.is_symlink() {
+            "symlink"
+        } else if ft.is_file() {
+            "regular file"
+        } else {
+            "non-regular file (fifo/socket/device)"
+        }
+    }
+
+    #[test]
     fn from_file_validates_directory_name_match() {
         use std::io::Write;
         let tmp = tempfile::tempdir().unwrap();

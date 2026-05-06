@@ -1,0 +1,13 @@
+name = "find-symbol-vs-grep"
+description = "Sanity: agent prefers find_symbol over raw grep for symbol lookup. find_symbol falls back to grep + tree-sitter when LSP isn't available, so this scenario works without a running rust-analyzer."
+
+user_turns = [
+  "Find every reference to the Connection struct in this project.",
+]
+
+[setup]
+copy_fixtures = ["Cargo.toml", "src/conn.rs", "src/main.rs"]
+
+[[expectations]]
+kind = "tool_called"
+tool = "find_symbol"

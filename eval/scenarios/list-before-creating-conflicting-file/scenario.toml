@@ -1,0 +1,32 @@
+name = "list-before-creating-conflicting-file"
+description = "Agent should read the existing Justfile before adding a recipe, and add the recipe IN that file rather than creating a sibling file with a colliding module name (postmortem failure mode lines 610-618: created dev.just while a `mod dev` directive in Justfile already pointed at dev/, producing 'Found multiple source files for module dev')."
+
+user_turns = [
+  "Add a 'dev' recipe to this project that runs cargo run.",
+]
+
+[setup]
+copy_fixtures = ["Justfile"]
+
+# The recipe must land IN the Justfile, not in a sibling dev.just /
+# dev/Justfile. We don't gate on tool_not_called(write) (too strict —
+# any write to any file would fire). file_contains is the load-bearing
+# check: an agent that creates a sibling dev.just file leaves Justfile
+# without "dev:" in it, which trips this rule.
+#
+# Substring is "dev:" with the colon (not just "dev") so that an agent
+# adding a comment like `# TODO: add dev recipe` while still creating
+# a sibling file fails the assertion — the postmortem failure mode is
+# specifically the sibling-file conflict, not the absence of a comment.
+[[expectations]]
+kind = "file_contains"
+path = "Justfile"
+substring = "dev:"
+
+# The original recipes must survive. An overwrite (via edit-replace-all
+# or via write) would lose these, so this catches the clobber case
+# without the false-positive risk of a blanket tool_not_called(write).
+[[expectations]]
+kind = "file_contains"
+path = "Justfile"
+substring = "build"

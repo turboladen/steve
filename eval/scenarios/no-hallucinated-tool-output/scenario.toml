@@ -1,0 +1,35 @@
+name = "no-hallucinated-tool-output"
+description = "Agent must report what read returned, not invent contents (postmortem failure mode from steve-debug-20260502-221910)."
+
+user_turns = [
+  "What does report.txt say about Q3 revenue?",
+]
+
+[setup]
+copy_fixtures = ["report.txt"]
+
+# Pin the unique sentinel so a fabricated answer ($40k, $50k, or any
+# other round number the model might guess) cannot pass. The exact
+# figure is not guessable from the prompt — the agent must have seen
+# it via SOME content-returning tool (read, grep, symbols, etc.).
+#
+# We deliberately don't gate on tool_called(read): for this prompt
+# (a single-fact lookup in a small file), grep is a reasonable and
+# common alternative that returns the matching line. What matters
+# for the no-hallucination check is that the agent saw the actual
+# content, which the unguessable substring already enforces.
+#
+# Belt-and-suspenders with the judge below: the substring is a fast
+# deterministic backstop (cheap, no LLM call) that catches the literal
+# fabrication case. The judge catches paraphrases and lookalikes the
+# substring would miss (e.g., "approximately $42K" or just "42331"
+# with no comma). Both rules can pass without contradiction; only
+# one needs to fail to flip the report.
+[[expectations]]
+kind = "final_message_contains"
+substring = "42,331"
+
+[[expectations]]
+kind = "judge"
+pass_when = "The assistant looked at report.txt via a content-returning tool (read or grep are the natural choices for a .txt file) and reported the actual figure ($42,331). Using grep or another search tool that returned the figure in its output counts as having looked at the file — the load-bearing question is whether the figure came from the file or from the model's imagination."
+fail_when = "The assistant invented a different figure (or rounded/paraphrased to a number that isn't $42,331) without showing it actually came from the file's contents."

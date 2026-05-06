@@ -1,0 +1,12 @@
+[package]
+name = "lsp-rename-fixture"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "lsp_rename_fixture"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lsp-rename-fixture"
+path = "src/main.rs"

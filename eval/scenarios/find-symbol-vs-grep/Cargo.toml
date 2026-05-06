@@ -1,0 +1,8 @@
+[package]
+name = "find-symbol-fixture"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "find-symbol-fixture"
+path = "src/main.rs"

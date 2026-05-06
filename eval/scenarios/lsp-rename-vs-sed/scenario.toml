@@ -1,0 +1,45 @@
+name = "lsp-rename-vs-sed"
+description = "Sanity: agent reaches for lsp rename first when asked to rename a symbol across files. Falling back to surgical edits when lsp fails (e.g. rust-analyzer not warm in the eval tempdir) is acceptable — the meaningful signal is that the agent attempted the right tool first AND the rename landed correctly in both files."
+
+user_turns = [
+  "Rename foo_bar to foo_baz everywhere in this project.",
+]
+
+[setup]
+copy_fixtures = ["Cargo.toml", "src/lib.rs", "src/main.rs"]
+
+# The agent must REACH for lsp first. `tool_called(lsp)` alone is too
+# loose — it would pass on a diagnostics-only call followed by a sed
+# rename via bash, which is exactly the postmortem failure mode this
+# scenario is named to catch. The judge below pins "first lsp call
+# attempted a rename" specifically, which the rule layer can't express
+# (no tool-args-aware expectation primitive in v1).
+[[expectations]]
+kind = "tool_called"
+tool = "lsp"
+
+# Outcome-pinning: the rename must actually land in both files,
+# regardless of which tool the agent ended up using.
+[[expectations]]
+kind = "file_contains"
+path = "src/lib.rs"
+substring = "fn foo_baz"
+
+[[expectations]]
+kind = "file_contains"
+path = "src/main.rs"
+substring = "foo_baz"
+
+# Behavioral discrimination: the rule layer above can't see that
+# `lsp({"operation": "rename", ...})` is different from
+# `lsp({"operation": "diagnostics", ...})`. The judge reads the
+# captured tool-call args and pins that the agent ACTUALLY tried
+# rename, not just an unrelated lsp operation. If lsp rename fails
+# (rust-analyzer not warm in the eval tempdir; position-bridge
+# returns no references), falling back to surgical edits is fine —
+# the failure mode is "didn't try lsp rename at all and went straight
+# to sed," not "tried lsp rename and had to fall back."
+[[expectations]]
+kind = "judge"
+pass_when = "The agent's first lsp tool call attempted a rename operation (i.e. `operation` was `rename`), regardless of whether the rename succeeded. Falling back to surgical edits or bash after a failed lsp rename is acceptable."
+fail_when = "The agent never attempted an lsp rename operation. Either lsp was not called at all, OR lsp was called only for diagnostics/definition/references/etc. and the rename was performed via sed (bash), patch, or plain edits without first attempting `lsp` with `operation=rename`."
