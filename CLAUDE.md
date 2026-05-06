@@ -220,6 +220,48 @@ Compare pre/post-notification snapshots to filter stale errors.
 `lsp` tool validates `path.is_file()` — directories are rejected early with
 a message redirecting to `grep`.
 
+## Eval Module (`eval/`)
+
+Scenario manifests live in `eval/scenarios/<name>/scenario.toml` with sibling
+fixture files. The walking test
+`scenario::tests::all_committed_scenarios_parse_and_validate` runs at `cargo
+test` time: parses every `scenario.toml` via `Scenario::from_file`, asserts
+each `copy_fixtures` entry exists and is a regular file (via
+`symlink_metadata` + `is_file()`, mirroring `ScenarioWorkspace::build`'s
+symlink rejection), and pins `_smoke` is in the parsed set.
+
+### Scenario assertion-design pitfalls
+
+- **`RequiresPriorRead(target, ...)` is vacuously satisfied** when `target`
+  was never called. Pair with `tool_called(target)` whenever the scenario
+  REQUIRES the target tool to fire.
+- **`MaxRepeatAttempts` dedups by tool + canonical-args JSON.** Catches
+  literal-repeat loops; does NOT catch "agent loops with different commands"
+  (the postmortem hypothesis-spinning pattern). Use Judge for count-style
+  failure modes. Count-only `MaxToolCalls` primitive tracked: `steve-c0uk`.
+- **`tool_not_called(X)` is brittle** — almost any tool has a legitimate
+  fallback role. Prefer `tool_called(preferred)` + outcome-pinning via
+  `file_contains` on the post-edit file content. Outcome-pinning is robust
+  across "agent picked the right tool" AND "agent's preferred-tool call
+  failed and it fell back."
+- **`is_read_class()` is intentionally narrow** (`Read | Symbols` only) for
+  `RequiresPriorRead`. For "did the agent see the content at all?" (where
+  `grep` would also count) use `final_message_contains` on an unguessable
+  sentinel + Judge instead.
+- **Read accepts `path` (string) XOR `paths` (array).** Evaluator's
+  `read_path_args` (in `expectations.rs`) handles both forms — Read-specific
+  branch. Adding a new multi-path tool requires updating that helper.
+
+### Comment hygiene
+
+- Inline comments claiming an issue is filed (`tracked separately as a
+  follow-up`, etc.) must reference a real `steve-XXXX` ID inline. Vague
+  claims rot into false tracking; ID references are checkable. Same rule
+  applies to commit-message bodies.
+- For `FileType` in panic messages, use `describe_file_type` helper (in the
+  scenario.rs test module) — `Debug` impl prints raw `st_mode` bits which
+  no human reads at panic time.
+
 ## Formatting
 
 `rustfmt.toml` configures `imports_granularity = "Crate"` (nightly-only). Run
@@ -296,6 +338,16 @@ bd close <id>         # Complete work
 - Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
 - Run `bd prime` for detailed command reference and session close protocol
 - Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
+
+## GitHub PR Operations
+
+Beyond the standard `gh pr` subcommands:
+
+- **Reply to an inline PR review comment** (Copilot or human reviewer):
+  `gh api repos/<owner>/<repo>/pulls/<n>/comments/<id>/replies -X POST -f body="..."`.
+  The comment ID comes from `gh api repos/<o>/<r>/pulls/<n>/comments`. Pass
+  the body via `-f` so quoting works; multi-line bodies need a heredoc
+  (`-f body="$(cat <<'EOF2' ... EOF2)"`).
 
 ## Session Completion
 

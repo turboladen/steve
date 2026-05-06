@@ -1,0 +1,24 @@
+name = "glob-for-find"
+description = "Sanity: agent uses glob to enumerate files matching a pattern across the project rather than walking via repeated list calls or shelling out to find."
+
+user_turns = [
+  "List every Python file in this project.",
+]
+
+[setup]
+copy_fixtures = [
+  "src/foo.py",
+  "src/bar.py",
+  "src/baz.py",
+  "src/util.py",
+  "src/util_helpers.py",
+  "tests/test_foo.py",
+  "tests/test_bar.py",
+  "tests/test_baz.py",
+  "tests/test_util.py",
+  "tests/conftest.py",
+]
+
+[[expectations]]
+kind = "tool_called"
+tool = "glob"
