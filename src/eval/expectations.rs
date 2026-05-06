@@ -197,26 +197,28 @@ fn check_requires_prior_read(
         // A failed read tells the agent nothing about the file content, so
         // it cannot satisfy "must have read this before editing." Track
         // separately so the failure message can call out the attempt.
-        let path_arg = read_path_arg(prior, &captured.workspace_root);
+        let path_args = read_path_args(prior, &captured.workspace_root);
         if prior.is_error {
-            if let Some(PathOrigin::Inside(rel)) = path_arg {
-                failed_reads.push(rel);
-            } else if let Some(PathOrigin::Outside(raw)) = path_arg {
-                outside_workspace.push(raw);
+            for arg in path_args {
+                match arg {
+                    PathOrigin::Inside(rel) => failed_reads.push(rel),
+                    PathOrigin::Outside(raw) => outside_workspace.push(raw),
+                }
             }
             continue;
         }
-        match path_arg {
-            Some(PathOrigin::Inside(rel)) => {
-                if normalized_required.iter().any(|r| r == &rel) {
-                    return Outcome::Passed;
+        for arg in path_args {
+            match arg {
+                PathOrigin::Inside(rel) => {
+                    if normalized_required.iter().any(|r| r == &rel) {
+                        return Outcome::Passed;
+                    }
+                    actually_read.push(rel);
                 }
-                actually_read.push(rel);
+                PathOrigin::Outside(raw) => {
+                    outside_workspace.push(raw);
+                }
             }
-            Some(PathOrigin::Outside(raw)) => {
-                outside_workspace.push(raw);
-            }
-            None => {}
         }
     }
 
@@ -272,18 +274,49 @@ enum PathOrigin {
     Outside(String),
 }
 
-/// Extract a tool's primary path arg, normalize it lexically, and classify
-/// it as inside or outside the workspace. Reuses the project-wide
-/// `normalize_tool_path` helper so the eval evaluator stays in lockstep
-/// with the permission system's path semantics.
-fn read_path_arg(call: &RecordedToolCall, workspace_root: &Path) -> Option<PathOrigin> {
-    let key = *call.tool_name.path_arg_keys().first()?;
-    let raw = call.arguments.get(key)?.as_str()?;
+/// Extract every path arg a tool was invoked with, normalize each
+/// lexically, and classify each as inside or outside the workspace.
+/// Reuses the project-wide `normalize_tool_path` helper so the eval
+/// evaluator stays in lockstep with the permission system's path
+/// semantics.
+///
+/// Most tools take a single string path arg keyed by their first
+/// `path_arg_keys()` entry. The `read` tool additionally accepts a
+/// `paths` array (`{"paths": ["a", "b", ...]}`) for batch reads, and
+/// in that form `arguments["path"]` is absent. The Read-specific
+/// branch below handles the array case so multi-file reads are
+/// visible to `requires_prior_read`.
+fn read_path_args(call: &RecordedToolCall, workspace_root: &Path) -> Vec<PathOrigin> {
+    let mut out = Vec::new();
+    // Multi-path Read: `paths` is an array of strings.
+    if call.tool_name == ToolName::Read
+        && let Some(arr) = call.arguments.get("paths").and_then(|v| v.as_array())
+    {
+        for v in arr {
+            if let Some(raw) = v.as_str() {
+                out.push(classify_path(raw, workspace_root));
+            }
+        }
+        if !out.is_empty() {
+            return out;
+        }
+    }
+    // Single-path form: covers `path` for read-class tools and every
+    // other tool's first path_arg_keys() entry (when one exists).
+    if let Some(&key) = call.tool_name.path_arg_keys().first()
+        && let Some(raw) = call.arguments.get(key).and_then(|v| v.as_str())
+    {
+        out.push(classify_path(raw, workspace_root));
+    }
+    out
+}
+
+fn classify_path(raw: &str, workspace_root: &Path) -> PathOrigin {
     let (normalized, inside) = normalize_tool_path(raw, workspace_root);
     if inside {
-        Some(PathOrigin::Inside(normalized))
+        PathOrigin::Inside(normalized)
     } else {
-        Some(PathOrigin::Outside(raw.to_string()))
+        PathOrigin::Outside(raw.to_string())
     }
 }
 
@@ -658,6 +691,113 @@ mod tests {
         ));
         let r = check_requires_prior_read(ToolName::Edit, &[PathBuf::from(".teller.yml")], &cap);
         assert!(r.is_passed());
+    }
+
+    #[test]
+    fn requires_prior_read_handles_multi_path_read_form() {
+        // The read tool accepts both `path: "<str>"` and `paths: ["<str>", ...]`.
+        // A previous version of read_path_args only checked the singular
+        // `path` key, so an agent batch-reading both files in one call
+        // appeared to read NOTHING. Real PR #55 smoke run on simple-bug-fix
+        // surfaced this — agent did `read({"paths": ["tests/test_add.py",
+        // "add.py"]})` then edit, and the rule failed despite the read
+        // having actually happened.
+        let mut cap = empty_capture(PathBuf::from("/tmp"));
+        cap.tool_calls.push(call(
+            "c1",
+            ToolName::Read,
+            json!({"paths": ["tests/test_add.py", "add.py"]}),
+        ));
+        cap.tool_calls
+            .push(call("c2", ToolName::Edit, json!({"file_path": "add.py"})));
+        let r = check_requires_prior_read(ToolName::Edit, &[PathBuf::from("add.py")], &cap);
+        assert!(r.is_passed(), "multi-path read of add.py must satisfy");
+    }
+
+    #[test]
+    fn requires_prior_read_multi_path_read_with_one_match_satisfies() {
+        // The matching path is mixed in with unrelated paths. Pin that
+        // the satisfying-path detection works regardless of position
+        // in the array — guards against a future refactor that
+        // accidentally breaks the early-return-on-first-match into
+        // first-path-wins.
+        let mut cap = empty_capture(PathBuf::from("/tmp"));
+        cap.tool_calls.push(call(
+            "c1",
+            ToolName::Read,
+            json!({"paths": ["unrelated.txt", "add.py", "another.txt"]}),
+        ));
+        cap.tool_calls
+            .push(call("c2", ToolName::Edit, json!({"file_path": "add.py"})));
+        let r = check_requires_prior_read(ToolName::Edit, &[PathBuf::from("add.py")], &cap);
+        assert!(
+            r.is_passed(),
+            "matching path mixed with unrelated paths must still satisfy"
+        );
+    }
+
+    #[test]
+    fn requires_prior_read_failed_multi_path_read_surfaces_all_paths() {
+        // A failed (`is_error: true`) multi-path read must attribute
+        // every path to `failed_reads`/`outside_workspace` so the
+        // operator can see what was attempted. Mirrors the
+        // single-path failed-read coverage at
+        // requires_prior_read_does_not_count_failed_reads.
+        let mut cap = empty_capture(PathBuf::from("/tmp"));
+        cap.tool_calls.push(RecordedToolCall {
+            call_id: "c1".into(),
+            tool_name: ToolName::Read,
+            arguments: json!({"paths": ["one.txt", "two.txt", "add.py"]}),
+            output: Some("permission denied on one of the paths".into()),
+            is_error: true,
+            turn_index: 0,
+        });
+        cap.tool_calls
+            .push(call("c2", ToolName::Edit, json!({"file_path": "add.py"})));
+        let r = check_requires_prior_read(ToolName::Edit, &[PathBuf::from("add.py")], &cap);
+        assert!(
+            r.is_failed(),
+            "failed read must NOT satisfy regardless of path"
+        );
+        let Outcome::Failed { reason } = &r else {
+            panic!("expected Failed");
+        };
+        // All three paths must appear in the failed_reads list — a
+        // singular `if let Some(...)` regression would only push the
+        // first path.
+        for p in ["one.txt", "two.txt", "add.py"] {
+            assert!(
+                reason.contains(p),
+                "failed multi-path read must surface every attempted path; missing {p}: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn requires_prior_read_multi_path_read_other_path_does_not_satisfy() {
+        // Sibling check to the above: if the multi-path read includes
+        // ONLY unrelated paths, the rule still fails — we're not blindly
+        // trusting any multi-path read to satisfy the requirement.
+        let mut cap = empty_capture(PathBuf::from("/tmp"));
+        cap.tool_calls.push(call(
+            "c1",
+            ToolName::Read,
+            json!({"paths": ["other.txt", "another.txt"]}),
+        ));
+        cap.tool_calls
+            .push(call("c2", ToolName::Edit, json!({"file_path": "add.py"})));
+        let r = check_requires_prior_read(ToolName::Edit, &[PathBuf::from("add.py")], &cap);
+        assert!(r.is_failed());
+        let Outcome::Failed { reason } = &r else {
+            panic!("expected Failed");
+        };
+        // Both batch-read paths must appear in the failure message so the
+        // operator can see what WAS read and decide if the scenario or
+        // the agent prompt needs adjusting.
+        assert!(
+            reason.contains("other.txt") && reason.contains("another.txt"),
+            "multi-path read failure must list every read path: {reason}"
+        );
     }
 
     #[test]
