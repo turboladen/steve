@@ -35,9 +35,13 @@ the primary signal.
    become full scenario failures.
 2. **Cumulative improvement tracking.** Tell how much the app has improved
    versus a chosen anchor (a release tag, a date, a known-good commit).
-3. **Cross-model comparison.** Run the same scenarios with different agent
-   models (e.g., free local Ollama vs paid Fuel-IX-relayed Claude) and
-   compare them on equal footing.
+3. **Per-model regression tracking.** Maintain separate baselines for
+   each agent model (e.g., free local Ollama AND paid Fuel-IX-relayed
+   Claude), so "did my code change regress this model's behavior" is
+   answerable for whichever model the user happens to be running.
+   (True head-to-head "is model A better than model B" comparison is
+   out of scope for v1 — see "Use case mapping" below for the design
+   constraint that defers it.)
 
 ## Prior art / convention anchors
 
@@ -102,17 +106,22 @@ artifacts in git, no web UI. Cherry-pick ideas; don't import scope.
 ```
 [scenarios]  →  steve eval run     →  [results.yaml]
                                               ↓
-[baseline.yaml]  ←  steve eval baseline freeze
+[eval/baselines/]  ←  steve eval baseline freeze
                                               ↓
-[results.yaml] + [baseline.yaml]  →  steve eval report  →  headline + per-axis + per-scenario
+[results.yaml] + [eval/baselines/]  →  steve eval report  →  headline + per-axis + per-scenario
 ```
 
 Three operations, three concerns:
 
 1. **Run** — sample agent behavior. Reads scenarios, runs each K times,
    writes a normalized YAML results file. **Zero judge calls.**
-2. **Freeze** — turn a run into a baseline. Conceptually `run + mv` into
-   `eval/baselines/<scenario>/<model>.yaml`, plus a manifest entry.
+2. **Freeze** — capture a fresh single-run baseline for each requested
+   scenario and write it to `eval/baselines/<scenario>/<provider>/<model>.yaml`,
+   plus a manifest entry. Internally performs its own one-shot capture
+   (K=1 regardless of `scenario.runs`); does NOT consume a previously
+   written `results.yaml`. The two stages are decoupled at the *output*
+   level (both produce `NormalizedTranscript`-bearing files), not at the
+   *invocation* level.
 3. **Report** — judge results against a baseline and emit the layered
    headline. **All judge calls happen here.**
 
@@ -121,39 +130,61 @@ baseline. The common case stays one command.
 
 ### Why decouple run from report
 
-Three downstream wins:
+Two downstream wins:
 
 - **Generate once, compare many times.** Agent runs are the expensive
   part. A 10-scenario suite with N=3 runs against Anthropic costs real
   money in tokens and time; judge calls are cheap (~$0.20). Decoupling
   means a single `steve eval run` can be reported against multiple
   baselines without burning more agent tokens.
-- **Backtest judge changes.** Change the judge prompt or upgrade the
-  judge model? Re-`report` against archived results files — past behavior
-  gets re-graded under the new rubric. Calibration drift becomes visible
-  and recoverable.
-- **Cross-model compare for free.** "Compare ollama vs anthropic" is just
-  `steve eval report ollama-results.yaml --baseline anthropic-results.yaml`.
-  No new machinery: baselines and run-outputs share a schema, so any
-  results file can serve as either side of a comparison.
+- **Backtest judge changes.** Change the judge prompt, upgrade the
+  judge model, or add a new axis to the rubric? Re-`report` against
+  archived results files — past behavior gets re-graded under the new
+  rules. Calibration drift becomes visible and recoverable without
+  re-running any agent.
 
-The shared schema between baselines and run-outputs is the load-bearing
-piece. A baseline IS a run-output that's been frozen.
+`ResultsFile` and `BaselineFile` are distinct top-level shapes (see
+"Schema" below) but share the per-transcript `NormalizedTranscript`
+schema. That shared piece is what the judge consumes, which is what
+makes "generate once, compare many times" cheap.
 
 ### Baselines as files in git
 
-Baselines live at `eval/baselines/<scenario>/<model_id>.yaml`, checked
-into the repo. Format is plain YAML via serde-saphyr (see "File format"
-below for why). A small `eval/baselines/manifest.toml` records provenance:
+Baselines live at `eval/baselines/<scenario>/<provider>/<model>.yaml`,
+checked into the repo. Format is plain YAML via serde-saphyr (see "File
+format" below for why).
+
+The split path (`<provider>/<model>.yaml` rather than a single
+slash-bearing filename) is deliberate — model IDs in this codebase use
+the `provider/model` convention everywhere (see CLAUDE.md), so the
+filesystem path mirrors that natural hierarchy. No encoding gymnastics
+needed; the slash IS the separator. Listing all baselines for a model:
+`find eval/baselines -path '*/ollama/qwen3-coder.yaml'`.
+
+A small `eval/baselines/manifest.toml` records provenance:
 
 ```toml
 [[baseline]]
 scenario = "no-hallucinated-tool-output"
 model = "ollama/qwen3-coder"
 git_ref = "abc1234"
-frozen_at = "2026-05-06"
-judge_model = "fuel-ix/claude-haiku-4-5"
+frozen_at = "2026-05-06T22:00:00Z"
 ```
+
+The manifest carries no `judge_model` field — freeze runs the agent
+only, not the judge, so a baseline is a behavioral snapshot, not a
+graded artifact. The judge model used for any specific report is
+recorded in that report's metadata block (and in the `history.jsonl`
+row when `--record-history` is used), keeping calibration drift
+traceable at the *report* level rather than the *baseline* level.
+
+The manifest is the **authoritative index** for cross-baseline
+queries ("which baselines exist for model X? when was each frozen?").
+Each individual baseline file mirrors the `git_ref` and `frozen_at`
+fields for self-describing readability, but if the manifest and the
+file ever disagree, the manifest wins — `freeze` writes both
+together, and a manifest-only edit is the supported way to fix a
+broken provenance entry.
 
 Refresh is explicit: `steve eval baseline freeze --scenario X --model Y`
 re-runs and overwrites. The manifest entry updates atomically with the
@@ -190,9 +221,11 @@ Plain pretty-printed YAML, NOT gzipped. Reasons:
 - Plain text files give git everything it's good at — diffs, blame,
   grep across history.
 
-`serde_yaml` has been unmaintained since 2024. We use `serde-saphyr` as
-the active fork. The format choice is reversible: `Baseline:
-Serialize/Deserialize` keeps it a few-line change to swap libraries.
+We use `serde-saphyr` for YAML serialization (chosen for active
+maintenance and feature coverage as of design time; revisit if the
+ecosystem shifts). The format choice is reversible: every type that
+hits disk derives `Serialize`/`Deserialize`, so swapping serializer
+libraries is a few-line change to whichever module wires the writer.
 
 Repo size budget: ~50KB raw YAML per (scenario, model) baseline. At
 10 scenarios × 3 models = ~1.5MB total. At 50 scenarios × 5 models =
@@ -207,7 +240,7 @@ bearing for the judge) is the first lever.
 `CapturedRun` carries fields that are noise for diffs and baselines:
 exact timestamps, full duration in nanoseconds, workspace tempdir paths
 (UUID-bearing), tool-call UUIDs. A `Normalizer` helper takes a
-`CapturedRun` and produces a baseline-shaped struct that strips or
+`CapturedRun` and produces a `NormalizedTranscript` that strips or
 canonicalizes those:
 
 - Timestamps removed (sequence is implied by array order)
@@ -217,11 +250,12 @@ canonicalizes those:
 - Token counts kept (informational; tracked across runs as a usage signal)
 - Duration kept but rounded to whole milliseconds (jitter-friendly)
 
-Used at two boundaries:
+Used at two boundaries — both as a pure transformation, no I/O:
 
-1. **Freeze time:** writes the normalized form to baseline files.
-2. **Report time:** normalizes the live `CapturedRun` before passing to
-   the judge so comparison is apples-to-apples.
+1. **Freeze time:** the freeze command wraps the normalized transcript
+   in a `BaselineFile` (adding provenance) and writes that to disk.
+2. **Report time:** normalizes the live `CapturedRun` before passing
+   to the judge so comparison is apples-to-apples.
 
 ### New `Score` channel alongside existing `Outcome`
 
@@ -237,6 +271,8 @@ pub enum Axis {
     Correctness,
     Efficiency,
     Conciseness,
+    Robustness,    // for scenarios like stop-guessing-after-failures
+    Truthfulness,  // for scenarios like no-hallucinated-tool-output
     // Additional axes added by enum variant when there's a concrete
     // use case. Arbitrary user-defined axis names are deferred —
     // the per-scenario override (below) parses into this enum, so
@@ -248,9 +284,16 @@ pub enum Verdict { CurrentWins, BaselineWins, Tie }
 
 pub struct PairedScore {
     pub axis: Axis,
+    pub rationale: String,    // judge's per-axis justification (emitted before verdict — load-bearing for halo-effect mitigation; see "Halo-effect mitigation in the prompt" below)
     pub verdict: Verdict,
-    pub rationale: String,    // judge's per-axis justification
 }
+
+/// Output of one `Judge::compare` invocation: one verdict per axis the
+/// judge was asked to score on, in axis order. Type alias rather than
+/// a wrapper struct because every contextual field a caller would want
+/// (scenario, model, run_index) is already known at the call site —
+/// the verdict alone is what comes back from the LLM.
+pub type CompareVerdict = Vec<PairedScore>;
 
 pub struct ScenarioScore {
     pub scenario: String,
@@ -260,17 +303,73 @@ pub struct ScenarioScore {
     pub axes: Vec<PairedScore>,
 }
 
+/// A single agent run, normalized for diff-stable storage and apples-
+/// to-apples judge input. The per-transcript shape — captures only what
+/// the agent did, not the scenario inputs (user turns) it was responding
+/// to and not the run-level metadata (model, provenance). Where each
+/// piece lives: user_turns are on `ScenarioResults` and `BaselineFile`;
+/// model identity is on `ResultsFile` (top-level for runs) and
+/// `BaselineFile`; provenance (`git_ref`, `recorded_at`, `frozen_at`)
+/// is on `ResultsFile` and `BaselineFile`.
 pub struct NormalizedTranscript {
-    pub scenario_name: String,
-    pub model: String,
-    pub git_ref: Option<String>,    // populated for baseline files
-    pub frozen_at: Option<String>,  // populated for baseline files
-    pub user_turns: Vec<String>,
-    pub events: Vec<TranscriptEvent>,  // user_turn | tool_call | tool_result | assistant_message
+    pub events: Vec<TranscriptEvent>,  // tool_call | tool_result | assistant_message
     pub deterministic_floor_passed: bool,
     pub usage_summary: UsageSummary,   // rounded token counts, ms duration
 }
+
+/// Per-scenario container inside a `ResultsFile`. Bundles the scenario
+/// inputs (user turns) with the K transcripts produced by running the
+/// scenario K times. This is where user_turns live — they're scenario-
+/// level data (identical across the K transcripts), so storing them
+/// once at this level rather than redundantly inside each transcript
+/// is the right cardinality.
+pub struct ScenarioResults {
+    pub user_turns: Vec<String>,         // copied from scenario.toml at run time
+    pub runs: Vec<NormalizedTranscript>, // length = scenario.runs
+}
+
+/// Top-level shape of `results.yaml` (output of `steve eval run`).
+/// Multi-scenario; each scenario carries its inputs + K transcripts.
+pub struct ResultsFile {
+    pub git_ref: String,
+    pub recorded_at: String,             // ISO 8601 UTC
+    pub model: String,                   // "provider/model"
+    pub scenarios: BTreeMap<String, ScenarioResults>,
+    // BTreeMap (not HashMap) for stable scenario ordering on serialize.
+    // Per-transcript content still varies with wall-clock-affected
+    // fields the Normalizer doesn't strip (e.g., token counts), so
+    // byte-identical files require both semantic stability AND
+    // identical sampling — stable ordering is the guarantee, not
+    // byte-identical output.
+}
+
+/// Top-level shape of an individual baseline file at
+/// `eval/baselines/<scenario>/<provider>/<model>.yaml`. Single scenario,
+/// single transcript, plus the scenario's user_turns for self-describing
+/// readability (so a baseline file is independently interpretable
+/// without cross-referencing scenario.toml at the right git ref).
+/// Provenance fields here describe the file in-place; the same fields
+/// (with matching names) are mirrored into `eval/baselines/manifest.toml`,
+/// which is the authoritative index for cross-baseline queries ("which
+/// baselines exist for model X, frozen when?"). Read the manifest for
+/// indexing; read the file for the transcript.
+pub struct BaselineFile {
+    pub scenario: String,                // matches manifest's `scenario` key
+    pub model: String,                   // "provider/model"
+    pub git_ref: String,                 // commit hash when baselined
+    pub frozen_at: String,               // ISO 8601 UTC when baselined
+    pub user_turns: Vec<String>,         // copied from scenario.toml at freeze time
+    pub transcript: NormalizedTranscript,
+}
 ```
+
+`ResultsFile` and `BaselineFile` are intentionally distinct. They share
+the `NormalizedTranscript` piece — which is what actually gets
+paired-compared by the judge — but their top-level shapes serve
+different needs: one is a multi-scenario run dump, the other is a
+single-scenario frozen artifact sharded by `(scenario, model)` for
+diff-friendly refresh and selective `git checkout` when a refresh goes
+wrong.
 
 Scenarios where the deterministic floor fails are *not* graded by the
 judge — they're reported as a hard-fail in the headline (separate from
@@ -297,11 +396,14 @@ prompt is parameterized over the axes list.
 
 `scenario.toml`'s existing `runs: NonZeroUsize` field becomes load-
 bearing. Default 3, per-scenario override allowed. The
-`runner.rs:69` bail on `runs > 1` is removed.
+`runs > 1` bail in `Runner::build` is removed.
 
 For each scenario, the runner produces `Vec<CapturedRun>` of length
-`scenario.runs`. Each capture is normalized and written to the results
-file independently. Aggregation happens at report time:
+`scenario.runs`. Each capture is normalized into a `NormalizedTranscript`
+and appended to that scenario's `ScenarioResults.runs` Vec in the
+`ResultsFile`'s `scenarios` map (with the scenario's `user_turns`
+populated once at the `ScenarioResults` level). Aggregation happens
+at report time:
 
 - Each of the K new captures is paired-compared against the single
   canonical baseline → K verdicts × A axes per scenario.
@@ -314,8 +416,10 @@ file independently. Aggregation happens at report time:
 
 The baseline is a single canonical transcript, not K transcripts. This
 treats the baseline as a fixed reference and the new runs as samples of
-current behavior. Pairwise across N×N pairs adds aggregator complexity
-without obvious signal benefit.
+current behavior. Lifting `K_baseline = 1` to `K_baseline > 1` would
+require K_baseline × K_current pairwise comparisons per scenario plus
+an aggregation rule to collapse them — added complexity without
+obvious signal benefit.
 
 ## Judge
 
@@ -328,10 +432,36 @@ impl Judge {
         baseline: &NormalizedTranscript,
         current: &NormalizedTranscript,
         axes: &[Axis],
-        user_turns: &[String],
-    ) -> CompareVerdict { /* ... */ }
+        user_turns: &[String],   // from BaselineFile.user_turns (= ScenarioResults.user_turns)
+    ) -> anyhow::Result<CompareVerdict> { /* ... */ }
 }
 ```
+
+The return type is fallible because two distinct failure modes exist:
+(1) the LLM call can fail (transport, API rate limits, timeouts),
+and (2) the parser is strict — a response that puts `verdict` before
+`rationale`, omits an axis, or returns an unknown verdict variant is
+rejected as malformed (see "Halo-effect mitigation in the prompt"
+below). Successful judge opinions encode their result *inside*
+`CompareVerdict` (per-axis `Verdict::CurrentWins | BaselineWins | Tie`);
+infrastructure failures propagate as `Err`.
+
+Failure handling at the `eval report` level: retry once on transient
+LLM errors; if the second attempt also fails, mark that
+`(scenario, run-index)` cell as errored, omit it from the aggregate
+totals, and surface it in `--verbose` output. The headline is computed
+over successful comparisons only. If ALL K runs of a scenario error,
+the scenario is treated like a missing baseline (skip-with-warning).
+This keeps a single bad call from blowing up a 30-call suite while
+keeping the failure visible.
+
+`user_turns` is passed as a separate parameter rather than being read
+out of either transcript because it's *scenario-level* context, not
+per-transcript content — both the baseline and current transcripts
+were produced by responding to these same prompts, so duplicating them
+inside each transcript would be wasteful. Caller pulls them from
+`BaselineFile.user_turns` (or, equivalently, `ScenarioResults.user_turns`
+on the current side — they're guaranteed equal for the same scenario).
 
 Lives alongside the existing `Judge::evaluate` (single-transcript
 absolute judgment). The existing method stays — it's still useful for
@@ -340,24 +470,39 @@ the deterministic-floor's own LLM-graded assertions.
 
 ### Single call, structured multi-axis output
 
-One judge invocation per (scenario-pair × run-index). Returns per-axis
-verdicts plus per-axis rationale in a structured response. Schema:
+One judge invocation per `(scenario, run-index)` pair, comparing the
+baseline transcript against that run's current transcript. A single
+call covers all axes (no per-axis multiplier on call count). Returns
+per-axis verdicts plus per-axis rationale in a structured response.
+Schema:
 
 ```yaml
 correctness:
-  verdict: current_wins | baseline_wins | tie
   rationale: "Brief justification"
+  verdict: current_wins | baseline_wins | tie
 efficiency:
-  verdict: ...
   rationale: ...
+  verdict: ...
 conciseness:
-  verdict: ...
   rationale: ...
+  verdict: ...
 ```
 
-Cost shape at default settings (N=3, 10 scenarios, 3 axes):
-~30 judge calls per `steve eval` invocation. On a Haiku-class judge
-relayed through Fuel-IX, ~$0.15–$0.25 total. Affordable on every PR.
+Key order is **load-bearing**: `rationale` precedes `verdict` because LLM
+output is generated left-to-right, so emitting the rationale first
+forces the judge to commit per-axis reasoning to text *before* picking
+a winner. Putting verdict first would let the judge anchor on a winner
+and rationalize backward — defeating the halo-mitigation design. The
+prompt explicitly instructs this order, and the parser is strict about
+it (a response with verdict before rationale is rejected as
+malformed).
+
+Cost shape at default settings: `S × K` judge calls per `steve eval`
+invocation, where S = scenarios and K = runs-per-scenario. The axis
+count doesn't enter the multiplier (single call per pair, all axes
+in one structured response). At S=10 and K=3, that's 30 calls; on a
+Haiku-class judge relayed through Fuel-IX, ~$0.15–$0.25 total.
+Affordable on every PR.
 
 ### Halo-effect mitigation in the prompt
 
@@ -385,16 +530,22 @@ Default `steve eval report` output:
 ```
 Eval results — current vs baseline (frozen 2026-04-15 at abc1234)
 
-  Headline:        +2.4% net win rate (98% non-regression)
+  Headline:        +2.2% net win rate (97.8% non-regression)
   Hard floor:      10/10 scenarios passed deterministic assertions
 
   Per axis:
-    correctness:   +1.8% net win rate (won 18 / lost 12 / tied 60)
-    efficiency:    +4.1% net win rate (won 24 / lost 11 / tied 55)
-    conciseness:   +1.3% net win rate (won 14 / lost 10 / tied 66)
+    correctness:   -3.3% net win rate (won 1 / lost 2 / tied 27)
+    efficiency:    +6.7% net win rate (won 2 / lost 0 / tied 28)
+    conciseness:   +3.3% net win rate (won 1 / lost 0 / tied 29)
 
   See --verbose for per-scenario breakdown.
 ```
+
+(Numbers above are illustrative for S=10 scenarios, K=3 runs, A=3
+default axes — so per-axis totals sum to S × K = 30 and suite-wide
+totals sum to S × K × A = 90. The slight correctness regression
+paired with efficiency and conciseness gains is exactly the kind of
+multi-axis trade-off a single pass/fail headline would have hidden.)
 
 Three layers:
 
@@ -410,26 +561,32 @@ Three layers:
 Let `W`, `L`, `T` be the suite-wide totals of `CurrentWins`,
 `BaselineWins`, and `Tie` verdicts across all `S × K × A` cells.
 
-- **Net win rate** = `(W - L) / (W + L + T)` — signed; ties contribute
-  zero. Range `[-1.0, +1.0]`. This is the headline number. `+0.024`
-  reads as "current is the clear winner 2.4% more often than baseline,"
-  `-0.014` reads as "current is the clear loser 1.4% more often." All
-  ties = 0.0, no change. Random 50/50 with no ties = 0.0, no change.
+- **Net win rate** = `(W - L) / (W + L + T)` — signed; range
+  `[-1.0, +1.0]`. This is the headline number. Each tie verdict adds
+  0 to the numerator and 1 to the denominator — so ties don't push
+  the ratio in either direction, but they DO dilute it toward 0
+  (a suite of mostly ties with a small W/L imbalance produces a
+  small headline). `+0.022` reads as "current is the clear winner
+  2.2% more often than baseline," `-0.014` reads as "current is the
+  clear loser 1.4% more often." All ties = 0.0, no change. Random
+  50/50 W/L with no ties = 0.0, no change.
 - **Non-regression rate** = `(W + T) / (W + L + T)` — "how often the
   new build wasn't worse." Range `[0.0, 1.0]`. Sits beside the headline
   as a confidence check.
 
-A `60% non-regression` paired with `+2.4% net win rate` is a much weaker
-signal than `99% non-regression` with `+2.4% net win rate` — same
+A `60% non-regression` paired with `+2.2% net win rate` is a much weaker
+signal than `99% non-regression` with `+2.2% net win rate` — same
 headline, very different confidence. Both reported. Per-axis breakdowns
 use the same formulas applied to per-axis slices.
 
 ### Baseline provenance
 
-Every report's metadata block records the baseline's git ref + freeze
-date + judge model identity. This makes reports interpretable when
-read three months later. Does not affect the headline number; sits in
-the metadata block.
+Every report's metadata block records: the baseline's git ref + freeze
+date (from the baseline manifest), and the judge model used to grade
+*this report* (which is a per-report property — the baseline itself
+carries no judge attribution; see "Judge model selection" below).
+Provenance does not affect the headline number; sits in the metadata
+block to make reports interpretable when read three months later.
 
 ### History file (`eval/history.jsonl`)
 
@@ -441,16 +598,16 @@ Schema per row:
 
 ```json
 {
-  "git_ref": "abc1234",
+  "git_ref": "def5678",
   "recorded_at": "2026-05-06T14:23:00Z",
   "model": "ollama/qwen3-coder",
-  "baseline_git_ref": "main/2026-04-15",
+  "baseline_git_ref": "abc1234",
   "judge_model": "fuel-ix/claude-haiku-4-5",
-  "headline": { "net_win_rate": 0.024, "non_regression_rate": 0.98 },
+  "headline": { "net_win_rate": 0.022, "non_regression_rate": 0.978 },
   "per_axis": {
-    "correctness": { "net_win_rate": 0.018, "won": 18, "lost": 12, "tied": 60 },
-    "efficiency": { "net_win_rate": 0.041, "won": 24, "lost": 11, "tied": 55 },
-    "conciseness": { "net_win_rate": 0.013, "won": 14, "lost": 10, "tied": 66 }
+    "correctness": { "net_win_rate": -0.033, "won": 1, "lost": 2, "tied": 27 },
+    "efficiency": { "net_win_rate": 0.067, "won": 2, "lost": 0, "tied": 28 },
+    "conciseness": { "net_win_rate": 0.033, "won": 1, "lost": 0, "tied": 29 }
   },
   "deterministic_floor": { "passed": 10, "total": 10 },
   "results_file": "path/to/results.yaml"
@@ -483,35 +640,92 @@ Layout:
 3. **Per-scenario links** — table of scenarios with links into
    `eval/scenarios/<name>/scenario.toml` and the rendered transcript.
 
-Implementation: pure HTML + Chart.js via CDN, no build step. Embeds
-all data inline so the file is self-contained — can be attached to
-issues, hosted as a GitHub Pages artifact, or just opened locally.
+Implementation: pure HTML + Chart.js bundled inline (single
+self-contained file, ~200KB total). All data, JS, and styles embedded
+directly — no CDN lookups, no external assets, renders offline and in
+air-gapped CI artifacts. Tradeoff: the 200KB cost vs. a small CDN
+script tag is minor for a file generated per-eval; the offline-renders
+property earns the size back any time the file is attached to an
+issue or archived as a CI artifact.
+
+**License compliance:** Chart.js is MIT-licensed. Bundling means
+distributing it, so the generated HTML must include the upstream
+Chart.js copyright + MIT license text in an HTML comment near the
+inlined script block. This is non-negotiable for MIT compliance —
+the renderer code must check it in as a static string adjacent to the
+bundled JS so the two can never drift apart.
+
+**XSS / HTML-injection safety:** the report embeds dynamic content
+that originates from agent runs — scenario names, user turn text,
+tool call args, tool result bodies, assistant messages — any of
+which can contain `<script>`, `<img onerror=...>`, or other
+HTML/JS sequences (especially since scenarios deliberately exercise
+the agent on real code). All dynamic fields MUST be HTML-escaped
+before being inserted into the document (or, if rendered via JS,
+written via `textContent` rather than `innerHTML`). Static HTML
+chrome — headings, layout, the inlined Chart.js — is the only
+path allowed to use raw HTML. This applies to text content AND
+attribute values (a tool result containing `" onload="alert(1)`
+would escape an unquoted attribute). Treat this as a load-bearing
+invariant of the renderer; a unit test should verify that a
+transcript containing `<script>alert(1)</script>` round-trips to
+`&lt;script&gt;alert(1)&lt;/script&gt;` in the rendered output.
 
 ## CLI surface
 
 ### Verbs
 
-- `steve eval` — chains run → report against the configured baseline.
-  Default common case.
-- `steve eval run [--model X] [--out path]` — runs scenarios, writes
-  results.yaml. No judging.
-- `steve eval report <results.yaml> [--baseline path] [--verbose] [--record-history] [--html path]` —
-  runs the judge, prints layered output. `--record-history` appends a
-  row to `eval/history.jsonl`. `--html path` writes a self-contained
-  HTML report. Exit code reflects regression threshold (configurable;
-  default: any negative headline delta is exit 1).
+- `steve eval [--model X] [--scenario X] [--baselines-dir path] [--verbose] [--record-history] [--html path] [--judge-model X] [--regression-threshold F]` —
+  chains run → report against the configured baseline. Forwards all
+  relevant flags to its `run` and `report` subcommands. Default common
+  case.
+- `steve eval run [--model X] [--scenario X] [--out path]` — runs
+  scenarios K times each (K from `scenario.runs`), writes a normalized
+  results YAML file. No judging. `--out` defaults to a temp path
+  printed on stdout when not given.
+- `steve eval report <results.yaml> [--baselines-dir path] [--verbose] [--record-history] [--html path] [--judge-model X] [--regression-threshold F]` —
+  loads `results.yaml`, auto-resolves a baseline file per scenario from
+  `--baselines-dir` (default `eval/baselines/`) using the scenario name
+  + the model recorded in the results file, runs the judge, prints
+  layered output. `--record-history` appends a row to
+  `eval/history.jsonl`. `--html path` writes a self-contained HTML
+  report. `--judge-model` overrides per-scenario `judge_model` from
+  `scenario.toml`. `--regression-threshold` overrides
+  `eval.regression_threshold` in `.steve.jsonc`. Exit code reflects
+  regression threshold (default `0.0`: any negative headline delta is
+  exit 1).
 - `steve eval baseline freeze [--scenario X] [--model Y]` — runs scenarios,
-  writes baseline files, updates manifest.
+  writes baseline files, updates manifest. **No flags = all scenarios
+  with the configured default model.**
+
+The auto-resolution rule for `report` deserves spelling out: the
+results file has a top-level `model` field (e.g.,
+`ollama/qwen3-coder`); each scenario's matching baseline is looked
+up at `<baselines-dir>/<scenario>/<provider>/<model>.yaml`.
+Missing files trigger the no-baseline policy below. There is no
+per-file `--baseline` flag in v1 — multi-scenario reports need a
+directory of baseline files, not a single one. (For comparing
+against baselines from a non-default location, see the
+"Different-baselines-dir compare" row in the use case table below.)
 
 ### Use case mapping
 
 | Use case | Command |
 |----------|---------|
-| PR regression check | `steve eval` (uses checked-in baseline) |
-| Cross-model compare | `steve eval --model ollama/qwen3-coder` (compares against ollama baseline) |
-| Compare to older anchor | `git checkout v0.4.0 -- eval/baselines/ && steve eval` (uses checked-out baseline files); long-term, replaced by named anchor manifest |
-| Backtest judge changes | `steve eval report archived-results.yaml` (re-grades old transcripts) |
-| Cross-baseline comparison | `steve eval report current.yaml --baseline some-other.yaml` (any two results files) |
+| PR regression check (configured model) | `steve eval` |
+| PR regression check, non-default agent model | `steve eval --model ollama/qwen3-coder` (asks: did my code change *ollama's* behavior, comparing against the ollama baseline) |
+| Compare to older anchor | `git checkout v0.4.0 -- eval/baselines/ && steve eval` (uses checked-out baseline files); long-term, replaced by named anchor manifest (`steve-6hes`) |
+| Backtest judge changes | `steve eval report archived-results.yaml` (re-grades old transcripts under current judge prompt; baselines auto-resolve from current `eval/baselines/`) |
+| Different-baselines-dir compare | `steve eval report current.yaml --baselines-dir some-other-baselines/` (e.g., baselines from a checked-out older ref placed in a separate directory) |
+
+**True cross-model compare (model A vs model B head-to-head — e.g.,
+"is ollama better than anthropic on these scenarios?") is OUT OF SCOPE
+for v1.** The current design's baseline-shape (K=1) doesn't naturally
+serve a results-shape (K=N) on the baseline side without additional
+aggregation rules. Workaround for v1: compare each model against its
+own baseline separately; the headline deltas tell you "did my code
+change behavior" per-model but not "is A better than B." File as
+future work if the need becomes concrete.
 
 ### Baseline workflows
 
@@ -524,13 +738,13 @@ baselines. All examples below assume the configured model is
 ```
 $ steve eval baseline freeze
 $ git add eval/baselines/
-$ git commit -m "Freeze initial baselines for ollama/qwen3-coder"
+$ git commit -m "chore(eval): freeze initial baselines for ollama/qwen3-coder"
 ```
 
 Bare `baseline freeze` runs every scenario under `eval/scenarios/` once
 with the configured model, normalizes each transcript, writes one file
-per scenario to `eval/baselines/<scenario>/<model_id>.yaml`, and
-updates `eval/baselines/manifest.toml`.
+per scenario to `eval/baselines/<scenario>/<provider>/<model>.yaml`,
+and updates `eval/baselines/manifest.toml`.
 
 **Per-scenario or per-model freeze:**
 
@@ -541,9 +755,10 @@ $ steve eval baseline freeze --scenario X --model Y
 ```
 
 Filters compose. No flags = all scenarios + configured model.
-`--model` runs against models that aren't the configured default
-(useful for the cross-model-compare use case — freeze a baseline
-once per model you care about).
+`--model` lets you freeze baselines for non-default models — useful
+when you want regression-tracking against multiple agent models
+(e.g., a free local Ollama AND a paid Anthropic model) without
+swapping your default config back and forth.
 
 **Refreshing after an intentional behavior change:**
 
@@ -557,7 +772,7 @@ $ steve eval baseline freeze --scenario stop-guessing-after-failures
 $ git diff eval/baselines/stop-guessing-after-failures/
 # ...review the YAML diff: did the agent's behavior change in the way I expected?
 $ git add eval/baselines/stop-guessing-after-failures/
-$ git commit -m "Refresh baseline: stop-guessing now stops at attempt 3 (was 5)"
+$ git commit -m "chore(eval): refresh stop-guessing baseline after stop-at-3 prompt change"
 ```
 
 No `--force` flag needed; freeze always overwrites. Git's working-copy
@@ -582,7 +797,7 @@ keeps history clean.
 ```
 $ steve eval baseline freeze --model anthropic/claude-haiku-4-5
 $ git add eval/baselines/
-$ git commit -m "Add claude-haiku-4-5 baselines"
+$ git commit -m "chore(eval): add claude-haiku-4-5 baselines"
 ```
 
 Now `steve eval --model anthropic/claude-haiku-4-5` has something to
@@ -622,12 +837,16 @@ ones, compute the headline over the rest, surface the gap explicitly:
 ```
 Eval results — current vs baseline (frozen 2026-04-15 at abc1234)
 
-  Headline:        +2.4% net win rate (98% non-regression)
+  Headline:        +1.4% net win rate (98.6% non-regression)
   Skipped:         2 scenarios (no baseline for model 'ollama/qwen3-coder')
                    - find-symbol-vs-grep
                    - lsp-rename-vs-sed
                    run: steve eval baseline freeze --model ollama/qwen3-coder
 ```
+
+(Numbers above reflect the smaller effective suite: 8 scenarios × K=3 =
+24 verdicts per axis, 72 suite-wide. Different from the main example
+because the sample size is different.)
 
 If *no* scenarios have baselines for the configured model: fail loud,
 same shape as targeted-invocation. The "all-missing" case is almost
@@ -661,10 +880,13 @@ Precedence, highest first:
 3. Error: no fallback. The runner already validates judge config
    loud at startup (`Runner::build` posture); same applies here.
 
-The baseline manifest's `judge_model` field is **informational only**
-— it records which judge graded the baseline at freeze time, so a
-reviewer can see "this baseline was graded by Haiku, but my current
-report is using Sonnet — calibration may differ."
+The baseline manifest does NOT carry a `judge_model` field — freeze
+runs the agent only, not the judge, so a baseline is a behavioral
+snapshot, not a graded artifact. The judge model used for any
+specific report is recorded in that report's metadata block (and in
+the `history.jsonl` row when `--record-history` is used), so
+calibration drift across runs is traceable at the *report* level,
+not the *baseline* level.
 
 ## What stays from Phases 1–5
 
@@ -694,13 +916,16 @@ main.
 Scope:
 
 - Schema overhaul: add `PairedScore`, `ScenarioScore`, `Axis`,
-  `Verdict`, `NormalizedTranscript` types.
+  `Verdict`, `NormalizedTranscript`, `ScenarioResults`, `ResultsFile`,
+  `BaselineFile` types. The `Axis` enum is added in this phase but is
+  NOT yet wired into `scenario.toml`'s `[scoring]` block — that parser
+  lands in Phase 7 where it has a consumer (the judge).
 - `Normalizer` helper: `CapturedRun` → `NormalizedTranscript` (strips
   noise, canonicalizes paths).
 - Multi-run: honor `Scenario.runs`, runner produces `Vec<CapturedRun>`,
-  remove the `runs > 1` bail at `runner.rs:69`.
+  remove the `runs > 1` bail in `Runner::build`.
 - Baseline storage: read/write helpers for
-  `eval/baselines/<scenario>/<model>.yaml` via serde-saphyr;
+  `eval/baselines/<scenario>/<provider>/<model>.yaml` via serde-saphyr;
   `manifest.toml` reader/writer.
 - `steve eval baseline freeze` subcommand.
 - `steve eval run` subcommand (writes results.yaml; no judge).
@@ -713,8 +938,12 @@ Ships when:
   multi-run results.yaml.
 - All Phase-5 scenarios baseline successfully against a configured
   default model.
-- No reporting yet; `steve eval` without subcommand still does the
-  Phase-5 single-run pretty-JSON output (preserved for non-disruption).
+- No reporting yet; `steve eval` (no subcommand) preserves the Phase-5
+  single-run pretty-JSON output untouched. **Implementation note:** the
+  old `steve eval` path forces `runs = 1` internally regardless of
+  `scenario.runs` setting, so removing the `runs > 1` bail in
+  `Runner::build` doesn't change the legacy command's behavior.
+  Multi-run only fires through the new `steve eval run` subcommand.
 
 ### Phase 7 — Paired-Comparison Judge (`steve-xa5u`)
 
@@ -724,7 +953,8 @@ Scope:
 - Halo-mitigation prompt design (per-axis-rationale-before-verdict,
   tie as first-class, A/B order randomization).
 - Per-scenario axis override parsing in `scenario.toml`'s `[scoring]`
-  block.
+  block. Phase 6 added the `Axis` enum; this phase wires the parser
+  and threads the chosen axes into the judge prompt.
 - Unit tests on canned transcript pairs covering: clear win on each
   axis, mixed verdicts (won correctness, lost efficiency), all-tie,
   baseline-wins.
@@ -739,11 +969,13 @@ Ships when:
 
 Scope:
 
-- `steve eval report <results> [--baseline path]` subcommand.
+- `steve eval report <results> [--baselines-dir path]` subcommand
+  with auto-resolution of per-scenario baselines from the directory.
 - Layered text output (headline + per-axis + verbose per-scenario).
 - Net win rate + non-regression rate formulas.
 - Baseline provenance metadata in every report.
-- `steve eval history.jsonl` append on `--record-history` flag.
+- `eval/history.jsonl` append by `steve eval report --record-history`
+  (bare `report` is read-only against the file).
 - `steve eval report --html path` writes a self-contained HTML
   report covering the latest run + trends-over-time chart from
   `eval/history.jsonl`.
@@ -968,8 +1200,8 @@ For future reference (and to prevent re-litigating in implementation):
 | Baseline shape | Single canonical transcript, not N | 2026-05-06 |
 | Judge call structure | One call per pair, structured multi-axis output | 2026-05-06 |
 | Headline metric | Layered: net win rate + per-axis + verbose | 2026-05-06 |
-| Headline formulas | Net win rate `(W-L)/(W+L+T)` + non-regression rate `(W+T)/total` | 2026-05-06 |
-| Run/report coupling | Decoupled — same schema for baselines and run-outputs | 2026-05-06 |
+| Headline formulas | Net win rate `(W-L)/(W+L+T)` + non-regression rate `(W+T)/(W+L+T)` | 2026-05-06 |
+| Run/report coupling | Decoupled — `ResultsFile` and `BaselineFile` are distinct top-level shapes, sharing the per-transcript `NormalizedTranscript` schema | 2026-05-06 |
 | No-baseline (targeted) | Fail loud with copy-pasteable freeze command | 2026-05-06 |
 | No-baseline (whole-suite, partial) | Skip-with-warning, headline over the rest | 2026-05-06 |
 | Pass/fail assertions | Kept as deterministic floor; not headline | 2026-05-06 |
@@ -977,7 +1209,7 @@ For future reference (and to prevent re-litigating in implementation):
 | Judge model precedence | CLI flag > `scenario.toml` field > error | 2026-05-06 |
 | Custom axes | Deferred — fixed enum for v1, add variants when needed | 2026-05-06 |
 | History tracking | `eval/history.jsonl` in repo, append on `--record-history` flag only | 2026-05-06 |
-| HTML report | Self-contained single-file via `--html path`, Chart.js for trends | 2026-05-06 |
+| HTML report | Self-contained single-file via `--html path`, Chart.js bundled inline (~200KB) for offline rendering | 2026-05-06 |
 | Freeze run count | Always N=1, regardless of `scenario.runs` setting | 2026-05-06 |
 | Freeze overwrite policy | Always overwrites; `git diff` is the safety net (no `--force` flag) | 2026-05-06 |
 | External tracking tools | None (MLflow/Langfuse/OTEL considered, declined — see Considered alternatives) | 2026-05-06 |
