@@ -23,7 +23,7 @@ pub use expectations::{EvalReport, ExpectationResult, JudgeRecord, Outcome, eval
 pub use judge::{Judge, JudgeOutcome, JudgeVerdict, apply_judges};
 pub use results::{ResultsFile, ScenarioResults};
 pub use runner::Runner;
-pub use scenario::{Expectation, Scenario, Setup};
+pub use scenario::{Expectation, Scenario, Setup, discover_scenarios};
 pub use score::{Axis, CompareVerdict, PairedScore, ScenarioScore, Verdict};
 pub use transcript::{NormalizedTranscript, Normalizer, TranscriptEvent, UsageSummary};
 pub use workspace::{ScenarioWorkspace, WorkspaceSnapshot};

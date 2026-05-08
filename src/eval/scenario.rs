@@ -290,6 +290,39 @@ impl Scenario {
     }
 }
 
+/// Walk `scenarios_dir` for subdirectories that contain a `scenario.toml`.
+/// Returns `(name, scenario_toml_path)` pairs in alphabetical order by
+/// name. Missing `scenarios_dir` is treated as "no scenarios" (empty
+/// result, not an error) — this matches the freeze flow's expectation
+/// of being callable on a fresh checkout.
+pub fn discover_scenarios(scenarios_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
+    if !scenarios_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(scenarios_dir)
+        .with_context(|| format!("reading {}", scenarios_dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("iterating {}", scenarios_dir.display()))?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let manifest = path.join("scenario.toml");
+        if !manifest.is_file() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(String::from)
+            .with_context(|| format!("scenario dir {} has non-UTF-8 name", path.display()))?;
+        out.push((name, manifest));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
 impl Expectation {
     fn validate(&self) -> Result<()> {
         match self {
@@ -1320,5 +1353,47 @@ tool = "read"
         .unwrap();
         let s = Scenario::from_file(&manifest).unwrap();
         assert_eq!(s.name, "kitchen-sink");
+    }
+
+    #[test]
+    fn discover_scenarios_returns_empty_for_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let scenarios = discover_scenarios(&dir.path().join("does-not-exist")).unwrap();
+        assert!(scenarios.is_empty());
+    }
+
+    #[test]
+    fn discover_scenarios_returns_empty_for_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let scenarios = discover_scenarios(dir.path()).unwrap();
+        assert!(scenarios.is_empty());
+    }
+
+    #[test]
+    fn discover_scenarios_finds_subdirs_with_scenario_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        // Subdir with a scenario.toml — should be discovered.
+        std::fs::create_dir_all(dir.path().join("foo")).unwrap();
+        std::fs::write(dir.path().join("foo/scenario.toml"), b"# pretend manifest").unwrap();
+        // Subdir without scenario.toml — should be skipped.
+        std::fs::create_dir_all(dir.path().join("bar")).unwrap();
+        // File at top level — should be skipped (not a scenario dir).
+        std::fs::write(dir.path().join("loose.toml"), b"").unwrap();
+
+        let scenarios = discover_scenarios(dir.path()).unwrap();
+        let names: Vec<&str> = scenarios.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["foo"]);
+    }
+
+    #[test]
+    fn discover_scenarios_returns_alphabetical_order() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["zebra", "alpha", "middle"] {
+            std::fs::create_dir_all(dir.path().join(name)).unwrap();
+            std::fs::write(dir.path().join(name).join("scenario.toml"), b"#").unwrap();
+        }
+        let scenarios = discover_scenarios(dir.path()).unwrap();
+        let names: Vec<&str> = scenarios.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "middle", "zebra"]);
     }
 }
