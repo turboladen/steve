@@ -204,7 +204,10 @@ pub async fn freeze_subcommand(
                 "no scenario named {name:?} found under {}",
                 scenarios_dir.display()
             ),
-            None => anyhow::bail!("no scenarios found under {}", scenarios_dir.display()),
+            None => anyhow::bail!(
+                "no scenarios found under {} (does the directory contain <name>/scenario.toml files?)",
+                scenarios_dir.display()
+            ),
         }
     }
 

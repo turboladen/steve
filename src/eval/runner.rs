@@ -209,7 +209,7 @@ impl Runner {
     /// is independent across runs (the runner is rebuilt per run by the
     /// `eval run` subcommand), so this method exists for symmetry and as
     /// a convenience for tests that don't care about per-run isolation.
-    pub async fn run_n(
+    pub(crate) async fn run_n(
         &mut self,
         scenario: &Scenario,
         count: std::num::NonZeroUsize,
