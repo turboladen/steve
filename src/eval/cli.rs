@@ -258,3 +258,144 @@ pub async fn freeze_subcommand(
     println!("updated manifest: {}", mfst_path.display());
     Ok(())
 }
+
+#[cfg(test)]
+mod integration_tests {
+    use std::{collections::BTreeMap, path::PathBuf, time::Duration};
+
+    use serde_json::json;
+
+    use crate::{
+        eval::{
+            baseline::{BaselineFile, Manifest, ManifestEntry, baseline_path, manifest_path},
+            capture::CapturedRun,
+            results::{ResultsFile, ScenarioResults},
+            transcript::{Normalizer, TranscriptEvent},
+            workspace::WorkspaceSnapshot,
+        },
+        event::AppEvent,
+        tool::{ToolName, ToolOutput},
+    };
+
+    fn fake_captured() -> CapturedRun {
+        let mut cap = CapturedRun::new(
+            PathBuf::from("/tmp/fake-eval"),
+            WorkspaceSnapshot {
+                files: BTreeMap::new(),
+            },
+        );
+        cap.observe(&AppEvent::LlmDelta {
+            text: "Reading.".into(),
+        });
+        cap.observe(&AppEvent::LlmToolCall {
+            call_id: "uuid-1".into(),
+            tool_name: ToolName::Read,
+            arguments: json!({"path": "/tmp/fake-eval/foo.txt"}),
+        });
+        cap.observe(&AppEvent::ToolResult {
+            call_id: "uuid-1".into(),
+            tool_name: ToolName::Read,
+            output: ToolOutput {
+                title: "read".into(),
+                output: "hello".into(),
+                is_error: false,
+            },
+        });
+        cap.observe(&AppEvent::LlmFinish { usage: None });
+        cap.duration = Duration::from_millis(123);
+        cap
+    }
+
+    /// End-to-end YAML pipeline: build a fake CapturedRun, normalize it,
+    /// wrap in a BaselineFile, write to disk, read back. Verifies the
+    /// freeze-side data path.
+    #[test]
+    fn freeze_pipeline_round_trip_via_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let baselines = dir.path().to_path_buf();
+
+        let cap = fake_captured();
+        let transcript = Normalizer::normalize(&cap, true);
+
+        let baseline = BaselineFile {
+            scenario: "_fake".into(),
+            model: "ollama/qwen3-coder".into(),
+            git_ref: "abc1234".into(),
+            frozen_at: "2026-05-07T00:00:00Z".into(),
+            user_turns: vec!["Read the file.".into()],
+            transcript,
+        };
+        let path = baseline_path(&baselines, "_fake", "ollama/qwen3-coder").unwrap();
+        baseline.write_to_path(&path).unwrap();
+        assert!(path.exists());
+        assert_eq!(
+            path.strip_prefix(&baselines).unwrap(),
+            std::path::Path::new("_fake/ollama/qwen3-coder.yaml"),
+            "path layout must match the spec"
+        );
+
+        let mut manifest = Manifest::read_from_path(&manifest_path(&baselines)).unwrap();
+        manifest.upsert(ManifestEntry {
+            scenario: "_fake".into(),
+            model: "ollama/qwen3-coder".into(),
+            git_ref: "abc1234".into(),
+            frozen_at: "2026-05-07T00:00:00Z".into(),
+        });
+        manifest.write_to_path(&manifest_path(&baselines)).unwrap();
+
+        // Read everything back.
+        let back = BaselineFile::read_from_path(&path).unwrap();
+        assert_eq!(back, baseline);
+        let back_manifest = Manifest::read_from_path(&manifest_path(&baselines)).unwrap();
+        assert_eq!(back_manifest.baseline.len(), 1);
+        assert_eq!(back_manifest.baseline[0].scenario, "_fake");
+
+        // Workspace-tempdir leak check: serialized YAML must not contain
+        // the fake captured tempdir path.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !raw.contains("/tmp/fake-eval"),
+            "workspace path leaked into baseline YAML: {raw}"
+        );
+    }
+
+    /// End-to-end results pipeline: build several fake CapturedRuns,
+    /// normalize each, assemble a ResultsFile with K=3 transcripts, write
+    /// to disk, read back. Verifies the run-side data path.
+    #[test]
+    fn run_pipeline_round_trip_via_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("results.yaml");
+
+        let transcripts: Vec<_> = (0..3)
+            .map(|_| Normalizer::normalize(&fake_captured(), true))
+            .collect();
+        let mut scenarios = BTreeMap::new();
+        scenarios.insert(
+            "_fake".to_string(),
+            ScenarioResults {
+                user_turns: vec!["Read the file.".into()],
+                runs: transcripts,
+            },
+        );
+        let results = ResultsFile {
+            git_ref: "abc1234".into(),
+            recorded_at: "2026-05-07T12:00:00Z".into(),
+            model: "ollama/qwen3-coder".into(),
+            scenarios,
+        };
+        results.write_to_path(&path).unwrap();
+
+        let back = ResultsFile::read_from_path(&path).unwrap();
+        assert_eq!(back, results);
+        assert_eq!(back.scenarios.get("_fake").unwrap().runs.len(), 3);
+
+        // Sanity: each transcript has the expected event shape.
+        let evts = &back.scenarios.get("_fake").unwrap().runs[0].events;
+        assert!(evts.iter().any(|e| matches!(e, TranscriptEvent::ToolCall { tool_name, .. } if *tool_name == ToolName::Read)));
+        assert!(
+            evts.iter()
+                .any(|e| matches!(e, TranscriptEvent::AssistantMessage { .. }))
+        );
+    }
+}
