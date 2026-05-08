@@ -11,6 +11,7 @@ pub mod expectations;
 pub mod judge;
 pub mod runner;
 pub mod scenario;
+pub mod score;
 pub mod workspace;
 
 pub use capture::{CapturedRun, RecordedToolCall};
@@ -18,4 +19,5 @@ pub use expectations::{EvalReport, ExpectationResult, JudgeRecord, Outcome, eval
 pub use judge::{Judge, JudgeOutcome, JudgeVerdict, apply_judges};
 pub use runner::Runner;
 pub use scenario::{Expectation, Scenario, Setup};
+pub use score::{Axis, CompareVerdict, PairedScore, ScenarioScore, Verdict};
 pub use workspace::{ScenarioWorkspace, WorkspaceSnapshot};
