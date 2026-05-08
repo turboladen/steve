@@ -17,7 +17,7 @@ pub mod score;
 pub mod transcript;
 pub mod workspace;
 
-pub use baseline::{BaselineFile, baseline_path};
+pub use baseline::{BaselineFile, Manifest, ManifestEntry, baseline_path, manifest_path};
 pub use capture::{CapturedRun, RecordedToolCall};
 pub use expectations::{EvalReport, ExpectationResult, JudgeRecord, Outcome, evaluate};
 pub use judge::{Judge, JudgeOutcome, JudgeVerdict, apply_judges};

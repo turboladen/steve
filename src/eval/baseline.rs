@@ -82,6 +82,91 @@ pub fn baseline_path(baselines_dir: &Path, scenario: &str, model: &str) -> Resul
         .join(format!("{model_id}.yaml")))
 }
 
+/// Authoritative cross-baseline provenance index. Lives at
+/// `eval/baselines/manifest.toml`. The same fields are mirrored into
+/// each individual `BaselineFile` for self-describing readability,
+/// but the manifest is the source of truth for "which baselines
+/// exist for model X, frozen when?" queries.
+///
+/// No `judge_model` field — freeze runs the agent only, not the judge,
+/// so a baseline is a behavioral snapshot, not a graded artifact.
+/// The judge model used for any specific report is recorded in that
+/// report's metadata block (Phase 8).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Manifest {
+    /// One entry per (scenario, model) pair. The TOML idiom is
+    /// `[[baseline]]` (array of tables); `serde(rename = "baseline")` is
+    /// not needed because the field name already matches the array
+    /// element name.
+    #[serde(default)]
+    pub baseline: Vec<ManifestEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestEntry {
+    pub scenario: String,
+    pub model: String,
+    pub git_ref: String,
+    pub frozen_at: String, // ISO 8601 UTC
+}
+
+impl Manifest {
+    pub fn to_toml_string(&self) -> Result<String> {
+        toml::to_string_pretty(self).context("serializing Manifest to TOML")
+    }
+
+    pub fn from_toml_str(s: &str) -> Result<Self> {
+        toml::from_str(s).context("parsing Manifest from TOML")
+    }
+
+    pub fn write_to_path(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating parent dir for {}", path.display()))?;
+        }
+        std::fs::write(path, self.to_toml_string()?)
+            .with_context(|| format!("writing manifest TOML to {}", path.display()))
+    }
+
+    /// Read the manifest from disk. Returns `Manifest::default()` (empty)
+    /// if the path does not exist — the freeze flow blindly does
+    /// read-modify-write, and a fresh checkout has no manifest yet.
+    /// Other I/O errors (permission denied, partial read) propagate.
+    pub fn read_from_path(path: &Path) -> Result<Self> {
+        match std::fs::read_to_string(path) {
+            Ok(s) => Self::from_toml_str(&s),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(anyhow::Error::from(e)
+                .context(format!("reading manifest TOML from {}", path.display()))),
+        }
+    }
+
+    /// Composite key is (scenario, model). Matching entry is replaced;
+    /// non-matching entries are unchanged. New entries are appended at
+    /// the end (no implicit sort — manifest order reflects freeze order,
+    /// which has minor diagnostic value for "which scenario was frozen
+    /// most recently").
+    pub fn upsert(&mut self, entry: ManifestEntry) {
+        if let Some(existing) = self
+            .baseline
+            .iter_mut()
+            .find(|e| e.scenario == entry.scenario && e.model == entry.model)
+        {
+            *existing = entry;
+        } else {
+            self.baseline.push(entry);
+        }
+    }
+}
+
+/// Resolve the manifest path rooted at `baselines_dir` ->
+/// `baselines_dir/manifest.toml`.
+pub fn manifest_path(baselines_dir: &Path) -> PathBuf {
+    baselines_dir.join("manifest.toml")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +279,126 @@ mod tests {
             user_turns_idx < transcript_idx,
             "user_turns must serialize at the BaselineFile level (before transcript:): {yaml}"
         );
+    }
+
+    #[test]
+    fn manifest_round_trips_via_toml() {
+        let m = Manifest {
+            baseline: vec![
+                ManifestEntry {
+                    scenario: "_smoke".into(),
+                    model: "ollama/qwen3-coder".into(),
+                    git_ref: "abc1234".into(),
+                    frozen_at: "2026-05-07T00:00:00Z".into(),
+                },
+                ManifestEntry {
+                    scenario: "no-hallucinated-tool-output".into(),
+                    model: "ollama/qwen3-coder".into(),
+                    git_ref: "abc1234".into(),
+                    frozen_at: "2026-05-07T00:00:00Z".into(),
+                },
+            ],
+        };
+        let s = m.to_toml_string().unwrap();
+        let back = Manifest::from_toml_str(&s).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn manifest_empty_round_trips() {
+        let m = Manifest { baseline: vec![] };
+        let s = m.to_toml_string().unwrap();
+        let back = Manifest::from_toml_str(&s).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn manifest_upsert_replaces_matching_scenario_and_model() {
+        let mut m = Manifest {
+            baseline: vec![ManifestEntry {
+                scenario: "_smoke".into(),
+                model: "ollama/qwen3-coder".into(),
+                git_ref: "old".into(),
+                frozen_at: "2026-01-01T00:00:00Z".into(),
+            }],
+        };
+        m.upsert(ManifestEntry {
+            scenario: "_smoke".into(),
+            model: "ollama/qwen3-coder".into(),
+            git_ref: "new".into(),
+            frozen_at: "2026-05-07T00:00:00Z".into(),
+        });
+        assert_eq!(
+            m.baseline.len(),
+            1,
+            "upsert must not duplicate existing rows"
+        );
+        assert_eq!(m.baseline[0].git_ref, "new");
+        assert_eq!(m.baseline[0].frozen_at, "2026-05-07T00:00:00Z");
+    }
+
+    #[test]
+    fn manifest_upsert_appends_when_no_match() {
+        let mut m = Manifest {
+            baseline: vec![ManifestEntry {
+                scenario: "_smoke".into(),
+                model: "ollama/qwen3-coder".into(),
+                git_ref: "x".into(),
+                frozen_at: "y".into(),
+            }],
+        };
+        m.upsert(ManifestEntry {
+            scenario: "different".into(),
+            model: "ollama/qwen3-coder".into(),
+            git_ref: "z".into(),
+            frozen_at: "w".into(),
+        });
+        assert_eq!(m.baseline.len(), 2);
+    }
+
+    #[test]
+    fn manifest_upsert_treats_scenario_and_model_as_composite_key() {
+        // Same scenario, different model -> two entries.
+        let mut m = Manifest { baseline: vec![] };
+        m.upsert(ManifestEntry {
+            scenario: "_smoke".into(),
+            model: "ollama/qwen3-coder".into(),
+            git_ref: "x".into(),
+            frozen_at: "y".into(),
+        });
+        m.upsert(ManifestEntry {
+            scenario: "_smoke".into(),
+            model: "anthropic/claude-haiku-4-5".into(),
+            git_ref: "x".into(),
+            frozen_at: "y".into(),
+        });
+        assert_eq!(m.baseline.len(), 2);
+    }
+
+    #[test]
+    fn manifest_write_then_read_via_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest.toml");
+        let m = Manifest {
+            baseline: vec![ManifestEntry {
+                scenario: "_smoke".into(),
+                model: "ollama/qwen3-coder".into(),
+                git_ref: "abc1234".into(),
+                frozen_at: "2026-05-07T00:00:00Z".into(),
+            }],
+        };
+        m.write_to_path(&path).unwrap();
+        let back = Manifest::read_from_path(&path).unwrap();
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn manifest_read_from_missing_path_returns_empty() {
+        // Bare-metal `eval baseline freeze` against a fresh checkout has no
+        // manifest yet; read_from_path must not error in that case so the
+        // freeze flow can do read-modify-write blindly.
+        let dir = tempfile::tempdir().unwrap();
+        let m = Manifest::read_from_path(&dir.path().join("does-not-exist.toml")).unwrap();
+        assert!(m.baseline.is_empty());
     }
 }
