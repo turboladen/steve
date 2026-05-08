@@ -167,3 +167,94 @@ fn current_git_ref() -> Option<String> {
     let s = String::from_utf8(output.stdout).ok()?.trim().to_string();
     if s.is_empty() { None } else { Some(s) }
 }
+
+/// `steve eval baseline freeze` — captures one fresh transcript per
+/// (scenario, model) and writes it to
+/// `eval/baselines/<scenario>/<provider>/<model>.yaml`, plus a manifest
+/// entry.
+///
+/// **K=1 regardless of `scenario.runs`.** Per spec: the baseline is the
+/// fixed reference; the current side runs K samples and aggregates.
+/// Doing N runs at freeze time would require defining "best run," which
+/// requires a judge — circular, since the judge is what we're trying to
+/// use the baseline to enable.
+///
+/// Filters compose: `(scenario_filter, model)` together select what to
+/// freeze. `scenario_filter = None` runs every scenario.
+pub async fn freeze_subcommand(
+    scenarios_dir: &Path,
+    baselines_dir: &Path,
+    scenario_filter: Option<&str>,
+    model: &str,
+) -> Result<()> {
+    use crate::eval::{
+        baseline::{BaselineFile, Manifest, ManifestEntry, baseline_path, manifest_path},
+        scenario::discover_scenarios,
+        transcript::Normalizer,
+    };
+
+    let discovered = discover_scenarios(scenarios_dir)?;
+    let selected: Vec<(String, std::path::PathBuf)> = match scenario_filter {
+        Some(name) => discovered.into_iter().filter(|(n, _)| n == name).collect(),
+        None => discovered,
+    };
+    if selected.is_empty() {
+        match scenario_filter {
+            Some(name) => anyhow::bail!(
+                "no scenario named {name:?} found under {}",
+                scenarios_dir.display()
+            ),
+            None => anyhow::bail!("no scenarios found under {}", scenarios_dir.display()),
+        }
+    }
+
+    // Read-modify-write the manifest. read_from_path returns Manifest::default()
+    // on NotFound, so the fresh-checkout case Just Works.
+    let mfst_path = manifest_path(baselines_dir);
+    let mut manifest = Manifest::read_from_path(&mfst_path)?;
+
+    let git_ref = current_git_ref().unwrap_or_else(|| "unknown".to_string());
+    let frozen_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+    for (name, scenario_path) in &selected {
+        let scenario = Scenario::from_file(scenario_path)
+            .with_context(|| format!("loading scenario {}", scenario_path.display()))?;
+        let scenario_dir = scenario_path
+            .parent()
+            .with_context(|| format!("scenario path has no parent: {}", scenario_path.display()))?;
+
+        let mut runner = Runner::build(&scenario, scenario_dir, model)
+            .with_context(|| format!("building runner for {name}"))?;
+        let captured = runner
+            .run(&scenario)
+            .await
+            .with_context(|| format!("running scenario {name} for freeze"))?;
+        let report = evaluate(&scenario, &captured);
+        let floor_passed = report.passed() && captured.completed_normally();
+        let transcript = Normalizer::normalize(&captured, floor_passed);
+
+        let baseline = BaselineFile {
+            scenario: name.clone(),
+            model: model.to_string(),
+            git_ref: git_ref.clone(),
+            frozen_at: frozen_at.clone(),
+            user_turns: scenario.user_turns.clone(),
+            transcript,
+        };
+        let path = baseline_path(baselines_dir, name, model)?;
+        baseline.write_to_path(&path)?;
+
+        manifest.upsert(ManifestEntry {
+            scenario: name.clone(),
+            model: model.to_string(),
+            git_ref: git_ref.clone(),
+            frozen_at: frozen_at.clone(),
+        });
+
+        println!("froze {name} -> {}", path.display());
+    }
+
+    manifest.write_to_path(&mfst_path)?;
+    println!("updated manifest: {}", mfst_path.display());
+    Ok(())
+}
