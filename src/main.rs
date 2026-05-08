@@ -22,21 +22,75 @@ enum Commands {
         #[command(subcommand)]
         command: steve::cli::TaskCommand,
     },
-    /// Run one eval scenario end-to-end and emit the captured trace as JSON
-    /// (chat/coding regression harness — see `eval/scenarios/_smoke/`).
-    Eval {
-        /// Path to the `scenario.toml` file inside a scenario directory.
-        scenario: std::path::PathBuf,
+    /// Run scenarios. Without a sub-subcommand, runs ONE scenario
+    /// end-to-end and emits the captured trace as JSON (the existing
+    /// Phase-5 path; transitional, retired in Phase 8).
+    Eval(EvalArgs),
+}
+
+/// `args_conflicts_with_subcommands` lets us keep the existing positional
+/// `<scenario>` form (`steve eval scenarios/_smoke/scenario.toml --model X`,
+/// the Phase-5 dev loop) while also offering the new sub-subcommands.
+/// When a sub-subcommand is given, the positional args are not allowed
+/// (and vice versa). The positional form is transitional — Phase 8
+/// retires it.
+#[derive(clap::Args)]
+#[command(args_conflicts_with_subcommands = true)]
+struct EvalArgs {
+    /// Phase-5 single-shot path: `scenario.toml` to run end-to-end with a
+    /// captured-trace JSON dump on stdout. Mutually exclusive with the
+    /// sub-subcommands below. Internally forces runs = 1 regardless of
+    /// `scenario.runs`. Transitional; Phase 8 retires this shape.
+    #[arg(value_name = "SCENARIO")]
+    scenario: Option<std::path::PathBuf>,
+    /// Model to run against, in `provider/model_id` format. Required for
+    /// the positional form.
+    #[arg(long)]
+    model: Option<String>,
+    /// Override the judge model for `Judge` expectations (positional form).
+    #[arg(long)]
+    judge_model: Option<String>,
+    #[command(subcommand)]
+    command: Option<EvalSubcommand>,
+}
+
+#[derive(clap::Subcommand)]
+enum EvalSubcommand {
+    /// Run scenarios K times each (K from `scenario.runs`), writing a
+    /// normalized results YAML. No judging.
+    Run {
+        /// Scenario name (e.g. `_smoke`). When omitted, runs every
+        /// scenario under `eval/scenarios/`.
+        #[arg(long)]
+        scenario: Option<String>,
         /// Model to run against, in `provider/model_id` format.
         #[arg(long)]
         model: String,
-        /// Override the judge model for any `Judge` expectation this run.
-        /// Format: `provider/model_id`. When omitted, falls back to a
-        /// per-expectation `judge_model`, then the scenario-level
-        /// `judge_model`; if none of the three is set, Judge expectations
-        /// fail loudly. There is no hardcoded default.
+        /// Output path for the results YAML. Defaults to a timestamped
+        /// path in the current directory.
         #[arg(long)]
-        judge_model: Option<String>,
+        out: Option<std::path::PathBuf>,
+    },
+    /// Manage frozen baselines.
+    Baseline {
+        #[command(subcommand)]
+        command: BaselineSubcommand,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum BaselineSubcommand {
+    /// Freeze (capture and overwrite) baseline files for selected scenarios.
+    /// `K = 1` regardless of `scenario.runs`; the baseline is the fixed
+    /// reference, not a multi-sample artifact. No flags = all scenarios
+    /// with the supplied (or configured-default) model.
+    Freeze {
+        /// Scenario name. When omitted, freezes every scenario.
+        #[arg(long)]
+        scenario: Option<String>,
+        /// Model to freeze for, in `provider/model_id` format.
+        #[arg(long)]
+        model: String,
     },
 }
 
@@ -85,12 +139,8 @@ async fn main() -> Result<()> {
         Some(Commands::Task { command }) => {
             return steve::cli::run_task(command);
         }
-        Some(Commands::Eval {
-            scenario,
-            model,
-            judge_model,
-        }) => {
-            return steve::eval::cli::run_one(&scenario, &model, judge_model.as_deref()).await;
+        Some(Commands::Eval(args)) => {
+            return dispatch_eval(args).await;
         }
         None => {}
     }
@@ -166,4 +216,56 @@ async fn main() -> Result<()> {
     usage_handle.shutdown_and_wait();
     tracing::info!("steve shutting down");
     Ok(())
+}
+
+async fn dispatch_eval(args: EvalArgs) -> Result<()> {
+    let scenarios_dir = std::path::Path::new("eval/scenarios");
+    let baselines_dir = std::path::Path::new("eval/baselines");
+
+    // Sub-subcommand path — new shapes.
+    if let Some(sub) = args.command {
+        match sub {
+            EvalSubcommand::Run {
+                scenario,
+                model,
+                out,
+            } => {
+                let out_path = out.unwrap_or_else(|| {
+                    let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+                    std::path::PathBuf::from(format!("eval-results-{ts}.yaml"))
+                });
+                return steve::eval::cli::run_subcommand(
+                    scenarios_dir,
+                    scenario.as_deref(),
+                    &model,
+                    &out_path,
+                )
+                .await;
+            }
+            EvalSubcommand::Baseline { command } => match command {
+                BaselineSubcommand::Freeze { scenario, model } => {
+                    return steve::eval::cli::freeze_subcommand(
+                        scenarios_dir,
+                        baselines_dir,
+                        scenario.as_deref(),
+                        &model,
+                    )
+                    .await;
+                }
+            },
+        }
+    }
+
+    // Phase-5 positional path — preserved through Phase 6, retired in Phase 8.
+    // Required: scenario + --model.
+    let Some(scenario) = args.scenario else {
+        anyhow::bail!(
+            "supply a scenario path (e.g. 'steve eval eval/scenarios/_smoke/scenario.toml --model X') \
+             or use a sub-subcommand ('steve eval run', 'steve eval baseline freeze')"
+        );
+    };
+    let Some(model) = args.model else {
+        anyhow::bail!("'steve eval <scenario>' requires --model");
+    };
+    steve::eval::cli::run_one(&scenario, &model, args.judge_model.as_deref()).await
 }
