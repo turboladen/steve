@@ -21,5 +21,5 @@ pub use judge::{Judge, JudgeOutcome, JudgeVerdict, apply_judges};
 pub use runner::Runner;
 pub use scenario::{Expectation, Scenario, Setup};
 pub use score::{Axis, CompareVerdict, PairedScore, ScenarioScore, Verdict};
-pub use transcript::{NormalizedTranscript, TranscriptEvent, UsageSummary};
+pub use transcript::{NormalizedTranscript, Normalizer, TranscriptEvent, UsageSummary};
 pub use workspace::{ScenarioWorkspace, WorkspaceSnapshot};
