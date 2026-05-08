@@ -61,20 +61,6 @@ impl Runner {
     /// must be in `provider/model_id` format and the provider must be
     /// resolvable from the user's global config.
     pub fn build(scenario: &Scenario, scenario_dir: &Path, cli_model: &str) -> Result<Self> {
-        // Multi-run support (`runs > 1` with majority-pass semantics) lands
-        // alongside Phase 6's JSONL+compare work — the output shape for N
-        // captures + N reports is a Phase 6 design decision. Until then,
-        // fail loudly so a `runs = 3` scenario doesn't silently report a
-        // single-run verdict as if it were the majority result.
-        if scenario.runs.get() > 1 {
-            anyhow::bail!(
-                "scenario {:?} sets runs={} but multi-run execution is not yet implemented \
-                 (tracked as steve-paeu, blocks Phase 6); rerun with runs=1 or omit the field",
-                scenario.name,
-                scenario.runs.get()
-            );
-        }
-
         let workspace = ScenarioWorkspace::build(scenario_dir, &scenario.setup)
             .with_context(|| format!("building workspace for scenario {}", scenario.name))?;
 
@@ -215,6 +201,25 @@ impl Runner {
         captured.duration = started_at.elapsed();
         Ok(captured)
     }
+
+    /// Drive the same scenario `count` times, returning one `CapturedRun`
+    /// per run. Each run reuses the SAME `App` and SAME workspace tempdir
+    /// — the agent's conversation history persists across runs unless the
+    /// caller re-builds the Runner. For Phase 6, every multi-run scenario
+    /// is independent across runs (the runner is rebuilt per run by the
+    /// `eval run` subcommand), so this method exists for symmetry and as
+    /// a convenience for tests that don't care about per-run isolation.
+    pub async fn run_n(
+        &mut self,
+        scenario: &Scenario,
+        count: std::num::NonZeroUsize,
+    ) -> Result<Vec<CapturedRun>> {
+        let mut out = Vec::with_capacity(count.get());
+        for _ in 0..count.get() {
+            out.push(self.run(scenario).await?);
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -249,20 +254,22 @@ mod tests {
         }
     }
 
-    /// Multi-run scenarios fail loud at build time so a `runs = 3` scenario
-    /// can't silently report a single-run verdict as if it were the
-    /// majority. Tracked as steve-paeu (Phase 6 work).
-    #[test]
-    fn build_bails_when_runs_greater_than_one() {
+    /// Multi-run scenarios used to bail at build time pending Phase 6 work.
+    /// Phase 6 lifted the restriction; build now succeeds for runs > 1.
+    #[tokio::test]
+    async fn build_succeeds_for_runs_greater_than_one() {
         let scenario_dir = tempfile::tempdir().unwrap();
         let scenario = scenario_with_runs(3);
-        let chain = match Runner::build(&scenario, scenario_dir.path(), "fake/model") {
-            Ok(_) => panic!("expected runs=3 to bail at build time"),
+        // Build will still fail downstream because no provider is configured
+        // in the test env, but it must NOT fail with the "multi-run not
+        // implemented" message — that's the regression gate.
+        let err = match Runner::build(&scenario, scenario_dir.path(), "fake/model") {
+            Ok(_) => return, // happy path: build succeeded outright (unlikely without API keys)
             Err(e) => format!("{e:#}"),
         };
         assert!(
-            chain.contains("runs=3") && chain.contains("multi-run"),
-            "expected multi-run bail message: {chain}"
+            !err.contains("multi-run execution is not yet implemented"),
+            "the runs>1 bail must be removed; got: {err}"
         );
     }
 
