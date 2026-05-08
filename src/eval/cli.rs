@@ -63,3 +63,107 @@ pub async fn run_one(scenario_path: &Path, model: &str, judge_model: Option<&str
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
 }
+
+/// `steve eval run` — runs scenarios K times each (K from `scenario.runs`),
+/// writes a normalized `ResultsFile` YAML. No judging.
+///
+/// `scenario_filter` is the `--scenario` value (a name like "_smoke", not
+/// a path). When `None`, every scenario under `scenarios_dir` is run.
+/// `out_path` is where to write the YAML.
+pub async fn run_subcommand(
+    scenarios_dir: &Path,
+    scenario_filter: Option<&str>,
+    model: &str,
+    out_path: &Path,
+) -> Result<()> {
+    use std::collections::BTreeMap;
+
+    use crate::eval::{
+        results::{ResultsFile, ScenarioResults},
+        scenario::discover_scenarios,
+        transcript::Normalizer,
+    };
+
+    let discovered = discover_scenarios(scenarios_dir)?;
+    let selected: Vec<(String, std::path::PathBuf)> = match scenario_filter {
+        Some(name) => discovered.into_iter().filter(|(n, _)| n == name).collect(),
+        None => discovered,
+    };
+    if selected.is_empty() {
+        match scenario_filter {
+            Some(name) => anyhow::bail!(
+                "no scenario named {name:?} found under {}",
+                scenarios_dir.display()
+            ),
+            None => anyhow::bail!(
+                "no scenarios found under {} (does the directory contain <name>/scenario.toml files?)",
+                scenarios_dir.display()
+            ),
+        }
+    }
+
+    let mut scenarios_out: BTreeMap<String, ScenarioResults> = BTreeMap::new();
+
+    for (name, scenario_path) in &selected {
+        let scenario = Scenario::from_file(scenario_path)
+            .with_context(|| format!("loading scenario {}", scenario_path.display()))?;
+        let scenario_dir = scenario_path
+            .parent()
+            .with_context(|| format!("scenario path has no parent: {}", scenario_path.display()))?;
+
+        let mut transcripts = Vec::with_capacity(scenario.runs.get());
+        for run_idx in 0..scenario.runs.get() {
+            // Fresh Runner per run -> fresh tempdir workspace. Without this,
+            // `setup.shell` mutations from a prior run would persist into
+            // the next run's working state. Each run is a clean sample.
+            let mut runner = Runner::build(&scenario, scenario_dir, model)
+                .with_context(|| format!("building runner for {name} run #{}", run_idx + 1))?;
+            let captured = runner
+                .run(&scenario)
+                .await
+                .with_context(|| format!("running scenario {name} run #{}", run_idx + 1))?;
+            // Compute deterministic-floor verdict the same way `run_one` does:
+            // expectations.passed() && captured.completed_normally().
+            let report = evaluate(&scenario, &captured);
+            let floor_passed = report.passed() && captured.completed_normally();
+            transcripts.push(Normalizer::normalize(&captured, floor_passed));
+        }
+
+        scenarios_out.insert(
+            name.clone(),
+            ScenarioResults {
+                user_turns: scenario.user_turns.clone(),
+                runs: transcripts,
+            },
+        );
+    }
+
+    let git_ref = current_git_ref().unwrap_or_else(|| "unknown".to_string());
+    let recorded_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let results = ResultsFile {
+        git_ref,
+        recorded_at,
+        model: model.to_string(),
+        scenarios: scenarios_out,
+    };
+    results.write_to_path(out_path)?;
+    println!("wrote results to {}", out_path.display());
+    Ok(())
+}
+
+/// Best-effort current git ref (short hash). Returns `None` outside a git
+/// repo or if `git` is missing — callers fall back to `"unknown"` rather
+/// than failing the whole eval. The build script's STEVE_GIT_REV is at
+/// build time; this is the runtime ref of the workspace at run time, so
+/// shelling out is the correct approach.
+fn current_git_ref() -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
