@@ -54,7 +54,12 @@ pub struct Scenario {
 }
 
 fn default_runs() -> NonZeroUsize {
-    NonZeroUsize::new(1).expect("1 != 0")
+    // Per spec: "Default 3, per-scenario override allowed." Multi-run
+    // is the new norm for the paired-comparison pivot; the existing
+    // Phase-5 `steve eval <scenario.toml>` path (transitional until
+    // Phase 8 retires it) forces runs = 1 internally via cli::run_one,
+    // so this default only fires through the new `eval run` subcommand.
+    NonZeroUsize::new(3).expect("3 != 0")
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -430,7 +435,11 @@ judge_model = "anthropic/claude-haiku-4-5"
         let s = Scenario::from_toml_str(minimal_scenario_toml()).unwrap();
         assert_eq!(s.name, "minimal");
         assert_eq!(s.description, "smallest valid scenario");
-        assert_eq!(s.runs.get(), 1, "default runs = 1 when omitted");
+        assert_eq!(
+            s.runs.get(),
+            3,
+            "default runs = 3 when omitted (Phase 6: multi-run is the norm)"
+        );
         assert!(s.setup.copy_fixtures.is_empty());
         assert!(s.setup.shell.is_empty());
         assert_eq!(s.user_turns, vec!["hello"]);
