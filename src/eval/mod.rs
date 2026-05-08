@@ -5,6 +5,7 @@
 //! rule-based assertions handle structural facts (tool-call sequence, file diffs); a small
 //! LLM-as-judge handles behavioral checks where idiom drift makes regex matching brittle.
 
+pub mod baseline;
 pub mod capture;
 pub mod cli;
 pub mod expectations;
@@ -16,6 +17,7 @@ pub mod score;
 pub mod transcript;
 pub mod workspace;
 
+pub use baseline::{BaselineFile, baseline_path};
 pub use capture::{CapturedRun, RecordedToolCall};
 pub use expectations::{EvalReport, ExpectationResult, JudgeRecord, Outcome, evaluate};
 pub use judge::{Judge, JudgeOutcome, JudgeVerdict, apply_judges};
