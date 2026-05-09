@@ -240,9 +240,21 @@ async fn dispatch_eval(args: EvalArgs) -> Result<()> {
     // (and ScenarioWorkspace::build's symlink-rejection rationale: a
     // symlinked scenarios dir could exfiltrate file content from outside
     // the repo).
-    let scenarios_dir_ok = std::fs::symlink_metadata(&scenarios_dir)
-        .map(|m| m.file_type().is_dir())
-        .unwrap_or(false);
+    //
+    // Distinguish NotFound (the misuse case we want to give a friendly
+    // message for) from other I/O errors (permission denied, transient
+    // failure) so we don't mask real diagnostics behind a generic
+    // "not found" message.
+    let scenarios_dir_ok = match std::fs::symlink_metadata(&scenarios_dir) {
+        Ok(m) => m.file_type().is_dir(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            return Err(anyhow::Error::from(e).context(format!(
+                "checking eval/scenarios at {}",
+                scenarios_dir.display()
+            )));
+        }
+    };
     if !scenarios_dir_ok {
         anyhow::bail!(
             "eval/scenarios not found (or is a symlink) at {} (detected project root: {}). \

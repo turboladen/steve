@@ -299,7 +299,21 @@ impl Scenario {
 /// result, not an error) — this matches the freeze flow's expectation
 /// of being callable on a fresh checkout.
 pub fn discover_scenarios(scenarios_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
-    if !scenarios_dir.exists() {
+    // Use symlink_metadata so a symlinked scenarios root is rejected —
+    // entries inside are already symlink-checked below; this closes the
+    // gap at the root level. NotFound is treated as "no scenarios" so
+    // a fresh checkout (or running outside the repo) returns empty
+    // rather than erroring; non-NotFound errors propagate with context.
+    let root_ft = match std::fs::symlink_metadata(scenarios_dir) {
+        Ok(m) => m.file_type(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(
+                anyhow::Error::from(e).context(format!("checking {}", scenarios_dir.display()))
+            );
+        }
+    };
+    if root_ft.is_symlink() || !root_ft.is_dir() {
         return Ok(Vec::new());
     }
     let mut out = Vec::new();
@@ -1412,6 +1426,29 @@ tool = "read"
         let scenarios = discover_scenarios(dir.path()).unwrap();
         let names: Vec<&str> = scenarios.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, vec!["alpha", "middle", "zebra"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_scenarios_returns_empty_for_symlinked_root() {
+        // The discovery root itself is a symlink — same exfiltration
+        // concern as for symlinked entries inside, so silently treat it
+        // as "no scenarios" (the dispatch_eval guard surfaces the
+        // user-facing error).
+        let target = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(target.path().join("foo")).unwrap();
+        std::fs::write(target.path().join("foo/scenario.toml"), b"#").unwrap();
+
+        let parent = tempfile::tempdir().unwrap();
+        let symlinked_root = parent.path().join("scenarios-symlink");
+        std::os::unix::fs::symlink(target.path(), &symlinked_root).unwrap();
+
+        let scenarios = discover_scenarios(&symlinked_root).unwrap();
+        assert!(
+            scenarios.is_empty(),
+            "symlinked discovery root must be rejected, got: {:?}",
+            scenarios
+        );
     }
 
     #[cfg(unix)]
