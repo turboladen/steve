@@ -234,9 +234,18 @@ async fn dispatch_eval(args: EvalArgs) -> Result<()> {
     // *will* find but which has no eval/scenarios). Without this guard the
     // user would see a misleading "no scenarios found" error pointing at
     // a directory that doesn't even exist.
-    if !scenarios_dir.exists() {
+    //
+    // Use symlink_metadata + is_dir() rather than exists() so a symlinked
+    // eval/scenarios is rejected — matching discover_scenarios's posture
+    // (and ScenarioWorkspace::build's symlink-rejection rationale: a
+    // symlinked scenarios dir could exfiltrate file content from outside
+    // the repo).
+    let scenarios_dir_ok = std::fs::symlink_metadata(&scenarios_dir)
+        .map(|m| m.file_type().is_dir())
+        .unwrap_or(false);
+    if !scenarios_dir_ok {
         anyhow::bail!(
-            "eval/scenarios not found at {} (detected project root: {}). \
+            "eval/scenarios not found (or is a symlink) at {} (detected project root: {}). \
              Run `steve eval ...` from inside the steve repository.",
             scenarios_dir.display(),
             project.root.display()
