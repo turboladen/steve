@@ -48,8 +48,8 @@ pub enum TranscriptEvent {
 /// signal. Token counts are tracked across runs as a usage signal but are
 /// NOT used by the judge (efficiency on tool-call count is a different
 /// dimension from token efficiency, and conflating them muddies the axis).
-/// `duration_ms` is rounded to whole milliseconds so jitter doesn't dirty
-/// the diff.
+/// `duration_ms` is truncated to whole milliseconds (via `Duration::as_millis`)
+/// so sub-ms jitter doesn't dirty the diff.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UsageSummary {
@@ -463,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_rounds_duration_to_whole_milliseconds() {
+    fn normalize_truncates_duration_to_whole_milliseconds() {
         let mut cap = captured_with_workspace("/tmp/eval-x");
         cap.duration = Duration::from_micros(1_234_567); // 1234.567 ms
         let t = Normalizer::normalize(&cap, true);

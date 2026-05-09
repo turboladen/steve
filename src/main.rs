@@ -30,7 +30,7 @@ enum Commands {
 }
 
 /// `args_conflicts_with_subcommands` lets us keep the existing positional
-/// `<scenario>` form (`steve eval scenarios/_smoke/scenario.toml --model X`)
+/// `<scenario>` form (`steve eval eval/scenarios/_smoke/scenario.toml --model X`)
 /// while also offering the new sub-subcommands. When a sub-subcommand is
 /// given, the positional args are not allowed (and vice versa).
 #[derive(clap::Args)]
@@ -217,8 +217,15 @@ async fn main() -> Result<()> {
 }
 
 async fn dispatch_eval(args: EvalArgs) -> Result<()> {
-    let scenarios_dir = std::path::Path::new("eval/scenarios");
-    let baselines_dir = std::path::Path::new("eval/baselines");
+    // Resolve eval directories against the detected project root so the user
+    // can invoke `steve eval ...` from a subdirectory of the repo (e.g.
+    // `cd src/eval && steve eval baseline freeze`) without hitting "no
+    // scenarios found" simply because CWD doesn't contain `eval/scenarios`.
+    // detect_or_cwd walks up looking for git/Cargo markers and falls back to
+    // CWD outside a repo, which preserves the legacy behavior in that case.
+    let project = steve::project::detect_or_cwd();
+    let scenarios_dir = project.root.join("eval/scenarios");
+    let baselines_dir = project.root.join("eval/baselines");
 
     // Sub-subcommand path — new shapes.
     if let Some(sub) = args.command {
@@ -231,10 +238,10 @@ async fn dispatch_eval(args: EvalArgs) -> Result<()> {
                 let out_path = out.unwrap_or_else(|| {
                     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
                     let scope = scenario.as_deref().unwrap_or("all");
-                    std::path::PathBuf::from(format!("eval/results/{scope}-{ts}.yaml"))
+                    project.root.join(format!("eval/results/{scope}-{ts}.yaml"))
                 });
                 return steve::eval::cli::run_subcommand(
-                    scenarios_dir,
+                    &scenarios_dir,
                     scenario.as_deref(),
                     &model,
                     &out_path,
@@ -244,8 +251,8 @@ async fn dispatch_eval(args: EvalArgs) -> Result<()> {
             EvalSubcommand::Baseline { command } => match command {
                 BaselineSubcommand::Freeze { scenario, model } => {
                     return steve::eval::cli::freeze_subcommand(
-                        scenarios_dir,
-                        baselines_dir,
+                        &scenarios_dir,
+                        &baselines_dir,
                         scenario.as_deref(),
                         &model,
                     )
