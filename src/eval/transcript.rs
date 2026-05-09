@@ -112,6 +112,13 @@ impl Normalizer {
         // — `captured.tool_calls` is already in emit order), then emit the
         // AssistantMessage for that turn (skipping empties — see test
         // rationale).
+        //
+        // Single-pass iteration via peekable + next_if relies on
+        // tool_calls being sorted by turn_index — guaranteed because
+        // CapturedRun::observe stamps turn_index = self.current_turn,
+        // which only ever increments (on LlmFinish/LlmError). This keeps
+        // normalization O(tool_calls + turns) instead of the
+        // O(turns × tool_calls) a per-turn filter would produce.
         let max_tool_turn = captured
             .tool_calls
             .iter()
@@ -119,12 +126,9 @@ impl Normalizer {
             .max()
             .unwrap_or(0);
         let total_turns = captured.assistant_messages.len().max(max_tool_turn);
+        let mut tool_iter = captured.tool_calls.iter().peekable();
         for turn_idx in 0..total_turns {
-            for call in captured
-                .tool_calls
-                .iter()
-                .filter(|c| c.turn_index == turn_idx)
-            {
+            while let Some(call) = tool_iter.next_if(|c| c.turn_index == turn_idx) {
                 let stripped_args = strip_workspace(&call.arguments, &workspace_str);
                 events.push(TranscriptEvent::ToolCall {
                     tool_name: call.tool_name,
