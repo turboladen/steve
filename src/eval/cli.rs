@@ -1,11 +1,19 @@
 //! `steve eval` subcommand entry points.
 
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use anyhow::{Context, Result};
 use serde_json::json;
 
-use crate::eval::{Judge, Runner, Scenario, apply_judges, evaluate, judge::validate_judge_config};
+use crate::eval::{
+    Judge, Runner, Scenario, apply_judges,
+    baseline::{BaselineFile, Manifest, ManifestEntry, baseline_path, manifest_path},
+    evaluate,
+    judge::validate_judge_config,
+    results::{ResultsFile, ScenarioResults},
+    scenario::discover_scenarios,
+    transcript::Normalizer,
+};
 
 /// Run a single scenario and emit the captured trace + assertion report as
 /// pretty JSON to stdout. Exit code stays 0 even when expectations fail —
@@ -76,14 +84,6 @@ pub async fn run_subcommand(
     model: &str,
     out_path: &Path,
 ) -> Result<()> {
-    use std::collections::BTreeMap;
-
-    use crate::eval::{
-        results::{ResultsFile, ScenarioResults},
-        scenario::discover_scenarios,
-        transcript::Normalizer,
-    };
-
     let discovered = discover_scenarios(scenarios_dir)?;
     let selected: Vec<(String, std::path::PathBuf)> = match scenario_filter {
         Some(name) => discovered.into_iter().filter(|(n, _)| n == name).collect(),
@@ -102,17 +102,32 @@ pub async fn run_subcommand(
         }
     }
 
-    let mut scenarios_out: BTreeMap<String, ScenarioResults> = BTreeMap::new();
+    let git_ref = current_git_ref().unwrap_or_else(|| {
+        eprintln!(
+            "warning: could not determine git ref (not a git repo, or `git` not in PATH); \
+             output will be tagged git_ref=\"unknown\""
+        );
+        "unknown".to_string()
+    });
+    let recorded_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
-    for (name, scenario_path) in &selected {
+    let mut scenarios_out: BTreeMap<String, ScenarioResults> = BTreeMap::new();
+    let total = selected.len();
+
+    for (i, (name, scenario_path)) in selected.iter().enumerate() {
+        println!("running scenario {} ({}/{})...", name, i + 1, total);
         let scenario = Scenario::from_file(scenario_path)
             .with_context(|| format!("loading scenario {}", scenario_path.display()))?;
         let scenario_dir = scenario_path
             .parent()
             .with_context(|| format!("scenario path has no parent: {}", scenario_path.display()))?;
 
-        let mut transcripts = Vec::with_capacity(scenario.runs.get());
-        for run_idx in 0..scenario.runs.get() {
+        let runs = scenario.runs.get();
+        let mut transcripts = Vec::with_capacity(runs);
+        for run_idx in 0..runs {
+            let started = std::time::Instant::now();
+            print!("  run {}/{}...", run_idx + 1, runs);
+            std::io::Write::flush(&mut std::io::stdout()).ok();
             // Fresh Runner per run -> fresh tempdir workspace. Without this,
             // `setup.shell` mutations from a prior run would persist into
             // the next run's working state. Each run is a clean sample.
@@ -127,6 +142,7 @@ pub async fn run_subcommand(
             let report = evaluate(&scenario, &captured);
             let floor_passed = report.passed() && captured.completed_normally();
             transcripts.push(Normalizer::normalize(&captured, floor_passed));
+            println!(" done in {:.1}s", started.elapsed().as_secs_f32());
         }
 
         scenarios_out.insert(
@@ -138,8 +154,6 @@ pub async fn run_subcommand(
         );
     }
 
-    let git_ref = current_git_ref().unwrap_or_else(|| "unknown".to_string());
-    let recorded_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let results = ResultsFile {
         git_ref,
         recorded_at,
@@ -187,12 +201,6 @@ pub async fn freeze_subcommand(
     scenario_filter: Option<&str>,
     model: &str,
 ) -> Result<()> {
-    use crate::eval::{
-        baseline::{BaselineFile, Manifest, ManifestEntry, baseline_path, manifest_path},
-        scenario::discover_scenarios,
-        transcript::Normalizer,
-    };
-
     let discovered = discover_scenarios(scenarios_dir)?;
     let selected: Vec<(String, std::path::PathBuf)> = match scenario_filter {
         Some(name) => discovered.into_iter().filter(|(n, _)| n == name).collect(),
@@ -204,19 +212,34 @@ pub async fn freeze_subcommand(
                 "no scenario named {name:?} found under {}",
                 scenarios_dir.display()
             ),
-            None => anyhow::bail!("no scenarios found under {}", scenarios_dir.display()),
+            None => anyhow::bail!(
+                "no scenarios found under {} (does the directory contain <name>/scenario.toml files?)",
+                scenarios_dir.display()
+            ),
         }
     }
 
-    // Read-modify-write the manifest. read_from_path returns Manifest::default()
-    // on NotFound, so the fresh-checkout case Just Works.
     let mfst_path = manifest_path(baselines_dir);
-    let mut manifest = Manifest::read_from_path(&mfst_path)?;
 
-    let git_ref = current_git_ref().unwrap_or_else(|| "unknown".to_string());
+    let git_ref = current_git_ref().unwrap_or_else(|| {
+        eprintln!(
+            "warning: could not determine git ref (not a git repo, or `git` not in PATH); \
+             output will be tagged git_ref=\"unknown\""
+        );
+        "unknown".to_string()
+    });
     let frozen_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
-    for (name, scenario_path) in &selected {
+    // Collect: run every scenario and accumulate results in memory. No disk writes
+    // happen here. If any scenario fails the error propagates immediately,
+    // leaving the baselines/ tree exactly as it was before this call.
+    let mut pending: Vec<(std::path::PathBuf, BaselineFile, ManifestEntry)> =
+        Vec::with_capacity(selected.len());
+    let total = selected.len();
+    for (i, (name, scenario_path)) in selected.iter().enumerate() {
+        let started = std::time::Instant::now();
+        print!("running scenario {name} ({}/{})...", i + 1, total);
+        std::io::Write::flush(&mut std::io::stdout()).ok();
         let scenario = Scenario::from_file(scenario_path)
             .with_context(|| format!("loading scenario {}", scenario_path.display()))?;
         let scenario_dir = scenario_path
@@ -232,6 +255,7 @@ pub async fn freeze_subcommand(
         let report = evaluate(&scenario, &captured);
         let floor_passed = report.passed() && captured.completed_normally();
         let transcript = Normalizer::normalize(&captured, floor_passed);
+        println!(" done in {:.1}s", started.elapsed().as_secs_f32());
 
         let baseline = BaselineFile {
             scenario: name.clone(),
@@ -242,18 +266,32 @@ pub async fn freeze_subcommand(
             transcript,
         };
         let path = baseline_path(baselines_dir, name, model)?;
-        baseline.write_to_path(&path)?;
-
-        manifest.upsert(ManifestEntry {
+        let entry = ManifestEntry {
             scenario: name.clone(),
             model: model.to_string(),
             git_ref: git_ref.clone(),
             frozen_at: frozen_at.clone(),
-        });
-
-        println!("froze {name} -> {}", path.display());
+        };
+        pending.push((path, baseline, entry));
     }
 
+    // Write: all runs succeeded — commit to disk. Read-modify-write the
+    // manifest. read_from_path returns Manifest::default() on NotFound, so
+    // the fresh-checkout case Just Works.
+    let mut manifest = Manifest::read_from_path(&mfst_path)?;
+    for (idx, (path, baseline, _)) in pending.iter().enumerate() {
+        baseline.write_to_path(path).with_context(|| {
+            format!(
+                "writing baseline for {} ({} earlier baseline(s) in this run already on disk; \
+                 re-run freeze to restore consistent state)",
+                baseline.scenario, idx
+            )
+        })?;
+        println!("froze {} -> {}", baseline.scenario, path.display());
+    }
+    for (_, _, entry) in pending {
+        manifest.upsert(entry);
+    }
     manifest.write_to_path(&mfst_path)?;
     println!("updated manifest: {}", mfst_path.display());
     Ok(())

@@ -24,23 +24,21 @@ enum Commands {
     },
     /// Run scenarios. Without a sub-subcommand, runs ONE scenario
     /// end-to-end and emits the captured trace as JSON (the existing
-    /// Phase-5 path; transitional, retired in Phase 8).
+    /// single-shot positional path; mutually exclusive with the
+    /// sub-subcommands below).
     Eval(EvalArgs),
 }
 
 /// `args_conflicts_with_subcommands` lets us keep the existing positional
-/// `<scenario>` form (`steve eval scenarios/_smoke/scenario.toml --model X`,
-/// the Phase-5 dev loop) while also offering the new sub-subcommands.
-/// When a sub-subcommand is given, the positional args are not allowed
-/// (and vice versa). The positional form is transitional — Phase 8
-/// retires it.
+/// `<scenario>` form (`steve eval scenarios/_smoke/scenario.toml --model X`)
+/// while also offering the new sub-subcommands. When a sub-subcommand is
+/// given, the positional args are not allowed (and vice versa).
 #[derive(clap::Args)]
 #[command(args_conflicts_with_subcommands = true)]
 struct EvalArgs {
-    /// Phase-5 single-shot path: `scenario.toml` to run end-to-end with a
-    /// captured-trace JSON dump on stdout. Mutually exclusive with the
-    /// sub-subcommands below. Internally forces runs = 1 regardless of
-    /// `scenario.runs`. Transitional; Phase 8 retires this shape.
+    /// Single-shot positional path: `scenario.toml` to run end-to-end with
+    /// a captured-trace JSON dump on stdout. Mutually exclusive with the
+    /// sub-subcommands below.
     #[arg(value_name = "SCENARIO")]
     scenario: Option<std::path::PathBuf>,
     /// Model to run against, in `provider/model_id` format. Required for
@@ -232,7 +230,8 @@ async fn dispatch_eval(args: EvalArgs) -> Result<()> {
             } => {
                 let out_path = out.unwrap_or_else(|| {
                     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-                    std::path::PathBuf::from(format!("eval-results-{ts}.yaml"))
+                    let scope = scenario.as_deref().unwrap_or("all");
+                    std::path::PathBuf::from(format!("eval/results/{scope}-{ts}.yaml"))
                 });
                 return steve::eval::cli::run_subcommand(
                     scenarios_dir,
@@ -256,8 +255,7 @@ async fn dispatch_eval(args: EvalArgs) -> Result<()> {
         }
     }
 
-    // Phase-5 positional path — preserved through Phase 6, retired in Phase 8.
-    // Required: scenario + --model.
+    // Single-shot positional path: scenario + --model required.
     let Some(scenario) = args.scenario else {
         anyhow::bail!(
             "supply a scenario path (e.g. 'steve eval eval/scenarios/_smoke/scenario.toml --model X') \

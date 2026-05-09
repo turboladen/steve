@@ -4,10 +4,10 @@
 //! per-axis paired-comparison outcome. `PairedScore` bundles a verdict with
 //! its rationale. `ScenarioScore` is the per-(scenario, run) grading record.
 //!
-//! These types are added in Phase 6 so downstream schema (NormalizedTranscript,
-//! ResultsFile, BaselineFile) can compile against a stable shape. The
-//! `[scoring].axes` parser in `scenario.toml` lands in Phase 7 where the
-//! judge actually consumes the chosen axes.
+//! Downstream schema (NormalizedTranscript, ResultsFile, BaselineFile) depends
+//! on these as a stable shape. The `[scoring].axes` field in scenario.toml is
+//! not yet wired — it will be parsed and threaded into the judge prompt when
+//! the judge consumes axes.
 
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +49,30 @@ pub struct PairedScore {
     pub verdict: Verdict,
 }
 
+impl std::fmt::Display for Axis {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Axis::Correctness => "correctness",
+            Axis::Efficiency => "efficiency",
+            Axis::Conciseness => "conciseness",
+            Axis::Robustness => "robustness",
+            Axis::Truthfulness => "truthfulness",
+        };
+        f.write_str(s)
+    }
+}
+
+impl std::fmt::Display for Verdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Verdict::CurrentWins => "current_wins",
+            Verdict::BaselineWins => "baseline_wins",
+            Verdict::Tie => "tie",
+        };
+        f.write_str(s)
+    }
+}
+
 /// One `Judge::compare` invocation returns one `Verdict` per axis the
 /// judge was asked to score on, in axis order. Type alias rather than a
 /// wrapper struct because every contextual field a caller would want
@@ -60,6 +84,7 @@ pub type CompareVerdict = Vec<PairedScore>;
 /// copied from the existing rule-based assertion channel; failing the
 /// floor short-circuits paired-comparison grading at report time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScenarioScore {
     pub scenario: String,
     pub model: String,
@@ -94,9 +119,33 @@ mod tests {
             "\"correctness\""
         );
         assert_eq!(
+            serde_json::to_string(&Axis::Efficiency).unwrap(),
+            "\"efficiency\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Axis::Conciseness).unwrap(),
+            "\"conciseness\""
+        );
+        assert_eq!(
             serde_json::to_string(&Axis::Robustness).unwrap(),
             "\"robustness\""
         );
+        assert_eq!(
+            serde_json::to_string(&Axis::Truthfulness).unwrap(),
+            "\"truthfulness\""
+        );
+    }
+
+    #[test]
+    fn axis_rejects_unknown_variants() {
+        assert!(serde_json::from_str::<Axis>("\"speed\"").is_err());
+        assert!(serde_json::from_str::<Axis>("\"\"").is_err());
+    }
+
+    #[test]
+    fn verdict_rejects_unknown_variants() {
+        assert!(serde_json::from_str::<Verdict>("\"winner\"").is_err());
+        assert!(serde_json::from_str::<Verdict>("\"\"").is_err());
     }
 
     #[test]
@@ -151,6 +200,50 @@ mod tests {
             r_pos < v_pos,
             "rationale must serialize before verdict, got: {s}"
         );
+    }
+
+    #[test]
+    fn axis_display_matches_serde() {
+        for axis in [
+            Axis::Correctness,
+            Axis::Efficiency,
+            Axis::Conciseness,
+            Axis::Robustness,
+            Axis::Truthfulness,
+        ] {
+            let display = format!("{axis}");
+            let serde_str = serde_json::to_string(&axis).unwrap();
+            // serde_json wraps strings in quotes; strip them.
+            let serde_str = serde_str.trim_matches('"');
+            assert_eq!(
+                display, serde_str,
+                "Display and serde must match for {axis:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn verdict_display_matches_serde() {
+        for v in [Verdict::CurrentWins, Verdict::BaselineWins, Verdict::Tie] {
+            let display = format!("{v}");
+            let serde_str = serde_json::to_string(&v).unwrap();
+            let serde_str = serde_str.trim_matches('"');
+            assert_eq!(display, serde_str, "Display and serde must match for {v:?}");
+        }
+    }
+
+    #[test]
+    fn scenario_score_rejects_unknown_fields() {
+        let bad = r#"{
+            "scenario": "x",
+            "model": "y/z",
+            "run_index": 0,
+            "deterministic_floor_passed": true,
+            "axes": [],
+            "mystery": "oops"
+        }"#;
+        let r: Result<ScenarioScore, _> = serde_json::from_str(bad);
+        assert!(r.is_err(), "unknown ScenarioScore field must be rejected");
     }
 
     #[test]

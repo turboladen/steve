@@ -4,7 +4,7 @@
 //! exact timestamps, full duration in nanoseconds, workspace tempdir paths
 //! (UUID-bearing), tool-call UUIDs. `Normalizer` strips or canonicalizes
 //! those, producing a `NormalizedTranscript` that's stable across runs of
-//! the same scenario and that the Phase 7 judge can paired-compare against
+//! the same scenario and that the judge can paired-compare against
 //! a baseline.
 //!
 //! The shape captures only what the agent did. Scenario-level inputs
@@ -28,7 +28,7 @@ use crate::tool::ToolName;
 /// tool calls (interleaved with their matching results) appear before
 /// that turn's final assistant message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TranscriptEvent {
     ToolCall {
         tool_name: ToolName,
@@ -51,9 +51,14 @@ pub enum TranscriptEvent {
 /// `duration_ms` is rounded to whole milliseconds so jitter doesn't dirty
 /// the diff.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UsageSummary {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
+    /// Provider-reported total. NOT derived from prompt + completion —
+    /// providers may include reasoning tokens, cached-read tokens, or
+    /// other sub-categories that make the provider total differ from
+    /// the naive sum. Copied directly from `StreamUsage.total_tokens`.
     pub total_tokens: u32,
     pub duration_ms: u64,
 }
@@ -64,6 +69,7 @@ pub struct UsageSummary {
 /// the run-level provenance (model, recorded_at, git_ref) — those live on
 /// `ResultsFile` / `ScenarioResults` / `BaselineFile`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NormalizedTranscript {
     pub events: Vec<TranscriptEvent>,
     pub deterministic_floor_passed: bool,
@@ -113,7 +119,9 @@ impl Normalizer {
                 }
             }
             if !msg.is_empty() {
-                events.push(TranscriptEvent::AssistantMessage { text: msg.clone() });
+                events.push(TranscriptEvent::AssistantMessage {
+                    text: msg.replace(&workspace_str, ""),
+                });
             }
         }
 
@@ -486,5 +494,66 @@ mod tests {
         assert!(passed.deterministic_floor_passed);
         let failed = Normalizer::normalize(&cap, false);
         assert!(!failed.deterministic_floor_passed);
+    }
+
+    #[test]
+    fn strip_workspace_recurses_into_arrays_and_nested_objects() {
+        let ws = "/tmp/eval-abc-123";
+        // Note: strip_workspace is private; access via super::strip_workspace.
+        let v = json!({
+            "paths": [format!("{ws}/a.txt"), format!("{ws}/b.txt")],
+            "nested": {"path": format!("{ws}/c.txt")}
+        });
+        let stripped = super::strip_workspace(&v, ws);
+        let s = serde_json::to_string(&stripped).unwrap();
+        assert!(
+            !s.contains(ws),
+            "workspace path not stripped from nested values: {s}"
+        );
+        assert!(s.contains("/a.txt"));
+        assert!(s.contains("/b.txt"));
+        assert!(s.contains("/c.txt"));
+    }
+
+    #[test]
+    fn transcript_event_rejects_unknown_fields_in_variant() {
+        // Without deny_unknown_fields on the enum, an extra field on a
+        // ToolCall variant (e.g., a typo like `tol_name` instead of
+        // `tool_name`) would silently deserialize successfully — serde
+        // drops the unknown field and the typo'd field is missing,
+        // producing a misshapen event without any error. The attribute
+        // makes the typo a hard parse failure.
+        let bad = r#"{"kind":"tool_call","tool_name":"read","arguments":{},"extra":"oops"}"#;
+        let r: Result<TranscriptEvent, _> = serde_json::from_str(bad);
+        assert!(
+            r.is_err(),
+            "unknown field in tool_call variant must be rejected"
+        );
+    }
+
+    #[test]
+    fn normalize_strips_workspace_root_from_assistant_message_text() {
+        let workspace = "/tmp/eval-abc-123";
+        let mut cap = captured_with_workspace(workspace);
+        cap.observe(&AppEvent::LlmDelta {
+            text: format!("I read {workspace}/foo.txt and it had hello in it."),
+        });
+        cap.observe(&AppEvent::LlmFinish { usage: None });
+        let t = Normalizer::normalize(&cap, true);
+        let s = serde_json::to_string(&t).unwrap();
+        assert!(
+            !s.contains(workspace),
+            "workspace path leaked into AssistantMessage text: {s}"
+        );
+        // Positive assertions: the path remnant and surrounding narration must
+        // still be present after stripping only the workspace prefix.
+        assert!(
+            s.contains("/foo.txt"),
+            "stripped path '/foo.txt' should still be present in the message: {s}"
+        );
+        assert!(
+            s.contains("hello in it"),
+            "non-path narration should be preserved: {s}"
+        );
     }
 }

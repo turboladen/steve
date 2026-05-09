@@ -238,10 +238,21 @@ mod tests {
             !yaml.contains("\\n"),
             "multi-line strings must NOT round-trip as escaped \\n (lost diff-friendliness): {yaml}"
         );
+        assert!(
+            yaml.contains('|') || yaml.contains('>'),
+            "multi-line string must render with a block-scalar indicator (| or >): {yaml}"
+        );
 
         // Round-trip equality regardless of form.
         let back = ResultsFile::from_yaml_str(&yaml).expect("deserialize");
         assert_eq!(rf, back);
+    }
+
+    #[test]
+    fn results_file_rejects_unknown_top_level_fields_via_yaml() {
+        let yaml = "git_ref: x\nrecorded_at: y\nmodel: z\nscenarios: {}\nunknown: oops\n";
+        let r = ResultsFile::from_yaml_str(yaml);
+        assert!(r.is_err(), "unknown YAML field 'unknown' must be rejected");
     }
 
     #[test]

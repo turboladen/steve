@@ -35,7 +35,8 @@ pub struct Scenario {
     /// Must match the scenario directory name; mismatch is treated as rename drift.
     pub name: String,
     pub description: String,
-    /// Pass criterion across multi-run scenarios is `>= ceil(runs / 2)` passes.
+    /// Number of times the agent runs this scenario; each run produces one
+    /// transcript. The runner produces `Vec<CapturedRun>` of length `runs`.
     #[serde(default = "default_runs")]
     pub runs: NonZeroUsize,
     #[serde(default)]
@@ -54,11 +55,10 @@ pub struct Scenario {
 }
 
 fn default_runs() -> NonZeroUsize {
-    // Per spec: "Default 3, per-scenario override allowed." Multi-run
-    // is the new norm for the paired-comparison pivot; the existing
-    // Phase-5 `steve eval <scenario.toml>` path (transitional until
-    // Phase 8 retires it) forces runs = 1 internally via cli::run_one,
-    // so this default only fires through the new `eval run` subcommand.
+    // Per spec: "Default 3, per-scenario override allowed." The existing
+    // `steve eval <scenario.toml>` path always does a single run regardless
+    // of this field, so this default only fires through the `eval run`
+    // subcommand.
     NonZeroUsize::new(3).expect("3 != 0")
 }
 
@@ -128,8 +128,9 @@ pub enum Expectation {
     },
     /// LLM-as-judge expectation. The judge model is configured at the eval
     /// level; `judge_model` (when set) overrides it for this expectation.
-    /// Phase 4 (steve-bh3r) implements the actual evaluation; until then,
-    /// the evaluator returns `Skipped` for every Judge expectation.
+    /// `evaluate()` produces `Skipped` as a placeholder for Judge
+    /// expectations; `apply_judges()` (called after `evaluate`) replaces
+    /// those with actual judge verdicts.
     ///
     /// `pass_when` and `fail_when` are separate fields (not a single freeform
     /// rubric) so the judge prompt template can construct a structured prompt
@@ -235,7 +236,8 @@ impl Scenario {
             .with_context(|| format!("parsing scenario manifest at {}", path.display()))?;
         scenario.validate()?;
         // Parent-directory match is a filesystem-only invariant; not part of
-        // `validate()` so the Phase 7 generator can validate without a path.
+        // `validate()` so callers that build `Scenario` in memory can
+        // validate without a path.
         let parent_name = path
             .parent()
             .and_then(|p| p.file_name())
@@ -254,7 +256,7 @@ impl Scenario {
     }
 
     /// Skips the parent-directory match check — useful for in-memory scenarios
-    /// (tests, the Phase 7 debug-export generator).
+    /// (tests, struct-literal construction).
     pub fn from_toml_str(toml_src: &str) -> Result<Self> {
         let scenario: Scenario =
             toml::from_str(toml_src).context("parsing scenario manifest from string")?;
@@ -263,7 +265,8 @@ impl Scenario {
     }
 
     /// Self-consistency checks that don't depend on filesystem state. Public so
-    /// the Phase 7 generator can run validation after struct-literal construction.
+    /// callers that build `Scenario` via struct literal can validate after
+    /// construction.
     pub fn validate(&self) -> Result<()> {
         if self.name.trim().is_empty() {
             anyhow::bail!("scenario name must not be empty");
@@ -305,11 +308,28 @@ pub fn discover_scenarios(scenarios_dir: &Path) -> Result<Vec<(String, PathBuf)>
     {
         let entry = entry.with_context(|| format!("iterating {}", scenarios_dir.display()))?;
         let path = entry.path();
-        if !path.is_dir() {
+        // Use entry.file_type() (does NOT follow symlinks) rather than
+        // path.is_dir() (follows symlinks). A symlinked scenario dir could
+        // exfiltrate file content from outside the scenario tree; this matches
+        // ScenarioWorkspace::build's symlink-rejection posture.
+        let ft = entry
+            .file_type()
+            .with_context(|| format!("stat {}", path.display()))?;
+        if ft.is_symlink() || !ft.is_dir() {
             continue;
         }
         let manifest = path.join("scenario.toml");
-        if !manifest.is_file() {
+        // Use symlink_metadata (does NOT follow symlinks) so a symlinked
+        // scenario.toml doesn't slip past the directory-level guard above.
+        let manifest_ft = match std::fs::symlink_metadata(&manifest) {
+            Ok(m) => m.file_type(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue, // no scenario.toml — not a scenario dir
+            Err(e) => {
+                return Err(anyhow::Error::from(e)
+                    .context(format!("checking scenario manifest {}", manifest.display())));
+            }
+        };
+        if manifest_ft.is_symlink() || !manifest_ft.is_file() {
             continue;
         }
         let name = path
@@ -468,11 +488,7 @@ judge_model = "anthropic/claude-haiku-4-5"
         let s = Scenario::from_toml_str(minimal_scenario_toml()).unwrap();
         assert_eq!(s.name, "minimal");
         assert_eq!(s.description, "smallest valid scenario");
-        assert_eq!(
-            s.runs.get(),
-            3,
-            "default runs = 3 when omitted (Phase 6: multi-run is the norm)"
-        );
+        assert_eq!(s.runs.get(), 3, "default runs = 3 when omitted");
         assert!(s.setup.copy_fixtures.is_empty());
         assert!(s.setup.shell.is_empty());
         assert_eq!(s.user_turns, vec!["hello"]);
@@ -532,8 +548,8 @@ judge_model = "anthropic/claude-haiku-4-5"
 
     #[test]
     fn round_trip_kitchen_sink_scenario() {
-        // Phase 7 generator emits TOML — round-tripping the full variant set
-        // is the only thing standing between it and silently dropping fields.
+        // If a serialization refactor drops fields silently, the round-trip
+        // test catches it.
         let original = Scenario::from_toml_str(kitchen_sink_toml()).unwrap();
         let serialized = toml::to_string(&original).unwrap();
         let reparsed = Scenario::from_toml_str(&serialized).unwrap();
@@ -542,9 +558,10 @@ judge_model = "anthropic/claude-haiku-4-5"
 
     #[test]
     fn scenario_level_judge_model_round_trips() {
-        // Scenario-level `judge_model` is the middle tier of the Phase 4
-        // resolution chain (CLI > per-expectation > scenario > fail). Pin
-        // that it parses, round-trips, and survives in serialized TOML.
+        // Scenario-level `judge_model` is the middle tier of the
+        // judge-model resolution chain (CLI > per-expectation > scenario >
+        // fail). Pin that it parses, round-trips, and survives in serialized
+        // TOML.
         let toml_src = r#"
 name = "judge-model-pinned"
 description = "scenario pins a judge model for all judges"
@@ -578,8 +595,8 @@ fail_when = "gave up"
 
     #[test]
     fn setup_omitted_equals_setup_explicit_empty() {
-        // Both forms must produce an equivalent Setup so the Phase 2 runner
-        // doesn't branch on author style.
+        // Both forms must produce an equivalent Setup so the runner doesn't
+        // branch on author style.
         let omitted = Scenario::from_toml_str(minimal_scenario_toml()).unwrap();
         let explicit = Scenario::from_toml_str(
             r#"
@@ -1395,5 +1412,50 @@ tool = "read"
         let scenarios = discover_scenarios(dir.path()).unwrap();
         let names: Vec<&str> = scenarios.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, vec!["alpha", "middle", "zebra"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_scenarios_skips_symlinked_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        // Real scenario dir.
+        std::fs::create_dir_all(dir.path().join("real")).unwrap();
+        std::fs::write(dir.path().join("real/scenario.toml"), b"#").unwrap();
+        // Symlinked scenario dir pointing outside the discovery root.
+        let target = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(target.path().join("inner")).unwrap();
+        std::os::unix::fs::symlink(target.path(), dir.path().join("symlinked")).unwrap();
+
+        let scenarios = discover_scenarios(dir.path()).unwrap();
+        let names: Vec<&str> = scenarios.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["real"], "symlinked entries must be skipped");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_scenarios_skips_symlinked_scenario_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(target.path(), b"# pretend manifest").unwrap();
+
+        // Real subdir containing a symlinked scenario.toml.
+        std::fs::create_dir_all(dir.path().join("real-with-symlink")).unwrap();
+        std::os::unix::fs::symlink(
+            target.path(),
+            dir.path().join("real-with-symlink/scenario.toml"),
+        )
+        .unwrap();
+
+        // Real subdir with a real scenario.toml (control).
+        std::fs::create_dir_all(dir.path().join("real")).unwrap();
+        std::fs::write(dir.path().join("real/scenario.toml"), b"#").unwrap();
+
+        let scenarios = discover_scenarios(dir.path()).unwrap();
+        let names: Vec<&str> = scenarios.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["real"],
+            "symlinked scenario.toml inside a real directory must be skipped"
+        );
     }
 }

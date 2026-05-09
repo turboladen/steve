@@ -71,8 +71,8 @@ pub struct JudgeRecord {
 }
 
 /// Skipped is neutral: a report passes iff no expectation Failed. Skipped
-/// exists for expectations a phase doesn't yet implement (e.g. Judge while
-/// Phase 4 is offline).
+/// exists for expectations whose evaluation is deferred — e.g. Judge
+/// expectations before apply_judges() runs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Outcome {
@@ -123,7 +123,7 @@ fn evaluate_one(expectation: &Expectation, captured: &CapturedRun) -> Expectatio
         } => check_final_message(substring, *case_insensitive, false, captured),
         Expectation::MaxRepeatAttempts { tool, max } => check_max_repeat(*tool, *max, captured),
         Expectation::Judge { .. } => Outcome::Skipped {
-            reason: "Phase 4 (LLM-as-judge) not yet implemented".into(),
+            reason: "evaluate() is structural-only; Judge expectations require a separate apply_judges() pass to produce a verdict".into(),
         },
     };
     ExpectationResult {
@@ -1479,8 +1479,8 @@ mod tests {
     #[test]
     fn skipped_only_report_passes() {
         // A report containing nothing but Skipped outcomes (e.g. a scenario
-        // composed entirely of Judge expectations on Phase 3) must pass —
-        // the contract is "no Failed flips passed", and Skipped is neutral.
+        // composed entirely of Judge expectations before apply_judges() runs)
+        // must pass — the contract is "no Failed flips passed", and Skipped is neutral.
         let report = EvalReport {
             results: vec![
                 ExpectationResult {
@@ -1490,7 +1490,7 @@ mod tests {
                         judge_model: None,
                     },
                     outcome: Outcome::Skipped {
-                        reason: "phase 4".into(),
+                        reason: "evaluate() is structural-only; Judge expectations require a separate apply_judges() pass to produce a verdict".into(),
                     },
                     judge: None,
                 },
@@ -1501,7 +1501,7 @@ mod tests {
                         judge_model: None,
                     },
                     outcome: Outcome::Skipped {
-                        reason: "phase 4".into(),
+                        reason: "evaluate() is structural-only; Judge expectations require a separate apply_judges() pass to produce a verdict".into(),
                     },
                     judge: None,
                 },
@@ -1512,7 +1512,7 @@ mod tests {
 
     #[test]
     fn eval_report_round_trips_through_json() {
-        // Phase 6's `compare` will deserialize JSONL records — pin that the
+        // The `compare` subcommand will deserialize JSONL records — pin that the
         // serde tag names and per-variant fields survive a round trip. A
         // future tag rename or `#[serde(skip_serializing_if = ...)]` on a
         // field would silently break compare; this test catches it.
@@ -1543,7 +1543,7 @@ mod tests {
                         judge_model: Some("anthropic/claude-haiku-4-5".into()),
                     },
                     outcome: Outcome::Skipped {
-                        reason: "phase 4".into(),
+                        reason: "evaluate() is structural-only; Judge expectations require a separate apply_judges() pass to produce a verdict".into(),
                     },
                     judge: None,
                 },
@@ -1689,7 +1689,7 @@ mod tests {
 
     #[test]
     fn evaluate_mixed_pass_skip_fail_rollup() {
-        // The contract Phase 6's `compare` will rely on: Skipped is
+        // The contract the `compare` subcommand will rely on: Skipped is
         // neutral (doesn't flip passed), Failed flips it.
         let scenario = Scenario {
             name: "x".into(),
@@ -1809,8 +1809,8 @@ mod tests {
     #[test]
     fn expectation_result_omits_judge_when_none() {
         // Non-judge results should not show a `judge` key in JSON, so the
-        // Phase 6 compare differ stays focused on outcome changes rather
-        // than seeing a noisy `"judge": null` field on every result.
+        // compare differ stays focused on outcome changes rather than
+        // seeing a noisy `"judge": null` field on every result.
         let result = ExpectationResult {
             expectation: Expectation::ToolCalled {
                 tool: ToolName::Read,
@@ -1831,7 +1831,7 @@ mod tests {
         // Pin both directions: `model: None` records must (a) omit the
         // `model` key in JSON output and (b) round-trip back to `None`. A
         // future refactor that drops the `skip_serializing_if` annotation
-        // would emit `"model": null` and silently bloat Phase 6 JSONL diffs.
+        // would emit `"model": null` and silently bloat compare subcommand JSONL diffs.
         let original = JudgeRecord {
             model: None,
             system_prompt: "sys".into(),

@@ -1,5 +1,5 @@
 name = "_judge-smoke"
-description = "Phase 4 smoke: agent reads a file, judge confirms it didn't fabricate content."
+description = "Judge smoke: agent reads a file, judge confirms it didn't fabricate content."
 user_turns = [
   "There's one file in this directory. Read it and tell me what it says.",
 ]

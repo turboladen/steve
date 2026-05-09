@@ -38,11 +38,11 @@ pub struct Runner {
     workspace: ScenarioWorkspace,
     app: App,
     /// Second `ProviderRegistry` built from the same `cfg.providers` as the
-    /// agent-under-test's registry, but kept separate so Phase 4's
-    /// LLM-as-judge calls don't share state with the App. Building a second
-    /// registry is cheap (no I/O — just `Client::with_config(...)`
-    /// instances) and avoids retrofitting `Arc<ProviderRegistry>` through
-    /// `App::new` just for the judge boundary.
+    /// agent-under-test's registry, but kept separate so the judge's LLM
+    /// calls don't share state with the App. Building a second registry is
+    /// cheap (no I/O — just `Client::with_config(...)` instances) and
+    /// avoids retrofitting `Arc<ProviderRegistry>` through `App::new` just
+    /// for the judge boundary.
     judge_registry: ProviderRegistry,
     /// Held to keep the writer thread alive for the lifetime of the App.
     /// Dropped together with `Runner`; the writer thread exits cleanly
@@ -205,11 +205,12 @@ impl Runner {
     /// Drive the same scenario `count` times, returning one `CapturedRun`
     /// per run. Each run reuses the SAME `App` and SAME workspace tempdir
     /// — the agent's conversation history persists across runs unless the
-    /// caller re-builds the Runner. For Phase 6, every multi-run scenario
-    /// is independent across runs (the runner is rebuilt per run by the
-    /// `eval run` subcommand), so this method exists for symmetry and as
-    /// a convenience for tests that don't care about per-run isolation.
-    pub async fn run_n(
+    /// caller re-builds the Runner. In `eval run`, each run uses a fresh
+    /// `Runner` to guarantee workspace isolation. This method is for callers
+    /// that intentionally share workspace state across runs (e.g., for
+    /// in-process scenarios where conversation history persistence is the
+    /// test condition itself).
+    pub(crate) async fn run_n(
         &mut self,
         scenario: &Scenario,
         count: std::num::NonZeroUsize,
@@ -235,10 +236,9 @@ mod tests {
         tool::ToolName,
     };
 
-    // End-to-end Runner coverage requires lifting MockChatStream out of
-    // `#[cfg(test)]` in src/stream/mod.rs — deferred until Phase 4 (judge)
-    // forces it. The smoke test (`cargo run -- eval`) is the ecologically-
-    // valid gate for v1.
+    // End-to-end Runner coverage requires `MockChatStream` to be accessible
+    // outside `stream`'s `#[cfg(test)]` block. The smoke test
+    // (`cargo run -- eval`) is the ecologically-valid gate for v1.
 
     fn scenario_with_runs(runs: usize) -> Scenario {
         Scenario {
@@ -254,8 +254,7 @@ mod tests {
         }
     }
 
-    /// Multi-run scenarios used to bail at build time pending Phase 6 work.
-    /// Phase 6 lifted the restriction; build now succeeds for runs > 1.
+    /// The `runs > 1` bail was removed; verify it stays removed.
     #[tokio::test]
     async fn build_succeeds_for_runs_greater_than_one() {
         let scenario_dir = tempfile::tempdir().unwrap();

@@ -1,6 +1,6 @@
 //! LLM-as-judge assertion runner.
 //!
-//! Phase 3's rule-based evaluator handles structural facts (tool sequence,
+//! The rule-based evaluator handles structural facts (tool sequence,
 //! file diffs); behavioral checks like "did the assistant give up" or
 //! "did it fabricate tool output" don't reduce cleanly to substring
 //! matches, so the schema reserves [`Expectation::Judge`] for an LLM-graded
@@ -123,7 +123,7 @@ struct JudgeResponse {
 // Backend trait — the test seam.
 // ──────────────────────────────────────────────────────────────────────
 
-/// Boundary between Phase 4's orchestration and the actual chat provider
+/// Boundary between the judge orchestration and the actual chat provider
 /// call. Production wires [`RegistryBackend`]; tests substitute their own
 /// implementation returning canned `(String, Option<StreamUsage>)` pairs
 /// or transport errors.
@@ -377,8 +377,8 @@ pub fn validate_judge_config(
 }
 
 /// Walk `report.results`, replacing every `Expectation::Judge` entry's
-/// outcome (currently `Skipped` from the Phase 3 evaluator) with the
-/// judge's verdict and populating `judge: Some(record)`.
+/// outcome (currently `Skipped` from evaluate()) with the judge's verdict
+/// and populating `judge: Some(record)`.
 pub async fn apply_judges(
     report: &mut EvalReport,
     scenario: &Scenario,
@@ -388,10 +388,11 @@ pub async fn apply_judges(
     for result in &mut report.results {
         // Exhaustive match (rather than a `let Expectation::Judge {...} =
         // ... else { continue }`) so adding a new judging-class variant in
-        // the future is a compile error here, not a silent skip — Phase 3
-        // produced `Outcome::Skipped` for unhandled variants, which the
-        // report treats as neutral, so a missed match would silently turn
-        // a behavioral check into a no-op.
+        // the future is a compile error here, not a silent skip —
+        // evaluate() produces Outcome::Skipped for unhandled variants,
+        // which the report treats as neutral, so a missed match would
+        // silently turn a behavioral check into a no-op.
+        // apply_judges() replaces those Skipped outcomes before report write.
         let (pass_when, fail_when, judge_model) = match &result.expectation {
             Expectation::Judge {
                 pass_when,
@@ -921,8 +922,8 @@ mod tests {
         assert!(matches!(out.verdict, JudgeVerdict::Passed));
         assert_eq!(out.record.model.as_deref(), Some("m"));
         assert!(out.record.usage.is_some());
-        // Pin raw_response on the success path too — Phase 6's compare
-        // differ relies on it for reproducibility, and a regression that
+        // Pin raw_response on the success path too — the compare differ
+        // relies on it for reproducibility, and a regression that
         // populated raw_response only on the Failed branch would slip
         // through tests that only check `usage.is_some()`.
         assert_eq!(out.record.raw_response, raw);
@@ -1891,7 +1892,7 @@ mod tests {
                 ExpectationResult {
                     expectation: scenario.expectations[0].clone(),
                     outcome: Outcome::Skipped {
-                        reason: "Phase 4 (LLM-as-judge) not yet implemented".into(),
+                        reason: "evaluate() is structural-only; Judge expectations require a separate apply_judges() pass to produce a verdict".into(),
                     },
                     judge: None,
                 },
@@ -1957,14 +1958,14 @@ mod tests {
                 ExpectationResult {
                     expectation: exp_a,
                     outcome: Outcome::Skipped {
-                        reason: "phase 4".into(),
+                        reason: "evaluate() is structural-only; Judge expectations require a separate apply_judges() pass to produce a verdict".into(),
                     },
                     judge: None,
                 },
                 ExpectationResult {
                     expectation: exp_b,
                     outcome: Outcome::Skipped {
-                        reason: "phase 4".into(),
+                        reason: "evaluate() is structural-only; Judge expectations require a separate apply_judges() pass to produce a verdict".into(),
                     },
                     judge: None,
                 },
@@ -2031,10 +2032,10 @@ mod tests {
 
     #[tokio::test]
     async fn evaluate_uses_per_expectation_override_when_only_source() {
-        // The Phase 1 schema's per-expectation `judge_model` is the
-        // narrowest precedence tier; existing evaluate_* tests cover the
-        // CLI-only and scenario-fallthrough cases but not this one. Pin
-        // it so an argument-order mistake in `Judge::evaluate`'s call to
+        // The per-expectation `judge_model` is the narrowest precedence
+        // tier; existing evaluate_* tests cover the CLI-only and
+        // scenario-fallthrough cases but not this one. Pin it so an
+        // argument-order mistake in `Judge::evaluate`'s call to
         // `resolve_judge_model` doesn't slip through.
         let backend = MockBackend::new(vec![ok_response(r#"{"passed": true, "reason": "ok"}"#)]);
         let judge = Judge::with_backend(Box::new(backend), None);

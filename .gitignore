@@ -14,3 +14,6 @@
 
 # Beads / Dolt files (added by bd init)
 .beads-credential-key
+
+# Eval run output (timestamped results files); baselines are committed
+eval/results/

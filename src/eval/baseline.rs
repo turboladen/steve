@@ -24,8 +24,9 @@ use crate::eval::transcript::NormalizedTranscript;
 /// Provenance fields here describe the file in-place; the same fields
 /// (with matching names) are mirrored into the manifest. Read the manifest
 /// for cross-baseline indexing; read the file for the transcript. If the
-/// two ever disagree, the manifest wins (`freeze` writes them together;
-/// a manifest-only edit is the supported fix).
+/// two ever disagree, treat the manifest as authoritative — the freeze
+/// command writes both together, so a stale file is the artifact of a
+/// hand-edit; re-running freeze re-synchronizes them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BaselineFile {
@@ -76,6 +77,61 @@ pub fn baseline_path(baselines_dir: &Path, scenario: &str, model: &str) -> Resul
     if provider.is_empty() || model_id.is_empty() {
         anyhow::bail!("model {model:?} has empty provider or model id");
     }
+    // Reject additional slashes (e.g. "anthropic/claude/preview" would silently
+    // create a nested subdir hierarchy; "ollama//qwen" via PathBuf::join would
+    // treat the empty-then-"/qwen" as an absolute path and escape the tree).
+    if provider.contains('/') || model_id.contains('/') {
+        anyhow::bail!(
+            "model {model:?} must have exactly one '/' separating provider and model id \
+             (got extra slashes)"
+        );
+    }
+    // Reject whitespace — pasted display names like "Qwen 3 coder" would produce
+    // filesystem paths with spaces that break shell pipelines and find patterns.
+    if provider.chars().any(|c| c.is_whitespace()) || model_id.chars().any(|c| c.is_whitespace()) {
+        anyhow::bail!(
+            "model {model:?} must not contain whitespace in provider or model id \
+             (got a display name instead of the api identifier?)"
+        );
+    }
+    // Reject ".." and leading "." in model components to prevent path traversal.
+    if provider == ".." || provider.starts_with('.') {
+        anyhow::bail!(
+            "provider in model {model:?} must not be '..' or start with '.' (path traversal)"
+        );
+    }
+    if model_id == ".." || model_id.starts_with('.') {
+        anyhow::bail!(
+            "model_id in model {model:?} must not be '..' or start with '.' (path traversal)"
+        );
+    }
+    // NUL bytes in model components would produce confusing runtime errors in
+    // std::fs rather than clean validation failures.
+    if provider.as_bytes().contains(&0) || model_id.as_bytes().contains(&0) {
+        anyhow::bail!("model {model:?} must not contain NUL bytes in provider or model id");
+    }
+    // Comprehensive checks on scenario — it is also joined into the path.
+    if scenario.starts_with('/') {
+        anyhow::bail!("scenario {scenario:?} must not be absolute");
+    }
+    if scenario.contains('/') {
+        anyhow::bail!("scenario {scenario:?} must not contain '/'");
+    }
+    if scenario.chars().any(|c| c.is_whitespace()) {
+        anyhow::bail!("scenario {scenario:?} must not contain whitespace");
+    }
+    if scenario.as_bytes().contains(&0) {
+        anyhow::bail!("scenario {scenario:?} must not contain NUL bytes");
+    }
+    // Use component-based dotdot check (rejects ".." as a path component but
+    // permits substrings like "a..b").
+    if std::path::Path::new(scenario)
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+        || scenario.starts_with('.')
+    {
+        anyhow::bail!("scenario {scenario:?} must not be '..' or start with '.'");
+    }
     Ok(baselines_dir
         .join(scenario)
         .join(provider)
@@ -91,16 +147,14 @@ pub fn baseline_path(baselines_dir: &Path, scenario: &str, model: &str) -> Resul
 /// No `judge_model` field — freeze runs the agent only, not the judge,
 /// so a baseline is a behavioral snapshot, not a graded artifact.
 /// The judge model used for any specific report is recorded in that
-/// report's metadata block (Phase 8).
+/// report's metadata block.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     /// One entry per (scenario, model) pair. The TOML idiom is
-    /// `[[baseline]]` (array of tables); `serde(rename = "baseline")` is
-    /// not needed because the field name already matches the array
-    /// element name.
+    /// `[[baseline]]` (array of tables).
     #[serde(default)]
-    pub baseline: Vec<ManifestEntry>,
+    pub(crate) baseline: Vec<ManifestEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,6 +308,156 @@ mod tests {
     }
 
     #[test]
+    fn baseline_path_rejects_double_slash_in_model() {
+        let err = baseline_path(Path::new("x"), "_smoke", "ollama//qwen").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("extra slashes") || msg.contains("exactly one"),
+            "expected helpful message about extra slashes, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn baseline_path_rejects_extra_slashes_in_model() {
+        let err = baseline_path(Path::new("x"), "_smoke", "anthropic/claude/preview").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("extra slashes") || msg.contains("exactly one"),
+            "expected helpful message about extra slashes, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn baseline_path_rejects_whitespace_in_model() {
+        let err = baseline_path(Path::new("x"), "_smoke", "ollama/Qwen 3 coder").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("whitespace"),
+            "expected whitespace rejection message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn baseline_path_rejects_dotdot_in_scenario() {
+        let err = baseline_path(Path::new("x"), "../etc/passwd", "ollama/qwen").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("path traversal") || msg.contains("'..'") || msg.contains("must not"),
+            "expected path traversal rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn baseline_path_rejects_absolute_scenario() {
+        let err = baseline_path(Path::new("x"), "/etc/passwd", "ollama/qwen3-coder").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("must not be absolute"), "got: {msg}");
+    }
+
+    #[test]
+    fn baseline_path_rejects_pure_dotdot_scenario() {
+        // ".." has no slash, so the contains('/') guard does not fire.
+        // The component-based ParentDir check must catch it.
+        let err = baseline_path(Path::new("x"), "..", "ollama/qwen3-coder").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("must not be '..'"),
+            "expected dotdot rejection on pure '..' scenario, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn baseline_path_rejects_leading_dot_scenario() {
+        // ".hidden" has no slash and is not a ParentDir component.
+        // The starts_with('.') clause must catch it.
+        let err = baseline_path(Path::new("x"), ".hidden", "ollama/qwen3-coder").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("start with '.'"),
+            "expected leading-dot rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn baseline_path_rejects_slash_in_scenario() {
+        let err = baseline_path(Path::new("x"), "foo/bar", "ollama/qwen3-coder").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("must not contain '/'"),
+            "expected slash rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn baseline_path_rejects_whitespace_in_scenario() {
+        let err = baseline_path(Path::new("x"), "foo bar", "ollama/qwen3-coder").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("whitespace"),
+            "expected whitespace rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn baseline_path_rejects_nul_byte_in_components() {
+        // Each input isolates one of the three NUL positions: scenario,
+        // provider, model_id. All three should be rejected with a NUL message.
+        for (scenario, model, label) in [
+            ("foo\0bar", "ollama/qwen", "scenario"),
+            ("foo", "olla\0ma/qwen", "provider"),
+            ("foo", "ollama/qw\0en", "model_id"),
+        ] {
+            let err = baseline_path(Path::new("x"), scenario, model).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("NUL"),
+                "expected NUL byte rejection for {label}, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn baseline_path_permits_double_dot_substring_in_scenario() {
+        // "a..b" is a substring with .. but not a path component; the new
+        // component-based check should accept it (the old substring check
+        // would have rejected it incorrectly).
+        let p = baseline_path(Path::new("x"), "a..b", "ollama/qwen").unwrap();
+        assert_eq!(p.file_name().and_then(|n| n.to_str()), Some("qwen.yaml"));
+    }
+
+    #[test]
+    fn baseline_path_rejects_dotdot_in_provider_or_model() {
+        // "../foo/bar" splits on first '/' into provider="..", model_id="foo/bar".
+        // model_id contains '/' so the extra-slash check fires.
+        let err = baseline_path(Path::new("x"), "_smoke", "../foo/bar").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("extra slashes")
+                || msg.contains("more than one slash")
+                || msg.contains("exactly one"),
+            "expected extra-slash rejection, got: {msg}"
+        );
+
+        // "../qwen" splits on first '/' into provider="..", model_id="qwen".
+        // provider == ".." fires the dotdot check.
+        let err2 = baseline_path(Path::new("x"), "_smoke", "../qwen").unwrap_err();
+        let msg2 = format!("{err2:#}");
+        assert!(
+            msg2.contains("path traversal") || msg2.contains("'..'") || msg2.contains("must not"),
+            "expected dotdot rejection on provider, got: {msg2}"
+        );
+
+        // "ollama/.." splits on first '/' into provider="ollama", model_id="..".
+        // model_id == ".." fires the dotdot check.
+        let err3 = baseline_path(Path::new("x"), "_smoke", "ollama/..").unwrap_err();
+        let msg3 = format!("{err3:#}");
+        assert!(
+            msg3.contains("path traversal") || msg3.contains("'..'") || msg3.contains("must not"),
+            "expected dotdot rejection on model_id, got: {msg3}"
+        );
+    }
+
+    #[test]
     fn baseline_file_yaml_contains_user_turns_and_transcript() {
         let yaml = sample_baseline().to_yaml_string().unwrap();
         assert!(
@@ -400,5 +604,139 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let m = Manifest::read_from_path(&dir.path().join("does-not-exist.toml")).unwrap();
         assert!(m.baseline.is_empty());
+    }
+
+    #[test]
+    fn baseline_file_rejects_unknown_fields_inside_transcript() {
+        let yaml = r#"scenario: _smoke
+model: ollama/qwen3-coder
+git_ref: abc
+frozen_at: 2026-05-08T00:00:00Z
+user_turns: []
+transcript:
+  events: []
+  deterministic_floor_passed: true
+  usage_summary:
+    prompt_tokens: 0
+    completion_tokens: 0
+    total_tokens: 0
+    duration_ms: 0
+  mystery: oops
+"#;
+        let r = BaselineFile::from_yaml_str(yaml);
+        assert!(
+            r.is_err(),
+            "unknown field inside transcript must be rejected"
+        );
+    }
+
+    #[test]
+    fn baseline_file_rejects_unknown_fields_inside_usage_summary() {
+        let yaml = r#"scenario: _smoke
+model: ollama/qwen3-coder
+git_ref: abc
+frozen_at: 2026-05-08T00:00:00Z
+user_turns: []
+transcript:
+  events: []
+  deterministic_floor_passed: true
+  usage_summary:
+    prompt_tokens: 0
+    completion_tokens: 0
+    total_tokens: 0
+    duration_ms: 0
+    prmopt_tokens: 999
+"#;
+        let r = BaselineFile::from_yaml_str(yaml);
+        assert!(
+            r.is_err(),
+            "typo inside usage_summary must be rejected: prmopt_tokens should not silently deserialize as zero"
+        );
+    }
+
+    #[test]
+    fn baseline_file_rejects_unknown_fields_via_yaml() {
+        let yaml = r#"scenario: _smoke
+model: ollama/qwen3-coder
+git_ref: abc
+frozen_at: 2026-05-08T00:00:00Z
+user_turns: []
+transcript:
+  events: []
+  deterministic_floor_passed: true
+  usage_summary:
+    prompt_tokens: 0
+    completion_tokens: 0
+    total_tokens: 0
+    duration_ms: 0
+mystery: oops
+"#;
+        let r = BaselineFile::from_yaml_str(yaml);
+        assert!(
+            r.is_err(),
+            "unknown BaselineFile YAML field must be rejected"
+        );
+    }
+
+    #[test]
+    fn manifest_rejects_unknown_top_level_fields() {
+        let toml = r#"
+mystery = "oops"
+[[baseline]]
+scenario = "x"
+model = "y/z"
+git_ref = "a"
+frozen_at = "b"
+"#;
+        let r = Manifest::from_toml_str(toml);
+        assert!(r.is_err(), "unknown Manifest TOML field must be rejected");
+    }
+
+    #[test]
+    fn manifest_entry_rejects_unknown_fields() {
+        let toml = r#"
+[[baseline]]
+scenario = "x"
+model = "y/z"
+git_ref = "a"
+frozen_at = "b"
+mystery = "oops"
+"#;
+        let r = Manifest::from_toml_str(toml);
+        assert!(
+            r.is_err(),
+            "unknown ManifestEntry TOML field must be rejected"
+        );
+    }
+
+    #[test]
+    fn baseline_file_rejects_unknown_fields_inside_transcript_event() {
+        // Verifies that serde-saphyr (the YAML deserializer) honors
+        // deny_unknown_fields on TranscriptEvent variants. Without this
+        // test, only the JSON path is verified — and a hand-edited
+        // baseline could silently drop typo'd fields inside an event.
+        let yaml = r#"scenario: _smoke
+model: ollama/qwen3-coder
+git_ref: abc
+frozen_at: 2026-05-08T00:00:00Z
+user_turns: []
+transcript:
+  events:
+    - kind: tool_call
+      tool_name: read
+      arguments: {}
+      extra: oops
+  deterministic_floor_passed: true
+  usage_summary:
+    prompt_tokens: 0
+    completion_tokens: 0
+    total_tokens: 0
+    duration_ms: 0
+"#;
+        let r = BaselineFile::from_yaml_str(yaml);
+        assert!(
+            r.is_err(),
+            "unknown field inside TranscriptEvent variant must be rejected via YAML deserializer"
+        );
     }
 }
