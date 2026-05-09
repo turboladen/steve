@@ -102,6 +102,11 @@ impl Normalizer {
         // what the agent was doing when it stalled — would be silently
         // dropped from the transcript.
         //
+        // Note: LlmError also closes a turn (pushes to assistant_messages
+        // and increments current_turn in CapturedRun::observe), so an
+        // errored turn does NOT produce this gap — only a hard timeout
+        // does.
+        //
         // For each turn t: emit (ToolCall, ToolResult) pairs for every
         // recorded call whose turn_index == t (in their original emit order
         // — `captured.tool_calls` is already in emit order), then emit the

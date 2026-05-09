@@ -282,9 +282,11 @@ async fn dispatch_eval(args: EvalArgs) -> Result<()> {
     };
     if !baselines_dir_ok {
         anyhow::bail!(
-            "eval/baselines exists but is a symlink or non-directory at {}; \
-             refusing to write through it (would escape the repo).",
-            baselines_dir.display()
+            "eval/baselines exists but is a symlink or non-directory at {} \
+             (detected project root: {}); refusing to write through it \
+             (would escape the repo).",
+            baselines_dir.display(),
+            project.root.display()
         );
     }
 
