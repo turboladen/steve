@@ -221,6 +221,19 @@ pub async fn freeze_subcommand(
 
     let mfst_path = manifest_path(baselines_dir);
 
+    // Pre-flight: validate the model string maps to safe paths AND the
+    // existing manifest (if any) is readable, BEFORE burning agent tokens.
+    // Without this, a typo in --model or a corrupt manifest.toml would
+    // surface only after every scenario ran. baseline_path validates the
+    // model string structure; Manifest::read_from_path returns
+    // Manifest::default() on NotFound (fresh-checkout case) and propagates
+    // parse / permission errors otherwise.
+    let resolved_paths: Vec<std::path::PathBuf> = selected
+        .iter()
+        .map(|(name, _)| baseline_path(baselines_dir, name, model))
+        .collect::<Result<_>>()?;
+    let mut manifest = Manifest::read_from_path(&mfst_path)?;
+
     let git_ref = current_git_ref().unwrap_or_else(|| {
         eprintln!(
             "warning: could not determine git ref (not a git repo, or `git` not in PATH); \
@@ -236,7 +249,7 @@ pub async fn freeze_subcommand(
     let mut pending: Vec<(std::path::PathBuf, BaselineFile, ManifestEntry)> =
         Vec::with_capacity(selected.len());
     let total = selected.len();
-    for (i, (name, scenario_path)) in selected.iter().enumerate() {
+    for (i, ((name, scenario_path), path)) in selected.iter().zip(resolved_paths).enumerate() {
         let started = std::time::Instant::now();
         print!("running scenario {name} ({}/{})...", i + 1, total);
         std::io::Write::flush(&mut std::io::stdout()).ok();
@@ -265,7 +278,6 @@ pub async fn freeze_subcommand(
             user_turns: scenario.user_turns.clone(),
             transcript,
         };
-        let path = baseline_path(baselines_dir, name, model)?;
         let entry = ManifestEntry {
             scenario: name.clone(),
             model: model.to_string(),
@@ -275,10 +287,7 @@ pub async fn freeze_subcommand(
         pending.push((path, baseline, entry));
     }
 
-    // Write: all runs succeeded — commit to disk. Read-modify-write the
-    // manifest. read_from_path returns Manifest::default() on NotFound, so
-    // the fresh-checkout case Just Works.
-    let mut manifest = Manifest::read_from_path(&mfst_path)?;
+    // Write: all runs succeeded — commit to disk.
     for (idx, (path, baseline, _)) in pending.iter().enumerate() {
         baseline.write_to_path(path).with_context(|| {
             format!(

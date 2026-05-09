@@ -43,6 +43,7 @@ pub enum Verdict {
 /// reasoning before anchoring on a verdict (see "Halo-effect mitigation
 /// in the prompt" in the spec).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PairedScore {
     pub axis: Axis,
     pub rationale: String,
@@ -230,6 +231,23 @@ mod tests {
             let serde_str = serde_str.trim_matches('"');
             assert_eq!(display, serde_str, "Display and serde must match for {v:?}");
         }
+    }
+
+    #[test]
+    fn paired_score_rejects_unknown_fields() {
+        // Phase 7 will parse judge responses into PairedScore. A robust
+        // pipeline parses raw LLM output through a permissive intermediate
+        // type and converts to PairedScore; that conversion benefits from
+        // strict deser here so a typo or LLM-added field can't slip into
+        // the final scored record.
+        let bad = r#"{
+            "axis": "correctness",
+            "rationale": "looks good",
+            "verdict": "current_wins",
+            "confidence": 0.9
+        }"#;
+        let r: Result<PairedScore, _> = serde_json::from_str(bad);
+        assert!(r.is_err(), "unknown PairedScore field must be rejected");
     }
 
     #[test]

@@ -65,7 +65,8 @@ enum EvalSubcommand {
         #[arg(long)]
         model: String,
         /// Output path for the results YAML. Defaults to a timestamped
-        /// path in the current directory.
+        /// path under `<project_root>/eval/results/`. Relative paths are
+        /// anchored to the project root; absolute paths are used as-is.
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
