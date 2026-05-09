@@ -166,6 +166,80 @@ export OPENAI_API_KEY="sk-..."
 | `providers.*.base_url`    | Yes      | OpenAI-compatible API endpoint                                                  |
 | `providers.*.api_key_env` | No       | Env var holding the API key. Omit for keyless local providers (Ollama, etc.)    |
 | `providers.*.models`      | Yes      | Map of available models for this provider                                       |
+| `mcp_servers`             | No       | Map of MCP server configurations (see [MCP Servers](#mcp-servers))              |
+
+### MCP Servers
+
+Steve can connect to [Model Context Protocol](https://modelcontextprotocol.io)
+servers — external processes (or remote HTTP endpoints) that expose extra tools
+and resources to the LLM. Add them under `mcp_servers`, keyed by a server ID.
+The server ID must not contain `__` (it's the separator inside the
+`mcp__<server_id>__<tool>` tool names that Steve presents to the model).
+
+**Local stdio server (child process):**
+
+```jsonc
+{
+  "mcp_servers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" },
+    },
+  },
+}
+```
+
+**Remote HTTP/SSE server with a static bearer token:**
+
+```jsonc
+{
+  "mcp_servers": {
+    "example": {
+      "url": "https://mcp.example.com",
+      "headers": { "Authorization": "Bearer ${MCP_TOKEN}" },
+    },
+  },
+}
+```
+
+**Remote OAuth-protected server:** for servers that support
+[dynamic client registration](https://datatracker.ietf.org/doc/html/rfc7591),
+just provide the URL — Steve will register and walk you through the OAuth flow
+on first connect:
+
+```jsonc
+{
+  "mcp_servers": {
+    "github-mcp": { "url": "https://api.githubcopilot.com/mcp/" },
+  },
+}
+```
+
+For servers that don't support dynamic registration, supply a pre-registered
+`client_id` (and `client_secret` if the provider requires one — GitHub OAuth
+Apps do):
+
+```jsonc
+{
+  "mcp_servers": {
+    "custom-oauth-mcp": {
+      "url": "https://mcp.example.com",
+      "client_id": "your-app-client-id",
+      "client_secret": "${MCP_CLIENT_SECRET}",
+    },
+  },
+}
+```
+
+`${VAR}` placeholders inside `env`, `headers`, and `client_secret` are expanded
+from process environment variables at server start, not at config load — keep
+secrets in your shell environment, not in `.steve.jsonc`.
+
+Project config's `mcp_servers` merges with global config by server ID (project
+wins on conflict). MCP tools are subject to the permission system like any
+other tool, but `AllowAlways` grants are session-only since MCP tool names are
+discovered at runtime.
 
 ## Usage
 
