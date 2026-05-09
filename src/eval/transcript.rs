@@ -94,12 +94,27 @@ impl Normalizer {
         let mut events =
             Vec::with_capacity(captured.tool_calls.len() * 2 + captured.assistant_messages.len());
 
-        // Walk turns in order. For each turn t: emit (ToolCall, ToolResult)
-        // pairs for every recorded call whose turn_index == t (in their
-        // original emit order — `captured.tool_calls` is already in emit
-        // order), then emit the AssistantMessage for that turn (skipping
-        // empties — see test rationale).
-        for (turn_idx, msg) in captured.assistant_messages.iter().enumerate() {
+        // Walk turns in order. Iteration bound is the max of
+        // assistant_messages.len() (covers normal completion) and
+        // 1 + max(tool_calls.turn_index) (covers a timed-out turn where
+        // LlmFinish never fired but tool calls had already been observed).
+        // Without the second bound the diagnostic signal of a timeout —
+        // what the agent was doing when it stalled — would be silently
+        // dropped from the transcript.
+        //
+        // For each turn t: emit (ToolCall, ToolResult) pairs for every
+        // recorded call whose turn_index == t (in their original emit order
+        // — `captured.tool_calls` is already in emit order), then emit the
+        // AssistantMessage for that turn (skipping empties — see test
+        // rationale).
+        let max_tool_turn = captured
+            .tool_calls
+            .iter()
+            .map(|c| c.turn_index + 1)
+            .max()
+            .unwrap_or(0);
+        let total_turns = captured.assistant_messages.len().max(max_tool_turn);
+        for turn_idx in 0..total_turns {
             for call in captured
                 .tool_calls
                 .iter()
@@ -118,7 +133,9 @@ impl Normalizer {
                     });
                 }
             }
-            if !msg.is_empty() {
+            if let Some(msg) = captured.assistant_messages.get(turn_idx)
+                && !msg.is_empty()
+            {
                 events.push(TranscriptEvent::AssistantMessage {
                     text: msg.replace(&workspace_str, ""),
                 });
@@ -383,6 +400,56 @@ mod tests {
         assert!(
             !has_empty_msg,
             "empty assistant_message events must be dropped: {:?}",
+            t.events
+        );
+    }
+
+    #[test]
+    fn normalize_includes_tool_calls_from_timed_out_final_turn() {
+        // When Runner::run hits PER_TURN_TIMEOUT mid-turn, it sets
+        // timed_out=true and breaks BEFORE observing LlmFinish. So tool
+        // calls emitted before the timeout have turn_index == current_turn
+        // but assistant_messages doesn't include that turn's slot. The
+        // Normalizer must still surface those tool calls — otherwise the
+        // diagnostic signal of the timeout (what the agent was doing when
+        // it stalled) is invisible in the baseline.
+        let mut cap = captured_with_workspace("/tmp/eval-x");
+        cap.observe(&AppEvent::LlmToolCall {
+            call_id: "u".into(),
+            tool_name: ToolName::Bash,
+            arguments: json!({"command": "while true; do :; done"}),
+        });
+        cap.observe(&AppEvent::ToolResult {
+            call_id: "u".into(),
+            tool_name: ToolName::Bash,
+            output: ToolOutput {
+                title: "bash".into(),
+                output: "(killed)".into(),
+                is_error: true,
+            },
+        });
+        // No LlmFinish — runner timed out before the turn could close.
+        cap.timed_out = true;
+
+        let t = Normalizer::normalize(&cap, false);
+        let calls = t
+            .events
+            .iter()
+            .filter(|e| matches!(e, TranscriptEvent::ToolCall { .. }))
+            .count();
+        let results = t
+            .events
+            .iter()
+            .filter(|e| matches!(e, TranscriptEvent::ToolResult { .. }))
+            .count();
+        assert_eq!(
+            calls, 1,
+            "tool call from timed-out turn must be preserved: {:?}",
+            t.events
+        );
+        assert_eq!(
+            results, 1,
+            "tool result from timed-out turn must be preserved: {:?}",
             t.events
         );
     }

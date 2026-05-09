@@ -265,6 +265,29 @@ async fn dispatch_eval(args: EvalArgs) -> Result<()> {
         );
     }
 
+    // Same symlink-rejection posture for baselines_dir: if it exists, it
+    // must be a real directory. NotFound is allowed because freeze creates
+    // the directory on first run via create_dir_all. Without this guard, a
+    // symlinked eval/baselines would let baseline.write_to_path() write
+    // outside the repo root.
+    let baselines_dir_ok = match std::fs::symlink_metadata(&baselines_dir) {
+        Ok(m) => m.file_type().is_dir(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => {
+            return Err(anyhow::Error::from(e).context(format!(
+                "checking eval/baselines at {}",
+                baselines_dir.display()
+            )));
+        }
+    };
+    if !baselines_dir_ok {
+        anyhow::bail!(
+            "eval/baselines exists but is a symlink or non-directory at {}; \
+             refusing to write through it (would escape the repo).",
+            baselines_dir.display()
+        );
+    }
+
     // Sub-subcommand path — new shapes.
     if let Some(sub) = args.command {
         match sub {
