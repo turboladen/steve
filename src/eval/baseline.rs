@@ -74,68 +74,69 @@ pub fn baseline_path(baselines_dir: &Path, scenario: &str, model: &str) -> Resul
             "model {model:?} must be in 'provider/model_id' form (matches the project-wide convention; see CLAUDE.md)"
         )
     })?;
-    if provider.is_empty() || model_id.is_empty() {
-        anyhow::bail!("model {model:?} has empty provider or model id");
-    }
-    // Reject additional slashes (e.g. "anthropic/claude/preview" would silently
-    // create a nested subdir hierarchy; "ollama//qwen" via PathBuf::join would
-    // treat the empty-then-"/qwen" as an absolute path and escape the tree).
-    if provider.contains('/') || model_id.contains('/') {
-        anyhow::bail!(
-            "model {model:?} must have exactly one '/' separating provider and model id \
-             (got extra slashes)"
-        );
-    }
-    // Reject whitespace — pasted display names like "Qwen 3 coder" would produce
-    // filesystem paths with spaces that break shell pipelines and find patterns.
-    if provider.chars().any(|c| c.is_whitespace()) || model_id.chars().any(|c| c.is_whitespace()) {
-        anyhow::bail!(
-            "model {model:?} must not contain whitespace in provider or model id \
-             (got a display name instead of the api identifier?)"
-        );
-    }
-    // Reject ".." and leading "." in model components to prevent path traversal.
-    if provider == ".." || provider.starts_with('.') {
-        anyhow::bail!(
-            "provider in model {model:?} must not be '..' or start with '.' (path traversal)"
-        );
-    }
-    if model_id == ".." || model_id.starts_with('.') {
-        anyhow::bail!(
-            "model_id in model {model:?} must not be '..' or start with '.' (path traversal)"
-        );
-    }
-    // NUL bytes in model components would produce confusing runtime errors in
-    // std::fs rather than clean validation failures.
-    if provider.as_bytes().contains(&0) || model_id.as_bytes().contains(&0) {
-        anyhow::bail!("model {model:?} must not contain NUL bytes in provider or model id");
-    }
-    // Comprehensive checks on scenario — it is also joined into the path.
-    if scenario.starts_with('/') {
-        anyhow::bail!("scenario {scenario:?} must not be absolute");
-    }
-    if scenario.contains('/') {
-        anyhow::bail!("scenario {scenario:?} must not contain '/'");
-    }
-    if scenario.chars().any(|c| c.is_whitespace()) {
-        anyhow::bail!("scenario {scenario:?} must not contain whitespace");
-    }
-    if scenario.as_bytes().contains(&0) {
-        anyhow::bail!("scenario {scenario:?} must not contain NUL bytes");
-    }
-    // Use component-based dotdot check (rejects ".." as a path component but
-    // permits substrings like "a..b").
-    if std::path::Path::new(scenario)
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
-        || scenario.starts_with('.')
-    {
-        anyhow::bail!("scenario {scenario:?} must not be '..' or start with '.'");
-    }
+    validate_path_segment(scenario, "scenario")?;
+    validate_path_segment(provider, "provider")?;
+    validate_path_segment(model_id, "model id")?;
     Ok(baselines_dir
         .join(scenario)
         .join(provider)
         .join(format!("{model_id}.yaml")))
+}
+
+/// Validate that a string is safe to use as a single segment of a filesystem
+/// path under a controlled root, on both Unix and Windows.
+///
+/// Why this exists: `PathBuf::join` is platform-aware. On Windows, joining
+/// against `"C:\\tmp"` or `"foo\\bar"` would replace the prefix or insert
+/// extra subdirectories — defeating the "stay under baselines_dir" intent.
+/// Substring checks against `'/'` alone would miss those cases. Using
+/// `Path::components()` gives cross-platform correctness for free.
+///
+/// Rejects:
+///   - Absolute paths (`Path::is_absolute()`; catches `/foo` on Unix, `C:\foo`
+///     and `\foo` on Windows)
+///   - Root or drive prefixes (`Component::RootDir` / `Component::Prefix`)
+///   - `..` or `.` as path components (path traversal)
+///   - Multi-component paths (any second component; catches both `/` and `\`
+///     separators on the platform that interprets them)
+///   - Empty, leading dot (hidden / reserved), whitespace, NUL bytes
+fn validate_path_segment(segment: &str, label: &str) -> Result<()> {
+    if segment.is_empty() {
+        anyhow::bail!("{label} must not be empty");
+    }
+    let path = std::path::Path::new(segment);
+    if path.is_absolute() {
+        anyhow::bail!("{label} {segment:?} must not be an absolute path");
+    }
+    let mut components = path.components();
+    match components.next() {
+        Some(std::path::Component::Normal(_)) => {}
+        Some(std::path::Component::ParentDir) => {
+            anyhow::bail!("{label} {segment:?} must not be '..' (path traversal)");
+        }
+        Some(std::path::Component::CurDir) => {
+            anyhow::bail!("{label} {segment:?} must not be '.'");
+        }
+        Some(std::path::Component::RootDir | std::path::Component::Prefix(_)) => {
+            anyhow::bail!("{label} {segment:?} must not include a root or drive prefix");
+        }
+        None => anyhow::bail!("{label} must not be empty"),
+    }
+    if components.next().is_some() {
+        anyhow::bail!(
+            "{label} {segment:?} must be a single path component (no '/' or '\\\\' separators)"
+        );
+    }
+    if segment.starts_with('.') {
+        anyhow::bail!("{label} {segment:?} must not start with '.'");
+    }
+    if segment.chars().any(|c| c.is_whitespace()) {
+        anyhow::bail!("{label} {segment:?} must not contain whitespace");
+    }
+    if segment.as_bytes().contains(&0) {
+        anyhow::bail!("{label} {segment:?} must not contain NUL bytes");
+    }
+    Ok(())
 }
 
 /// Authoritative cross-baseline provenance index. Lives at
@@ -309,21 +310,25 @@ mod tests {
 
     #[test]
     fn baseline_path_rejects_double_slash_in_model() {
+        // "ollama//qwen" splits to provider="ollama", model_id="/qwen".
+        // model_id "/qwen" is rejected as an absolute path.
         let err = baseline_path(Path::new("x"), "_smoke", "ollama//qwen").unwrap_err();
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("extra slashes") || msg.contains("exactly one"),
-            "expected helpful message about extra slashes, got: {msg}"
+            msg.contains("absolute path"),
+            "expected absolute-path rejection on '/qwen' model_id, got: {msg}"
         );
     }
 
     #[test]
     fn baseline_path_rejects_extra_slashes_in_model() {
+        // "anthropic/claude/preview" splits to provider="anthropic",
+        // model_id="claude/preview". model_id has two components.
         let err = baseline_path(Path::new("x"), "_smoke", "anthropic/claude/preview").unwrap_err();
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("extra slashes") || msg.contains("exactly one"),
-            "expected helpful message about extra slashes, got: {msg}"
+            msg.contains("single path component"),
+            "expected single-component rejection on multi-segment model_id, got: {msg}"
         );
     }
 
@@ -351,7 +356,7 @@ mod tests {
     fn baseline_path_rejects_absolute_scenario() {
         let err = baseline_path(Path::new("x"), "/etc/passwd", "ollama/qwen3-coder").unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("must not be absolute"), "got: {msg}");
+        assert!(msg.contains("absolute path"), "got: {msg}");
     }
 
     #[test]
@@ -380,11 +385,12 @@ mod tests {
 
     #[test]
     fn baseline_path_rejects_slash_in_scenario() {
+        // "foo/bar" parses to two components — the single-component check fires.
         let err = baseline_path(Path::new("x"), "foo/bar", "ollama/qwen3-coder").unwrap_err();
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("must not contain '/'"),
-            "expected slash rejection, got: {msg}"
+            msg.contains("single path component"),
+            "expected single-component rejection for multi-segment scenario, got: {msg}"
         );
     }
 
@@ -428,32 +434,31 @@ mod tests {
     #[test]
     fn baseline_path_rejects_dotdot_in_provider_or_model() {
         // "../foo/bar" splits on first '/' into provider="..", model_id="foo/bar".
-        // model_id contains '/' so the extra-slash check fires.
+        // Validation order is scenario -> provider -> model_id, so provider's
+        // ".." (a ParentDir component) fires first.
         let err = baseline_path(Path::new("x"), "_smoke", "../foo/bar").unwrap_err();
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("extra slashes")
-                || msg.contains("more than one slash")
-                || msg.contains("exactly one"),
-            "expected extra-slash rejection, got: {msg}"
+            msg.contains("path traversal"),
+            "expected path-traversal rejection on '..' provider, got: {msg}"
         );
 
-        // "../qwen" splits on first '/' into provider="..", model_id="qwen".
-        // provider == ".." fires the dotdot check.
+        // "../qwen" splits to provider="..", model_id="qwen". provider's ".."
+        // fires first.
         let err2 = baseline_path(Path::new("x"), "_smoke", "../qwen").unwrap_err();
         let msg2 = format!("{err2:#}");
         assert!(
-            msg2.contains("path traversal") || msg2.contains("'..'") || msg2.contains("must not"),
-            "expected dotdot rejection on provider, got: {msg2}"
+            msg2.contains("path traversal"),
+            "expected path-traversal rejection on provider, got: {msg2}"
         );
 
-        // "ollama/.." splits on first '/' into provider="ollama", model_id="..".
-        // model_id == ".." fires the dotdot check.
+        // "ollama/.." splits to provider="ollama", model_id="..". model_id's
+        // ".." fires the path-traversal check.
         let err3 = baseline_path(Path::new("x"), "_smoke", "ollama/..").unwrap_err();
         let msg3 = format!("{err3:#}");
         assert!(
-            msg3.contains("path traversal") || msg3.contains("'..'") || msg3.contains("must not"),
-            "expected dotdot rejection on model_id, got: {msg3}"
+            msg3.contains("path traversal"),
+            "expected path-traversal rejection on model_id, got: {msg3}"
         );
     }
 
