@@ -104,6 +104,13 @@ fn validate_path_segment(segment: &str, label: &str) -> Result<()> {
     if segment.is_empty() {
         anyhow::bail!("{label} must not be empty");
     }
+    // NUL byte check runs BEFORE constructing a Path: passing a NUL-bearing
+    // OsStr to syscalls is a panic-class failure on every platform, so fail
+    // fast with a clean validation error instead of letting std::fs surface
+    // the OS-level error later.
+    if segment.as_bytes().contains(&0) {
+        anyhow::bail!("{label} {segment:?} must not contain NUL bytes");
+    }
     let path = std::path::Path::new(segment);
     if path.is_absolute() {
         anyhow::bail!("{label} {segment:?} must not be an absolute path");
@@ -120,11 +127,14 @@ fn validate_path_segment(segment: &str, label: &str) -> Result<()> {
         Some(std::path::Component::RootDir | std::path::Component::Prefix(_)) => {
             anyhow::bail!("{label} {segment:?} must not include a root or drive prefix");
         }
+        // `is_empty` and `is_absolute` upstream catch the inputs that produce
+        // an empty Components iterator on every supported platform; the arm
+        // is defense-in-depth.
         None => anyhow::bail!("{label} must not be empty"),
     }
     if components.next().is_some() {
         anyhow::bail!(
-            "{label} {segment:?} must be a single path component (no '/' or '\\\\' separators)"
+            "{label} {segment:?} must be a single path component (no '/' or '\\' separators)"
         );
     }
     if segment.starts_with('.') {
@@ -132,9 +142,6 @@ fn validate_path_segment(segment: &str, label: &str) -> Result<()> {
     }
     if segment.chars().any(|c| c.is_whitespace()) {
         anyhow::bail!("{label} {segment:?} must not contain whitespace");
-    }
-    if segment.as_bytes().contains(&0) {
-        anyhow::bail!("{label} {segment:?} must not contain NUL bytes");
     }
     Ok(())
 }
@@ -361,8 +368,8 @@ mod tests {
 
     #[test]
     fn baseline_path_rejects_pure_dotdot_scenario() {
-        // ".." has no slash, so the contains('/') guard does not fire.
-        // The component-based ParentDir check must catch it.
+        // ".." parses as a single ParentDir component; the component match
+        // arm fires.
         let err = baseline_path(Path::new("x"), "..", "ollama/qwen3-coder").unwrap_err();
         let msg = format!("{err:#}");
         assert!(
@@ -372,15 +379,45 @@ mod tests {
     }
 
     #[test]
+    fn baseline_path_rejects_curdir_scenario() {
+        // "." parses as a single CurDir component; baselines_dir.join(".")
+        // would silently stay in baselines_dir and produce a confusing path.
+        let err = baseline_path(Path::new("x"), ".", "ollama/qwen3-coder").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("must not be '.'"),
+            "expected curdir rejection on '.', got: {msg}"
+        );
+    }
+
+    #[test]
     fn baseline_path_rejects_leading_dot_scenario() {
-        // ".hidden" has no slash and is not a ParentDir component.
-        // The starts_with('.') clause must catch it.
+        // ".hidden" parses as a single Normal component; the component match
+        // succeeds and falls through to the post-match `starts_with('.')` guard.
         let err = baseline_path(Path::new("x"), ".hidden", "ollama/qwen3-coder").unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("start with '.'"),
             "expected leading-dot rejection, got: {msg}"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn baseline_path_rejects_windows_absolute_paths() {
+        // The cross-platform claim is only verifiable on the platform that
+        // motivated it. On Unix, "C:\\Users\\evil" parses as a single Normal
+        // component and would silently pass — harmless on Unix because
+        // PathBuf::join doesn't treat the drive prefix as absolute, but the
+        // rejection contract should hold on Windows.
+        for bad in ["C:\\Users\\evil", "\\foo\\bar", "C:foo"] {
+            let err = baseline_path(Path::new("x"), bad, "ollama/qwen").unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("absolute path") || msg.contains("root or drive prefix"),
+                "expected Windows-absolute rejection for {bad:?}, got: {msg}"
+            );
+        }
     }
 
     #[test]
