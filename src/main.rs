@@ -221,11 +221,27 @@ async fn dispatch_eval(args: EvalArgs) -> Result<()> {
     // can invoke `steve eval ...` from a subdirectory of the repo (e.g.
     // `cd src/eval && steve eval baseline freeze`) without hitting "no
     // scenarios found" simply because CWD doesn't contain `eval/scenarios`.
-    // detect_or_cwd walks up looking for git/Cargo markers and falls back to
-    // CWD outside a repo, which preserves the legacy behavior in that case.
+    // detect_or_cwd walks up looking for a `.git/` directory and falls back
+    // to CWD outside a repo (the silent fallback is fine because the
+    // existence check below catches the common misuse cases).
     let project = steve::project::detect_or_cwd();
     let scenarios_dir = project.root.join("eval/scenarios");
     let baselines_dir = project.root.join("eval/baselines");
+
+    // Guard the common misuse case: invoking `steve eval ...` outside the
+    // steve repo (e.g. from /tmp, where detect_or_cwd silently falls back
+    // to CWD) or from an unrelated cargo project (whose .git/ detect_or_cwd
+    // *will* find but which has no eval/scenarios). Without this guard the
+    // user would see a misleading "no scenarios found" error pointing at
+    // a directory that doesn't even exist.
+    if !scenarios_dir.exists() {
+        anyhow::bail!(
+            "eval/scenarios not found at {} (detected project root: {}). \
+             Run `steve eval ...` from inside the steve repository.",
+            scenarios_dir.display(),
+            project.root.display()
+        );
+    }
 
     // Sub-subcommand path — new shapes.
     if let Some(sub) = args.command {
@@ -235,11 +251,19 @@ async fn dispatch_eval(args: EvalArgs) -> Result<()> {
                 model,
                 out,
             } => {
-                let out_path = out.unwrap_or_else(|| {
-                    let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
-                    let scope = scenario.as_deref().unwrap_or("all");
-                    project.root.join(format!("eval/results/{scope}-{ts}.yaml"))
-                });
+                // --out resolution: absolute path used as-is; relative path
+                // anchored against project.root for symmetry with the default
+                // (otherwise `--out results/x.yaml` from a subdir would land
+                // somewhere different from the same default-construction).
+                let out_path = match out {
+                    Some(p) if p.is_absolute() => p,
+                    Some(p) => project.root.join(p),
+                    None => {
+                        let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+                        let scope = scenario.as_deref().unwrap_or("all");
+                        project.root.join(format!("eval/results/{scope}-{ts}.yaml"))
+                    }
+                };
                 return steve::eval::cli::run_subcommand(
                     &scenarios_dir,
                     scenario.as_deref(),
