@@ -22,21 +22,74 @@ enum Commands {
         #[command(subcommand)]
         command: steve::cli::TaskCommand,
     },
-    /// Run one eval scenario end-to-end and emit the captured trace as JSON
-    /// (chat/coding regression harness — see `eval/scenarios/_smoke/`).
-    Eval {
-        /// Path to the `scenario.toml` file inside a scenario directory.
-        scenario: std::path::PathBuf,
+    /// Run scenarios. Without a sub-subcommand, runs ONE scenario
+    /// end-to-end and emits the captured trace as JSON (the existing
+    /// single-shot positional path; mutually exclusive with the
+    /// sub-subcommands below).
+    Eval(EvalArgs),
+}
+
+/// `args_conflicts_with_subcommands` lets us keep the existing positional
+/// `<scenario>` form (`steve eval eval/scenarios/_smoke/scenario.toml --model X`)
+/// while also offering the new sub-subcommands. When a sub-subcommand is
+/// given, the positional args are not allowed (and vice versa).
+#[derive(clap::Args)]
+#[command(args_conflicts_with_subcommands = true)]
+struct EvalArgs {
+    /// Single-shot positional path: `scenario.toml` to run end-to-end with
+    /// a captured-trace JSON dump on stdout. Mutually exclusive with the
+    /// sub-subcommands below.
+    #[arg(value_name = "SCENARIO")]
+    scenario: Option<std::path::PathBuf>,
+    /// Model to run against, in `provider/model_id` format. Required for
+    /// the positional form.
+    #[arg(long)]
+    model: Option<String>,
+    /// Override the judge model for `Judge` expectations (positional form).
+    #[arg(long)]
+    judge_model: Option<String>,
+    #[command(subcommand)]
+    command: Option<EvalSubcommand>,
+}
+
+#[derive(clap::Subcommand)]
+enum EvalSubcommand {
+    /// Run scenarios K times each (K from `scenario.runs`), writing a
+    /// normalized results YAML. No judging.
+    Run {
+        /// Scenario name (e.g. `_smoke`). When omitted, runs every
+        /// scenario under `eval/scenarios/`.
+        #[arg(long)]
+        scenario: Option<String>,
         /// Model to run against, in `provider/model_id` format.
         #[arg(long)]
         model: String,
-        /// Override the judge model for any `Judge` expectation this run.
-        /// Format: `provider/model_id`. When omitted, falls back to a
-        /// per-expectation `judge_model`, then the scenario-level
-        /// `judge_model`; if none of the three is set, Judge expectations
-        /// fail loudly. There is no hardcoded default.
+        /// Output path for the results YAML. Defaults to a timestamped
+        /// path under `<project_root>/eval/results/`. Relative paths are
+        /// anchored to the project root; absolute paths are used as-is.
         #[arg(long)]
-        judge_model: Option<String>,
+        out: Option<std::path::PathBuf>,
+    },
+    /// Manage frozen baselines.
+    Baseline {
+        #[command(subcommand)]
+        command: BaselineSubcommand,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum BaselineSubcommand {
+    /// Freeze (capture and overwrite) baseline files for selected scenarios.
+    /// `K = 1` regardless of `scenario.runs`; the baseline is the fixed
+    /// reference, not a multi-sample artifact. No flags = all scenarios
+    /// with the supplied (or configured-default) model.
+    Freeze {
+        /// Scenario name. When omitted, freezes every scenario.
+        #[arg(long)]
+        scenario: Option<String>,
+        /// Model to freeze for, in `provider/model_id` format.
+        #[arg(long)]
+        model: String,
     },
 }
 
@@ -85,12 +138,8 @@ async fn main() -> Result<()> {
         Some(Commands::Task { command }) => {
             return steve::cli::run_task(command);
         }
-        Some(Commands::Eval {
-            scenario,
-            model,
-            judge_model,
-        }) => {
-            return steve::eval::cli::run_one(&scenario, &model, judge_model.as_deref()).await;
+        Some(Commands::Eval(args)) => {
+            return dispatch_eval(args).await;
         }
         None => {}
     }
@@ -166,4 +215,133 @@ async fn main() -> Result<()> {
     usage_handle.shutdown_and_wait();
     tracing::info!("steve shutting down");
     Ok(())
+}
+
+async fn dispatch_eval(args: EvalArgs) -> Result<()> {
+    // Resolve eval directories against the detected project root so the user
+    // can invoke `steve eval ...` from a subdirectory of the repo (e.g.
+    // `cd src/eval && steve eval baseline freeze`) without hitting "no
+    // scenarios found" simply because CWD doesn't contain `eval/scenarios`.
+    // detect_or_cwd walks up looking for a `.git/` directory and falls back
+    // to CWD outside a repo (the silent fallback is fine because the
+    // existence check below catches the common misuse cases).
+    let project = steve::project::detect_or_cwd();
+    let scenarios_dir = project.root.join("eval/scenarios");
+    let baselines_dir = project.root.join("eval/baselines");
+
+    // Guard the common misuse case: invoking `steve eval ...` outside the
+    // steve repo (e.g. from /tmp, where detect_or_cwd silently falls back
+    // to CWD) or from an unrelated cargo project (whose .git/ detect_or_cwd
+    // *will* find but which has no eval/scenarios). Without this guard the
+    // user would see a misleading "no scenarios found" error pointing at
+    // a directory that doesn't even exist.
+    //
+    // Use symlink_metadata + is_dir() rather than exists() so a symlinked
+    // eval/scenarios is rejected — matching discover_scenarios's posture
+    // (and ScenarioWorkspace::build's symlink-rejection rationale: a
+    // symlinked scenarios dir could exfiltrate file content from outside
+    // the repo).
+    //
+    // Distinguish NotFound (the misuse case we want to give a friendly
+    // message for) from other I/O errors (permission denied, transient
+    // failure) so we don't mask real diagnostics behind a generic
+    // "not found" message.
+    let scenarios_dir_ok = match std::fs::symlink_metadata(&scenarios_dir) {
+        Ok(m) => m.file_type().is_dir(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            return Err(anyhow::Error::from(e).context(format!(
+                "checking eval/scenarios at {}",
+                scenarios_dir.display()
+            )));
+        }
+    };
+    if !scenarios_dir_ok {
+        anyhow::bail!(
+            "eval/scenarios not found (or is a symlink) at {} (detected project root: {}). \
+             Run `steve eval ...` from inside the steve repository.",
+            scenarios_dir.display(),
+            project.root.display()
+        );
+    }
+
+    // Same symlink-rejection posture for baselines_dir: if it exists, it
+    // must be a real directory. NotFound is allowed because freeze creates
+    // the directory on first run via create_dir_all. Without this guard, a
+    // symlinked eval/baselines would let baseline.write_to_path() write
+    // outside the repo root.
+    let baselines_dir_ok = match std::fs::symlink_metadata(&baselines_dir) {
+        Ok(m) => m.file_type().is_dir(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => {
+            return Err(anyhow::Error::from(e).context(format!(
+                "checking eval/baselines at {}",
+                baselines_dir.display()
+            )));
+        }
+    };
+    if !baselines_dir_ok {
+        anyhow::bail!(
+            "eval/baselines exists but is a symlink or non-directory at {} \
+             (detected project root: {}); refusing to write through it \
+             (would escape the repo).",
+            baselines_dir.display(),
+            project.root.display()
+        );
+    }
+
+    // Sub-subcommand path — new shapes.
+    if let Some(sub) = args.command {
+        match sub {
+            EvalSubcommand::Run {
+                scenario,
+                model,
+                out,
+            } => {
+                // --out resolution: absolute path used as-is; relative path
+                // anchored against project.root for symmetry with the default
+                // (otherwise `--out results/x.yaml` from a subdir would land
+                // somewhere different from the same default-construction).
+                let out_path = match out {
+                    Some(p) if p.is_absolute() => p,
+                    Some(p) => project.root.join(p),
+                    None => {
+                        let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+                        let scope = scenario.as_deref().unwrap_or("all");
+                        project.root.join(format!("eval/results/{scope}-{ts}.yaml"))
+                    }
+                };
+                return steve::eval::cli::run_subcommand(
+                    &scenarios_dir,
+                    scenario.as_deref(),
+                    &model,
+                    &out_path,
+                )
+                .await;
+            }
+            EvalSubcommand::Baseline { command } => match command {
+                BaselineSubcommand::Freeze { scenario, model } => {
+                    return steve::eval::cli::freeze_subcommand(
+                        &scenarios_dir,
+                        &baselines_dir,
+                        scenario.as_deref(),
+                        &model,
+                    )
+                    .await;
+                }
+            },
+        }
+    }
+
+    // Single-shot positional path: scenario + --model required.
+    let Some(scenario) = args.scenario else {
+        anyhow::bail!(
+            "supply a scenario path (e.g. 'steve eval eval/scenarios/_smoke/scenario.toml --model X') \
+             or use a sub-subcommand ('steve eval run', 'steve eval baseline freeze')"
+        );
+    };
+    let Some(model) = args.model else {
+        anyhow::bail!("'steve eval <scenario>' requires --model");
+    };
+    steve::eval::cli::run_one(&scenario, &model, args.judge_model.as_deref()).await
 }

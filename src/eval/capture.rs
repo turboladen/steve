@@ -1,7 +1,7 @@
 //! Per-run capture state.
 //!
 //! `Capture::observe` is invoked for every `AppEvent` that flows through
-//! `App::run_until_idle`. It accumulates the trace data the Phase 3
+//! `App::run_until_idle`. It accumulates the trace data the rule-based
 //! evaluator needs (tool calls in stream-emit order, the assistant message
 //! text per turn, final token usage). The match is exhaustive so adding a
 //! new `AppEvent` variant is a compile error here — the new event might be

@@ -38,11 +38,11 @@ pub struct Runner {
     workspace: ScenarioWorkspace,
     app: App,
     /// Second `ProviderRegistry` built from the same `cfg.providers` as the
-    /// agent-under-test's registry, but kept separate so Phase 4's
-    /// LLM-as-judge calls don't share state with the App. Building a second
-    /// registry is cheap (no I/O — just `Client::with_config(...)`
-    /// instances) and avoids retrofitting `Arc<ProviderRegistry>` through
-    /// `App::new` just for the judge boundary.
+    /// agent-under-test's registry, but kept separate so the judge's LLM
+    /// calls don't share state with the App. Building a second registry is
+    /// cheap (no I/O — just `Client::with_config(...)` instances) and
+    /// avoids retrofitting `Arc<ProviderRegistry>` through `App::new` just
+    /// for the judge boundary.
     judge_registry: ProviderRegistry,
     /// Held to keep the writer thread alive for the lifetime of the App.
     /// Dropped together with `Runner`; the writer thread exits cleanly
@@ -61,20 +61,6 @@ impl Runner {
     /// must be in `provider/model_id` format and the provider must be
     /// resolvable from the user's global config.
     pub fn build(scenario: &Scenario, scenario_dir: &Path, cli_model: &str) -> Result<Self> {
-        // Multi-run support (`runs > 1` with majority-pass semantics) lands
-        // alongside Phase 6's JSONL+compare work — the output shape for N
-        // captures + N reports is a Phase 6 design decision. Until then,
-        // fail loudly so a `runs = 3` scenario doesn't silently report a
-        // single-run verdict as if it were the majority result.
-        if scenario.runs.get() > 1 {
-            anyhow::bail!(
-                "scenario {:?} sets runs={} but multi-run execution is not yet implemented \
-                 (tracked as steve-paeu, blocks Phase 6); rerun with runs=1 or omit the field",
-                scenario.name,
-                scenario.runs.get()
-            );
-        }
-
         let workspace = ScenarioWorkspace::build(scenario_dir, &scenario.setup)
             .with_context(|| format!("building workspace for scenario {}", scenario.name))?;
 
@@ -215,6 +201,26 @@ impl Runner {
         captured.duration = started_at.elapsed();
         Ok(captured)
     }
+
+    /// Drive the same scenario `count` times, returning one `CapturedRun`
+    /// per run. Each run reuses the SAME `App` and SAME workspace tempdir
+    /// — the agent's conversation history persists across runs unless the
+    /// caller re-builds the Runner. In `eval run`, each run uses a fresh
+    /// `Runner` to guarantee workspace isolation. This method is for callers
+    /// that intentionally share workspace state across runs (e.g., for
+    /// in-process scenarios where conversation history persistence is the
+    /// test condition itself).
+    pub(crate) async fn run_n(
+        &mut self,
+        scenario: &Scenario,
+        count: std::num::NonZeroUsize,
+    ) -> Result<Vec<CapturedRun>> {
+        let mut out = Vec::with_capacity(count.get());
+        for _ in 0..count.get() {
+            out.push(self.run(scenario).await?);
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -230,10 +236,9 @@ mod tests {
         tool::ToolName,
     };
 
-    // End-to-end Runner coverage requires lifting MockChatStream out of
-    // `#[cfg(test)]` in src/stream/mod.rs — deferred until Phase 4 (judge)
-    // forces it. The smoke test (`cargo run -- eval`) is the ecologically-
-    // valid gate for v1.
+    // End-to-end Runner coverage requires `MockChatStream` to be accessible
+    // outside `stream`'s `#[cfg(test)]` block. The smoke test
+    // (`cargo run -- eval`) is the ecologically-valid gate for v1.
 
     fn scenario_with_runs(runs: usize) -> Scenario {
         Scenario {
@@ -249,20 +254,21 @@ mod tests {
         }
     }
 
-    /// Multi-run scenarios fail loud at build time so a `runs = 3` scenario
-    /// can't silently report a single-run verdict as if it were the
-    /// majority. Tracked as steve-paeu (Phase 6 work).
-    #[test]
-    fn build_bails_when_runs_greater_than_one() {
+    /// The `runs > 1` bail was removed; verify it stays removed.
+    #[tokio::test]
+    async fn build_succeeds_for_runs_greater_than_one() {
         let scenario_dir = tempfile::tempdir().unwrap();
         let scenario = scenario_with_runs(3);
-        let chain = match Runner::build(&scenario, scenario_dir.path(), "fake/model") {
-            Ok(_) => panic!("expected runs=3 to bail at build time"),
+        // Build will still fail downstream because no provider is configured
+        // in the test env, but it must NOT fail with the "multi-run not
+        // implemented" message — that's the regression gate.
+        let err = match Runner::build(&scenario, scenario_dir.path(), "fake/model") {
+            Ok(_) => return, // happy path: build succeeded outright (unlikely without API keys)
             Err(e) => format!("{e:#}"),
         };
         assert!(
-            chain.contains("runs=3") && chain.contains("multi-run"),
-            "expected multi-run bail message: {chain}"
+            !err.contains("multi-run execution is not yet implemented"),
+            "the runs>1 bail must be removed; got: {err}"
         );
     }
 
