@@ -203,10 +203,18 @@ The server ID must not contain `__` (it's the separator inside the
 }
 ```
 
-**Remote OAuth-protected server:** for servers that support
-[dynamic client registration](https://datatracker.ietf.org/doc/html/rfc7591),
-just provide the URL — Steve will register and walk you through the OAuth flow
-on first connect:
+**Remote OAuth-protected server:** many servers can be configured with just a
+URL. Steve resolves OAuth client credentials in this order:
+
+1. [Dynamic client registration (RFC 7591)](https://datatracker.ietf.org/doc/html/rfc7591)
+   — if the server supports it, Steve registers automatically on first connect.
+2. Config-provided `client_id` (and `client_secret`) — see below.
+3. Built-in well-known credentials — currently shipped for `githubcopilot.com`
+   and `github.com` domains.
+
+The GitHub MCP server falls through to the built-in credentials path, so a URL
+alone is enough — Steve will still walk you through the browser OAuth flow on
+first connect:
 
 ```jsonc
 {
@@ -216,9 +224,9 @@ on first connect:
 }
 ```
 
-For servers that don't support dynamic registration, supply a pre-registered
-`client_id` (and `client_secret` if the provider requires one — GitHub OAuth
-Apps do):
+For servers that don't support dynamic registration and aren't in the built-in
+list, supply a pre-registered `client_id` (and `client_secret` if the provider
+requires one):
 
 ```jsonc
 {
