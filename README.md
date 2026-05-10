@@ -174,7 +174,9 @@ Steve can connect to [Model Context Protocol](https://modelcontextprotocol.io)
 servers — external processes (or remote HTTP endpoints) that expose extra tools
 and resources to the LLM. Add them under `mcp_servers`, keyed by a server ID.
 The server ID must not contain `__` (it's the separator inside the
-`mcp__<server_id>__<tool>` tool names that Steve presents to the model).
+`mcp__<server_id>__<tool>` tool names that Steve presents to the model). Each
+server entry must use exactly one transport: a `command` (stdio child process)
+or a `url` (HTTP/SSE). Mixing both keys in the same entry silently selects HTTP.
 
 **Local stdio server (child process):**
 
@@ -202,6 +204,11 @@ The server ID must not contain `__` (it's the separator inside the
   },
 }
 ```
+
+When an explicit `Authorization` header is set, Steve does not attempt the
+OAuth fallback on failure — a bad or expired token fails the connection
+outright. Omit the header to let Steve walk through the OAuth flow described
+below.
 
 **Remote OAuth-protected server:** many servers can be configured with just a
 URL. Steve resolves OAuth client credentials in this order:
@@ -242,7 +249,8 @@ requires one):
 
 `${VAR}` placeholders inside `env`, `headers`, and `client_secret` are expanded
 from process environment variables at server start, not at config load — keep
-secrets in your shell environment, not in `.steve.jsonc`.
+secrets in your shell environment, not in `.steve.jsonc`. (`client_id` is used
+as a literal string and is not env-expanded.)
 
 Project config's `mcp_servers` merges with global config by server ID (project
 wins on conflict). MCP tools are subject to the permission system like any
