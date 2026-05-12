@@ -29,25 +29,42 @@ enum Commands {
     Eval(EvalArgs),
 }
 
-/// `args_conflicts_with_subcommands` lets us keep the existing positional
-/// `<scenario>` form (`steve eval eval/scenarios/_smoke/scenario.toml --model X`)
-/// while also offering the new sub-subcommands. When a sub-subcommand is
-/// given, the positional args are not allowed (and vice versa).
+/// `args_conflicts_with_subcommands` lets the no-subcommand form
+/// (`steve eval --scenario X --model Y`) chain run → report, while
+/// sub-subcommands (`run`, `baseline freeze`, `report`) own their own
+/// args. When a sub-subcommand is given, the top-level args are
+/// rejected (and vice versa).
+///
+/// Phase 5's positional form (`steve eval eval/scenarios/_smoke/scenario.toml`)
+/// retired in Phase 8 per spec.
 #[derive(clap::Args)]
 #[command(args_conflicts_with_subcommands = true)]
 struct EvalArgs {
-    /// Single-shot positional path: `scenario.toml` to run end-to-end with
-    /// a captured-trace JSON dump on stdout. Mutually exclusive with the
-    /// sub-subcommands below.
-    #[arg(value_name = "SCENARIO")]
-    scenario: Option<std::path::PathBuf>,
-    /// Model to run against, in `provider/model_id` format. Required for
-    /// the positional form.
+    /// Scenario name (e.g. `_smoke`). When omitted, runs every scenario
+    /// under `eval/scenarios/`.
+    #[arg(long)]
+    scenario: Option<String>,
+    /// Model to run against, in `provider/model_id` format.
     #[arg(long)]
     model: Option<String>,
-    /// Override the judge model for `Judge` expectations (positional form).
+    /// Override the judge model. Format: `provider/model_id`. Takes
+    /// precedence over `.steve.eval.jsonc`'s `default_judge_model` and
+    /// per-scenario `judge_model`.
     #[arg(long)]
     judge_model: Option<String>,
+    /// Append a row to `eval/history.jsonl` recording this run.
+    #[arg(long)]
+    record_history: bool,
+    /// Write a self-contained HTML report to this path.
+    #[arg(long, value_name = "PATH")]
+    html: Option<std::path::PathBuf>,
+    /// Net win rate threshold for the exit code. Below this value
+    /// = regression (exit 1).
+    #[arg(long, value_name = "FLOAT")]
+    regression_threshold: Option<f64>,
+    /// Show per-scenario detail in the text output.
+    #[arg(long)]
+    verbose: bool,
     #[command(subcommand)]
     command: Option<EvalSubcommand>,
 }
@@ -431,15 +448,58 @@ async fn dispatch_eval(args: EvalArgs) -> Result<()> {
         }
     }
 
-    // Single-shot positional path: scenario + --model required.
-    let Some(scenario) = args.scenario else {
+    // No subcommand: chain run → report against the configured baseline.
+    let Some(model) = args.model else {
         anyhow::bail!(
-            "supply a scenario path (e.g. 'steve eval eval/scenarios/_smoke/scenario.toml --model X') \
-             or use a sub-subcommand ('steve eval run', 'steve eval baseline freeze')"
+            "'steve eval' (no subcommand) requires --model <provider/model_id>; \
+             alternatively use 'steve eval run', 'steve eval baseline freeze', \
+             or 'steve eval report'"
         );
     };
-    let Some(model) = args.model else {
-        anyhow::bail!("'steve eval <scenario>' requires --model");
-    };
-    steve::eval::cli::run_one(&scenario, &model, args.judge_model.as_deref()).await
+
+    // 1. Run: produce a temp results file under eval/results/.
+    let results_dir = project.root.join("eval/results");
+    std::fs::create_dir_all(&results_dir)?;
+    let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    let scope = args.scenario.as_deref().unwrap_or("all");
+    let results_path = results_dir.join(format!("chained-{scope}-{ts}.yaml"));
+    steve::eval::cli::run_subcommand(
+        &scenarios_dir,
+        args.scenario.as_deref(),
+        &model,
+        &results_path,
+    )
+    .await?;
+
+    // 2. Report: against the configured baseline.
+    let (cfg, _warnings) = steve::config::load(&project.root)?;
+    let eval_cfg = steve::config::load_eval_config(&project.root)?;
+    let (registry, missing) = steve::provider::ProviderRegistry::from_config(&cfg);
+    if !missing.is_empty() {
+        let names: Vec<String> = missing.iter().map(|w| w.provider_id.clone()).collect();
+        anyhow::bail!(
+            "eval report requires API keys for the configured provider(s): {}",
+            names.join(", ")
+        );
+    }
+    let history_path = project.root.join("eval/history.jsonl");
+    let judge_model_resolved = args
+        .judge_model
+        .clone()
+        .or(eval_cfg.default_judge_model.clone());
+    let exit = steve::eval::cli::report_subcommand(steve::eval::cli::ReportArgs {
+        results_path: &results_path,
+        baselines_dir: &baselines_dir,
+        scenarios_dir: &scenarios_dir,
+        history_path: &history_path,
+        html_out: args.html.as_deref(),
+        judge_model: judge_model_resolved.as_deref(),
+        cli_regression_threshold: args.regression_threshold,
+        config_regression_threshold: eval_cfg.regression_threshold,
+        verbose: args.verbose,
+        record_history: args.record_history,
+        registry: &registry,
+    })
+    .await?;
+    std::process::exit(exit.as_i32());
 }
