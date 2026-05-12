@@ -1513,16 +1513,29 @@ git switch feat/eval-harness && git pull
 # 2. Confirm the new types compile and the [scoring] override works.
 cargo test --lib eval::
 
-# 3. Confirm a real scenario.toml accepts an optional [scoring] block.
-#    Add it temporarily to one of the postmortem-derived scenarios
-#    (e.g., stop-guessing-after-failures), parse it, then revert:
-echo '[scoring]' >> eval/scenarios/stop-guessing-after-failures/scenario.toml
-echo 'axes = ["robustness", "efficiency"]' >> eval/scenarios/stop-guessing-after-failures/scenario.toml
-cargo test --lib all_committed_scenarios_parse_and_validate
-git checkout eval/scenarios/stop-guessing-after-failures/scenario.toml
+# 3. Confirm a real scenario.toml accepts an optional [scoring] block,
+#    AND that the override is observable from the CLI run output (not
+#    just unit tests). `steve eval run` prints the resolved axes per
+#    scenario in the header line — defaults are unannotated, overrides
+#    carry an `(override)` tag, so the round-trip is visible in stdout.
+#
+#    a) Run without a [scoring] block — should see
+#       "[axes: correctness, efficiency, conciseness]":
+cargo run -- eval run --scenario _smoke --model <your-model>
+
+#    b) Add a [scoring] block to an existing scenario and re-run.
+#       Output should change to
+#       "[axes (override): robustness, efficiency]":
+echo '' >> eval/scenarios/_smoke/scenario.toml
+echo '[scoring]' >> eval/scenarios/_smoke/scenario.toml
+echo 'axes = ["robustness", "efficiency"]' >> eval/scenarios/_smoke/scenario.toml
+cargo run -- eval run --scenario _smoke --model <your-model>
+git checkout eval/scenarios/_smoke/scenario.toml  # revert
 
 # 4. There is no `steve eval report` yet — that's Phase 8.
-#    Phase 7 is verified by the test suite alone.
+#    Phase 7 is verified by the test suite + the CLI axes-line above.
+#    The results.yaml itself doesn't carry the axes (axes are a
+#    report-time concern); Phase 8 wires them into the headline output.
 ```
 
 ---

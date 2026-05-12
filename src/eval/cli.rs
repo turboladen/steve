@@ -72,6 +72,35 @@ pub async fn run_one(scenario_path: &Path, model: &str, judge_model: Option<&str
     Ok(())
 }
 
+/// Format the per-scenario header line printed at the start of each
+/// scenario's runs. Surfaces the resolved scoring axes (and whether
+/// they came from a `[scoring]` block or `DEFAULT_AXES`) so a manual
+/// CLI smoke can verify Phase 7's `[scoring]` override end-to-end —
+/// the override would otherwise only be observable through unit
+/// tests, not the `eval run` output.
+fn format_scenario_header(name: &str, index: usize, total: usize, scenario: &Scenario) -> String {
+    let axes_str = scenario
+        .scoring_axes()
+        .iter()
+        .map(|a| format!("{a}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // Annotate only when the axes came from a [scoring] override —
+    // the default case is what readers expect, so the `(override)`
+    // marker is the load-bearing signal. Tagging both cases would
+    // just add noise to every line.
+    let axes_label = if scenario.scoring.is_some() {
+        "axes (override)"
+    } else {
+        "axes"
+    };
+    format!(
+        "running scenario {name} ({}/{}) [{axes_label}: {axes_str}]...",
+        index + 1,
+        total,
+    )
+}
+
 /// `steve eval run` — runs scenarios K times each (K from `scenario.runs`),
 /// writes a normalized `ResultsFile` YAML. No judging.
 ///
@@ -115,12 +144,16 @@ pub async fn run_subcommand(
     let total = selected.len();
 
     for (i, (name, scenario_path)) in selected.iter().enumerate() {
-        println!("running scenario {} ({}/{})...", name, i + 1, total);
         let scenario = Scenario::from_file(scenario_path)
             .with_context(|| format!("loading scenario {}", scenario_path.display()))?;
         let scenario_dir = scenario_path
             .parent()
             .with_context(|| format!("scenario path has no parent: {}", scenario_path.display()))?;
+        // Print resolved scoring axes so Phase 7's [scoring] block
+        // override is observable from a real run — without this, the
+        // override is only visible through `cargo test`, not through
+        // the CLI smoke path.
+        println!("{}", format_scenario_header(name, i, total, &scenario));
 
         let runs = scenario.runs.get();
         let mut transcripts = Vec::with_capacity(runs);
@@ -304,6 +337,66 @@ pub async fn freeze_subcommand(
     manifest.write_to_path(&mfst_path)?;
     println!("updated manifest: {}", mfst_path.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+    use crate::eval::{
+        scenario::{Scenario, Scoring},
+        score::Axis,
+    };
+
+    fn scenario_with_optional_scoring(scoring: Option<Scoring>) -> Scenario {
+        Scenario {
+            name: "x".into(),
+            description: "x".into(),
+            runs: std::num::NonZeroUsize::new(1).unwrap(),
+            setup: Default::default(),
+            user_turns: vec!["go".into()],
+            expectations: vec![crate::eval::scenario::Expectation::ToolCalled {
+                tool: crate::tool::ToolName::Read,
+            }],
+            judge_model: None,
+            scoring,
+        }
+    }
+
+    #[test]
+    fn header_shows_default_axes_unannotated_when_no_scoring_block() {
+        let scenario = scenario_with_optional_scoring(None);
+        let line = format_scenario_header("x", 0, 3, &scenario);
+        assert!(line.contains("(1/3)"), "got: {line}");
+        assert!(
+            line.contains("[axes: correctness, efficiency, conciseness]"),
+            "got: {line}"
+        );
+        assert!(
+            !line.contains("override"),
+            "default axes must NOT carry an annotation; got: {line}"
+        );
+    }
+
+    #[test]
+    fn header_annotates_override_axes_when_scoring_block_present() {
+        // Phase 7 contract: the override is observable from the CLI
+        // smoke. The `(override)` tag is the load-bearing signal —
+        // readers expect defaults silently, so only the override
+        // case earns a label.
+        let scenario = scenario_with_optional_scoring(Some(Scoring {
+            axes: vec![Axis::Robustness, Axis::Efficiency],
+        }));
+        let line = format_scenario_header("stop-guessing", 2, 5, &scenario);
+        assert!(line.contains("(3/5)"), "got: {line}");
+        assert!(
+            line.contains("[axes (override): robustness, efficiency]"),
+            "got: {line}"
+        );
+        assert!(
+            !line.contains("correctness"),
+            "override must NOT print the default axes; got: {line}"
+        );
+    }
 }
 
 #[cfg(test)]
