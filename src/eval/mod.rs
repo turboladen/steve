@@ -9,6 +9,7 @@ pub mod baseline;
 pub mod capture;
 pub mod cli;
 pub mod expectations;
+pub mod history;
 pub mod judge;
 pub mod report;
 pub mod results;
@@ -21,6 +22,7 @@ pub mod workspace;
 pub use baseline::{BaselineFile, Manifest, ManifestEntry, baseline_path, manifest_path};
 pub use capture::{CapturedRun, RecordedToolCall};
 pub use expectations::{EvalReport, ExpectationResult, JudgeRecord, Outcome, evaluate};
+pub use history::{HistoryEntry, append_history, read_history};
 pub use judge::{ComparePair, Judge, JudgeAdapter, JudgeOutcome, JudgeVerdict, apply_judges};
 pub use report::{
     AxisTotals, BaselineProvenance, Report, ReportTotals, ScenarioOutcome, ScenarioReport,
