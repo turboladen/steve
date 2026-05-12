@@ -312,13 +312,26 @@ impl Scenario {
                 .validate()
                 .with_context(|| format!("scenario {} expectation #{}", self.name, idx + 1))?;
         }
-        if let Some(scoring) = &self.scoring
-            && scoring.axes.is_empty()
-        {
-            anyhow::bail!(
-                "scenario {} has [scoring] block with empty `axes`; remove the block to use defaults, or list at least one axis",
-                self.name
-            );
+        if let Some(scoring) = &self.scoring {
+            if scoring.axes.is_empty() {
+                anyhow::bail!(
+                    "scenario {} has [scoring] block with empty `axes`; remove the block to use defaults, or list at least one axis",
+                    self.name
+                );
+            }
+            // Reject duplicates: each axis must appear at most once.
+            // Without this, downstream `parse_compare_response`'s
+            // per-axis loop would push N copies of the same PairedScore
+            // and the aggregation report would silently double-count.
+            let mut seen = std::collections::HashSet::new();
+            for axis in &scoring.axes {
+                if !seen.insert(*axis) {
+                    anyhow::bail!(
+                        "scenario {} has duplicate axis {axis} in [scoring].axes; each axis must appear at most once",
+                        self.name
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -1325,6 +1338,35 @@ tool = "read"
         assert!(
             msg.contains("axes") && (msg.contains("empty") || msg.contains("at least one")),
             "expected error about empty axes list; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn scenario_rejects_duplicate_axes_in_scoring() {
+        // Second review found: `axes = ["correctness", "correctness"]`
+        // deserializes fine, validates fine, and reaches
+        // `parse_compare_response`. If the LLM emits a single
+        // `correctness:` key, the per-axis loop pushes two PairedScore
+        // entries with identical content — downstream aggregation
+        // silently double-counts the axis. Reject at validate time
+        // so the authoring mistake fails loudly.
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["go"]
+
+[scoring]
+axes = ["correctness", "efficiency", "correctness"]
+
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("duplicate") && msg.contains("correctness"),
+            "expected duplicate-axis rejection naming correctness; got: {msg}"
         );
     }
 
