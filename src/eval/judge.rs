@@ -834,6 +834,7 @@ mod tests {
             user_turns: vec!["go".into()],
             expectations: vec![expectation],
             judge_model: scenario_judge_model.map(|s| s.to_string()),
+            scoring: None,
         }
     }
 
@@ -1561,6 +1562,7 @@ mod tests {
                 tool: ToolName::Read,
             }],
             judge_model: None,
+            scoring: None,
         };
         let registry = registry_with("p", "m"); // judge model unused
         validate_judge_config(&scenario, &registry, None).expect("rule-only scenarios pass");
@@ -1651,6 +1653,7 @@ mod tests {
                 judge_expectation(Some("p2/m2")), // -> per-expectation
             ],
             judge_model: Some("p1/m1".into()),
+            scoring: None,
         };
         let cfg = {
             use std::collections::HashMap;
@@ -1720,6 +1723,7 @@ mod tests {
                 judge_expectation(Some("typo/missing")), // unresolvable model
             ],
             judge_model: None,
+            scoring: None,
         };
         let registry = registry_with("real", "model");
         let err = format!(
@@ -1760,6 +1764,7 @@ mod tests {
                 judge_expectation(Some("typo/missing")), // #3: unresolvable
             ],
             judge_model: None,
+            scoring: None,
         };
         let registry = registry_with("real", "model");
         let err = format!(
@@ -1785,6 +1790,7 @@ mod tests {
             user_turns: vec!["go".into()],
             expectations: (0..n).map(|_| judge_expectation(None)).collect(),
             judge_model: None,
+            scoring: None,
         }
     }
 
@@ -1950,6 +1956,7 @@ mod tests {
             user_turns: vec!["go".into()],
             expectations: vec![exp_a.clone(), exp_b.clone()],
             judge_model: None,
+            scoring: None,
         };
         let cap = empty_capture();
 
@@ -2008,6 +2015,7 @@ mod tests {
                 tool: ToolName::Read,
             }],
             judge_model: None,
+            scoring: None,
         };
         let cap = empty_capture();
 

@@ -81,6 +81,13 @@ impl std::fmt::Display for Verdict {
 /// the verdict alone is what comes back from the LLM.
 pub type CompareVerdict = Vec<PairedScore>;
 
+/// Default axes a `Judge::compare` call grades on when a scenario
+/// declares no `[scoring]` block. Order is load-bearing: the prompt
+/// presents axes in this order, and per-axis reporting follows the
+/// same order. Spec: "Default axes: correctness, efficiency,
+/// conciseness."
+pub const DEFAULT_AXES: [Axis; 3] = [Axis::Correctness, Axis::Efficiency, Axis::Conciseness];
+
 /// Per-(scenario, run) grading record. `deterministic_floor_passed` is
 /// copied from the existing rule-based assertion channel; failing the
 /// floor short-circuits paired-comparison grading at report time.
@@ -280,5 +287,16 @@ mod tests {
         let s = serde_json::to_string(&score).unwrap();
         let back: ScenarioScore = serde_json::from_str(&s).unwrap();
         assert_eq!(score, back);
+    }
+
+    #[test]
+    fn default_axes_are_correctness_efficiency_conciseness_in_that_order() {
+        // Order is load-bearing: the judge prompt presents axes in this
+        // order, and PairedScore Vec ordering follows it. A reorder here
+        // would silently change the per-axis report sequence.
+        assert_eq!(
+            DEFAULT_AXES,
+            [Axis::Correctness, Axis::Efficiency, Axis::Conciseness]
+        );
     }
 }

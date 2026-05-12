@@ -24,7 +24,10 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use strum::IntoEnumIterator;
 
-use crate::tool::ToolName;
+use crate::{
+    eval::score::{Axis, DEFAULT_AXES},
+    tool::ToolName,
+};
 
 /// `deny_unknown_fields` makes typos like `case_insenstive` or `judge_modle`
 /// hard errors at parse time instead of silently parsing as default — for a
@@ -52,6 +55,13 @@ pub struct Scenario {
     /// hardcoded default.
     #[serde(default)]
     pub judge_model: Option<String>,
+    /// Optional override of the axes a `Judge::compare` call grades on for
+    /// this scenario. When absent, `scoring_axes()` returns `DEFAULT_AXES`.
+    /// Spec: "Per-scenario axis override — most scenarios inherit the
+    /// defaults; the few with specialized lenses (postmortem-derived ones)
+    /// declare their own."
+    #[serde(default)]
+    pub scoring: Option<Scoring>,
 }
 
 fn default_runs() -> NonZeroUsize {
@@ -72,6 +82,19 @@ pub struct Setup {
     /// Run inside the tempdir, in order, AFTER `copy_fixtures` is applied.
     #[serde(default)]
     pub shell: Vec<String>,
+}
+
+/// Per-scenario override of the default judging axes. When absent (the
+/// common case), `Scenario::scoring_axes()` returns `DEFAULT_AXES`. When
+/// present, `axes` must be non-empty — validated by `Scenario::validate`.
+///
+/// `Axis` is a closed enum; serde rejects unknown axis names at parse
+/// time so a typo in `scenario.toml` fails loud rather than silently
+/// producing an unknown-axis judge prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scoring {
+    pub axes: Vec<Axis>,
 }
 
 /// Tagged enum: TOML authors write `kind = "tool_called"` (snake_case) to select
@@ -289,7 +312,25 @@ impl Scenario {
                 .validate()
                 .with_context(|| format!("scenario {} expectation #{}", self.name, idx + 1))?;
         }
+        if let Some(scoring) = &self.scoring
+            && scoring.axes.is_empty()
+        {
+            anyhow::bail!(
+                "scenario {} has [scoring] block with empty `axes`; remove the block to use defaults, or list at least one axis",
+                self.name
+            );
+        }
         Ok(())
+    }
+
+    /// Returns the axes this scenario should be paired-compared on.
+    /// Override-or-default: if `scoring` is present, returns its `axes`
+    /// slice; otherwise returns `DEFAULT_AXES`.
+    pub fn scoring_axes(&self) -> &[Axis] {
+        match &self.scoring {
+            Some(s) => &s.axes,
+            None => &DEFAULT_AXES,
+        }
     }
 }
 
@@ -1201,6 +1242,109 @@ tool = "read"
             chain.contains("must be relative"),
             "unexpected error: {chain}"
         );
+    }
+
+    #[test]
+    fn scenario_without_scoring_block_uses_default_axes() {
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["go"]
+
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+"#;
+        let scenario = Scenario::from_toml_str(toml_src).unwrap();
+        assert_eq!(scenario.scoring, None);
+        assert_eq!(
+            scenario.scoring_axes(),
+            &[Axis::Correctness, Axis::Efficiency, Axis::Conciseness]
+        );
+    }
+
+    #[test]
+    fn scenario_with_scoring_override_returns_overridden_axes() {
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["go"]
+
+[scoring]
+axes = ["robustness", "efficiency"]
+
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+"#;
+        let scenario = Scenario::from_toml_str(toml_src).unwrap();
+        let axes = scenario.scoring_axes();
+        assert_eq!(axes, &[Axis::Robustness, Axis::Efficiency]);
+    }
+
+    #[test]
+    fn scenario_rejects_unknown_axis_name_in_scoring() {
+        // Closed enum: typos like "speed" must fail at load time, not
+        // silently produce an unknown-axis judge prompt.
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["go"]
+
+[scoring]
+axes = ["speed"]
+
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("speed") || msg.contains("variant") || msg.contains("axes"),
+            "expected error to mention the unknown axis name; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn scenario_rejects_empty_scoring_axes() {
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["go"]
+
+[scoring]
+axes = []
+
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("axes") && (msg.contains("empty") || msg.contains("at least one")),
+            "expected error about empty axes list; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn scoring_block_rejects_unknown_field() {
+        // deny_unknown_fields on Scoring catches typos like `axis` (singular).
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["go"]
+
+[scoring]
+axes = ["correctness"]
+extra = "oops"
+
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+"#;
+        assert!(Scenario::from_toml_str(toml_src).is_err());
     }
 
     #[test]

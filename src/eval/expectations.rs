@@ -1587,6 +1587,7 @@ mod tests {
                 judge_model: None,
             }],
             judge_model: None,
+            scoring: None,
         };
         let cap = empty_capture(PathBuf::from("/tmp"));
         let report = evaluate(&scenario, &cap);
@@ -1618,6 +1619,7 @@ mod tests {
                 },
             ],
             judge_model: None,
+            scoring: None,
         };
         let mut cap = empty_capture(PathBuf::from("/tmp"));
         cap.tool_calls.push(call("c1", ToolName::Read, json!({})));
@@ -1655,6 +1657,7 @@ mod tests {
                 },
             ],
             judge_model: None,
+            scoring: None,
         };
         let mut cap = empty_capture(PathBuf::from("/tmp"));
         cap.tool_calls.push(call("c1", ToolName::Read, json!({})));
@@ -1680,6 +1683,7 @@ mod tests {
                 },
             ],
             judge_model: None,
+            scoring: None,
         };
         let mut cap = empty_capture(PathBuf::from("/tmp"));
         cap.tool_calls.push(call("c1", ToolName::Read, json!({})));
@@ -1711,6 +1715,7 @@ mod tests {
                 },
             ],
             judge_model: None,
+            scoring: None,
         };
         let mut cap = empty_capture(PathBuf::from("/tmp"));
         cap.tool_calls.push(call("c1", ToolName::Read, json!({})));
