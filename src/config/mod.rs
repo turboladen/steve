@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod eval;
 pub mod persist;
 
 use std::{
@@ -10,6 +11,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 pub use agents::{AgentsFile, load_agents_md, load_agents_md_chain};
+pub use eval::{EvalConfig, load_eval_config};
 pub use persist::persist_allow_tool;
 
 use crate::ui::terminal_detect::ThemePreference;
