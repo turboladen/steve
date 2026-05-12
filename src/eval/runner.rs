@@ -251,6 +251,7 @@ mod tests {
                 tool: ToolName::Read,
             }],
             judge_model: None,
+            scoring: None,
         }
     }
 

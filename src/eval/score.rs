@@ -5,9 +5,10 @@
 //! its rationale. `ScenarioScore` is the per-(scenario, run) grading record.
 //!
 //! Downstream schema (NormalizedTranscript, ResultsFile, BaselineFile) depends
-//! on these as a stable shape. The `[scoring].axes` field in scenario.toml is
-//! not yet wired — it will be parsed and threaded into the judge prompt when
-//! the judge consumes axes.
+//! on these as a stable shape. The per-scenario `[scoring].axes` override is
+//! parsed via the `Scoring` struct in `scenario.rs` and threaded into the
+//! judge prompt by `Judge::compare`; `DEFAULT_AXES` (below) is the fallback
+//! when no override is declared.
 
 use serde::{Deserialize, Serialize};
 
@@ -50,6 +51,34 @@ pub struct PairedScore {
     pub verdict: Verdict,
 }
 
+impl Axis {
+    /// One-line definition of what this axis grades on. Used in the
+    /// paired-comparison judge prompt to anchor each axis with a
+    /// concrete question, and reusable wherever an axis needs a
+    /// human-readable description (CLI help, HTML report, etc.).
+    pub fn definition(&self) -> &'static str {
+        match self {
+            Axis::Correctness => "did the agent produce the right outcome for the user's task?",
+            Axis::Efficiency => {
+                "did the agent achieve the outcome with fewer/better tool calls (no redundant \
+                 work, no thrashing)?"
+            }
+            Axis::Conciseness => {
+                "were the agent's assistant messages succinct and on-point (no padding, no \
+                 repetition)?"
+            }
+            Axis::Robustness => {
+                "did the agent handle errors and unexpected results well, or did it spin / \
+                 give up / make things worse?"
+            }
+            Axis::Truthfulness => {
+                "did the agent ground its claims in actual tool output, without fabrication \
+                 or hallucinated content?"
+            }
+        }
+    }
+}
+
 impl std::fmt::Display for Axis {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
@@ -80,6 +109,13 @@ impl std::fmt::Display for Verdict {
 /// (scenario, model, run_index) is already known at the call site —
 /// the verdict alone is what comes back from the LLM.
 pub type CompareVerdict = Vec<PairedScore>;
+
+/// Default axes a `Judge::compare` call grades on when a scenario
+/// declares no `[scoring]` block. Order is load-bearing: the prompt
+/// presents axes in this order, and per-axis reporting follows the
+/// same order. Spec: "Default axes: correctness, efficiency,
+/// conciseness."
+pub const DEFAULT_AXES: [Axis; 3] = [Axis::Correctness, Axis::Efficiency, Axis::Conciseness];
 
 /// Per-(scenario, run) grading record. `deterministic_floor_passed` is
 /// copied from the existing rule-based assertion channel; failing the
@@ -235,11 +271,11 @@ mod tests {
 
     #[test]
     fn paired_score_rejects_unknown_fields() {
-        // Phase 7 will parse judge responses into PairedScore. A robust
-        // pipeline parses raw LLM output through a permissive intermediate
-        // type and converts to PairedScore; that conversion benefits from
-        // strict deser here so a typo or LLM-added field can't slip into
-        // the final scored record.
+        // `parse_compare_response` in judge.rs deserializes raw LLM output
+        // through a permissive intermediate type (`RawAxisResponse`) and
+        // converts to `PairedScore`. That conversion benefits from strict
+        // deser here so a typo or LLM-added field can't slip into the
+        // final scored record.
         let bad = r#"{
             "axis": "correctness",
             "rationale": "looks good",
@@ -280,5 +316,46 @@ mod tests {
         let s = serde_json::to_string(&score).unwrap();
         let back: ScenarioScore = serde_json::from_str(&s).unwrap();
         assert_eq!(score, back);
+    }
+
+    #[test]
+    fn axis_definition_is_non_empty_for_every_variant() {
+        // Exhaustive coverage: every Axis variant must return a
+        // non-empty, distinct definition. The judge prompt embeds
+        // these definitions per-axis; an empty or duplicated
+        // description would degrade the LLM's per-axis discrimination.
+        let definitions = [
+            (Axis::Correctness, Axis::Correctness.definition()),
+            (Axis::Efficiency, Axis::Efficiency.definition()),
+            (Axis::Conciseness, Axis::Conciseness.definition()),
+            (Axis::Robustness, Axis::Robustness.definition()),
+            (Axis::Truthfulness, Axis::Truthfulness.definition()),
+        ];
+        for (axis, def) in &definitions {
+            assert!(
+                !def.trim().is_empty(),
+                "Axis::{axis:?}::definition() must be non-empty"
+            );
+        }
+        // Distinctness: no two axes share a definition.
+        for (i, (a1, d1)) in definitions.iter().enumerate() {
+            for (a2, d2) in &definitions[i + 1..] {
+                assert_ne!(
+                    d1, d2,
+                    "Axis::{a1:?} and Axis::{a2:?} have identical definitions"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_axes_are_correctness_efficiency_conciseness_in_that_order() {
+        // Order is load-bearing: the judge prompt presents axes in this
+        // order, and PairedScore Vec ordering follows it. A reorder here
+        // would silently change the per-axis report sequence.
+        assert_eq!(
+            DEFAULT_AXES,
+            [Axis::Correctness, Axis::Efficiency, Axis::Conciseness]
+        );
     }
 }
