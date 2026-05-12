@@ -75,6 +75,40 @@ enum EvalSubcommand {
         #[command(subcommand)]
         command: BaselineSubcommand,
     },
+    /// Run the paired-comparison report on an existing results.yaml.
+    /// Loads the file, resolves per-scenario baselines from
+    /// `--baselines-dir`, calls `Judge::compare` for each
+    /// (scenario, run) pair, and renders the layered text report.
+    /// Exit code 0 (pass) / 1 (regression below threshold) / 2 (infra error).
+    Report {
+        /// Path to the results file produced by `steve eval run`.
+        #[arg(value_name = "RESULTS")]
+        results: std::path::PathBuf,
+        /// Override the baselines directory.
+        /// Default: `<project_root>/eval/baselines/`.
+        #[arg(long)]
+        baselines_dir: Option<std::path::PathBuf>,
+        /// Override the judge model. Format: `provider/model_id`.
+        /// Takes precedence over `.steve.eval.jsonc`'s
+        /// `default_judge_model` and per-scenario `judge_model`.
+        #[arg(long)]
+        judge_model: Option<String>,
+        /// Append a row to `eval/history.jsonl` recording this run.
+        /// Off by default — local exploratory runs don't pollute history.
+        #[arg(long)]
+        record_history: bool,
+        /// Write a self-contained HTML report to this path.
+        #[arg(long, value_name = "PATH")]
+        html: Option<std::path::PathBuf>,
+        /// Net win rate threshold for the exit code. Below this value
+        /// = regression (exit 1). Default sourced from
+        /// `eval.regression_threshold` in `.steve.eval.jsonc`, or 0.0.
+        #[arg(long, value_name = "FLOAT")]
+        regression_threshold: Option<f64>,
+        /// Show per-scenario detail in the text output.
+        #[arg(long)]
+        verbose: bool,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -94,7 +128,18 @@ enum BaselineSubcommand {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
+    // Phase 8 exit-code contract: 0 (pass) / 1 (regression, set via
+    // `std::process::exit` inside the report dispatch) / 2 (infra
+    // error — any Err from `run`). Other CLI paths exit 2 on Err too
+    // to keep the contract uniform.
+    if let Err(e) = run().await {
+        eprintln!("error: {e:#}");
+        std::process::exit(2);
+    }
+}
+
+async fn run() -> Result<()> {
     // Parse CLI args (handles --version, --help automatically)
     let cli = Cli::parse();
 
@@ -330,6 +375,59 @@ async fn dispatch_eval(args: EvalArgs) -> Result<()> {
                     .await;
                 }
             },
+            EvalSubcommand::Report {
+                results,
+                baselines_dir: baselines_dir_override,
+                judge_model,
+                record_history,
+                html,
+                regression_threshold,
+                verbose,
+            } => {
+                // Resolve the baselines dir. CLI flag wins over the
+                // project default we computed above.
+                let baselines_dir_used = match baselines_dir_override {
+                    Some(p) if p.is_absolute() => p,
+                    Some(p) => project.root.join(p),
+                    None => baselines_dir.clone(),
+                };
+                // Load the base config (for the ProviderRegistry that
+                // resolves judge models) AND the eval-specific config
+                // (regression threshold + default_judge_model).
+                let (cfg, _warnings) = steve::config::load(&project.root)?;
+                let eval_cfg = steve::config::load_eval_config(&project.root)?;
+                let (registry, missing) = steve::provider::ProviderRegistry::from_config(&cfg);
+                if !missing.is_empty() {
+                    let names: Vec<String> =
+                        missing.iter().map(|w| w.provider_id.clone()).collect();
+                    anyhow::bail!(
+                        "eval report requires API keys for the configured provider(s): {}",
+                        names.join(", ")
+                    );
+                }
+                let history_path = project.root.join("eval/history.jsonl");
+                // Judge model precedence: --judge-model CLI flag >
+                // .steve.eval.jsonc's default_judge_model > None.
+                // (Per-scenario judge_model is applied inside
+                // Report::build_from_results when it's available.)
+                let judge_model_resolved =
+                    judge_model.clone().or(eval_cfg.default_judge_model.clone());
+                let exit = steve::eval::cli::report_subcommand(steve::eval::cli::ReportArgs {
+                    results_path: &results,
+                    baselines_dir: &baselines_dir_used,
+                    scenarios_dir: &scenarios_dir,
+                    history_path: &history_path,
+                    html_out: html.as_deref(),
+                    judge_model: judge_model_resolved.as_deref(),
+                    cli_regression_threshold: regression_threshold,
+                    config_regression_threshold: eval_cfg.regression_threshold,
+                    verbose,
+                    record_history,
+                    registry: &registry,
+                })
+                .await?;
+                std::process::exit(exit.as_i32());
+            }
         }
     }
 

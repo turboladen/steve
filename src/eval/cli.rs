@@ -198,6 +198,120 @@ pub async fn run_subcommand(
     Ok(())
 }
 
+/// Phase 8 exit codes. Mapped to process exit by main.rs:
+/// `Pass=0`, `Regression=1`. (InfraError=2 comes from main's
+/// generic `Err` handler, not this enum.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportExitCode {
+    Pass,
+    Regression,
+}
+
+impl ReportExitCode {
+    pub fn as_i32(&self) -> i32 {
+        match self {
+            ReportExitCode::Pass => 0,
+            ReportExitCode::Regression => 1,
+        }
+    }
+}
+
+/// Bundled inputs to `report_subcommand`. Grouped because the
+/// subcommand takes 9+ arguments — flat args would trip clippy's
+/// too-many-arguments lint and obscure intent. The three groups
+/// are: paths, judge-model resolution, report flags.
+pub struct ReportArgs<'a> {
+    pub results_path: &'a Path,
+    pub baselines_dir: &'a Path,
+    pub scenarios_dir: &'a Path,
+    pub history_path: &'a Path,
+    pub html_out: Option<&'a Path>,
+    /// Judge model resolved upstream: CLI `--judge-model` flag >
+    /// eval-config `default_judge_model` > None. The orchestrator
+    /// then layers scenario.judge_model on top of None.
+    pub judge_model: Option<&'a str>,
+    /// CLI `--regression-threshold` (highest precedence).
+    pub cli_regression_threshold: Option<f64>,
+    /// `eval.regression_threshold` from `.steve.eval.jsonc`.
+    pub config_regression_threshold: Option<f64>,
+    pub verbose: bool,
+    pub record_history: bool,
+    pub registry: &'a crate::provider::ProviderRegistry,
+}
+
+/// `steve eval report <results.yaml>` — load a results file, resolve
+/// per-scenario baselines from `baselines_dir`, judge each
+/// (scenario, run) pair via `Judge::compare`, render the layered
+/// text report to stdout, optionally write HTML and/or append a
+/// history row.
+///
+/// Returns a `ReportExitCode` per spec (Pass / Regression). The caller
+/// in main.rs translates this to `std::process::exit(code.as_i32())`.
+/// `anyhow::Error` returns map to exit code 2 (InfraError) in main.
+pub async fn report_subcommand(args: ReportArgs<'_>) -> Result<ReportExitCode> {
+    use crate::eval::{
+        Judge,
+        history::{HistoryEntry, append_history, read_history},
+        html_report::render_html,
+        report::Report,
+        results::ResultsFile,
+    };
+
+    let results = ResultsFile::read_from_path(args.results_path)
+        .with_context(|| format!("loading results from {}", args.results_path.display()))?;
+
+    // Resolve judge model. CLI/config-supplied model > error. (The
+    // orchestrator then layers per-scenario `judge_model` from the
+    // scenario.toml on top of None where set; that's
+    // Report::build_from_results's job.)
+    let resolved_judge = args.judge_model.ok_or_else(|| {
+        anyhow::anyhow!(
+            "no judge model configured: pass --judge-model <provider/model>, or set \
+             `default_judge_model` in `.steve.eval.jsonc`, or set `judge_model` on the scenario"
+        )
+    })?;
+    let judge = Judge::from_registry(args.registry, Some(resolved_judge));
+
+    let report = Report::build_from_results(
+        &results,
+        args.baselines_dir,
+        &args.results_path.display().to_string(),
+        &judge,
+        resolved_judge,
+        Some(args.scenarios_dir),
+    )
+    .await?;
+
+    print!("{}", report.render_text(args.verbose));
+
+    if let Some(html_path) = args.html_out {
+        let history = read_history(args.history_path)
+            .with_context(|| format!("reading history from {}", args.history_path.display()))?;
+        let html = render_html(&report, &history);
+        std::fs::write(html_path, html)
+            .with_context(|| format!("writing HTML to {}", html_path.display()))?;
+        println!("wrote HTML report to {}", html_path.display());
+    }
+
+    if args.record_history {
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let entry = HistoryEntry::from_report(&report, now);
+        append_history(args.history_path, &entry)?;
+        println!("appended history row to {}", args.history_path.display());
+    }
+
+    let threshold = args
+        .cli_regression_threshold
+        .or(args.config_regression_threshold)
+        .unwrap_or(0.0);
+    let exit = if report.headline_totals.net_win_rate() < threshold {
+        ReportExitCode::Regression
+    } else {
+        ReportExitCode::Pass
+    };
+    Ok(exit)
+}
+
 /// Best-effort current git ref (short hash). Returns `None` outside a git
 /// repo or if `git` is missing — callers fall back to `"unknown"` rather
 /// than failing the whole eval. The build script's STEVE_GIT_REV is at
