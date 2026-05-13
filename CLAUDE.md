@@ -66,18 +66,6 @@ use `"provider_id/model_id"` format throughout. MCP servers merge by server ID (
 `lib.rs` (public modules) + `main.rs` (binary). Integration tests in `tests/` access modules via
 `use steve::*`. No workspace — single crate.
 
-### App Module (`app/`)
-
-The `App` struct (coordination point) lives in `app/mod.rs`. Submodules split by concern:
-`event_loop.rs` (run/handle_event), `key_handling.rs`, `input.rs`, `commands.rs`,
-`session.rs`, `prompt.rs`, `context.rs` (diagnostics/sidebar/tokens), `helpers.rs`,
-`tool_display.rs`, `constants.rs`. Each submodule defines its own `impl App {}` block — Rust
-allows multiple impl blocks across child modules. Submodules use `use super::*;` to inherit
-mod.rs imports. Use `pub(super)` for cross-submodule methods, `pub` only for external API
-(`extract_args_summary`, `extract_result_summary`, `should_show_sidebar`). Use
-`close_all_overlays()`, `resolve_client()`, and `resolve_file_refs()` helpers to avoid
-duplication. Use `r#""#` raw strings for multi-line system prompts in `constants.rs`.
-
 ### Module Structure Convention
 
 Each major module follows a consistent pattern: `mod.rs` owns types and public API,
@@ -93,18 +81,6 @@ Tool operations use typed enums (`EditOperation`, `SymbolsOperation`, `LspOperat
 `FindSymbolOperation`, `TaskAction`) instead of string matching. Tree-sitter languages use
 `TreeSitterLang` enum. Parse from JSON args with `.parse()`, match exhaustively — adding
 a variant produces compiler errors at every unhandled site.
-
-### Stream Module (`stream/`)
-
-`StreamRequest::spawn()` launches the stream task; `StreamRequest::run()` is the main loop.
-Submodules: `agent.rs` (sub-agent spawning), `tools.rs` (tool call helpers), `recovery.rs`
-(length/iteration recovery), `phases.rs` (4 tool execution phases extracted from the loop).
-Sub-agents use `sub_request.spawn()` (not `Box::pin(run())`) to preserve the Send bound —
-`Box::pin` erases Send, preventing `tokio::spawn` for parallel execution.
-
-Both Phase 2 (parallel) and Phase 3 (sequential) use `spawn_blocking` for
-tool execution, so `block_on` is safe in any tool handler. Phase 3 also
-handles `JoinError` (task panics) gracefully in the UI.
 
 ### Crate-Level Utilities (`lib.rs`)
 
@@ -171,96 +147,20 @@ returning `(decl_node, name_node)` — used by both `find_symbol_by_name()` and
 closing brace). For classification, use `start_line` only — `end_line` includes the
 body interior where references (e.g., recursive calls) live.
 
-### Find Symbol Tool (`tool/find_symbol.rs`)
+## Per-module guidance
 
-`find_symbol` orchestrates workspace/symbol → grep → tree-sitter → LSP in a single tool call.
-Classified as `is_read_only()` (no side effects, always-allowed, parallel-eligible).
-When LSP servers are running, Phase B tries `workspace/symbol` first for semantic results
-(exact name match filtering), falling back to grep when unavailable or empty.
-`LspManager::running_servers()` iterates all active servers for workspace-level queries.
-`WorkspaceSymbolResult` in `lsp/server.rs` normalizes both `Flat` (`SymbolInformation`)
-and `Nested` (`WorkspaceSymbol`) LSP response formats. `convert_workspace_results()`
-bridges workspace/symbol output into the `(definitions, classified)` types used by
-Phases D and E.
-`is_identifier()` gates `\b` word-boundary wrapping — non-identifier symbols
-(e.g., `operator+`) use plain escaped matching. LSP enrichment requires a
-tree-sitter definition site; falls back to grep+tree-sitter when LSP unavailable.
-`regex_syntax::escape()` (transitive dep via grep/ignore) for regex escaping —
-do not add `regex` crate as a direct dependency.
+Module-specific gotchas live next to the code:
 
-### MCP Client Integration (`mcp/`)
+- `src/app/CLAUDE.md` — `App` struct + submodule split (event_loop, key_handling, etc.)
+- `src/stream/CLAUDE.md` — `StreamRequest`, sub-agent spawning, tool execution phases
+- `src/tool/CLAUDE.md` — Find Symbol Tool details (see also the ToolName match-locations list above)
+- `src/mcp/CLAUDE.md` — MCP client integration, server ID rules, AllowAlways semantics
+- `src/lsp/CLAUDE.md` — LSP server lifecycle, mutex-scope rules, position-encoding conventions
+- `src/eval/CLAUDE.md` — Eval module: scenario assertion pitfalls, CLI subcommand patterns, comment hygiene
 
-MCP tools bypass `ToolName` entirely — own registry with `McpToolSnapshot` (lock-free `Arc`) for
-lookups. Three integration points in `stream/phases.rs`: tool defs, name resolution fallback,
-Phase 4 sequential execution. Server IDs must not contain `__` (the separator).
-Submodules: `server.rs` (McpServer connection), `manager.rs` (McpManager orchestration),
-`transport.rs` (rmcp transport setup), `oauth/` (OAuth flow).
-
-`AllowAlways` for MCP tools is session-only (not persisted) — MCP tool names are runtime-dynamic.
-
-### LSP Integration (`lsp/`)
-
-The LSP tool accepts `symbol_name` as an alternative to `line`/`character` for
-position-based operations — `resolve_symbol_position()` in `tool/symbols.rs`
-bridges tree-sitter symbol lookup to LSP positions. Column values are byte
-offsets (tree-sitter convention), not UTF-16 code units (LSP spec default).
-
-Submodules: `server.rs` (LspServer + URI helpers), `manager.rs` (LspManager lifecycle),
-`client.rs` (JSON-RPC transport). Uses `workspace_folders` (not deprecated `root_uri`) for
-LSP init. URI encoding via `url::Url::from_file_path`/`to_file_path`. Binary discovery via
-`which` crate (no shell-out).
-
-`notify_did_change`/`notify_did_save` send file changes after write tools.
-`cached_diagnostics` reads the `SharedDiagnostics` cache (no `block_on`).
-`diagnostics()` uses `block_on` for a `documentSymbol` round-trip — only safe
-from `spawn_blocking`. Narrow mutex scope in `ensure_open`/`notify_did_change`:
-check state under lock, drop before I/O or notifications, re-acquire to commit.
-`publishDiagnostics` is async — stale results can arrive after `didChange`.
-Compare pre/post-notification snapshots to filter stale errors.
-`lsp` tool validates `path.is_file()` — directories are rejected early with
-a message redirecting to `grep`.
-
-## Eval Module (`eval/`)
-
-Scenario manifests live in `eval/scenarios/<name>/scenario.toml` with sibling
-fixture files. The walking test
-`scenario::tests::all_committed_scenarios_parse_and_validate` runs at `cargo
-test` time: parses every `scenario.toml` via `Scenario::from_file`, asserts
-each `copy_fixtures` entry exists and is a regular file (via
-`symlink_metadata` + `is_file()`, mirroring `ScenarioWorkspace::build`'s
-symlink rejection), and pins `_smoke` is in the parsed set.
-
-### Scenario assertion-design pitfalls
-
-- **`RequiresPriorRead(target, ...)` is vacuously satisfied** when `target`
-  was never called. Pair with `tool_called(target)` whenever the scenario
-  REQUIRES the target tool to fire.
-- **`MaxRepeatAttempts` dedups by tool + canonical-args JSON.** Catches
-  literal-repeat loops; does NOT catch "agent loops with different commands"
-  (the postmortem hypothesis-spinning pattern). Use Judge for count-style
-  failure modes. Count-only `MaxToolCalls` primitive tracked: `steve-c0uk`.
-- **`tool_not_called(X)` is brittle** — almost any tool has a legitimate
-  fallback role. Prefer `tool_called(preferred)` + outcome-pinning via
-  `file_contains` on the post-edit file content. Outcome-pinning is robust
-  across "agent picked the right tool" AND "agent's preferred-tool call
-  failed and it fell back."
-- **`is_read_class()` is intentionally narrow** (`Read | Symbols` only) for
-  `RequiresPriorRead`. For "did the agent see the content at all?" (where
-  `grep` would also count) use `final_message_contains` on an unguessable
-  sentinel + Judge instead.
-- **Read accepts `path` (string) XOR `paths` (array).** Evaluator's
-  `read_path_args` (in `expectations.rs`) handles both forms — Read-specific
-  branch. Adding a new multi-path tool requires updating that helper.
-
-### Comment hygiene
-
-- Inline comments claiming an issue is filed (`tracked separately as a
-  follow-up`, etc.) must reference a real `steve-XXXX` ID inline. Vague
-  claims rot into false tracking; ID references are checkable. Same rule
-  applies to commit-message bodies.
-- For `FileType` in panic messages, use `describe_file_type` helper (in the
-  scenario.rs test module) — `Debug` impl prints raw `st_mode` bits which
-  no human reads at panic time.
+These auto-load when you `cd` into the module (Claude Code walks up from cwd
+loading each `CLAUDE.md`). Cross-module work happens against the root file
+plus whatever's loaded for your current cwd.
 
 ## Formatting
 
@@ -318,6 +218,23 @@ Steve targets any OpenAI-compatible API. Known quirks:
 - **Storage**: `{data_dir}/storage/{project_id}/`
 - **Logs**: `{data_dir}/logs/steve.log.YYYY-MM-DD`
 
+## Squashing review-fix commits before merge
+
+When a PR accumulates many review-driven commits, the safe squash pattern:
+
+1. `git tag pre-squash-backup HEAD` — recovery anchor.
+2. `git checkout -B squash-tmp <base>` — fresh branch from PR's base.
+3. Cherry-pick logical groups: single commits with `git cherry-pick <sha>`,
+   multi-commit groups with `git cherry-pick A^..B` then
+   `git reset --soft HEAD~N && git commit -m '...'` to squash.
+4. Verify tree integrity:
+   `test "$(git rev-parse HEAD^{tree})" = "$(git rev-parse pre-squash-backup^{tree})"`
+   — must succeed. Tree-equality means zero data was lost.
+5. `git branch -f <pr-branch> squash-tmp && git checkout <pr-branch>`.
+6. `git push --force-with-lease` — refuses to clobber if remote moved.
+
+Inline review comments on squashed-away commits stay on GitHub but their
+line anchors orphan. The PR conversation tab preserves the discussion.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 ## Beads Issue Tracker
