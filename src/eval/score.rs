@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// `[scoring]` block of `scenario.toml` should fail at load time, not
 /// silently produce an unknown-axis judge prompt. New axes are added by
 /// adding a variant when there's a concrete use case.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Axis {
     Correctness,
