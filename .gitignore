@@ -2,6 +2,8 @@
 .worktrees/
 .steve.jsonc
 .steve.jsonc.tmp
+.steve.eval.jsonc
+.steve.eval.jsonc.tmp
 
 # Dolt database files (added by bd init)
 .dolt/
