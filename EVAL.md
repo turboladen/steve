@@ -16,6 +16,26 @@ The harness is a CLI: `steve eval` and its subcommands. This guide covers the
 workflows; for the design rationale see
 [`docs/superpowers/specs/2026-05-06-eval-harness-paired-comparison-pivot.md`](./docs/superpowers/specs/2026-05-06-eval-harness-paired-comparison-pivot.md).
 
+## Prerequisites
+
+Before running the examples below:
+
+1. **Build steve**: `cargo build --release`. The examples assume the
+   binary is on `$PATH` (e.g., `cp target/release/steve ~/.local/bin/`).
+   Substitute `cargo run --release -- ` for `steve ` if you'd rather
+   not install it.
+2. **Configure at least two providers** in `~/.config/steve/config.jsonc`
+   (or `.steve.jsonc` in the project root) — one for the **agent model**
+   (the model under test) and one for the **judge model** (the LLM that
+   grades comparisons). See the [Quick Start in
+   README.md](./README.md#quick-start) for the config schema. The
+   examples below use `ollama/gemma4` (agent) and
+   `fuel-ix/claude-haiku-4-5` (judge); swap in whatever providers you
+   have configured.
+3. **The `_smoke` scenario ships with the repo** at
+   `eval/scenarios/_smoke/`. Use it as your first end-to-end test —
+   you don't need to author a scenario to run the Quick Start.
+
 ## Quick start
 
 ```bash
@@ -82,17 +102,38 @@ be read as Pass by CI.
 
 Separate from paired comparison: every run also goes through **rule-based
 assertions** declared in `scenario.toml` (e.g., `tool_called`,
-`file_contains`). These run without the judge. The floor's pass/fail per run
-is recorded alongside the verdicts; an `(N/M passed)` counter appears in the
-headline.
+`file_contains`). These run without the judge. The floor's pass/fail per
+run is recorded into the baseline YAML and (when `--record-history` is
+set) into `eval/history.jsonl`'s `deterministic_floor` field. The text
+report doesn't surface a floor counter today; the HTML report's trend
+chart consumes the history data.
 
-The floor catches structural facts the judge would miss (the right tool was
-called, the right file was modified). Both layers ship together — neither
-replaces the other.
+The floor catches structural facts the judge would miss (the right tool
+was called, the right file was modified). Both layers ship together —
+neither replaces the other.
+
+### Scenario outcomes
+
+Each scenario in a report lands in one of three states:
+
+- **Graded** — every run produced verdicts; counted in the headline.
+- **Skipped** — judge never ran for this scenario. Reasons: no baseline
+  for this (scenario, model) pair, `user_turns` drifted from the
+  baseline, `scenario.toml` is missing/malformed under the scenarios
+  root, or every run errored.
+- **Errored** (per-run) — a single run failed twice in a row at the
+  judge step. The run is excluded from the tally; the scenario as a
+  whole stays Graded if any of its other runs succeeded.
 
 ## Workflows
 
 ### Setting up a scenario
+
+> If you're just trying the harness for the first time, skip to
+> *Freezing your first baseline* below — the repo ships several
+> scenarios under `eval/scenarios/` (including `_smoke`,
+> `find-symbol-vs-grep`, `lsp-rename-vs-sed`, and others). Come back
+> here when you want to write your own.
 
 A scenario lives in `eval/scenarios/<name>/scenario.toml` with optional
 fixture files alongside.
@@ -190,22 +231,22 @@ running scenario _smoke (1/1) [axes: correctness, efficiency, conciseness]...
 wrote results to /Users/you/proj/eval/results/chained-_smoke-20260513-060721.yaml
 
 Eval results — current (ollama/gemma4 at 318516b) vs baseline
-
   baseline frozen 2026-05-13T05:46:42Z at 27a328f (1 scenarios)
 
   Headline:        +33.3% net win rate (88.9% non-regression)
-  Floor:           3/3 passed
 
-  Correctness:     +66.7%  (won 2 / lost 0 / tied 1)
-  Efficiency:      +33.3%  (won 1 / lost 0 / tied 2)
-  Conciseness:      0.0%   (won 0 / lost 0 / tied 3)
+  Per axis:
+    correctness:   +66.7% net win rate (won 2 / lost 0 / tied 1)
+    efficiency:    +33.3% net win rate (won 1 / lost 0 / tied 2)
+    conciseness:    +0.0% net win rate (won 0 / lost 0 / tied 3)
 
   See --verbose for per-scenario breakdown.
 ```
 
 Pass `--verbose` for per-scenario detail (each scenario's per-axis breakdown
 + baseline provenance). Pass `--html /tmp/report.html` to also write a
-self-contained HTML dashboard.
+self-contained HTML dashboard. Add `--record-history` to append one row to
+`eval/history.jsonl` — the HTML report's trend chart reads that file.
 
 Three command shapes for different needs:
 
@@ -225,9 +266,14 @@ Exit codes:
 
 ### Refreshing baselines after an intentional change
 
-When you intentionally change agent behavior (system prompt, tool wiring,
-model choice, etc.), some scenarios will start "regressing" — but it's
-intended. The workflow:
+Rather than tagging baselines with semantic versions or maintaining a
+separate behavior-changelog, this harness uses the **YAML diff itself
+as the audit record**: `git log eval/baselines/` is your behavior
+changelog and `git blame` answers "when did this behavior change?".
+
+When you intentionally change agent behavior (system prompt, tool
+wiring, model choice, etc.), some scenarios will start "regressing"
+— but it's intended. The workflow:
 
 ```bash
 # 1. Make your agent change in source.
@@ -393,9 +439,23 @@ What each flag contributes:
 | `--record-history` | Append a row to `eval/history.jsonl` for trend tracking |
 | `--html eval-report.html` | Self-contained dashboard archived as a CI artifact |
 
-The harness's exit-code contract is tool-agnostic; the same logic works on
-GitLab CI, CircleCI, Jenkins, or a local `make` target. Just check `$?`
-after `steve eval` and act on 0/1/2.
+A few gotchas the snippet papers over and a real CI must handle:
+
+- **Provider config** — `.steve.jsonc` is gitignored, so CI needs its
+  own `~/.config/steve/config.jsonc` materialized at runtime (a
+  separate step that writes the file from secrets, or a checked-in
+  CI-only config under a different path).
+- **Env var name** — provider API-key env vars are whatever
+  `api_key_env` is set to per provider in your config; `ANTHROPIC_API_KEY`
+  in the snippet is an example assuming the obvious anthropic mapping.
+- **Judge cost** — judge calls happen on every CI run; pick a small
+  cheap judge or run eval on a schedule rather than every PR.
+- **Baselines must be in the checkout** — `actions/checkout@v6` covers
+  this since baselines live under `eval/baselines/` in the repo.
+
+The harness's exit-code contract is tool-agnostic; the same logic
+works on GitLab CI, CircleCI, Jenkins, or a local `make` target. Just
+check `$?` after `steve eval` and act on 0/1/2.
 
 ### Cross-machine coordination
 
@@ -510,26 +570,31 @@ Baselines directory: **CLI `--baselines-dir` (report only) > `baselines_dir` fro
 The `Eval results` block is layered:
 
 ```
-Eval results — current (model@ref) vs baseline
-
+Eval results — current (model at ref) vs baseline
   <baseline provenance: frozen-at + git_ref + scenario count>
 
   Headline:        +33.3% net win rate (88.9% non-regression)
-  Floor:           3/3 passed
+  Skipped:         N scenarios            <-- only present when N > 0
+                   - <name>: <reason>
 
-  Correctness:     +66.7%  (won 2 / lost 0 / tied 1)
-  Efficiency:      +33.3%  (won 1 / lost 0 / tied 2)
-  Conciseness:      0.0%   (won 0 / lost 0 / tied 3)
+  Per axis:
+    correctness:   +66.7% net win rate (won 2 / lost 0 / tied 1)
+    efficiency:    +33.3% net win rate (won 1 / lost 0 / tied 2)
+    conciseness:    +0.0% net win rate (won 0 / lost 0 / tied 3)
 
   See --verbose for per-scenario breakdown.
 ```
 
+- **Metadata line**: model + current git_ref, then a baseline provenance
+  line (`frozen <ts> at <ref>`, or `varied refs — see --verbose` when
+  scenarios pin different baseline refs).
 - **Headline**: suite-wide net win rate + non-regression rate.
-- **Floor**: deterministic-floor pass rate across runs.
-- **Per-axis lines**: tally of wins/losses/ties for each scoring axis.
-- **`--verbose`**: adds per-scenario blocks showing each scenario's
-  outcome (Graded with per-axis breakdown, or Skipped with reason) and
-  per-scenario baseline provenance.
+- **Skipped**: present only when at least one scenario was skipped;
+  lists each skipped scenario with its reason.
+- **Per axis**: per-axis tally for every axis in the resolved axis set.
+- **`--verbose`**: adds a `Per scenario:` section after the per-axis
+  block, showing each scenario's outcome (Graded with per-axis
+  breakdown + baseline provenance, or Skipped with reason).
 
 ### HTML report
 
@@ -563,8 +628,8 @@ trend points). Safe to commit or to keep gitignored — your call.
 | `user_turns drifted from baseline` (Skipped) | Scenario's `user_turns` changed since the baseline was frozen. Re-freeze: `steve eval baseline freeze --scenario X --model Y`. |
 | `scenario.toml not found at ...` (Skipped) | The results file references a scenario that no longer exists under `eval/scenarios/`. Either restore the scenario or regenerate the results file. |
 | `regression threshold ... is not a finite number` | Don't pass `NaN`/`Infinity` to `--regression-threshold`. |
-| `eval/baselines exists but is a symlink or non-directory` | Refuses to write through symlinks (would escape the repo). Remove the symlink or pass `--baselines-dir /real/path`. |
-| `baselines dir from --baselines-dir CLI flag contains '..' components` | Relative paths with `..` are rejected. Use an absolute path or a non-escaping relative path. |
+| ``baselines dir at <path> exists but is a symlink or non-directory`` | Refuses to write through symlinks (would escape the repo). Remove the symlink or pass `--baselines-dir /real/path` (report only). |
+| ``baselines dir from --baselines-dir CLI flag contains `..` components`` | Relative paths with `..` are rejected. Use an absolute path or a non-escaping relative path. |
 | Reports look "fine" but obviously regressed runs | Check `--verbose` output for `Skipped` scenarios — if all are skipped, exit will be 2 and the headline is the meaningless `0.0` sentinel. |
 
 ## Further reading
