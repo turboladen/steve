@@ -1,6 +1,6 @@
 //! `steve eval` subcommand entry points.
 
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, io::Write, path::Path};
 
 use anyhow::{Context, Result};
 
@@ -13,12 +13,46 @@ use crate::eval::{
     transcript::Normalizer,
 };
 
+/// Write `s` to stdout, treating a closed pipe (`head`, `less q`) as
+/// success. The default `print!` panics with exit 101 on EPIPE, which
+/// would break the documented `Pass=0`/`Regression=1`/`NoData=2`
+/// contract for callers piping output. Non-EPIPE I/O errors (disk
+/// full on a redirect, write-zero) propagate to the caller so the
+/// process can exit 2 instead of returning success with truncated
+/// output.
+fn write_stdout_lossy(s: &str) -> std::io::Result<()> {
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    match lock.write_all(s.as_bytes()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+fn writeln_stdout_lossy(s: &str) -> std::io::Result<()> {
+    write_stdout_lossy(s)?;
+    write_stdout_lossy("\n")
+}
+
+/// Flush stdout, treating EPIPE as success. Used after a partial-line
+/// progress message (`running scenario X...`) so the prefix renders
+/// before the work runs to completion. Other I/O errors propagate.
+fn flush_stdout_lossy() -> std::io::Result<()> {
+    match std::io::Write::flush(&mut std::io::stdout()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 /// Format the per-scenario header line printed at the start of each
 /// scenario's runs. Surfaces the resolved scoring axes (and whether
-/// they came from a `[scoring]` block or `DEFAULT_AXES`) so a manual
-/// CLI smoke can verify Phase 7's `[scoring]` override end-to-end —
-/// the override would otherwise only be observable through unit
-/// tests, not the `eval run` output.
+/// they came from a `[scoring]` block or `DEFAULT_AXES`) so the
+/// override is observable from the `eval run` output, not just unit
+/// tests. `(override)` is tagged only when overridden — the default
+/// case is the expected baseline, so leaving it untagged keeps the
+/// load-bearing signal load-bearing.
 fn format_scenario_header(name: &str, index: usize, total: usize, scenario: &Scenario) -> String {
     let axes_str = scenario
         .scoring_axes()
@@ -26,10 +60,6 @@ fn format_scenario_header(name: &str, index: usize, total: usize, scenario: &Sce
         .map(|a| format!("{a}"))
         .collect::<Vec<_>>()
         .join(", ");
-    // Annotate only when the axes came from a [scoring] override —
-    // the default case is what readers expect, so the `(override)`
-    // marker is the load-bearing signal. Tagging both cases would
-    // just add noise to every line.
     let axes_label = if scenario.scoring.is_some() {
         "axes (override)"
     } else {
@@ -90,18 +120,14 @@ pub async fn run_subcommand(
         let scenario_dir = scenario_path
             .parent()
             .with_context(|| format!("scenario path has no parent: {}", scenario_path.display()))?;
-        // Print resolved scoring axes so Phase 7's [scoring] block
-        // override is observable from a real run — without this, the
-        // override is only visible through `cargo test`, not through
-        // the CLI smoke path.
-        println!("{}", format_scenario_header(name, i, total, &scenario));
+        writeln_stdout_lossy(&format_scenario_header(name, i, total, &scenario))?;
 
         let runs = scenario.runs.get();
         let mut transcripts = Vec::with_capacity(runs);
         for run_idx in 0..runs {
             let started = std::time::Instant::now();
-            print!("  run {}/{}...", run_idx + 1, runs);
-            std::io::Write::flush(&mut std::io::stdout()).ok();
+            write_stdout_lossy(&format!("  run {}/{}...", run_idx + 1, runs))?;
+            flush_stdout_lossy()?;
             // Fresh Runner per run -> fresh tempdir workspace. Without this,
             // `setup.shell` mutations from a prior run would persist into
             // the next run's working state. Each run is a clean sample.
@@ -111,12 +137,13 @@ pub async fn run_subcommand(
                 .run(&scenario)
                 .await
                 .with_context(|| format!("running scenario {name} run #{}", run_idx + 1))?;
-            // Compute deterministic-floor verdict the same way `run_one` does:
-            // expectations.passed() && captured.completed_normally().
+            // Deterministic-floor verdict: report.passed() AND the run
+            // completed normally. Either rule-failures or timeout/abort
+            // counts as "floor failed".
             let report = evaluate(&scenario, &captured);
             let floor_passed = report.passed() && captured.completed_normally();
             transcripts.push(Normalizer::normalize(&captured, floor_passed));
-            println!(" done in {:.1}s", started.elapsed().as_secs_f32());
+            writeln_stdout_lossy(&format!(" done in {:.1}s", started.elapsed().as_secs_f32()))?;
         }
 
         scenarios_out.insert(
@@ -135,17 +162,23 @@ pub async fn run_subcommand(
         scenarios: scenarios_out,
     };
     results.write_to_path(out_path)?;
-    println!("wrote results to {}", out_path.display());
+    writeln_stdout_lossy(&format!("wrote results to {}", out_path.display()))?;
     Ok(())
 }
 
-/// Phase 8 exit codes. Mapped to process exit by main.rs:
-/// `Pass=0`, `Regression=1`. (InfraError=2 comes from main's
-/// generic `Err` handler, not this enum.)
+/// Exit codes for `steve eval report`. Mapped to process exit by
+/// main.rs: `Pass=0`, `Regression=1`, `NoData=2`. (Generic `Err`
+/// paths from `report_subcommand` also map to exit 2 via main's outer
+/// `if let Err` handler.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReportExitCode {
     Pass,
     Regression,
+    /// Every scenario was Skipped (no baselines, all-errored, etc).
+    /// The `net_win_rate` formula returns its `0.0` sentinel when
+    /// totals are empty — without this variant a green CI gate
+    /// would hide "no scenarios graded" from the operator.
+    NoData,
 }
 
 impl ReportExitCode {
@@ -153,8 +186,63 @@ impl ReportExitCode {
         match self {
             ReportExitCode::Pass => 0,
             ReportExitCode::Regression => 1,
+            ReportExitCode::NoData => 2,
         }
     }
+}
+
+/// Determine the exit code from a final `net_win_rate`, the CLI
+/// `--regression-threshold` (highest), and the config
+/// `eval.regression_threshold` (next). Falls back to `0.0`.
+/// Returns `Pass` for ≥ threshold, `Regression` for < threshold.
+/// Returns `Err` for malformed input (non-finite threshold) so the
+/// top-level main.rs handler maps it to exit 2 with a clear message —
+/// reusing `NoData` (which means "every scenario was Skipped") for
+/// malformed input would conflate two distinct failure modes for
+/// future readers.
+/// Caller is responsible for short-circuiting to `NoData` when
+/// no scenarios were graded.
+pub fn resolve_exit_code(
+    net_win_rate: f64,
+    cli_threshold: Option<f64>,
+    config_threshold: Option<f64>,
+) -> Result<ReportExitCode> {
+    let threshold = cli_threshold.or(config_threshold).unwrap_or(0.0);
+    // A non-finite threshold would make `net_win_rate < threshold`
+    // always false (NaN compares as false everywhere) and silently
+    // exit Pass on a regression.
+    if !threshold.is_finite() {
+        anyhow::bail!(
+            "regression threshold {threshold} is not a finite number; \
+             aborting (would silently mask regressions via NaN comparison)"
+        );
+    }
+    Ok(if net_win_rate < threshold {
+        ReportExitCode::Regression
+    } else {
+        ReportExitCode::Pass
+    })
+}
+
+/// Determine the final exit code from a populated `Report` plus the
+/// threshold sources. Wraps `resolve_exit_code` with the NoData
+/// short-circuit: when nothing was graded (every scenario Skipped),
+/// the `net_win_rate` formula returns its `0.0` sentinel — without
+/// this short-circuit a CI gate would silently exit 0 on a config
+/// that produces zero graded scenarios.
+pub fn report_exit_code(
+    report: &crate::eval::report::Report,
+    cli_threshold: Option<f64>,
+    config_threshold: Option<f64>,
+) -> Result<ReportExitCode> {
+    if report.headline_totals.total() == 0 {
+        return Ok(ReportExitCode::NoData);
+    }
+    resolve_exit_code(
+        report.headline_totals.net_win_rate(),
+        cli_threshold,
+        config_threshold,
+    )
 }
 
 /// Bundled inputs to `report_subcommand`. Grouped because the
@@ -167,10 +255,19 @@ pub struct ReportArgs<'a> {
     pub scenarios_dir: &'a Path,
     pub history_path: &'a Path,
     pub html_out: Option<&'a Path>,
-    /// Judge model resolved upstream: CLI `--judge-model` flag >
-    /// eval-config `default_judge_model` > None. The orchestrator
-    /// then layers scenario.judge_model on top of None.
-    pub judge_model: Option<&'a str>,
+    /// `--judge-model` CLI override (highest precedence). When set,
+    /// overrides BOTH `scenario.judge_model` and the eval-config
+    /// `default_judge_model`. The orchestrator passes this directly
+    /// into `Judge::from_registry` as the uniform model.
+    pub cli_judge_model: Option<&'a str>,
+    /// `eval.default_judge_model` from `.steve.eval.jsonc`. Applied
+    /// as a fallback ONLY when both `cli_judge_model` and the per-
+    /// scenario `judge_model` are unset — so a per-scenario override
+    /// always wins over the config default. MUST stay separate from
+    /// `cli_judge_model`: collapsing them into one field would make
+    /// the config default beat per-scenario overrides (since the
+    /// judge's `cli_model` slot has highest precedence).
+    pub config_default_judge_model: Option<&'a str>,
     /// CLI `--regression-threshold` (highest precedence).
     pub cli_regression_threshold: Option<f64>,
     /// `eval.regression_threshold` from `.steve.eval.jsonc`.
@@ -201,55 +298,106 @@ pub async fn report_subcommand(args: ReportArgs<'_>) -> Result<ReportExitCode> {
     let results = ResultsFile::read_from_path(args.results_path)
         .with_context(|| format!("loading results from {}", args.results_path.display()))?;
 
-    // Resolve judge model. CLI/config-supplied model > error. (The
-    // orchestrator then layers per-scenario `judge_model` from the
-    // scenario.toml on top of None where set; that's
-    // Report::build_from_results's job.)
-    let resolved_judge = args.judge_model.ok_or_else(|| {
-        anyhow::anyhow!(
-            "no judge model configured: pass --judge-model <provider/model>, or set \
-             `default_judge_model` in `.steve.eval.jsonc`, or set `judge_model` on the scenario"
-        )
-    })?;
-    let judge = Judge::from_registry(args.registry, Some(resolved_judge));
+    // Precedence: CLI > scenario.judge_model > config default. The
+    // Judge holds ONLY the CLI override; the config default and
+    // per-scenario judge_model are threaded into build_from_results
+    // for per-cell resolution. This preserves the "scenario beats
+    // config default" semantic that .steve.eval.jsonc docs promise.
+    let judge = Judge::from_registry(args.registry, args.cli_judge_model);
 
+    // Report.judge_model records what was UNIFORMLY applied across
+    // every scenario for history.jsonl trend grouping. With CLI set,
+    // every scenario uses it. Without CLI, each scenario can pick
+    // its own — so the field is None and the renderer surfaces
+    // "per-scenario" prose. Config default isn't surfaced as the
+    // "uniform" judge because it can be overridden per-scenario.
+    let report_judge_model = args.cli_judge_model;
     let report = Report::build_from_results(
         &results,
         args.baselines_dir,
         &args.results_path.display().to_string(),
         &judge,
-        resolved_judge,
+        report_judge_model,
         Some(args.scenarios_dir),
+        args.config_default_judge_model,
     )
     .await?;
 
-    print!("{}", report.render_text(args.verbose));
-
-    if let Some(html_path) = args.html_out {
-        let history = read_history(args.history_path)
-            .with_context(|| format!("reading history from {}", args.history_path.display()))?;
-        let html = render_html(&report, &history);
-        std::fs::write(html_path, html)
-            .with_context(|| format!("writing HTML to {}", html_path.display()))?;
-        println!("wrote HTML report to {}", html_path.display());
-    }
-
-    if args.record_history {
+    // Side effects FIRST — HTML and history are explicit user-requested
+    // outputs that must not be hostage to stdout draining.
+    //
+    // History append is gated on `headline_totals.total() > 0`:
+    // recording a row when every scenario was Skipped would pollute
+    // history.jsonl with a meaningless `net_win_rate=0.0` point
+    // (the sentinel value `ReportTotals::net_win_rate` returns for
+    // empty totals). Downstream trend grouping and the HTML chart
+    // would treat that as a real data point. Especially dangerous
+    // for "all scenarios drifted from baseline" runs which would
+    // otherwise silently log as a flat 0.0 trend.
+    let nothing_graded = report.headline_totals.total() == 0;
+    let appended_history = args.record_history && !nothing_graded;
+    if appended_history {
         let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let entry = HistoryEntry::from_report(&report, now);
         append_history(args.history_path, &entry)?;
-        println!("appended history row to {}", args.history_path.display());
+    } else if args.record_history && nothing_graded {
+        eprintln!(
+            "warning: skipping history append — no scenarios graded \
+             (would record a meaningless net_win_rate=0.0 trend point)"
+        );
     }
 
-    let threshold = args
-        .cli_regression_threshold
-        .or(args.config_regression_threshold)
-        .unwrap_or(0.0);
-    let exit = if report.headline_totals.net_win_rate() < threshold {
-        ReportExitCode::Regression
-    } else {
-        ReportExitCode::Pass
-    };
+    if let Some(html_path) = args.html_out {
+        let history = read_history(args.history_path).with_context(|| {
+            // If append_history just succeeded, the operator now
+            // has an orphaned line on disk that won't be reflected in
+            // any HTML report from this invocation. Tell them.
+            let prefix = if appended_history {
+                format!(
+                    "a new history row was already appended to {}; \
+                     you may want to remove the last line manually. ",
+                    args.history_path.display()
+                )
+            } else {
+                String::new()
+            };
+            format!(
+                "{prefix}reading history from {}",
+                args.history_path.display()
+            )
+        })?;
+        let html = render_html(&report, &history);
+        std::fs::write(html_path, html)
+            .with_context(|| format!("writing HTML to {}", html_path.display()))?;
+    }
+
+    // Stdout writes go through *_stdout_lossy so EPIPE from `head`/`less`
+    // downgrades to a clean exit (preserving the Pass/Regression/NoData
+    // contract). Non-EPIPE errors propagate to main as exit 2.
+    write_stdout_lossy(&report.render_text(args.verbose))?;
+    if appended_history {
+        writeln_stdout_lossy(&format!(
+            "appended history row to {}",
+            args.history_path.display()
+        ))?;
+    }
+    if let Some(html_path) = args.html_out {
+        writeln_stdout_lossy(&format!("wrote HTML report to {}", html_path.display()))?;
+    }
+
+    // Exit code: NoData (2) when nothing was graded, otherwise the
+    // threshold comparison. The helper `report_exit_code` encodes
+    // both branches so the predicate stays testable in isolation.
+    let exit = report_exit_code(
+        &report,
+        args.cli_regression_threshold,
+        args.config_regression_threshold,
+    )?;
+    if exit == ReportExitCode::NoData {
+        eprintln!(
+            "warning: no scenarios were graded (all skipped or errored); exiting with code 2"
+        );
+    }
     Ok(exit)
 }
 
@@ -339,8 +487,8 @@ pub async fn freeze_subcommand(
     let total = selected.len();
     for (i, ((name, scenario_path), path)) in selected.iter().zip(resolved_paths).enumerate() {
         let started = std::time::Instant::now();
-        print!("running scenario {name} ({}/{})...", i + 1, total);
-        std::io::Write::flush(&mut std::io::stdout()).ok();
+        write_stdout_lossy(&format!("running scenario {name} ({}/{})...", i + 1, total))?;
+        flush_stdout_lossy()?;
         let scenario = Scenario::from_file(scenario_path)
             .with_context(|| format!("loading scenario {}", scenario_path.display()))?;
         let scenario_dir = scenario_path
@@ -356,7 +504,7 @@ pub async fn freeze_subcommand(
         let report = evaluate(&scenario, &captured);
         let floor_passed = report.passed() && captured.completed_normally();
         let transcript = Normalizer::normalize(&captured, floor_passed);
-        println!(" done in {:.1}s", started.elapsed().as_secs_f32());
+        writeln_stdout_lossy(&format!(" done in {:.1}s", started.elapsed().as_secs_f32()))?;
 
         let baseline = BaselineFile {
             scenario: name.clone(),
@@ -376,6 +524,7 @@ pub async fn freeze_subcommand(
     }
 
     // Write: all runs succeeded — commit to disk.
+    let pending_count = pending.len();
     for (idx, (path, baseline, _)) in pending.iter().enumerate() {
         baseline.write_to_path(path).with_context(|| {
             format!(
@@ -384,13 +533,29 @@ pub async fn freeze_subcommand(
                 baseline.scenario, idx
             )
         })?;
-        println!("froze {} -> {}", baseline.scenario, path.display());
+        writeln_stdout_lossy(&format!(
+            "froze {} -> {}",
+            baseline.scenario,
+            path.display()
+        ))?;
     }
     for (_, _, entry) in pending {
         manifest.upsert(entry);
     }
-    manifest.write_to_path(&mfst_path)?;
-    println!("updated manifest: {}", mfst_path.display());
+    // Surface the baseline-vs-manifest skew explicitly: if this write
+    // fails after every baseline succeeded, the on-disk YAMLs are new
+    // but the manifest still reports the previous git_ref/frozen_at.
+    // History rows written by future `report --record-history` would
+    // cite the wrong baseline anchor.
+    manifest.write_to_path(&mfst_path).with_context(|| {
+        format!(
+            "writing manifest TOML to {} after {pending_count} baseline(s) already \
+             on disk; baselines and manifest are now out of sync — \
+             re-run freeze to update the manifest",
+            mfst_path.display()
+        )
+    })?;
+    writeln_stdout_lossy(&format!("updated manifest: {}", mfst_path.display()))?;
     Ok(())
 }
 
@@ -434,10 +599,10 @@ mod header_tests {
 
     #[test]
     fn header_annotates_override_axes_when_scoring_block_present() {
-        // Phase 7 contract: the override is observable from the CLI
-        // smoke. The `(override)` tag is the load-bearing signal —
-        // readers expect defaults silently, so only the override
-        // case earns a label.
+        // The `(override)` tag is the load-bearing signal — readers
+        // expect defaults silently, so only the override case earns
+        // a label. Without this tag the override is only observable
+        // through unit tests, not the CLI smoke.
         let scenario = scenario_with_optional_scoring(Some(Scoring {
             axes: vec![Axis::Robustness, Axis::Efficiency],
         }));
@@ -450,6 +615,169 @@ mod header_tests {
         assert!(
             !line.contains("correctness"),
             "override must NOT print the default axes; got: {line}"
+        );
+    }
+
+    // ── exit-code semantics ──
+    //
+    // The threshold-resolution logic is the entire CI-gating contract.
+    // Pin each precedence step + the < boundary that distinguishes
+    // Pass from Regression at the threshold value.
+
+    #[test]
+    fn resolve_exit_code_cli_wins_over_config_and_default() {
+        // CLI=0.05, config=-0.10, net=0.0 → 0.0 < 0.05 → Regression
+        assert_eq!(
+            resolve_exit_code(0.0, Some(0.05), Some(-0.10)).unwrap(),
+            ReportExitCode::Regression
+        );
+    }
+
+    #[test]
+    fn resolve_exit_code_config_used_when_cli_absent() {
+        // CLI=None, config=-0.10, net=-0.05 → -0.05 ≥ -0.10 → Pass
+        assert_eq!(
+            resolve_exit_code(-0.05, None, Some(-0.10)).unwrap(),
+            ReportExitCode::Pass
+        );
+    }
+
+    #[test]
+    fn resolve_exit_code_default_zero_used_when_both_absent() {
+        // CLI=None, config=None, net=-0.001 → -0.001 < 0.0 → Regression
+        assert_eq!(
+            resolve_exit_code(-0.001, None, None).unwrap(),
+            ReportExitCode::Regression
+        );
+    }
+
+    #[test]
+    fn resolve_exit_code_boundary_zero_is_pass() {
+        // CLI=None, config=None, net=0.0 → 0.0 < 0.0 is false → Pass.
+        // This is the load-bearing `<` vs `<=` distinction — flipping
+        // it would silently fail every CI on an exactly-zero result.
+        assert_eq!(
+            resolve_exit_code(0.0, None, None).unwrap(),
+            ReportExitCode::Pass
+        );
+    }
+
+    #[test]
+    fn report_exit_code_maps_to_process_codes() {
+        // Pass=0, Regression=1, NoData=2.
+        assert_eq!(ReportExitCode::Pass.as_i32(), 0);
+        assert_eq!(ReportExitCode::Regression.as_i32(), 1);
+        assert_eq!(ReportExitCode::NoData.as_i32(), 2);
+    }
+
+    // ── report_exit_code: the NoData short-circuit ──
+
+    use crate::eval::report::{
+        BaselineProvenance, Report, ReportTotals, ScenarioOutcome, ScenarioReport,
+    };
+    use std::collections::BTreeMap;
+
+    fn empty_report() -> Report {
+        Report {
+            model: "test/model".into(),
+            results_git_ref: "x".into(),
+            results_path: "x".into(),
+            baseline_provenance: BTreeMap::new(),
+            judge_model: None,
+            headline_totals: ReportTotals::default(),
+            per_axis: Vec::new(),
+            scenarios: Vec::new(),
+            deterministic_floor: Default::default(),
+        }
+    }
+
+    #[test]
+    fn resolve_exit_code_rejects_non_finite_threshold() {
+        // `--regression-threshold NaN` parses cleanly through clap's
+        // f64 parser. A NaN threshold makes `x < NaN` always false,
+        // which would silently exit Pass on a real regression.
+        // Return Err so the top-level main.rs handler maps to exit 2
+        // with a clear diagnostic — reusing NoData (which means
+        // "every scenario was Skipped") would conflate two distinct
+        // failure modes.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let err = resolve_exit_code(-0.99, Some(bad), None)
+                .expect_err("non-finite CLI threshold must Err");
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("not a finite number"),
+                "expected `not a finite number` diagnostic; got: {msg}"
+            );
+        }
+        // Config-source non-finite is equally bad.
+        let err = resolve_exit_code(-0.99, None, Some(f64::NAN))
+            .expect_err("non-finite config threshold must Err");
+        assert!(format!("{err:#}").contains("not a finite number"));
+    }
+
+    #[test]
+    fn report_exit_code_returns_no_data_when_totals_empty() {
+        // Critical: this short-circuit is the only thing preventing
+        // a green CI gate when every scenario is Skipped. The
+        // net_win_rate sentinel collapses to 0.0 on empty totals,
+        // which would otherwise read as Pass.
+        let r = empty_report();
+        assert_eq!(r.headline_totals.total(), 0);
+        assert_eq!(
+            report_exit_code(&r, None, None).unwrap(),
+            ReportExitCode::NoData
+        );
+    }
+
+    #[test]
+    fn report_exit_code_no_data_overrides_permissive_threshold() {
+        // Even with a CI threshold like -0.5 (allow 50% regression),
+        // zero graded scenarios must still exit NoData. A permissive
+        // threshold shouldn't mask the "no signal" case.
+        let r = empty_report();
+        assert_eq!(
+            report_exit_code(&r, Some(-0.5), Some(-0.5)).unwrap(),
+            ReportExitCode::NoData
+        );
+    }
+
+    #[test]
+    fn report_exit_code_no_data_overrides_when_skipped_scenarios_present() {
+        // Scenarios present but all Skipped → totals still zero
+        // → NoData.
+        let mut r = empty_report();
+        r.scenarios = vec![ScenarioReport {
+            scenario: "X".into(),
+            outcome: ScenarioOutcome::Skipped {
+                reason: "no baseline".into(),
+            },
+        }];
+        assert_eq!(
+            report_exit_code(&r, None, None).unwrap(),
+            ReportExitCode::NoData
+        );
+    }
+
+    #[test]
+    fn report_exit_code_passes_through_to_threshold_when_some_graded() {
+        // Real verdicts present → defer to resolve_exit_code's threshold.
+        let mut r = empty_report();
+        r.headline_totals = ReportTotals {
+            current_wins: 5,
+            baseline_wins: 0,
+            ties: 5,
+        };
+        r.baseline_provenance.insert(
+            "X".into(),
+            BaselineProvenance {
+                git_ref: "abc".into(),
+                frozen_at: "2026-05-12T00:00:00Z".into(),
+            },
+        );
+        // net_win_rate = (5-0)/10 = 0.5; default threshold 0.0 → Pass.
+        assert_eq!(
+            report_exit_code(&r, None, None).unwrap(),
+            ReportExitCode::Pass
         );
     }
 }

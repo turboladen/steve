@@ -1,5 +1,5 @@
 //! Aggregation of paired-comparison verdicts into the layered
-//! Phase 8 report — headline + per-axis + per-scenario detail.
+//! report — headline + per-axis + per-scenario detail.
 //!
 //! Pure data types and pure formula methods. No I/O. The
 //! orchestration that loads `ResultsFile` + baselines and calls
@@ -78,15 +78,21 @@ pub struct AxisTotals {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ScenarioOutcome {
     Graded {
-        /// One `Vec<PairedScore>` per run; length matches the count
-        /// of runs that successfully graded. Runs that errored on
-        /// both attempts are excluded from this list (and surface
-        /// in `--verbose` output via a separate channel — see
-        /// the renderer).
+        /// One `Vec<PairedScore>` per run that graded successfully.
+        /// Length may be less than the run count in the results file
+        /// if some runs errored on both judge-call attempts.
         per_run_scores: Vec<Vec<PairedScore>>,
         /// Per-axis tally for this scenario alone, for the verbose
         /// per-scenario rendering.
         per_axis: Vec<AxisTotals>,
+        /// Count of runs that errored on both judge-call attempts
+        /// and were excluded from `per_run_scores`. Surfaced in
+        /// `--verbose` output so operators see that the sample
+        /// size shrank below the configured K. `errored_runs.0`
+        /// is the count; `errored_runs.1` is the last error
+        /// message for context.
+        #[serde(default)]
+        errored_runs: ErroredRuns,
     },
     Skipped {
         /// Human-readable reason — the renderer prints this in the
@@ -95,6 +101,16 @@ pub enum ScenarioOutcome {
         /// `"all K runs of scenario X errored: <last error msg>"`.
         reason: String,
     },
+}
+
+/// Count of runs that errored on both judge-call attempts +
+/// the last error message. Surfaced in `--verbose` rendering so
+/// operators see when transient judge flakiness has shrunk the
+/// sample size below the configured `scenario.runs`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ErroredRuns {
+    pub count: usize,
+    pub last_error: Option<String>,
 }
 
 /// Per-scenario record carried by `Report.scenarios`.
@@ -112,6 +128,17 @@ pub struct ScenarioReport {
 pub struct BaselineProvenance {
     pub git_ref: String,
     pub frozen_at: String,
+}
+
+/// Tally of how many `NormalizedTranscript`s passed the
+/// deterministic rule-based assertion floor at eval-run time.
+/// Sourced from each transcript's `deterministic_floor_passed`
+/// bool; surfaced in history rows so cumulative-floor regressions
+/// are visible in the trend chart.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeterministicFloor {
+    pub passed: usize,
+    pub total: usize,
 }
 
 /// The complete result of a `steve eval report` run. Pure data;
@@ -132,9 +159,14 @@ pub struct Report {
     /// Per-scenario baseline provenance. Keys are scenario names.
     /// Missing entries indicate the scenario was skipped (no baseline).
     pub baseline_provenance: BTreeMap<String, BaselineProvenance>,
-    /// Judge model used for this report (resolved precedence:
-    /// CLI > scenario.judge_model > error).
-    pub judge_model: String,
+    /// Judge model used for this report. `Some("provider/model")` when
+    /// a single judge model is in effect (CLI flag or eval config
+    /// default). `None` when each scenario uses its own
+    /// `scenario.judge_model` — the renderer surfaces this as
+    /// "per-scenario" prose rather than a placeholder string that
+    /// would poison downstream tooling that parses the field as
+    /// `provider/model_id`.
+    pub judge_model: Option<String>,
     /// Suite-wide tally across all (scenario × run × axis) cells
     /// that were graded.
     pub headline_totals: ReportTotals,
@@ -144,6 +176,11 @@ pub struct Report {
     pub per_axis: Vec<AxisTotals>,
     /// Per-scenario detail. Order matches results-file insertion order.
     pub scenarios: Vec<ScenarioReport>,
+    /// Aggregate deterministic-floor tally across every run in the
+    /// results file. Computed from each transcript's
+    /// `deterministic_floor_passed` bool.
+    #[serde(default)]
+    pub deterministic_floor: DeterministicFloor,
 }
 
 impl Report {
@@ -154,33 +191,49 @@ impl Report {
     /// double-failures exclude the run from `per_run_scores`.
     /// All-runs-errored on a scenario maps to `Skipped` per spec.
     ///
-    /// `scenarios_dir` is `Option` because Phase-8 callers always pass
-    /// `Some(eval/scenarios)` to read per-scenario `[scoring].axes` and
-    /// `judge_model` overrides, but unit tests pass `None` to keep the
-    /// fake judge focused on orchestration logic (axes default to
+    /// `scenarios_dir` is `Option` because production callers always
+    /// pass `Some(eval/scenarios)` to read per-scenario `[scoring].axes`
+    /// and `judge_model` overrides, but unit tests pass `None` to keep
+    /// the fake judge focused on orchestration logic (axes default to
     /// `DEFAULT_AXES`, scenario_judge_model defaults to `None`).
     pub async fn build_from_results(
         results: &crate::eval::results::ResultsFile,
         baselines_dir: &std::path::Path,
         results_path: &str,
         judge: &dyn crate::eval::JudgeAdapter,
-        judge_model: &str,
+        judge_model: Option<&str>,
         scenarios_dir: Option<&std::path::Path>,
+        config_default_judge_model: Option<&str>,
     ) -> anyhow::Result<Self> {
         use crate::eval::{
             baseline::{BaselineFile, baseline_path},
             scenario::Scenario,
         };
 
+        // Compute aggregate deterministic-floor tally from every
+        // transcript in the results file. Counts ALL runs, not just
+        // graded ones (Skipped scenarios still ran the rule-based
+        // assertions; we surface their floor pass/fail too).
+        let mut floor = DeterministicFloor::default();
+        for scn in results.scenarios.values() {
+            for t in &scn.runs {
+                floor.total += 1;
+                if t.deterministic_floor_passed {
+                    floor.passed += 1;
+                }
+            }
+        }
+
         let mut report = Report {
             model: results.model.clone(),
             results_git_ref: results.git_ref.clone(),
             results_path: results_path.to_string(),
             baseline_provenance: BTreeMap::new(),
-            judge_model: judge_model.to_string(),
+            judge_model: judge_model.map(str::to_string),
             headline_totals: ReportTotals::default(),
             per_axis: Vec::new(),
             scenarios: Vec::new(),
+            deterministic_floor: floor,
         };
 
         // Accumulate per-axis tallies; finalize ordering below.
@@ -225,19 +278,51 @@ impl Report {
                     continue;
                 }
             };
-            report.baseline_provenance.insert(
-                scenario_name.clone(),
-                BaselineProvenance {
-                    git_ref: baseline.git_ref.clone(),
-                    frozen_at: baseline.frozen_at.clone(),
-                },
-            );
-
             // Determine axes + per-scenario judge model from the
             // on-disk scenario.toml when `scenarios_dir` was supplied.
-            let scenario_on_disk = scenarios_dir.and_then(|dir| {
-                Scenario::from_file(&dir.join(scenario_name).join("scenario.toml")).ok()
-            });
+            // A parse failure (typo, schema drift) MUST not silently
+            // fall back to DEFAULT_AXES — the operator would see a
+            // clean "Graded" report grading against the wrong axes.
+            // NotFound is the only legitimate fallback: it just means
+            // the report was invoked without a scenarios root.
+            let scenario_on_disk = match scenarios_dir {
+                Some(dir) => {
+                    let path = dir.join(scenario_name).join("scenario.toml");
+                    match Scenario::from_file(&path) {
+                        Ok(s) => Some(s),
+                        Err(e) => {
+                            // When `scenarios_dir` was supplied the
+                            // operator expects every scenario in the
+                            // results file to have a matching
+                            // `scenario.toml` under it. Either a parse
+                            // failure or a missing manifest deserves
+                            // Skipped with a clear diagnostic —
+                            // silently falling back to DEFAULT_AXES
+                            // would re-introduce the silent
+                            // grading-against-wrong-axes failure mode.
+                            let is_not_found = e
+                                .downcast_ref::<std::io::Error>()
+                                .is_some_and(|ioe| ioe.kind() == std::io::ErrorKind::NotFound);
+                            let reason = if is_not_found {
+                                format!(
+                                    "scenario.toml not found at {}; \
+                                     results file references a scenario that no \
+                                     longer exists under the scenarios root",
+                                    path.display()
+                                )
+                            } else {
+                                format!("scenario.toml load failed at {}: {e:#}", path.display())
+                            };
+                            report.scenarios.push(ScenarioReport {
+                                scenario: scenario_name.clone(),
+                                outcome: ScenarioOutcome::Skipped { reason },
+                            });
+                            continue;
+                        }
+                    }
+                }
+                None => None,
+            };
             let axes: Vec<Axis> = match &scenario_on_disk {
                 Some(scn) => scn.scoring_axes().to_vec(),
                 None => crate::eval::score::DEFAULT_AXES.to_vec(),
@@ -246,9 +331,59 @@ impl Report {
                 .as_ref()
                 .and_then(|scn| scn.judge_model.clone());
 
+            // user_turns drift: the baseline and the current results
+            // MUST share the same user prompts, otherwise the judge
+            // is comparing transcripts that responded to different
+            // questions. Skip with a re-freeze hint instead of
+            // producing misleading verdicts.
+            if baseline.user_turns != scenario_results.user_turns {
+                report.scenarios.push(ScenarioReport {
+                    scenario: scenario_name.clone(),
+                    outcome: ScenarioOutcome::Skipped {
+                        reason: format!(
+                            "scenario '{scenario_name}' user_turns drifted from baseline: \
+                             baseline was frozen against {} turn(s), results have {} turn(s); \
+                             re-run `steve eval baseline freeze --scenario {scenario_name} --model {}`",
+                            baseline.user_turns.len(),
+                            scenario_results.user_turns.len(),
+                            results.model
+                        ),
+                    },
+                });
+                continue;
+            }
+
+            // Special-case empty runs Vec — conflating "zero runs in
+            // the results file" with "all K runs errored" would be a
+            // misleading diagnostic. Tell the operator to re-run.
+            if scenario_results.runs.is_empty() {
+                report.scenarios.push(ScenarioReport {
+                    scenario: scenario_name.clone(),
+                    outcome: ScenarioOutcome::Skipped {
+                        reason: format!(
+                            "results file contains zero runs for scenario '{scenario_name}'; \
+                             re-run `steve eval run --scenario {scenario_name} --model {}`",
+                            results.model
+                        ),
+                    },
+                });
+                continue;
+            }
+
+            // Precedence at the judge-call site: scenario_judge_model
+            // wins over config_default_judge_model. CLI override is
+            // already inside `judge` (highest precedence).
+            // Collapsing config_default into the judge's CLI slot
+            // upstream would make config_default beat per-scenario
+            // overrides, which contradicts the documented precedence.
+            let effective_scenario_judge: Option<String> = scenario_judge_model
+                .clone()
+                .or_else(|| config_default_judge_model.map(str::to_string));
+
             // Walk each run; call judge with retry-once.
             let mut per_run_scores: Vec<Vec<PairedScore>> =
                 Vec::with_capacity(scenario_results.runs.len());
+            let mut errored_count: usize = 0;
             let mut last_error: Option<String> = None;
             for current_transcript in &scenario_results.runs {
                 let pair = crate::eval::judge::ComparePair {
@@ -263,7 +398,7 @@ impl Report {
                             pair,
                             &axes,
                             &scenario_results.user_turns,
-                            scenario_judge_model.as_deref(),
+                            effective_scenario_judge.as_deref(),
                         )
                         .await
                     {
@@ -276,8 +411,9 @@ impl Report {
                         }
                     }
                 };
-                if let Some(s) = scores {
-                    per_run_scores.push(s);
+                match scores {
+                    Some(s) => per_run_scores.push(s),
+                    None => errored_count += 1,
                 }
             }
 
@@ -321,11 +457,28 @@ impl Report {
                     })
                 })
                 .collect();
+            // Record provenance only for scenarios that actually
+            // graded — Skipped scenarios (parse failure, user_turns
+            // drift, missing scenario.toml, all-runs-errored) MUST NOT
+            // contribute to the metadata header's scenario count,
+            // which would otherwise overstate how many scenarios were
+            // anchored against the baseline.
+            report.baseline_provenance.insert(
+                scenario_name.clone(),
+                BaselineProvenance {
+                    git_ref: baseline.git_ref.clone(),
+                    frozen_at: baseline.frozen_at.clone(),
+                },
+            );
             report.scenarios.push(ScenarioReport {
                 scenario: scenario_name.clone(),
                 outcome: ScenarioOutcome::Graded {
                     per_run_scores,
                     per_axis: scenario_per_axis_vec,
+                    errored_runs: ErroredRuns {
+                        count: errored_count,
+                        last_error,
+                    },
                 },
             });
         }
@@ -431,16 +584,41 @@ impl Report {
         // Per-scenario (verbose only).
         out.push_str("  Per scenario:\n");
         for sr in &self.scenarios {
+            // Per-scenario baseline provenance — delivers on the
+            // "see --verbose" hint emitted from the metadata block
+            // when scenarios pin to varying baseline git_refs.
+            // Skipped scenarios have no provenance entry (no
+            // baseline to anchor against), so this only fires for
+            // Graded ones.
+            let provenance_line = self
+                .baseline_provenance
+                .get(&sr.scenario)
+                .map(|p| format!("      baseline: frozen {} at {}\n", p.frozen_at, p.git_ref))
+                .unwrap_or_default();
             match &sr.outcome {
                 ScenarioOutcome::Graded {
                     per_axis,
                     per_run_scores,
+                    errored_runs,
                 } => {
-                    out.push_str(&format!(
-                        "    {} ({} runs):\n",
-                        sr.scenario,
-                        per_run_scores.len()
-                    ));
+                    if errored_runs.count > 0 {
+                        out.push_str(&format!(
+                            "    {} ({} runs graded, {} errored):\n",
+                            sr.scenario,
+                            per_run_scores.len(),
+                            errored_runs.count,
+                        ));
+                        if let Some(err) = &errored_runs.last_error {
+                            out.push_str(&format!("      last error: {err}\n"));
+                        }
+                    } else {
+                        out.push_str(&format!(
+                            "    {} ({} runs):\n",
+                            sr.scenario,
+                            per_run_scores.len()
+                        ));
+                    }
+                    out.push_str(&provenance_line);
                     for ax in per_axis {
                         out.push_str(&format!(
                             "      {:14} {} (won {} / lost {} / tied {})\n",
@@ -554,47 +732,43 @@ mod tests {
         );
     }
 
-    #[test]
-    fn report_headline_sums_per_axis() {
-        // Aggregation contract: headline_totals = sum of per_axis totals.
-        let per_axis = [
-            AxisTotals {
-                axis: Axis::Correctness,
-                totals: ReportTotals {
-                    current_wins: 2,
-                    baseline_wins: 1,
-                    ties: 0,
-                },
-            },
-            AxisTotals {
-                axis: Axis::Efficiency,
-                totals: ReportTotals {
-                    current_wins: 1,
-                    baseline_wins: 1,
-                    ties: 1,
-                },
-            },
-            AxisTotals {
-                axis: Axis::Conciseness,
-                totals: ReportTotals {
-                    current_wins: 0,
-                    baseline_wins: 0,
-                    ties: 3,
-                },
-            },
-        ];
-        let headline = ReportTotals {
-            current_wins: 3,
-            baseline_wins: 2,
-            ties: 4,
-        };
-        let summed: ReportTotals = per_axis.iter().fold(ReportTotals::default(), |mut acc, a| {
-            acc.current_wins += a.totals.current_wins;
-            acc.baseline_wins += a.totals.baseline_wins;
-            acc.ties += a.totals.ties;
-            acc
-        });
-        assert_eq!(headline, summed);
+    #[tokio::test]
+    async fn build_from_results_headline_equals_sum_of_per_axis() {
+        // Aggregation contract: report.headline_totals must equal
+        // sum of report.per_axis totals. Pinned end-to-end through
+        // build_from_results rather than in isolation — a previous
+        // tautological version of this test summed values the test
+        // itself constructed, exercising no production code.
+        let tmp = TempDir::new().unwrap();
+        let results = results_file_with(vec![("_smoke", 3)]); // 3 runs × 3 axes
+        write_baseline(tmp.path(), "_smoke", "test/model");
+
+        let judge = FakeJudge::all_wins();
+        let report = Report::build_from_results(
+            &results,
+            tmp.path(),
+            "results.yaml",
+            &judge,
+            Some("fake/judge"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Sum per-axis tallies and assert against headline.
+        let summed = report
+            .per_axis
+            .iter()
+            .fold(ReportTotals::default(), |mut acc, a| {
+                acc.current_wins += a.totals.current_wins;
+                acc.baseline_wins += a.totals.baseline_wins;
+                acc.ties += a.totals.ties;
+                acc
+            });
+        assert_eq!(report.headline_totals, summed);
+        // Sanity: 3 runs × 3 axes = 9 cells, all CurrentWins.
+        assert_eq!(report.headline_totals.current_wins, 9);
     }
 
     fn paired(axis: Axis, verdict: Verdict) -> PairedScore {
@@ -627,6 +801,7 @@ mod tests {
                     ties: 0,
                 },
             }],
+            errored_runs: Default::default(),
         };
         let json = serde_json::to_string(&g).unwrap();
         let back: ScenarioOutcome = serde_json::from_str(&json).unwrap();
@@ -690,9 +865,14 @@ mod tests {
     /// Tracks call count to support fail-then-succeed retry tests.
     struct FakeJudge {
         /// On each call: if the call index is < `fail_until`, return
-        /// Err; otherwise return Ok with all-CurrentWins.
+        /// Err; otherwise return Ok with `verdict` for every axis.
         fail_until: usize,
         call_count: Mutex<usize>,
+        /// Records every `scenario_judge_model` value passed in —
+        /// used by precedence tests to assert which judge model
+        /// reached the compare site.
+        scenario_judge_calls: Mutex<Vec<Option<String>>>,
+        verdict: Verdict,
     }
 
     impl FakeJudge {
@@ -700,12 +880,24 @@ mod tests {
             Self {
                 fail_until: 0,
                 call_count: Mutex::new(0),
+                scenario_judge_calls: Mutex::new(Vec::new()),
+                verdict: Verdict::CurrentWins,
             }
         }
         fn fail_n_then_wins(n: usize) -> Self {
             Self {
                 fail_until: n,
                 call_count: Mutex::new(0),
+                scenario_judge_calls: Mutex::new(Vec::new()),
+                verdict: Verdict::CurrentWins,
+            }
+        }
+        fn all_with(verdict: Verdict) -> Self {
+            Self {
+                fail_until: 0,
+                call_count: Mutex::new(0),
+                scenario_judge_calls: Mutex::new(Vec::new()),
+                verdict,
             }
         }
     }
@@ -717,8 +909,12 @@ mod tests {
             _pair: ComparePair<'_>,
             axes: &[Axis],
             _user_turns: &[String],
-            _scenario_judge_model: Option<&str>,
+            scenario_judge_model: Option<&str>,
         ) -> anyhow::Result<CompareVerdict> {
+            self.scenario_judge_calls
+                .lock()
+                .unwrap()
+                .push(scenario_judge_model.map(str::to_string));
             let n = {
                 let mut c = self.call_count.lock().unwrap();
                 let prev = *c;
@@ -733,7 +929,7 @@ mod tests {
                 .map(|a| PairedScore {
                     axis: *a,
                     rationale: "fake".into(),
-                    verdict: Verdict::CurrentWins,
+                    verdict: self.verdict,
                 })
                 .collect())
         }
@@ -751,7 +947,8 @@ mod tests {
             tmp.path(),
             "results.yaml",
             &judge,
-            "fake/judge-model",
+            Some("fake/judge-model"),
+            None,
             None,
         )
         .await
@@ -780,7 +977,8 @@ mod tests {
             tmp.path(),
             "results.yaml",
             &judge,
-            "fake/judge-model",
+            Some("fake/judge-model"),
+            None,
             None,
         )
         .await
@@ -794,7 +992,6 @@ mod tests {
                     reason.contains("no baseline"),
                     "expected 'no baseline' diagnostic; got: {reason}"
                 );
-                // Spec: error suggestion must be copy-pasteable.
                 assert!(
                     reason.contains("steve eval baseline freeze"),
                     "expected exact freeze command in diagnostic; got: {reason}"
@@ -802,6 +999,258 @@ mod tests {
             }
             other => panic!("expected Skipped; got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn build_from_results_skips_scenario_when_scenario_toml_is_malformed() {
+        // A scenario.toml load failure MUST surface as Skipped (with
+        // the failure in the reason) rather than silently falling
+        // back to DEFAULT_AXES — silent fallback produces a clean
+        // Graded report grading against the wrong axes when the
+        // operator has a typo. A regression replacing the match with
+        // `.ok()` would be caught here.
+        let tmp = TempDir::new().unwrap();
+        let results = results_file_with(vec![("_smoke", 1)]);
+        write_baseline(tmp.path(), "_smoke", "test/model");
+
+        let scenarios = tmp.path().join("scenarios");
+        std::fs::create_dir_all(scenarios.join("_smoke")).unwrap();
+        std::fs::write(
+            scenarios.join("_smoke/scenario.toml"),
+            "this is { not valid toml",
+        )
+        .unwrap();
+
+        let judge = FakeJudge::all_wins();
+        let report = Report::build_from_results(
+            &results,
+            tmp.path(),
+            "results.yaml",
+            &judge,
+            Some("fake/judge-model"),
+            Some(&scenarios),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.scenarios.len(), 1);
+        match &report.scenarios[0].outcome {
+            ScenarioOutcome::Skipped { reason } => {
+                assert!(
+                    reason.contains("scenario.toml load failed"),
+                    "reason must surface load failure; got: {reason}"
+                );
+                assert!(
+                    reason.contains("_smoke"),
+                    "reason must identify the offending scenario; got: {reason}"
+                );
+            }
+            other => panic!("expected Skipped on malformed scenario.toml; got {other:?}"),
+        }
+        // Malformed scenario must NOT contribute any verdicts OR
+        // provenance — provenance is reserved for Graded scenarios
+        // so the metadata header's "(N scenarios)" count stays
+        // honest.
+        assert_eq!(report.headline_totals.current_wins, 0);
+        assert_eq!(report.headline_totals.baseline_wins, 0);
+        assert_eq!(report.headline_totals.ties, 0);
+        assert!(report.baseline_provenance.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_from_results_skips_when_scenario_toml_missing_under_scenarios_dir() {
+        // Operator-passed `scenarios_dir` means "every scenario in
+        // results MUST have a manifest here". A missing scenario.toml
+        // (NotFound) is silent grading-against-DEFAULT_AXES otherwise.
+        let tmp = TempDir::new().unwrap();
+        let results = results_file_with(vec![("_smoke", 1)]);
+        write_baseline(tmp.path(), "_smoke", "test/model");
+        // scenarios root exists but the _smoke subdir is absent.
+        let scenarios = tmp.path().join("scenarios");
+        std::fs::create_dir_all(&scenarios).unwrap();
+
+        let judge = FakeJudge::all_wins();
+        let report = Report::build_from_results(
+            &results,
+            tmp.path(),
+            "results.yaml",
+            &judge,
+            Some("fake/judge-model"),
+            Some(&scenarios),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.scenarios.len(), 1);
+        match &report.scenarios[0].outcome {
+            ScenarioOutcome::Skipped { reason } => {
+                assert!(
+                    reason.contains("not found"),
+                    "expected NotFound diagnostic; got: {reason}"
+                );
+                assert!(
+                    reason.contains("_smoke"),
+                    "expected scenario name in diagnostic; got: {reason}"
+                );
+            }
+            other => panic!("expected Skipped on missing scenario.toml; got {other:?}"),
+        }
+        assert_eq!(report.headline_totals.total(), 0);
+    }
+
+    /// Helper for the judge_model precedence tests: writes a valid
+    /// scenario.toml under `scenarios_dir/_smoke/` with the supplied
+    /// `judge_model` and a minimal user_turn matching the test
+    /// fixtures' baseline + results.
+    fn write_scenario_with_judge_model(scenarios_dir: &std::path::Path, judge: Option<&str>) {
+        let dir = scenarios_dir.join("_smoke");
+        std::fs::create_dir_all(&dir).unwrap();
+        let judge_line = match judge {
+            Some(j) => format!("judge_model = \"{j}\"\n"),
+            None => String::new(),
+        };
+        let toml = format!(
+            r#"name = "_smoke"
+description = "fixture"
+user_turns = ["go"]
+{judge_line}
+[[expectations]]
+kind = "final_message_contains"
+substring = "ok"
+"#
+        );
+        std::fs::write(dir.join("scenario.toml"), toml).unwrap();
+    }
+
+    #[tokio::test]
+    async fn build_from_results_uses_scenario_judge_over_config_default() {
+        // Precedence MUST be: CLI > scenario.judge_model > config_default.
+        // Collapsing config_default into Judge.cli_model upstream would
+        // make it beat per-scenario overrides — this pins the contract
+        // that scenario.toml's judge wins over any config-default the
+        // orchestrator threads in.
+        let tmp = TempDir::new().unwrap();
+        let results = results_file_with(vec![("_smoke", 1)]);
+        write_baseline(tmp.path(), "_smoke", "test/model");
+        let scenarios = tmp.path().join("scenarios");
+        write_scenario_with_judge_model(&scenarios, Some("scenario/judge"));
+
+        let judge = FakeJudge::all_wins();
+        let _report = Report::build_from_results(
+            &results,
+            tmp.path(),
+            "results.yaml",
+            &judge,
+            None, // no CLI override
+            Some(&scenarios),
+            Some("config/default"), // config_default present
+        )
+        .await
+        .unwrap();
+
+        let calls = judge.scenario_judge_calls.lock().unwrap().clone();
+        assert!(!calls.is_empty(), "judge should have been called");
+        for (i, call) in calls.iter().enumerate() {
+            assert_eq!(
+                call.as_deref(),
+                Some("scenario/judge"),
+                "call #{i}: scenario.judge_model MUST win over config_default; got {call:?}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn build_from_results_uses_config_default_when_scenario_has_no_judge_model() {
+        // When scenario.toml has no judge_model, config_default
+        // fills in. CLI not set.
+        let tmp = TempDir::new().unwrap();
+        let results = results_file_with(vec![("_smoke", 1)]);
+        write_baseline(tmp.path(), "_smoke", "test/model");
+        let scenarios = tmp.path().join("scenarios");
+        write_scenario_with_judge_model(&scenarios, None); // no judge_model
+
+        let judge = FakeJudge::all_wins();
+        let _report = Report::build_from_results(
+            &results,
+            tmp.path(),
+            "results.yaml",
+            &judge,
+            None,
+            Some(&scenarios),
+            Some("config/default"),
+        )
+        .await
+        .unwrap();
+
+        let calls = judge.scenario_judge_calls.lock().unwrap().clone();
+        assert!(!calls.is_empty());
+        for call in &calls {
+            assert_eq!(
+                call.as_deref(),
+                Some("config/default"),
+                "config_default MUST fill in when scenario has no judge_model",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn build_from_results_skips_when_user_turns_drift_from_baseline() {
+        // If the scenario's user prompts changed after the baseline
+        // was frozen, the judge would be comparing transcripts that
+        // responded to different questions — silently misleading.
+        // Skip with a "re-freeze" hint instead.
+        let tmp = TempDir::new().unwrap();
+        let mut results = results_file_with(vec![("_smoke", 1)]);
+        // Mutate the current run's user_turns to differ from the
+        // baseline's (which write_baseline pins at ["go"]).
+        results.scenarios.get_mut("_smoke").unwrap().user_turns =
+            vec!["go".into(), "and another step".into()];
+        write_baseline(tmp.path(), "_smoke", "test/model");
+
+        let judge = FakeJudge::all_wins();
+        let report = Report::build_from_results(
+            &results,
+            tmp.path(),
+            "results.yaml",
+            &judge,
+            Some("fake/judge-model"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.scenarios.len(), 1);
+        match &report.scenarios[0].outcome {
+            ScenarioOutcome::Skipped { reason } => {
+                assert!(
+                    reason.contains("user_turns drifted"),
+                    "expected drift diagnostic; got: {reason}"
+                );
+                assert!(
+                    reason.contains("steve eval baseline freeze"),
+                    "expected freeze hint; got: {reason}"
+                );
+                assert!(
+                    reason.contains("1 turn(s)") && reason.contains("2 turn(s)"),
+                    "expected baseline/current turn counts; got: {reason}"
+                );
+            }
+            other => panic!("expected Skipped on user_turns drift; got {other:?}"),
+        }
+        // Drifted scenario must NOT contribute any verdicts AND
+        // MUST NOT register a baseline_provenance entry — otherwise
+        // the metadata header's "(N scenarios)" count would
+        // overstate how many scenarios were actually graded against
+        // the baseline.
+        assert_eq!(report.headline_totals.total(), 0);
+        assert!(
+            report.baseline_provenance.is_empty(),
+            "Skipped-on-drift scenarios must not contribute provenance; got: {:?}",
+            report.baseline_provenance
+        );
     }
 
     #[tokio::test]
@@ -817,7 +1266,8 @@ mod tests {
             tmp.path(),
             "results.yaml",
             &judge,
-            "fake/judge-model",
+            Some("fake/judge-model"),
+            None,
             None,
         )
         .await
@@ -840,7 +1290,8 @@ mod tests {
             tmp.path(),
             "results.yaml",
             &judge,
-            "fake/judge-model",
+            Some("fake/judge-model"),
+            None,
             None,
         )
         .await
@@ -869,7 +1320,8 @@ mod tests {
             tmp.path(),
             "results.yaml",
             &judge,
-            "fake/judge-model",
+            Some("fake/judge-model"),
+            None,
             None,
         )
         .await
@@ -884,6 +1336,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn build_from_results_buckets_baseline_wins_correctly() {
+        // The all-CurrentWins tests can't catch a copy-paste swap of
+        // `current_wins` / `baseline_wins` in the bucket-walk loop.
+        // Pin each verdict variant into its own bucket end-to-end.
+        let tmp = TempDir::new().unwrap();
+        let results = results_file_with(vec![("_smoke", 2)]);
+        write_baseline(tmp.path(), "_smoke", "test/model");
+
+        let judge = FakeJudge::all_with(Verdict::BaselineWins);
+        let report = Report::build_from_results(
+            &results,
+            tmp.path(),
+            "results.yaml",
+            &judge,
+            Some("fake/judge-model"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // 1 scenario × 2 runs × 3 axes = 6 BaselineWins → all should
+        // land in baseline_wins, never current_wins.
+        assert_eq!(report.headline_totals.current_wins, 0);
+        assert_eq!(report.headline_totals.baseline_wins, 6);
+        assert_eq!(report.headline_totals.ties, 0);
+        for ax in &report.per_axis {
+            assert_eq!(
+                ax.totals.current_wins, 0,
+                "axis {:?} leaked into current",
+                ax.axis
+            );
+            assert_eq!(ax.totals.baseline_wins, 2, "axis {:?} miscount", ax.axis);
+        }
+    }
+
+    #[tokio::test]
+    async fn build_from_results_buckets_ties_correctly() {
+        let tmp = TempDir::new().unwrap();
+        let results = results_file_with(vec![("_smoke", 2)]);
+        write_baseline(tmp.path(), "_smoke", "test/model");
+
+        let judge = FakeJudge::all_with(Verdict::Tie);
+        let report = Report::build_from_results(
+            &results,
+            tmp.path(),
+            "results.yaml",
+            &judge,
+            Some("fake/judge-model"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.headline_totals.current_wins, 0);
+        assert_eq!(report.headline_totals.baseline_wins, 0);
+        assert_eq!(report.headline_totals.ties, 6);
+    }
+
+    #[tokio::test]
     async fn build_from_results_records_baseline_provenance() {
         let tmp = TempDir::new().unwrap();
         let results = results_file_with(vec![("_smoke", 1)]);
@@ -895,7 +1408,8 @@ mod tests {
             tmp.path(),
             "results.yaml",
             &judge,
-            "fake/judge-model",
+            Some("fake/judge-model"),
+            None,
             None,
         )
         .await
@@ -906,6 +1420,129 @@ mod tests {
         assert_eq!(prov.frozen_at, "2026-05-01T00:00:00Z");
     }
 
+    #[tokio::test]
+    async fn build_from_results_aggregates_deterministic_floor() {
+        // Pin: each run's `deterministic_floor_passed` bool flows
+        // from the transcript through Report.deterministic_floor.
+        // A break in this plumbing would render every row as 0/0 in
+        // history.jsonl without otherwise failing any test.
+        let tmp = TempDir::new().unwrap();
+        let mut results = results_file_with(vec![("a", 2), ("b", 1)]);
+        // a: 2 runs, both passed.
+        for t in results.scenarios.get_mut("a").unwrap().runs.iter_mut() {
+            t.deterministic_floor_passed = true;
+        }
+        // b: 1 run, failed.
+        results.scenarios.get_mut("b").unwrap().runs[0].deterministic_floor_passed = false;
+        write_baseline(tmp.path(), "a", "test/model");
+        write_baseline(tmp.path(), "b", "test/model");
+
+        let judge = FakeJudge::all_wins();
+        let report = Report::build_from_results(
+            &results,
+            tmp.path(),
+            "results.yaml",
+            &judge,
+            Some("fake/judge"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Total = 3 runs across both scenarios; 2 passed the floor.
+        assert_eq!(report.deterministic_floor.total, 3);
+        assert_eq!(report.deterministic_floor.passed, 2);
+    }
+
+    #[tokio::test]
+    async fn build_from_results_special_cases_empty_runs_vec() {
+        // Empty `runs: vec![]` must NOT collapse into the "all
+        // errored" diagnostic — there is no error to report, just
+        // an empty file. Surface a re-run hint instead.
+        let tmp = TempDir::new().unwrap();
+        let mut results = results_file_with(vec![("_smoke", 0)]);
+        // Force the runs Vec to empty (results_file_with(_, 0) does
+        // produce length 0 today, but be explicit).
+        results.scenarios.get_mut("_smoke").unwrap().runs.clear();
+        write_baseline(tmp.path(), "_smoke", "test/model");
+
+        let judge = FakeJudge::all_wins();
+        let report = Report::build_from_results(
+            &results,
+            tmp.path(),
+            "results.yaml",
+            &judge,
+            Some("fake/judge"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        match &report.scenarios[0].outcome {
+            ScenarioOutcome::Skipped { reason } => {
+                assert!(
+                    reason.contains("zero runs"),
+                    "expected 'zero runs' diagnostic, got: {reason}"
+                );
+                assert!(
+                    reason.contains("re-run"),
+                    "expected re-run hint, got: {reason}"
+                );
+            }
+            other => panic!("expected Skipped for empty-runs scenario; got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_from_results_surfaces_per_run_errors_in_graded_variant() {
+        // Pin: when some runs error but others succeed, the sample
+        // size shrinks silently — ErroredRuns must carry both the
+        // count AND the last error so the renderer can surface it.
+        let tmp = TempDir::new().unwrap();
+        let results = results_file_with(vec![("_smoke", 3)]);
+        write_baseline(tmp.path(), "_smoke", "test/model");
+
+        // First call fails (retried, fails again → run errored),
+        // then subsequent calls succeed. Total: 2 attempts for run 1
+        // (both fail), then 1 attempt each for runs 2 & 3 (both pass).
+        let judge = FakeJudge::fail_n_then_wins(2);
+        let report = Report::build_from_results(
+            &results,
+            tmp.path(),
+            "results.yaml",
+            &judge,
+            Some("fake/judge"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        match &report.scenarios[0].outcome {
+            ScenarioOutcome::Graded {
+                per_run_scores,
+                errored_runs,
+                ..
+            } => {
+                // 2 runs graded (run 2 and run 3), 1 errored (run 1).
+                assert_eq!(
+                    per_run_scores.len(),
+                    2,
+                    "expected 2 successful runs, got {}",
+                    per_run_scores.len()
+                );
+                assert_eq!(errored_runs.count, 1, "expected 1 errored run");
+                assert!(
+                    errored_runs.last_error.is_some(),
+                    "expected last_error to carry the simulated error message"
+                );
+            }
+            other => panic!("expected Graded with 1 errored, got {other:?}"),
+        }
+    }
+
     // ── Text rendering ──
 
     fn empty_report() -> Report {
@@ -914,10 +1551,11 @@ mod tests {
             results_git_ref: "abc1234".into(),
             results_path: "results.yaml".into(),
             baseline_provenance: BTreeMap::new(),
-            judge_model: "fake/judge".into(),
+            judge_model: Some("fake/judge".into()),
             headline_totals: ReportTotals::default(),
             per_axis: Vec::new(),
             scenarios: Vec::new(),
+            deterministic_floor: Default::default(),
         }
     }
 
@@ -992,6 +1630,7 @@ mod tests {
             outcome: ScenarioOutcome::Graded {
                 per_run_scores: vec![vec![]],
                 per_axis: Vec::new(),
+                errored_runs: Default::default(),
             },
         }];
         let out = r.render_text(false);
@@ -1025,12 +1664,118 @@ mod tests {
                         ties: 0,
                     },
                 }],
+                errored_runs: Default::default(),
             },
         }];
         let out = r.render_text(true);
         assert!(
             out.contains("_smoke"),
             "verbose must include scenario name; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn render_text_surfaces_errored_runs_with_last_error_in_verbose() {
+        // Spec mandates errored runs surface in --verbose output
+        // (paired-comparison spec, "judge-call failure handling").
+        // Pin both the "(X runs graded, Y errored)" status and the
+        // "last error: ..." line so refactors can't silently delete
+        // the spec-required visibility.
+        let mut r = empty_report();
+        r.headline_totals = ReportTotals {
+            current_wins: 3,
+            baseline_wins: 0,
+            ties: 0,
+        };
+        r.scenarios = vec![ScenarioReport {
+            scenario: "_smoke".into(),
+            outcome: ScenarioOutcome::Graded {
+                per_run_scores: vec![vec![]],
+                per_axis: vec![AxisTotals {
+                    axis: Axis::Correctness,
+                    totals: ReportTotals {
+                        current_wins: 1,
+                        baseline_wins: 0,
+                        ties: 0,
+                    },
+                }],
+                errored_runs: ErroredRuns {
+                    count: 2,
+                    last_error: Some("simulated 503".into()),
+                },
+            },
+        }];
+        let out = r.render_text(true);
+        assert!(
+            out.contains("1 runs graded, 2 errored"),
+            "expected the 'X graded, Y errored' status; got:\n{out}"
+        );
+        assert!(
+            out.contains("last error: simulated 503"),
+            "expected the last_error line; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn render_text_omits_errored_runs_line_when_count_is_zero() {
+        // Negative case: clean graded outcomes should NOT carry an
+        // "errored" suffix on the status line.
+        let mut r = empty_report();
+        r.headline_totals = ReportTotals {
+            current_wins: 3,
+            baseline_wins: 0,
+            ties: 0,
+        };
+        r.scenarios = vec![ScenarioReport {
+            scenario: "_smoke".into(),
+            outcome: ScenarioOutcome::Graded {
+                per_run_scores: vec![vec![]],
+                per_axis: Vec::new(),
+                errored_runs: Default::default(),
+            },
+        }];
+        let out = r.render_text(true);
+        assert!(
+            !out.contains("errored"),
+            "clean Graded scenarios must NOT mention 'errored'; got:\n{out}"
+        );
+        assert!(
+            !out.contains("last error:"),
+            "clean Graded scenarios must NOT mention 'last error:'; got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn render_text_does_not_surface_judge_model_field_when_none() {
+        // The text renderer deliberately does NOT include the
+        // judge_model field — that surface is HTML metadata + history
+        // JSONL only. Pin "doesn't surface" explicitly so a future PR
+        // that adds judge_model to render_text can't accidentally
+        // unwrap or Debug-print the Option<String> on the None case.
+        let mut r = empty_report();
+        r.judge_model = None;
+        r.headline_totals = ReportTotals {
+            current_wins: 1,
+            baseline_wins: 0,
+            ties: 0,
+        };
+        let out = r.render_text(false);
+        assert!(
+            !out.contains("judge_model"),
+            "text renderer must not surface judge_model field; got:\n{out}"
+        );
+        // Defense against `Debug` formatting on the Option<String>:
+        // `Some("x")` and `None` are both Debug forms that should
+        // never reach output.
+        assert!(
+            !out.contains("Some(") && !out.contains("None"),
+            "text renderer must not Debug-print Option<String>; got:\n{out}"
+        );
+        // The previous "<per-scenario>" placeholder string must also
+        // never appear (it was removed in favor of Option<String>).
+        assert!(
+            !out.contains("<per-scenario>"),
+            "old placeholder string must not leak into text; got:\n{out}"
         );
     }
 
@@ -1069,5 +1814,69 @@ mod tests {
         let out = r.render_text(false);
         assert!(out.contains("baseline frozen"), "got:\n{out}");
         assert!(out.contains("abc1234"), "got:\n{out}");
+    }
+
+    #[test]
+    fn render_text_verbose_surfaces_per_scenario_provenance() {
+        // The "varied refs — see --verbose" hint emitted by the
+        // metadata block when scenarios pin to different baseline
+        // git_refs needs an actual verbose payload to point at.
+        // Pin: each Graded scenario in --verbose output carries its
+        // baseline's frozen_at + git_ref.
+        let mut r = empty_report();
+        r.headline_totals = ReportTotals {
+            current_wins: 1,
+            baseline_wins: 0,
+            ties: 0,
+        };
+        r.scenarios = vec![
+            ScenarioReport {
+                scenario: "scenario-a".into(),
+                outcome: ScenarioOutcome::Graded {
+                    per_run_scores: vec![vec![]],
+                    per_axis: Vec::new(),
+                    errored_runs: Default::default(),
+                },
+            },
+            ScenarioReport {
+                scenario: "scenario-b".into(),
+                outcome: ScenarioOutcome::Graded {
+                    per_run_scores: vec![vec![]],
+                    per_axis: Vec::new(),
+                    errored_runs: Default::default(),
+                },
+            },
+        ];
+        r.baseline_provenance.insert(
+            "scenario-a".into(),
+            BaselineProvenance {
+                git_ref: "ref-aaaa".into(),
+                frozen_at: "2026-05-01T00:00:00Z".into(),
+            },
+        );
+        r.baseline_provenance.insert(
+            "scenario-b".into(),
+            BaselineProvenance {
+                git_ref: "ref-bbbb".into(),
+                frozen_at: "2026-05-02T00:00:00Z".into(),
+            },
+        );
+        let out = r.render_text(true);
+        assert!(
+            out.contains("ref-aaaa"),
+            "missing scenario-a git_ref; got:\n{out}"
+        );
+        assert!(
+            out.contains("ref-bbbb"),
+            "missing scenario-b git_ref; got:\n{out}"
+        );
+        assert!(
+            out.contains("2026-05-01"),
+            "missing scenario-a frozen_at; got:\n{out}"
+        );
+        assert!(
+            out.contains("2026-05-02"),
+            "missing scenario-b frozen_at; got:\n{out}"
+        );
     }
 }

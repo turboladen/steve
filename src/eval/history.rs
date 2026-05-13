@@ -21,7 +21,12 @@ pub struct HistoryEntry {
     pub recorded_at: String,
     pub model: String,
     pub baseline_git_ref: String,
-    pub judge_model: String,
+    /// Judge model in `provider/model_id` format, or `None` when each
+    /// scenario used its own `scenario.judge_model` (mixed judges
+    /// per run). Downstream consumers grouping by judge model must
+    /// handle `None` explicitly — historically this was a magic
+    /// `"<per-scenario>"` string that broke `provider/model` parsers.
+    pub judge_model: Option<String>,
     pub headline: HistoryHeadline,
     pub per_axis: BTreeMap<String, HistoryAxisEntry>,
     pub deterministic_floor: HistoryFloor,
@@ -89,13 +94,9 @@ impl HistoryEntry {
                 non_regression_rate: report.headline_totals.non_regression_rate(),
             },
             per_axis,
-            // Deterministic floor info comes from the legacy assertion
-            // channel; not yet plumbed through to Report. Spec lists
-            // it as a field; we ship with passed=total=0 for now and
-            // surface the gap in a follow-up issue.
             deterministic_floor: HistoryFloor {
-                passed: 0,
-                total: 0,
+                passed: report.deterministic_floor.passed,
+                total: report.deterministic_floor.total,
             },
             results_file: report.results_path.clone(),
         }
@@ -149,7 +150,10 @@ pub fn read_history(path: &Path) -> Result<Vec<HistoryEntry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::eval::report::{BaselineProvenance, Report, ReportTotals};
+    use crate::eval::{
+        report::{AxisTotals, BaselineProvenance, Report, ReportTotals},
+        score::Axis,
+    };
     use tempfile::TempDir;
 
     fn sample_entry() -> HistoryEntry {
@@ -158,7 +162,7 @@ mod tests {
             recorded_at: "2026-05-12T14:23:00Z".into(),
             model: "ollama/qwen3-coder".into(),
             baseline_git_ref: "abc1234".into(),
-            judge_model: "fuel-ix/claude-haiku-4-5".into(),
+            judge_model: Some("fuel-ix/claude-haiku-4-5".into()),
             headline: HistoryHeadline {
                 net_win_rate: 0.022,
                 non_regression_rate: 0.978,
@@ -252,7 +256,7 @@ mod tests {
                 );
                 m
             },
-            judge_model: "fuel-ix/claude-haiku-4-5".into(),
+            judge_model: Some("fuel-ix/claude-haiku-4-5".into()),
             headline_totals: ReportTotals {
                 current_wins: 1,
                 baseline_wins: 0,
@@ -260,13 +264,116 @@ mod tests {
             },
             per_axis: Vec::new(),
             scenarios: Vec::new(),
+            deterministic_floor: Default::default(),
         };
         let entry = HistoryEntry::from_report(&r, "2026-05-12T14:23:00Z".into());
         assert_eq!(entry.git_ref, "def5678");
         assert_eq!(entry.model, "ollama/qwen3-coder");
         assert_eq!(entry.baseline_git_ref, "abc1234");
-        assert_eq!(entry.judge_model, "fuel-ix/claude-haiku-4-5");
+        assert_eq!(
+            entry.judge_model.as_deref(),
+            Some("fuel-ix/claude-haiku-4-5")
+        );
         assert!((entry.headline.net_win_rate - 0.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn from_report_maps_per_axis_rows_field_by_field() {
+        // A copy-paste swap of won/lost/tied in the per_axis mapping
+        // would be invisible to entry_from_report_extracts_spec_fields
+        // (which uses an empty per_axis). Pin every field's source.
+        let r = Report {
+            model: "m".into(),
+            results_git_ref: "g".into(),
+            results_path: "p".into(),
+            baseline_provenance: BTreeMap::new(),
+            judge_model: None,
+            headline_totals: ReportTotals {
+                current_wins: 0,
+                baseline_wins: 0,
+                ties: 0,
+            },
+            per_axis: vec![AxisTotals {
+                axis: Axis::Correctness,
+                totals: ReportTotals {
+                    current_wins: 3,
+                    baseline_wins: 4,
+                    ties: 5,
+                },
+            }],
+            scenarios: Vec::new(),
+            deterministic_floor: Default::default(),
+        };
+        let entry = HistoryEntry::from_report(&r, "ts".into());
+        let row = entry
+            .per_axis
+            .get("correctness")
+            .expect("axis must be keyed by Display output");
+        assert_eq!(
+            row.won, 3,
+            "won must map from current_wins, not baseline_wins"
+        );
+        assert_eq!(row.lost, 4, "lost must map from baseline_wins");
+        assert_eq!(row.tied, 5, "tied must map from ties");
+        assert!(
+            (row.net_win_rate - (3.0 - 4.0) / 12.0).abs() < 1e-9,
+            "net_win_rate must come from ReportTotals::net_win_rate"
+        );
+    }
+
+    #[test]
+    fn from_report_baseline_git_ref_falls_back_to_unknown_when_provenance_empty() {
+        // When every scenario is Skipped (missing baselines), the
+        // report has no provenance entries. The history row records
+        // "unknown" so downstream trend grouping can bucket the row
+        // distinctly from a real git-ref-keyed group.
+        let r = Report {
+            model: "m".into(),
+            results_git_ref: "g".into(),
+            results_path: "p".into(),
+            baseline_provenance: BTreeMap::new(),
+            judge_model: None,
+            headline_totals: ReportTotals {
+                current_wins: 0,
+                baseline_wins: 0,
+                ties: 0,
+            },
+            per_axis: Vec::new(),
+            scenarios: Vec::new(),
+            deterministic_floor: Default::default(),
+        };
+        let entry = HistoryEntry::from_report(&r, "ts".into());
+        assert_eq!(entry.baseline_git_ref, "unknown");
+    }
+
+    #[test]
+    fn append_then_read_round_trips_none_judge_model() {
+        // The Option<String> shape for judge_model is the load-bearing
+        // contract — it replaced a magic "<per-scenario>" placeholder
+        // that downstream tooling parsed as a provider/model string.
+        // Pin BOTH the in-memory round-trip AND the on-disk shape
+        // (`"judge_model":null`) so a future #[serde(skip_serializing_if
+        // = "Option::is_none")] couldn't silently drop the field from
+        // the wire format.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("history.jsonl");
+        let mut e = sample_entry();
+        e.judge_model = None;
+        append_history(&path, &e).unwrap();
+
+        // In-memory round-trip.
+        let rows = read_history(&path).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].judge_model.is_none());
+
+        // On-disk shape: `null` literal must appear so downstream
+        // jq / pandas / duckdb consumers see a real null, not an
+        // absent column.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains("\"judge_model\":null"),
+            "expected `\"judge_model\":null` literal in JSONL; got: {raw}"
+        );
     }
 
     #[test]

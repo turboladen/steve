@@ -190,6 +190,26 @@ mod tests {
     }
 
     #[test]
+    fn merge_global_baselines_dir_bleeds_through_when_project_unset() {
+        // Symmetric to merge_preserves_unset_fields: when GLOBAL sets
+        // baselines_dir and PROJECT leaves it None, the global value
+        // must survive. A typo like `other.x.and(self.x)` instead of
+        // `or` would silently break this direction only.
+        let g = EvalConfig {
+            regression_threshold: None,
+            default_judge_model: None,
+            baselines_dir: Some("global/path".into()),
+        };
+        let p = EvalConfig {
+            regression_threshold: None,
+            default_judge_model: None,
+            baselines_dir: None,
+        };
+        let m = g.merge(p);
+        assert_eq!(m.baselines_dir.as_deref(), Some("global/path"));
+    }
+
+    #[test]
     fn jsonc_with_comments_parses() {
         // The base config supports JSONC (JSON-with-comments).
         // EvalConfig must too since it uses the same parser pipeline.

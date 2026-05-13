@@ -739,13 +739,12 @@ pub(crate) fn strip_markdown_fences(s: &str) -> &str {
 /// Build the user prompt for the judge. Truncates per-tool-call args/output
 /// and per-message body to keep the prompt bounded.
 ///
-/// Layout matches real execution order **per turn**: each turn shows its
-/// tool calls (in emit order) followed by the assistant's final message.
-/// Turns appear in chronological order. Round-3 fixed the within-turn
-/// layout (tool calls before message); this rendering also fixes
-/// across-turn layout (turn N's calls before turn N+1's calls), which a
-/// flat "all tool calls then all messages" presentation broke for
-/// multi-turn scenarios.
+/// Layout matches real execution order at every level: each turn
+/// shows its tool calls (in emit order) followed by the assistant's
+/// final message, and turn N's calls always precede turn N+1's. A
+/// flat "all tool calls then all messages" presentation would break
+/// multi-turn scenarios where the judge needs to see what each
+/// message responded to.
 ///
 /// Truncation happens at the TURN level — when a run has more turns than
 /// fit, the head and tail turns are shown with a sentinel naming the
@@ -2756,7 +2755,7 @@ mod tests {
         );
     }
 
-    // ── Phase 7: compare prompt + parser + Judge::compare ──
+    // ── compare prompt + parser + Judge::compare ──
 
     use crate::eval::transcript::{NormalizedTranscript, TranscriptEvent, UsageSummary};
 
@@ -3100,14 +3099,14 @@ conciseness:
 
     #[test]
     fn parse_compare_response_rejects_multiline_quoted_rationale() {
-        // Copilot review (round 3): a multi-line quoted scalar parses
-        // fine in YAML, but its source-text continuation line can
-        // contain content that looks like an axis key (e.g.,
-        // `    efficiency: was discussed`) and fool
-        // `find_line_anchored_key` into corrupting axis-region
-        // boundaries. The block-scalar pre-check only covers `|`/`>`,
-        // not multi-line `"..."`. Reject parsed rationales containing
-        // newlines so this fails with a clear diagnostic before the
+        // A multi-line quoted scalar parses fine in YAML, but its
+        // source-text continuation line can contain content that
+        // looks like an axis key (e.g., `    efficiency: was
+        // discussed`) and fool `find_line_anchored_key` into
+        // corrupting axis-region boundaries. The block-scalar
+        // pre-check only covers `|`/`>`, not multi-line `"..."`.
+        // Reject parsed rationales containing newlines so this
+        // fails with a clear diagnostic before the
         // boundary detection runs.
         let raw = "correctness:\n  rationale: \"first line\n    efficiency: was discussed\"\n  verdict: a\nefficiency:\n  rationale: \"ok\"\n  verdict: tie\nconciseness:\n  rationale: \"ok\"\n  verdict: tie";
         let err = parse_compare_response(raw, &requested_axes(), false).unwrap_err();
@@ -3708,13 +3707,14 @@ conciseness:\n  rationale: \"Equivalent.\"\n  verdict: tie\n";
 
     #[tokio::test]
     async fn compare_public_wrapper_threads_args_to_compare_with_swap() {
-        // The production wrapper `Judge::compare` is what Phase 8 will
-        // call; `compare_with_swap` is the test seam. Without a
-        // dedicated test on `compare`, a future refactor that reorders
-        // args between the two (both take `ComparePair`, `&[Axis]`,
-        // `&[String]`, and `Option<&str>` — all distinct types but
-        // reference-typed slices type-check across orderings) would
-        // pass every existing test while silently breaking production.
+        // `Judge::compare` is the production wrapper called by the
+        // report orchestrator; `compare_with_swap` is the test seam.
+        // Without a dedicated test on `compare`, a future refactor
+        // that reorders args between the two (both take `ComparePair`,
+        // `&[Axis]`, `&[String]`, and `Option<&str>` — all distinct
+        // types but reference-typed slices type-check across
+        // orderings) would pass every existing test while silently
+        // breaking production.
         //
         // Uses ALL_TIE_CANNED so the random `swap` doesn't matter:
         // tie verdicts are swap-invariant.
