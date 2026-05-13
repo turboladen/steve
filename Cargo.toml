@@ -136,3 +136,4 @@ regex-syntax = "0.8.10"
 # Scenario tempdir setup for the eval harness (used in src/eval/workspace.rs);
 # also used in tests across the crate.
 tempfile = "3"
+html-escape = "0.2"
