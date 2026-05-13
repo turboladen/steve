@@ -392,6 +392,16 @@ cargo test --test <name>    # Specific integration test
 Integration tests in `tests/` cover permissions, config loading, and tool execution. Some LSP
 integration tests are `#[ignore]` and require language servers on PATH.
 
+## Evaluation
+
+Steve ships with a paired-comparison eval harness for regression-testing agent behavior across
+model changes, prompt changes, and code changes. The `steve eval` subcommands freeze "known-good"
+baselines, run scenarios against fresh code, and use an LLM judge to pick winners per axis
+(correctness, efficiency, conciseness, robustness, truthfulness).
+
+See [`EVAL.md`](./EVAL.md) for the full guide — quick start, the diff-as-record refresh
+workflow, CI integration, troubleshooting.
+
 ## License
 
 MIT
