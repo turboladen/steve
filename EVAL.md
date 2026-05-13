@@ -238,7 +238,7 @@ Eval results — current (ollama/gemma4 at 318516b) vs baseline
   Per axis:
     correctness:   +66.7% net win rate (won 2 / lost 0 / tied 1)
     efficiency:    +33.3% net win rate (won 1 / lost 0 / tied 2)
-    conciseness:    +0.0% net win rate (won 0 / lost 0 / tied 3)
+    conciseness:   +0.0% net win rate (won 0 / lost 0 / tied 3)
 
   See --verbose for per-scenario breakdown.
 ```
@@ -399,7 +399,9 @@ The harness's primary CI surface is the **exit code**: 0 = pass, 1 =
 regression, 2 = no data or infra error. Wire it up like any other check.
 
 Example GitHub Actions step (matches the shape of
-`.github/workflows/ci.yml`):
+`.github/workflows/ci.yml`). The snippet uses `anthropic/` model
+identifiers as one concrete choice — substitute whatever providers your
+own `config.jsonc` defines:
 
 ```yaml
   eval:
@@ -483,7 +485,11 @@ If you've frozen a baseline that no one else has (e.g., a local-only
 model), you can either:
 - Commit it (others now have it as reference data; helpful for
   reproducibility), or
-- Delete the file locally — only `manifest.toml` needs to stay consistent.
+- Delete the YAML file locally **and** remove its `[[baseline]]` entry
+  from `eval/baselines/manifest.toml`. The manifest is the source of
+  truth for which (scenario, model) pairs have baselines; a dangling
+  manifest entry that points at a missing YAML will trip the next
+  `steve eval report` on that pair.
 
 ## Configuration reference
 
@@ -580,7 +586,7 @@ Eval results — current (model at ref) vs baseline
   Per axis:
     correctness:   +66.7% net win rate (won 2 / lost 0 / tied 1)
     efficiency:    +33.3% net win rate (won 1 / lost 0 / tied 2)
-    conciseness:    +0.0% net win rate (won 0 / lost 0 / tied 3)
+    conciseness:   +0.0% net win rate (won 0 / lost 0 / tied 3)
 
   See --verbose for per-scenario breakdown.
 ```
