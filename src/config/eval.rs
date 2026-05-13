@@ -89,8 +89,8 @@ fn parse_eval_jsonc(path: &Path) -> Result<EvalConfig> {
     if !path.exists() {
         return Ok(EvalConfig::default());
     }
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let content =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let json_value: Option<serde_json::Value> =
         jsonc_parser::parse_to_serde_value(&content, &Default::default())
             .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", path.display()))?;

@@ -455,6 +455,35 @@ impl<'a> Judge<'a> {
     }
 }
 
+/// Adapter trait abstracting `Judge::compare` for testing.
+/// `Report::build_from_results` accepts `&dyn JudgeAdapter` so unit
+/// tests can substitute fakes that return canned `CompareVerdict`s
+/// or simulate transient errors. Production code uses the auto-
+/// derived `impl JudgeAdapter for Judge` below.
+#[async_trait]
+pub trait JudgeAdapter: Send + Sync {
+    async fn compare(
+        &self,
+        pair: ComparePair<'_>,
+        axes: &[Axis],
+        user_turns: &[String],
+        scenario_judge_model: Option<&str>,
+    ) -> Result<CompareVerdict>;
+}
+
+#[async_trait]
+impl<'a> JudgeAdapter for Judge<'a> {
+    async fn compare(
+        &self,
+        pair: ComparePair<'_>,
+        axes: &[Axis],
+        user_turns: &[String],
+        scenario_judge_model: Option<&str>,
+    ) -> Result<CompareVerdict> {
+        Judge::compare(self, pair, axes, user_turns, scenario_judge_model).await
+    }
+}
+
 /// Up-front validation that every Judge expectation in `scenario` will
 /// be able to resolve a real judge model — checked **before** the agent
 /// run starts, so a misconfigured judge fails fast instead of burning
