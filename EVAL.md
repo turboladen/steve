@@ -368,7 +368,11 @@ git_ref = "27a328f"
 frozen_at = "2026-05-13T05:46:42Z"
 ```
 
-Used by `report` to surface "frozen at X" provenance in the headline.
+The manifest is **the inventory of what baselines exist** — a cross-
+baseline index you can scan without opening every YAML. `freeze`
+reads and writes it; `report` doesn't consume it (the headline's
+"frozen at X" provenance is read directly from each baseline YAML's
+`git_ref` / `frozen_at` fields).
 
 ### Back-testing judge changes
 
@@ -485,11 +489,12 @@ If you've frozen a baseline that no one else has (e.g., a local-only
 model), you can either:
 - Commit it (others now have it as reference data; helpful for
   reproducibility), or
-- Delete the YAML file locally **and** remove its `[[baseline]]` entry
-  from `eval/baselines/manifest.toml`. The manifest is the source of
-  truth for which (scenario, model) pairs have baselines; a dangling
-  manifest entry that points at a missing YAML will trip the next
-  `steve eval report` on that pair.
+- Delete the YAML file locally **and** remove its `[[baseline]]`
+  entry from `eval/baselines/manifest.toml`. `report` won't actually
+  fail on a dangling manifest entry — it locates baselines by file
+  path and Skips with a "no baseline" diagnostic regardless — but
+  the manifest is the inventory of what baselines exist, so a stale
+  entry mis-documents your local state.
 
 ## Configuration reference
 
