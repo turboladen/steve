@@ -24,14 +24,17 @@ Before running the examples below:
    binary is on `$PATH` (e.g., `cp target/release/steve ~/.local/bin/`).
    Substitute `cargo run --release -- ` for `steve ` if you'd rather
    not install it.
-2. **Configure at least two providers** in `~/.config/steve/config.jsonc`
-   (or `.steve.jsonc` in the project root) — one for the **agent model**
-   (the model under test) and one for the **judge model** (the LLM that
-   grades comparisons). See the [Quick Start in
+2. **Configure the providers your agent and judge models live behind**
+   in `~/.config/steve/config.jsonc` (or `.steve.jsonc` in the project
+   root). You need one **agent model** (the model under test) and one
+   **judge model** (the LLM that grades comparisons); they can be
+   different providers or the same provider with two model IDs — or
+   even the same model in both roles, as the CI snippet later in this
+   doc demonstrates. See the [Quick Start in
    README.md](./README.md#quick-start) for the config schema. The
    examples below use `ollama/gemma4` (agent) and
-   `fuel-ix/claude-haiku-4-5` (judge); swap in whatever providers you
-   have configured.
+   `fuel-ix/claude-haiku-4-5` (judge); swap in whatever you have
+   configured.
 3. **The `_smoke` scenario ships with the repo** at
    `eval/scenarios/_smoke/`. Use it as your first end-to-end test —
    you don't need to author a scenario to run the Quick Start.
@@ -116,7 +119,10 @@ neither replaces the other.
 
 Each scenario in a report lands in one of three states:
 
-- **Graded** — every run produced verdicts; counted in the headline.
+- **Graded** — at least one run produced verdicts; the scenario's
+  successful runs are counted in the headline. Individual runs that
+  double-failed at the judge step are tallied as `errored_runs` and
+  excluded from the per-axis counts.
 - **Skipped** — judge never ran for this scenario. Reasons: no baseline
   for this (scenario, model) pair, `user_turns` drifted from the
   baseline, `scenario.toml` is missing/malformed under the scenarios
@@ -477,9 +483,11 @@ eval/baselines/
     fuel-ix/claude-sonnet-4-6.yaml  ← CI froze this
 ```
 
-Each (scenario, provider, model_id) has its own file. The manifest is the
-authoritative index — `report` uses it to find the right baseline for the
-model the current results came from.
+Each (scenario, provider, model_id) has its own file. `report` locates
+the baseline by computing the path from `(baselines_dir, scenario,
+model)` directly — it doesn't consult `manifest.toml`. The manifest is
+the human-readable index of what's been frozen (see *Reading a
+baseline YAML by hand* above).
 
 When pulling a colleague's PR that re-freezes a baseline, you get their
 behavior change as a YAML diff. You can re-run `steve eval` locally to
