@@ -107,9 +107,11 @@ Separate from paired comparison: every run also goes through **rule-based
 assertions** declared in `scenario.toml` (e.g., `tool_called`,
 `file_contains`). These run without the judge. The floor's pass/fail per
 run is recorded into the baseline YAML and (when `--record-history` is
-set) into `eval/history.jsonl`'s `deterministic_floor` field. The text
-report doesn't surface a floor counter today; the HTML report's trend
-chart consumes the history data.
+set) into `eval/history.jsonl`'s `deterministic_floor` field for
+downstream analysis. The text report doesn't surface a floor counter
+today, and the HTML report's trend chart plots only
+`headline.net_win_rate` — the floor data is in the JSONL for ad-hoc
+inspection but isn't visualized in v1.
 
 The floor catches structural facts the judge would miss (the right tool
 was called, the right file was modified). Both layers ship together —
@@ -123,10 +125,11 @@ Each scenario in a report lands in one of three states:
   successful runs are counted in the headline. Individual runs that
   double-failed at the judge step are tallied as `errored_runs` and
   excluded from the per-axis counts.
-- **Skipped** — judge never ran for this scenario. Reasons: no baseline
-  for this (scenario, model) pair, `user_turns` drifted from the
-  baseline, `scenario.toml` is missing/malformed under the scenarios
-  root, or every run errored.
+- **Skipped** — the scenario contributes no verdicts to the aggregate
+  totals. Reasons: no baseline for this (scenario, model) pair,
+  `user_turns` drifted from the baseline, `scenario.toml` is
+  missing/malformed under the scenarios root, or every run errored
+  (the judge did run but double-failed for each one).
 - **Errored** (per-run) — a single run failed twice in a row at the
   judge step. The run is excluded from the tally; the scenario as a
   whole stays Graded if any of its other runs succeeded.
@@ -211,9 +214,14 @@ To freeze every scenario in one go, omit `--scenario`:
 steve eval baseline freeze --model ollama/gemma4
 ```
 
-The operation is all-or-nothing: every scenario runs to completion before
-anything is written, so a partial failure doesn't leave the baselines/
-tree in an inconsistent state.
+The operation is run-then-write: every scenario runs to completion in
+memory before any disk write, so a **scenario-run failure** (judge
+timeout, agent crash) leaves the baselines tree untouched. The
+**write phase** can still partially update — if a `baseline.write_to_path`
+fails midway through the commit loop (filesystem error, permission
+flip), earlier baselines in the same run are already on disk. The
+error message names the count of already-written baselines and tells
+you to re-run freeze to restore a consistent state.
 
 ### Running and comparing
 
@@ -356,7 +364,10 @@ Field by field:
 
 **What's normalized away** to make baselines stable across runs:
 - Timestamps within events (order is the array index)
-- Workspace tempdir paths (`/tmp/<uuid>/greeting.txt` → `greeting.txt`)
+- Workspace tempdir prefix stripped (`/tmp/<uuid>/greeting.txt` →
+  `/greeting.txt`; the normalizer drops the prefix substring without
+  re-adding the slash, so the leading `/` from the original absolute
+  path is preserved)
 - Tool-call UUIDs
 - Empty assistant messages
 
@@ -569,7 +580,7 @@ loudly.
 | `final_message_contains` | `substring`, `case_insensitive` | The last assistant message contains the substring |
 | `final_message_not_contains` | `substring`, `case_insensitive` | The last assistant message does NOT contain the substring |
 | `max_repeat_attempts` | `tool`, `max` | No (tool, args) pair was called more than `max` times |
-| `judge` | `pass_when`, `fail_when`, `judge_model` | LLM-as-judge per-scenario expectation; separate from paired-comparison |
+| `judge` | `pass_when`, `fail_when`, `judge_model` | LLM-as-judge per-scenario expectation. **Not wired into the current `run`/`freeze`/`report` flow** — scenario.toml parses these but `apply_judges()` isn't called from any production path today, so they evaluate as Skipped (counted as passing in the deterministic floor). Use paired-comparison via `report` for LLM judging today. Tracked: `steve-k9hu`. |
 
 For the canonical Rust definitions see `src/eval/scenario.rs` (`Expectation`
 enum).
