@@ -171,8 +171,11 @@ case_insensitive = true
 
 At runtime:
 
-- The scenario directory is copied to a temp workspace; `setup.copy_fixtures`
-  lists which files are needed.
+- A fresh temp workspace is created and **only the files named in
+  `setup.copy_fixtures`** are copied into it from the scenario
+  directory. The rest of the scenario directory (the `scenario.toml`
+  itself, README files, etc.) is NOT copied — the agent's view of
+  the workspace is exactly what you whitelisted.
 - The agent is given the `user_turns` in FIFO order — first entry is the
   initial prompt, subsequent entries become follow-ups after each completed
   assistant response.
