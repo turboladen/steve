@@ -400,7 +400,7 @@ baselines, run scenarios against fresh code, and use an LLM judge to pick winner
 (correctness, efficiency, conciseness, robustness, truthfulness).
 
 See [`EVAL.md`](./EVAL.md) for the full guide — quick start, the diff-as-record refresh
-workflow, CI integration, troubleshooting.
+workflow, back-testing judge changes, cross-machine coordination, troubleshooting.
 
 ## License
 
