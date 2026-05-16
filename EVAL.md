@@ -286,9 +286,25 @@ separate behavior-changelog, this harness uses the **YAML diff itself
 as the audit record**: `git log eval/baselines/` is your behavior
 changelog and `git blame` answers "when did this behavior change?".
 
-When you intentionally change agent behavior (system prompt, tool
-wiring, model choice, etc.), some scenarios will start "regressing"
-— but it's intended. The workflow:
+**When to re-freeze**: after a change you've decided to keep — not
+"after a change you suspect might be better." The baseline is the
+*desired* behavior, not the best possible behavior. So:
+
+- You changed the system prompt and verified (via `steve eval`) the
+  new transcripts look right → freeze. The judge's per-axis verdicts
+  may show losses on some axes; that's fine if the trade-off is
+  intentional (e.g., dropped a verbose preamble; "conciseness" wins,
+  "completeness" loses — both intentional).
+- You're not sure if your change is an improvement → run `steve eval`
+  WITHOUT freezing first. Read the layered headline. If the verdict
+  is unfavorable and you don't want the new behavior, revert the
+  source change; don't freeze. If you do want the new behavior,
+  freeze.
+- You suspect a regression you didn't intend → DON'T freeze. The
+  whole point of the harness is to catch this and surface it as
+  exit code 1.
+
+The workflow once you've decided:
 
 ```bash
 # 1. Make your agent change in source.
