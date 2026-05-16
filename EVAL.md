@@ -29,9 +29,8 @@ Before running the examples below:
    in `~/.config/steve/config.jsonc` (or `.steve.jsonc` in the project
    root). You need one **agent model** (the model under test) and one
    **judge model** (the LLM that grades comparisons); they can be
-   different providers or the same provider with two model IDs — or
-   even the same model in both roles, as the CI snippet later in this
-   doc demonstrates. See the [Quick Start in
+   different providers, the same provider with two model IDs, or
+   even the same model in both roles. See the [Quick Start in
    README.md](./README.md#quick-start) for the config schema. The
    examples below use `ollama/gemma4` (agent) and
    `ollama/qwen3-coder` (judge); swap in whatever you have
@@ -485,80 +484,6 @@ The agent transcripts are identical across both `report` runs — only
 the judge's opinion differs. That isolation is the whole point: any
 verdict difference is the judges disagreeing, not the agent behaving
 differently between samples.
-
-### CI integration
-
-The harness's primary CI surface is the **exit code**: 0 = pass, 1 =
-regression, 2 = no data or infra error. Wire it up like any other check.
-
-Example GitHub Actions step (matches the shape of
-`.github/workflows/ci.yml`). The snippet uses `anthropic/` model
-identifiers as one concrete choice — substitute whatever providers your
-own `config.jsonc` defines:
-
-```yaml
-  eval:
-    name: Eval
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Build steve
-        run: cargo build
-      - name: Run eval
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          ./target/debug/steve eval \
-            --model anthropic/claude-haiku-4-5 \
-            --judge-model anthropic/claude-haiku-4-5 \
-            --regression-threshold 0.0 \
-            --record-history \
-            --html eval-report.html
-      - name: Upload report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: eval-report
-          path: |
-            eval-report.html
-            eval/history.jsonl
-```
-
-Debug build is fine here: the eval harness is dominated by LLM API
-latency (seconds to tens of seconds per judge call), so the Rust
-runtime overhead is a tiny fraction of total wall time. The extra
-compilation cost of `cargo build --release` doesn't pay back in
-faster eval execution. Switch to `--release` only if you're running
-hundreds of scenarios or if local profiling shows the Rust side
-becoming a bottleneck.
-
-What each flag contributes:
-
-| Flag | Role |
-|---|---|
-| `--regression-threshold 0.0` | Step fails (exit 1) if net win rate < 0.0 |
-| `--record-history` | Append a row to `eval/history.jsonl` for trend tracking |
-| `--html eval-report.html` | Self-contained dashboard archived as a CI artifact |
-
-A few gotchas the snippet papers over and a real CI must handle:
-
-- **Provider config** — `.steve.jsonc` is gitignored, so CI needs its
-  own `~/.config/steve/config.jsonc` materialized at runtime (a
-  separate step that writes the file from secrets, or a checked-in
-  CI-only config under a different path).
-- **Env var name** — provider API-key env vars are whatever
-  `api_key_env` is set to per provider in your config; `ANTHROPIC_API_KEY`
-  in the snippet is an example assuming the obvious anthropic mapping.
-- **Judge cost** — judge calls happen on every CI run; pick a small
-  cheap judge or run eval on a schedule rather than every PR.
-- **Baselines must be in the checkout** — `actions/checkout@v6` covers
-  this since baselines live under `eval/baselines/` in the repo.
-
-The harness's exit-code contract is tool-agnostic; the same logic
-works on GitLab CI, CircleCI, Jenkins, or a local `make` target. Just
-check `$?` after `steve eval` and act on 0/1/2.
 
 ### Cross-machine coordination
 
