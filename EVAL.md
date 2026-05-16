@@ -34,7 +34,7 @@ Before running the examples below:
    doc demonstrates. See the [Quick Start in
    README.md](./README.md#quick-start) for the config schema. The
    examples below use `ollama/gemma4` (agent) and
-   `fuel-ix/claude-haiku-4-5` (judge); swap in whatever you have
+   `ollama/qwen3-coder` (judge); swap in whatever you have
    configured.
 3. **The `_smoke` scenario ships with the repo** at
    `eval/scenarios/_smoke/`. Use it as your first end-to-end test —
@@ -49,7 +49,7 @@ steve eval baseline freeze --scenario _smoke --model ollama/gemma4
 # 2. Run + report against that baseline; needs a judge model.
 steve eval --scenario _smoke \
   --model ollama/gemma4 \
-  --judge-model fuel-ix/claude-haiku-4-5
+  --judge-model ollama/qwen3-coder
 
 # Exit code: 0 = pass, 1 = regression, 2 = no data / infra error.
 ```
@@ -232,7 +232,7 @@ in one command:
 ```bash
 steve eval --scenario _smoke \
   --model ollama/gemma4 \
-  --judge-model fuel-ix/claude-haiku-4-5 \
+  --judge-model ollama/qwen3-coder \
   --regression-threshold 0.0
 ```
 
@@ -402,11 +402,11 @@ judge good enough?").
 # 1. Sample once with no judging.
 steve eval run --scenario _smoke --model ollama/gemma4 --out /tmp/results.yaml
 
-# 2. Judge with candidate A.
-steve eval report /tmp/results.yaml --judge-model fuel-ix/claude-haiku-4-5
+# 2. Judge with candidate A (cheap, local).
+steve eval report /tmp/results.yaml --judge-model ollama/qwen3-coder
 
-# 3. Judge the SAME results with candidate B.
-steve eval report /tmp/results.yaml --judge-model fuel-ix/claude-sonnet-4-6
+# 3. Judge the SAME results with candidate B (trusted reference).
+steve eval report /tmp/results.yaml --judge-model anthropic/claude-haiku-4-5
 
 # Compare verdicts side by side.
 ```
@@ -492,7 +492,7 @@ eval/baselines/
   _smoke/
     ollama/gemma4.yaml        ← Alice froze this
     anthropic/claude-haiku-4-5.yaml ← Bob froze this
-    fuel-ix/claude-sonnet-4-6.yaml  ← CI froze this
+    openai/gpt-4o.yaml         ← CI froze this
 ```
 
 Each (scenario, provider, model_id) has its own file. `report` locates
@@ -531,7 +531,7 @@ fields optional; missing fields fall back to defaults.
 
   // Judge model in provider/model_id format. Falls back to this when
   // --judge-model isn't passed and the scenario.toml doesn't declare one.
-  "default_judge_model": "fuel-ix/claude-haiku-4-5",
+  "default_judge_model": "ollama/qwen3-coder",
 
   // Baselines directory. Relative paths anchored to the project root.
   // Defaults to "eval/baselines".
