@@ -650,9 +650,29 @@ When `--record-history` is set, one JSON object per line is appended to
 {"git_ref":"abc1234","recorded_at":"...","model":"...","baseline_git_ref":"...","judge_model":"...","headline":{"net_win_rate":0.15,"non_regression_rate":0.8},"per_axis":{"correctness":{"net_win_rate":0.2,"won":3,"lost":2,"tied":1}},"deterministic_floor":{"passed":8,"total":9},"results_file":"..."}
 ```
 
-Append-only; the HTML report's trend chart reads this file. Rows are only
-appended when at least one scenario was graded (no meaningless `0.0`
-trend points). Safe to commit or to keep gitignored — your call.
+Append-only; the HTML report's trend chart reads this file. Rows are
+only appended when at least one scenario was graded (no meaningless
+`0.0` trend points).
+
+**Commit it.** Same reasoning as baselines: history.jsonl is the
+shared inventory of what's been measured, and committing it means:
+
+- The HTML trend chart shows team-wide history on any fresh checkout
+  (otherwise every clone starts with a blank chart).
+- The behavior trajectory is part of the audit trail — "when did
+  this scenario start regressing" is answerable from `git log
+  eval/history.jsonl` + the rows themselves.
+- Cross-developer continuity: Alice runs eval, commits the row; Bob
+  pulls and re-runs, his row appends; the chart shows both data
+  points. Without committing, each developer's chart only sees their
+  own runs.
+
+Gitignore it only if you're using eval as a personal local smoke
+test and explicitly don't want team-wide trend visibility. JSONL
+merge conflicts are rare in practice (append-only files with
+distinct timestamps resolve cleanly), and the per-row payload is
+metadata + verdict counts — no transcript content, no API key, no
+fixture data.
 
 ## Troubleshooting
 
@@ -681,3 +701,39 @@ trend points). Safe to commit or to keep gitignored — your call.
   - Baseline + manifest: [`src/eval/baseline.rs`](./src/eval/baseline.rs)
   - Scoring axes + formulas: [`src/eval/score.rs`](./src/eval/score.rs), [`src/eval/report.rs`](./src/eval/report.rs)
   - History row schema: [`src/eval/history.rs`](./src/eval/history.rs)
+
+### Prior art
+
+The design is a hybrid of established patterns rather than a clone of
+any single framework. Each external project here contributed one or
+more load-bearing ideas to steve's eval harness:
+
+- **[Chatbot Arena / LMSYS Arena](https://lmsys.org/blog/2023-05-03-arena/)** — pairwise comparison +
+  win-rate aggregation as the core scoring primitive (originally
+  inspired by chess Elo). "Compare two outputs, judge picks one,
+  aggregate over many pairs" is theirs.
+- **[MT-Bench](https://arxiv.org/abs/2306.05685)** and
+  **[G-Eval](https://arxiv.org/abs/2303.16634)** — LLM-as-judge with
+  a structured multi-axis rubric. G-Eval specifically formalized the
+  "rationale-before-verdict" prompt pattern that mitigates halo
+  effect; steve's per-axis judge prompt follows that ordering directly.
+- **Snapshot testing** — [`insta`](https://insta.rs/) (Rust),
+  [`jest` snapshots](https://jestjs.io/docs/snapshot-testing), and
+  compiler golden tests. Frozen baselines as committed text artifacts
+  + diff-in-PR review come from this lineage; steve's `Normalizer` is
+  what `insta` calls a redactor.
+- **[Inspect AI](https://inspect.aisi.org.uk/)** (UK AISI's eval
+  framework) — decoupled run/report architecture and the "logs are
+  first-class replayable artifacts" philosophy. Their
+  `Task` / `Solver` / `Scorer` decomposition closely mirrors steve's
+  `Scenario` / `Runner` / `Judge` split. Inspect is the closest
+  single existing analog; steve is intentionally narrower (project-
+  specific, CI-gated, plain-text artifacts in git, no web UI).
+- **[HELM](https://crfm.stanford.edu/helm/)** (Stanford, 2022) — the
+  "deterministic floor + graded layer" pattern. Narrow rule-based
+  correctness checks AND graded scenarios, both reported, neither
+  replacing the other.
+
+For a longer write-up of which ideas steve borrowed vs deliberately
+declined to import (Inspect's web viewer, HuggingFace integrations,
+multi-task suites), see the [design spec](./docs/superpowers/specs/2026-05-06-eval-harness-paired-comparison-pivot.md)'s "Prior art / convention anchors" section.
