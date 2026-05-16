@@ -20,10 +20,11 @@ workflows; for the design rationale see
 
 Before running the examples below:
 
-1. **Build steve**: `cargo build --release`. The examples assume the
-   binary is on `$PATH` (e.g., `cp target/release/steve ~/.local/bin/`).
-   Substitute `cargo run --release -- ` for `steve ` if you'd rather
-   not install it.
+1. **Install steve**: `cargo install --path .` from the repo root
+   drops the binary into `~/.cargo/bin/` (which is usually on
+   `$PATH`). If you'd rather not install, build with
+   `cargo build --release` and substitute `cargo run --release -- `
+   for `steve ` in the examples below.
 2. **Configure the providers your agent and judge models live behind**
    in `~/.config/steve/config.jsonc` (or `.steve.jsonc` in the project
    root). You need one **agent model** (the model under test) and one
