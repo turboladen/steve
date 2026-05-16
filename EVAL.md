@@ -224,6 +224,39 @@ flip), earlier baselines in the same run are already on disk. The
 error message names the count of already-written baselines and tells
 you to re-run freeze to restore a consistent state.
 
+#### Freezing for multiple models
+
+Baselines are keyed by `(scenario, provider, model_id)` — each model
+gets its own YAML file under `eval/baselines/<scenario>/<provider>/`.
+Freezing the same scenarios for multiple models gives you:
+
+- **Per-model regression detection.** Each model has its own "known
+  good" reference. A change that regresses `ollama/gemma4` doesn't
+  necessarily regress `anthropic/claude-haiku-4-5`; comparing
+  current-vs-baseline per model isolates the failure to one specific
+  cell, not "did the agent change or did the model behave
+  differently?"
+- **Model-upgrade decisions.** When a new model version drops (e.g.,
+  `claude-haiku-4-5` → `claude-haiku-5-0`), freeze a baseline with
+  the new version. The YAML diff vs the old version's baseline
+  shows exactly what changed in behavior — useful before committing
+  to a model upgrade.
+- **Cost / capability trade-offs.** Freeze baselines for both a cheap
+  model and a strong one. The scenarios where they agree are
+  candidates for routing the cheap model in production; the
+  scenarios where the strong model wins are routing exceptions.
+- **Cross-provider portability.** Freezing for `ollama/...`,
+  `openai/...`, and `anthropic/...` on the same scenarios surfaces
+  which scenarios work equivalently across providers vs which depend
+  on provider-specific quirks (tool-call formats, prompt
+  interpretation, etc.).
+- **CI matrix testing.** Each (model, scenario) pair is independent
+  — a CI lane per model can run against its own baselines, and
+  failures localize to the specific cell instead of being ambiguous.
+
+Baselines also coexist across developers — see *Cross-machine
+coordination* below for the per-developer angle on the same layout.
+
 ### Running and comparing
 
 The chained form runs all K samples and then compares against the baseline
