@@ -505,12 +505,12 @@ own `config.jsonc` defines:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build steve
-        run: cargo build --release
+        run: cargo build
       - name: Run eval
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          ./target/release/steve eval \
+          ./target/debug/steve eval \
             --model anthropic/claude-haiku-4-5 \
             --judge-model anthropic/claude-haiku-4-5 \
             --regression-threshold 0.0 \
@@ -525,6 +525,14 @@ own `config.jsonc` defines:
             eval-report.html
             eval/history.jsonl
 ```
+
+Debug build is fine here: the eval harness is dominated by LLM API
+latency (seconds to tens of seconds per judge call), so the Rust
+runtime overhead is a tiny fraction of total wall time. The extra
+compilation cost of `cargo build --release` doesn't pay back in
+faster eval execution. Switch to `--release` only if you're running
+hundreds of scenarios or if local profiling shows the Rust side
+becoming a bottleneck.
 
 What each flag contributes:
 
