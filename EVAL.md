@@ -410,9 +410,30 @@ reads and writes it; `report` doesn't consume it (the headline's
 
 ### Back-testing judge changes
 
-The `run` and `report` subcommands let you sample once and judge multiple
-times — useful when picking between candidate judges (e.g., "is the cheaper
-judge good enough?").
+The `run` and `report` subcommands let you sample once and judge
+multiple times. Reasons you might do this:
+
+- **Cost / latency triage** — judge calls fire on every report. A
+  cheap local judge that agrees with a trusted commercial reference
+  on your scenario set lets you run CI more often, iterate faster
+  during development, and avoid per-run API spend. Back-testing
+  answers "is the cheap judge good enough?" before you switch.
+- **Validating a new judge version** — when a judge model gets a
+  major bump (e.g., claude-haiku-4-5 → 5-0), back-test against the
+  prior version on your existing transcripts. If verdicts shift on
+  scenarios the agent didn't change, the new judge is just judging
+  differently — not detecting a real regression.
+- **Cross-judge sanity-checking** — different LLMs have systematic
+  biases about what "good agent behavior" looks like. Running two
+  judges over the same transcripts surfaces scenarios where the
+  verdict is judge-dependent (your behavior change isn't robust)
+  vs scenarios where both agree (the verdict is solid).
+- **Provider availability** — if your primary judge provider is
+  down or rate-limited, you want to know in advance whether a
+  fallback judge produces compatible verdicts.
+- **Air-gapped environments** — local-only setups can't use
+  commercial APIs; back-testing confirms a local judge is acceptable
+  before committing to it.
 
 ```bash
 # 1. Sample once with no judging.
@@ -427,9 +448,10 @@ steve eval report /tmp/results.yaml --judge-model anthropic/claude-haiku-4-5
 # Compare verdicts side by side.
 ```
 
-The agent transcripts are identical across both `report` runs — only the
-judge's opinion differs. Use this to validate that a faster/cheaper judge
-agrees with your trusted reference judge on a known set of regressions.
+The agent transcripts are identical across both `report` runs — only
+the judge's opinion differs. That isolation is the whole point: any
+verdict difference is the judges disagreeing, not the agent behaving
+differently between samples.
 
 ### CI integration
 
