@@ -8,6 +8,18 @@ each `copy_fixtures` entry exists and is a regular file (via
 `symlink_metadata` + `is_file()`, mirroring `ScenarioWorkspace::build`'s
 symlink rejection), and pins `_smoke` is in the parsed set.
 
+## User-facing documentation
+
+`EVAL.md` at the project root is the user guide. When you change
+`Report::render_text` / `render_html` output, baseline YAML shape,
+`history.jsonl` schema, the `Expectation` enum, exit-code semantics,
+or any CLI flag, EVAL.md likely needs a matching update — several of
+its sections quote actual format strings and sample outputs. Sample
+output blocks in EVAL.md MUST come from real runs, not hand-rolled
+(drift was caught repeatedly during the doc's initial review:
+hallucinated `Floor:` lines, capitalized axis names that aren't
+lowercase, off-by-one column alignment).
+
 ## Scenario assertion-design pitfalls
 
 - **`RequiresPriorRead(target, ...)` is vacuously satisfied** when `target`

@@ -265,6 +265,12 @@ Beyond the standard `gh pr` subcommands:
   The comment ID comes from `gh api repos/<o>/<r>/pulls/<n>/comments`. Pass
   the body via `-f` so quoting works; multi-line bodies need a heredoc
   (`-f body="$(cat <<'EOF2' ... EOF2)"`).
+- **Removing a doc section / scope from a PR mid-review** — grep for
+  every external reference, not just the file being edited. The PR
+  description, the README pointer, any sibling docs that mentioned
+  the removed section all need a matching update; update the PR body
+  via `gh pr edit <n> --body "..."`. Stale PR descriptions are
+  themselves a documentation contradiction reviewers will flag.
 
 ## Session Completion
 
