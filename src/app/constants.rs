@@ -26,6 +26,43 @@ pub(super) const TITLE_SYSTEM_PROMPT: &str = "Generate a concise 3-7 word title 
 based on the user's first message. Output only the title — no punctuation at the end, \
 no quotes, no explanation. The title should capture the user's intent in plain English.";
 
+/// Text shown by the `/help` slash command. Command/key labels are padded
+/// to a fixed column so the em-dashes align visually in the terminal.
+/// Edit the constant directly to add or rename a command — keep the new
+/// entry's column width consistent with the rest (longest command name +
+/// one trailing space before the em-dash).
+pub(super) const HELP_TEXT: &str = "\
+Commands:
+  /new             — Start a new session
+  /rename <t>      — Rename current session
+  /models          — List available models
+  /model <r>       — Switch to a model
+  /compact         — Compact conversation into a summary
+  /sessions        — Browse sessions
+  /tasks           — List all tasks
+  /task-new <t>    — Create a task
+  /task-done <id>  — Complete a task
+  /task-show <id>  — Show task details
+  /task-edit <id>  — Edit a task (field=value)
+  /epics           — List epics
+  /epic-new <t>    — Create an epic
+  /export-debug    — Export session with logs
+  /export-scenario — Export session as eval scenario scaffold
+  /init            — Create AGENTS.md in project root
+  /agents-update   — Update AGENTS.md with LLM analysis
+  /help            — Show this help
+  /exit            — Quit
+
+Keys:
+  Enter       — Send message
+  Shift+Enter — Insert newline
+  Tab         — Accept autocomplete / toggle Build–Plan mode
+  Up/Down     — Navigate autocomplete list
+  Ctrl+C      — Cancel stream / quit
+  Ctrl+B      — Toggle sidebar
+  Mouse wheel — Scroll messages
+  Click+drag  — Select text (auto-copies to clipboard)";
+
 /// Guidance for efficient tool usage, injected into the system prompt.
 pub(super) const TOOL_GUIDANCE: &str = r#"
 

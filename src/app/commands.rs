@@ -371,7 +371,7 @@ impl App {
             }
             Command::Help => {
                 self.messages.push(MessageBlock::System {
-                    text: "Commands:\n  /new             \u{2014} Start a new session\n  /rename <t>      \u{2014} Rename current session\n  /models          \u{2014} List available models\n  /model <r>       \u{2014} Switch to a model\n  /compact         \u{2014} Compact conversation into a summary\n  /sessions        \u{2014} Browse sessions\n  /tasks           \u{2014} List all tasks\n  /task-new <t>    \u{2014} Create a task\n  /task-done <id>  \u{2014} Complete a task\n  /task-show <id>  \u{2014} Show task details\n  /task-edit <id>  \u{2014} Edit a task (field=value)\n  /epics           \u{2014} List epics\n  /epic-new <t>    \u{2014} Create an epic\n  /export-debug    \u{2014} Export session with logs\n  /export-scenario \u{2014} Export session as eval scenario scaffold\n  /init            \u{2014} Create AGENTS.md in project root\n  /agents-update   \u{2014} Update AGENTS.md with LLM analysis\n  /help            \u{2014} Show this help\n  /exit            \u{2014} Quit\n\nKeys:\n  Enter       \u{2014} Send message\n  Shift+Enter \u{2014} Insert newline\n  Tab         \u{2014} Accept autocomplete / toggle Build\u{2013}Plan mode\n  Up/Down     \u{2014} Navigate autocomplete list\n  Ctrl+C      \u{2014} Cancel stream / quit\n  Ctrl+B      \u{2014} Toggle sidebar\n  Mouse wheel \u{2014} Scroll messages\n  Click+drag  \u{2014} Select text (auto-copies to clipboard)".to_string(),
+                    text: HELP_TEXT.to_string(),
                 });
             }
             // -- Task management commands --
