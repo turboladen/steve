@@ -300,9 +300,12 @@ impl App {
 
             // -- Streaming events --
             AppEvent::LlmResponseStart if self.streaming_active => {
-                // Save the completed assistant message from the previous response
+                // Save the completed assistant message from the previous response.
+                // `has_content` covers text + tool calls + tool results — the
+                // older `!text_content().is_empty()` check would have dropped
+                // a turn that emitted tool calls but no text.
                 if let Some(msg) = self.streaming_message.take()
-                    && !msg.text_content().is_empty()
+                    && msg.has_content()
                 {
                     let mgr = SessionManager::new(&self.storage, &self.project.id);
                     let _ = mgr.save_message(&msg);
@@ -366,6 +369,21 @@ impl App {
                         diff_content,
                     );
                 }
+                // Mirror the tool call into the persisted-shape Message
+                // so `stored_messages` (and therefore reloaded sessions)
+                // round-trip the agent's actions. Without this push,
+                // `/export-debug` showed no tool-call sections and
+                // `/export-scenario` lost fixture suggestions after
+                // reload (steve-quzp).
+                if let Some(msg) = &mut self.streaming_message {
+                    msg.parts
+                        .push(crate::session::message::MessagePart::ToolCall {
+                            call_id: call_id.clone(),
+                            tool_name,
+                            input: arguments.clone(),
+                            state: crate::session::message::ToolCallState::Running,
+                        });
+                }
                 self.status_line_state.set_activity(Activity::RunningTool {
                     tool_name,
                     args_summary,
@@ -382,10 +400,47 @@ impl App {
                 if let Some(last) = self.last_assistant_mut() {
                     last.complete_tool_call(
                         &call_id,
-                        summary,
+                        summary.clone(),
                         output.output.clone(),
                         output.is_error,
                     );
+                }
+
+                // Mirror the result into the persisted shape: update the
+                // matching ToolCall's state to Completed/Error and push a
+                // ToolResult part for downstream consumers (`/export-debug`
+                // iterates these). See LlmToolCall handler for the push
+                // side of the pair.
+                if let Some(msg) = &mut self.streaming_message {
+                    use crate::session::message::{MessagePart, ToolCallState};
+                    let mut title = String::new();
+                    for part in msg.parts.iter_mut() {
+                        if let MessagePart::ToolCall {
+                            call_id: cid,
+                            input,
+                            state,
+                            ..
+                        } = part
+                            && cid == &call_id
+                        {
+                            *state = if output.is_error {
+                                ToolCallState::Error {
+                                    message: String::new(),
+                                }
+                            } else {
+                                ToolCallState::Completed
+                            };
+                            title = extract_args_summary(tool_name, input);
+                            break;
+                        }
+                    }
+                    msg.parts.push(MessagePart::ToolResult {
+                        call_id: call_id.clone(),
+                        tool_name,
+                        output: output.output.clone(),
+                        title,
+                        is_error: output.is_error,
+                    });
                 }
 
                 // On successful write tool completion: invalidate file index + record changeset

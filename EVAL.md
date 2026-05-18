@@ -218,15 +218,6 @@ The scaffold contains:
 
 **Limitations:**
 
-- *Reloaded sessions lose fixture suggestions.* They're derived from
-  the agent's tool calls in the current in-memory session. Sessions
-  reloaded from storage (via `/sessions` or by resuming on startup)
-  reconstruct assistant turns as plain text — the tool-call structure
-  isn't persisted today, so `/export-scenario` on a reloaded session
-  produces a scaffold with correct `user_turns` but an empty
-  `copy_fixtures` array. Export while the session is still live.
-  Tracking the persistence fix (which would also fix `/export-debug`)
-  in `steve-quzp`.
 - *Mid-stream interjections are rejected.* If you typed a follow-up
   message *while* the assistant was still streaming, that turn was
   persisted as a separate `User` message with no `Assistant` reply

@@ -1780,12 +1780,9 @@ mod tests {
         std::fs::write(&scenario_path, b"pre-existing content").unwrap();
 
         let (mut rx, _h) = spawn_task(tmp.path().to_path_buf());
-        let event = drive_export_with_overwrite_answer(
-            &mut rx,
-            "my-scenario",
-            "User declined to answer.",
-        )
-        .await;
+        let event =
+            drive_export_with_overwrite_answer(&mut rx, "my-scenario", "User declined to answer.")
+                .await;
         assert!(matches!(event, AppEvent::ExportScenarioError { .. }));
         let contents = std::fs::read_to_string(&scenario_path).unwrap();
         assert_eq!(contents, "pre-existing content");
@@ -1852,8 +1849,7 @@ mod tests {
         std::fs::create_dir(&blocker).unwrap();
 
         let (mut rx, _h) = spawn_task(tmp.path().to_path_buf());
-        let event =
-            drive_export_with_overwrite_answer(&mut rx, "preexisting", "Overwrite").await;
+        let event = drive_export_with_overwrite_answer(&mut rx, "preexisting", "Overwrite").await;
         assert!(matches!(event, AppEvent::ExportScenarioError { .. }));
         assert!(
             scenario_dir.exists(),
