@@ -39,8 +39,17 @@ pub struct BaselineFile {
 }
 
 impl BaselineFile {
+    /// Serialize to YAML via `serde_yaml_ng` rather than serde-saphyr.
+    /// serde-saphyr 0.0.26's writer emits an off-by-one indent for block
+    /// scalars under deeply-nested mappings (e.g. `transcript.events[].output`
+    /// when the agent's `read` tool returned line-numbered content); the
+    /// emitted YAML can't even be parsed back by serde-saphyr itself.
+    /// Reader stays on serde-saphyr — its strict deserialization + span
+    /// errors are what we want for input validation. Tracking the upstream
+    /// fix in `steve-hv1c`; drop this workaround when serde-saphyr's writer
+    /// is corrected.
     pub fn to_yaml_string(&self) -> Result<String> {
-        serde_saphyr::to_string(self).context("serializing BaselineFile to YAML")
+        serde_yaml_ng::to_string(self).context("serializing BaselineFile to YAML")
     }
 
     pub fn from_yaml_str(s: &str) -> Result<Self> {
@@ -254,6 +263,52 @@ mod tests {
                 },
             },
         }
+    }
+
+    #[test]
+    fn baseline_file_roundtrip_survives_read_tool_output_with_line_numbers() {
+        // Regression test for the serde-saphyr 0.0.26 writer bug
+        // (steve-hv1c). The agent's `read` tool returns content like
+        // " 1 | …\n 2 | …\n" — for files with 10+ lines, the line-
+        // number prefix has leading whitespace; even for short files
+        // the content sits at a column where serde-saphyr's writer
+        // emits an off-by-one indent indicator (`|6` with content at
+        // parent+5 instead of parent+6). The emitted YAML then fails
+        // to parse back. Writer now uses serde_yaml_ng; this test
+        // pins that the BaselineFile-shape with nested read output
+        // round-trips.
+        let bf = BaselineFile {
+            scenario: "read-with-line-numbers".into(),
+            model: "test/model".into(),
+            git_ref: "abc1234".into(),
+            frozen_at: "2026-05-19T00:00:00Z".into(),
+            user_turns: vec!["read the file".into()],
+            transcript: NormalizedTranscript {
+                events: vec![
+                    TranscriptEvent::ToolCall {
+                        tool_name: crate::tool::ToolName::Read,
+                        arguments: serde_json::json!({"path": "foo.txt"}),
+                    },
+                    TranscriptEvent::ToolResult {
+                        tool_name: crate::tool::ToolName::Read,
+                        output: "1 | EXAMPLE-DO-NOT-USE-9d8c0aa9-3f5b-4e7c-89a2-1234567890ab\n\
+                                 2 | placeholder document for an untracked-file scenario\n"
+                            .into(),
+                        is_error: false,
+                    },
+                ],
+                deterministic_floor_passed: true,
+                usage_summary: UsageSummary {
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    total_tokens: 0,
+                    duration_ms: 0,
+                },
+            },
+        };
+        let yaml = bf.to_yaml_string().expect("write");
+        let parsed = BaselineFile::from_yaml_str(&yaml).expect("read-back");
+        assert_eq!(bf, parsed);
     }
 
     #[test]

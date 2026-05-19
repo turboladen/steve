@@ -44,8 +44,14 @@ impl ResultsFile {
     /// (user_turns, assistant_messages, tool outputs) is emitted as
     /// block scalars by the underlying emitter — that's the diff-
     /// friendliness property we picked YAML for.
+    /// Writer uses `serde_yaml_ng` rather than serde-saphyr because the
+    /// latter's 0.0.26 writer emits invalid block-scalar indentation
+    /// under nested mappings — same root cause as the BaselineFile
+    /// writer-swap. Reader stays on serde-saphyr. Tracked as
+    /// `steve-hv1c`; drop the workaround when serde-saphyr's writer is
+    /// fixed.
     pub fn to_yaml_string(&self) -> Result<String> {
-        serde_saphyr::to_string(self).context("serializing ResultsFile to YAML")
+        serde_yaml_ng::to_string(self).context("serializing ResultsFile to YAML")
     }
 
     pub fn from_yaml_str(s: &str) -> Result<Self> {
