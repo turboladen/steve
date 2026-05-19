@@ -24,7 +24,7 @@ jsonc-parser = { version = "0.32", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde-saphyr = "0.0.26"
 serde_json = "1"
-toml = "0.9"
+toml = "1.1"
 
 # LLM Client
 async-openai = { version = "0.36", features = ["chat-completion"] }

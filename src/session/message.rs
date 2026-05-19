@@ -118,11 +118,32 @@ impl Message {
         }
     }
 
-    /// Append text to the first text part (for streaming deltas).
+    /// Append text to the most recent text part (for streaming deltas).
+    /// When the last part isn't a text part — e.g. a `ToolCall` /
+    /// `ToolResult` interrupted the text stream — start a fresh text
+    /// segment instead. The historical "append to first text part"
+    /// behavior only worked because production code never pushed
+    /// non-text parts to a streaming message.
     pub fn append_text(&mut self, delta: &str) {
-        if let Some(MessagePart::Text { text }) = self.parts.first_mut() {
+        if let Some(MessagePart::Text { text }) = self.parts.last_mut() {
             text.push_str(delta);
+        } else {
+            self.parts.push(MessagePart::Text {
+                text: delta.to_string(),
+            });
         }
+    }
+
+    /// True iff this message has any observable content — non-empty
+    /// text, a tool call, or a tool result. `Reasoning` parts alone
+    /// don't count: a turn that emitted only reasoning is one the
+    /// user never observed, so it's not worth persisting.
+    pub fn has_content(&self) -> bool {
+        self.parts.iter().any(|p| match p {
+            MessagePart::Text { text } => !text.is_empty(),
+            MessagePart::ToolCall { .. } | MessagePart::ToolResult { .. } => true,
+            MessagePart::Reasoning { .. } => false,
+        })
     }
 }
 
@@ -186,6 +207,63 @@ mod tests {
         msg.append_text("hello");
         msg.append_text(" world");
         assert_eq!(msg.text_content(), "hello world");
+    }
+
+    #[test]
+    fn append_text_starts_new_part_after_tool_call() {
+        // When tool calls interleave with streaming text, deltas must
+        // start a fresh text segment instead of appending to the first
+        // text part (which would put post-tool text where pre-tool text
+        // lives).
+        let mut msg = Message::assistant("s", "before tool");
+        msg.parts.push(MessagePart::ToolCall {
+            call_id: "c1".into(),
+            tool_name: ToolName::Read,
+            input: serde_json::json!({"path": "x"}),
+            state: ToolCallState::Completed,
+        });
+        msg.append_text("after tool");
+        assert_eq!(msg.parts.len(), 3);
+        match &msg.parts[2] {
+            MessagePart::Text { text } => assert_eq!(text, "after tool"),
+            other => panic!("expected Text after ToolCall, got {other:?}"),
+        }
+        // Continued deltas keep appending to the new tail text part.
+        msg.append_text(" continued");
+        match &msg.parts[2] {
+            MessagePart::Text { text } => assert_eq!(text, "after tool continued"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn has_content_distinguishes_meaningful_from_empty() {
+        // Fresh assistant message starts with one empty text part → no content.
+        let empty = Message::assistant("s", "");
+        assert!(!empty.has_content());
+
+        // Any non-empty text → has content.
+        let with_text = Message::assistant("s", "hi");
+        assert!(with_text.has_content());
+
+        // Reasoning alone is NOT content — the user never observed it.
+        let mut reasoning_only = Message::assistant("s", "");
+        reasoning_only.parts.clear();
+        reasoning_only.parts.push(MessagePart::Reasoning {
+            text: "thinking...".into(),
+        });
+        assert!(!reasoning_only.has_content());
+
+        // A tool call alone IS content (the agent took an action).
+        let mut tool_only = Message::assistant("s", "");
+        tool_only.parts.clear();
+        tool_only.parts.push(MessagePart::ToolCall {
+            call_id: "c".into(),
+            tool_name: ToolName::Read,
+            input: serde_json::json!({}),
+            state: ToolCallState::Completed,
+        });
+        assert!(tool_only.has_content());
     }
 
     #[test]

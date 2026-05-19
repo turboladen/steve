@@ -15,6 +15,7 @@ pub mod judge;
 pub mod report;
 pub mod results;
 pub mod runner;
+pub mod scaffold;
 pub mod scenario;
 pub mod score;
 pub mod transcript;

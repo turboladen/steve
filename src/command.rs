@@ -12,6 +12,7 @@ pub enum Command {
     Compact,
     Sessions,
     ExportDebug,
+    ExportScenario,
     Help,
     // Task management commands
     Tasks,
@@ -71,6 +72,7 @@ impl Command {
             "/compact" => Ok(Command::Compact),
             "/sessions" => Ok(Command::Sessions),
             "/export-debug" => Ok(Command::ExportDebug),
+            "/export-scenario" => Ok(Command::ExportScenario),
             "/help" => Ok(Command::Help),
             // Task management commands
             "/tasks" => Ok(Command::Tasks),
@@ -236,6 +238,10 @@ impl Command {
                 description: "Export session with logs",
             },
             CommandInfo {
+                name: "/export-scenario",
+                description: "Export session as an eval scenario scaffold",
+            },
+            CommandInfo {
                 name: "/help",
                 description: "Show help",
             },
@@ -327,6 +333,7 @@ mod tests {
         assert!(names.contains(&"/sessions"));
         assert!(names.contains(&"/help"));
         assert!(names.contains(&"/export-debug"));
+        assert!(names.contains(&"/export-scenario"));
         assert!(names.contains(&"/quit"));
         assert!(names.contains(&"/tasks"));
         assert!(names.contains(&"/task-new"));
@@ -343,7 +350,7 @@ mod tests {
         assert!(names.contains(&"/mcp tools"));
         assert!(names.contains(&"/mcp resources"));
         assert!(names.contains(&"/mcp prompts"));
-        assert_eq!(cmds.len(), 26);
+        assert_eq!(cmds.len(), 27);
     }
 
     #[test]
@@ -351,6 +358,14 @@ mod tests {
         assert_eq!(
             Command::parse("/export-debug").unwrap(),
             Command::ExportDebug
+        );
+    }
+
+    #[test]
+    fn parse_export_scenario_command() {
+        assert_eq!(
+            Command::parse("/export-scenario").unwrap(),
+            Command::ExportScenario
         );
     }
 
@@ -366,7 +381,7 @@ mod tests {
     #[test]
     fn filter_commands_slash_only() {
         let matches = Command::matching_commands("/");
-        assert_eq!(matches.len(), 26);
+        assert_eq!(matches.len(), 27);
     }
 
     #[test]

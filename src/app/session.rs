@@ -25,7 +25,7 @@ impl App {
                         Role::Assistant => {
                             self.messages.push(MessageBlock::Assistant {
                                 thinking: None,
-                                parts: vec![AssistantPart::Text(msg.text_content())],
+                                parts: reconstruct_assistant_parts(msg),
                             });
                         }
                         Role::System => continue, // Don't display system messages
@@ -104,7 +104,7 @@ impl App {
                     }),
                     Role::Assistant => self.messages.push(MessageBlock::Assistant {
                         thinking: None,
-                        parts: vec![AssistantPart::Text(msg.text_content())],
+                        parts: reconstruct_assistant_parts(msg),
                     }),
                     Role::System => continue,
                 }
@@ -270,6 +270,101 @@ impl App {
     }
 }
 
+/// Rebuild the UI-shaped `Vec<AssistantPart>` from a persisted assistant
+/// `Message`. The streaming pipeline saves `MessagePart::ToolCall` /
+/// `MessagePart::ToolResult` interleaved with `Text` parts; the UI layer
+/// represents the same data as `AssistantPart::Text` / `ToolGroup`. This
+/// helper walks the saved parts and:
+///
+/// - Accumulates consecutive `Text` parts into a single buffered string.
+/// - Groups consecutive `ToolCall` (+ their matching `ToolResult`) parts
+///   into a single `ToolGroup` with status `Complete`.
+/// - Flushes the buffered text / open group on every boundary so the
+///   resulting parts preserve the original chronological order.
+///
+/// `Reasoning` parts are intentionally dropped — the UI's thinking-block
+/// reconstruction lives elsewhere and the assistant-parts walk only cares
+/// about user-visible content.
+fn reconstruct_assistant_parts(msg: &crate::session::message::Message) -> Vec<AssistantPart> {
+    use crate::{
+        session::message::MessagePart,
+        ui::message_block::{ToolCall, ToolGroup, ToolGroupStatus},
+    };
+    let mut out: Vec<AssistantPart> = Vec::new();
+    let mut text_buf = String::new();
+    let mut group: Option<ToolGroup> = None;
+
+    for part in &msg.parts {
+        match part {
+            MessagePart::Text { text } => {
+                if let Some(g) = group.take() {
+                    out.push(AssistantPart::ToolGroup(g));
+                }
+                text_buf.push_str(text);
+            }
+            MessagePart::Reasoning { .. } => {}
+            MessagePart::ToolCall {
+                call_id,
+                tool_name,
+                input,
+                state: _,
+            } => {
+                if !text_buf.is_empty() {
+                    out.push(AssistantPart::Text(std::mem::take(&mut text_buf)));
+                }
+                let args_summary = extract_args_summary(*tool_name, input);
+                let diff_content = extract_diff_content(*tool_name, input);
+                let call = ToolCall {
+                    call_id: call_id.clone(),
+                    tool_name: *tool_name,
+                    args_summary,
+                    full_output: None,
+                    result_summary: None,
+                    diff_content,
+                    is_error: false,
+                    expanded: false,
+                    agent_progress: None,
+                };
+                match group.as_mut() {
+                    Some(g) => g.calls.push(call),
+                    None => {
+                        group = Some(ToolGroup {
+                            calls: vec![call],
+                            status: ToolGroupStatus::Complete,
+                        })
+                    }
+                }
+            }
+            MessagePart::ToolResult {
+                call_id,
+                output,
+                is_error,
+                ..
+            } => {
+                // Attach the result to the matching ToolCall in the
+                // currently-open group. If no group is open (malformed
+                // history, or a tool result with no preceding call),
+                // the result is silently dropped — matches the UI's
+                // tolerance for stray events.
+                if let Some(g) = group.as_mut()
+                    && let Some(call) = g.calls.iter_mut().find(|c| &c.call_id == call_id)
+                {
+                    call.full_output = Some(output.clone());
+                    call.result_summary = Some(crate::truncate_chars(output, 80));
+                    call.is_error = *is_error;
+                }
+            }
+        }
+    }
+    if !text_buf.is_empty() {
+        out.push(AssistantPart::Text(text_buf));
+    }
+    if let Some(g) = group {
+        out.push(AssistantPart::ToolGroup(g));
+    }
+    out
+}
+
 /// Enforce a 60-char cap on a title, appending "..." if truncated.
 pub(super) fn truncate_title(text: &str) -> String {
     crate::truncate_chars(text, 60)
@@ -322,7 +417,222 @@ pub(super) fn sanitize_title(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tests::{create_test_session, make_test_app_with_storage, make_test_registry};
+    use crate::{
+        app::tests::{create_test_session, make_test_app_with_storage, make_test_registry},
+        session::message::{Message, MessagePart, ToolCallState},
+        tool::ToolName,
+        ui::message_block::{AssistantPart, ToolGroupStatus},
+    };
+
+    // -- reconstruct_assistant_parts tests --
+
+    fn assistant_message(parts: Vec<MessagePart>) -> Message {
+        Message {
+            id: "msg-1".into(),
+            session_id: "s".into(),
+            role: Role::Assistant,
+            parts,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn reconstruct_pure_text_message_yields_single_text_part() {
+        let msg = assistant_message(vec![MessagePart::Text {
+            text: "hello".into(),
+        }]);
+        let parts = reconstruct_assistant_parts(&msg);
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            AssistantPart::Text(t) => assert_eq!(t, "hello"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reconstruct_interleaved_text_and_tool_calls_preserves_order() {
+        // Sequence: text, tool call, tool result, text — i.e. the
+        // canonical streaming shape this PR finally persists.
+        let msg = assistant_message(vec![
+            MessagePart::Text {
+                text: "I'll read the file...".into(),
+            },
+            MessagePart::ToolCall {
+                call_id: "c1".into(),
+                tool_name: ToolName::Read,
+                input: serde_json::json!({"path": "src/lib.rs"}),
+                state: ToolCallState::Completed,
+            },
+            MessagePart::ToolResult {
+                call_id: "c1".into(),
+                tool_name: ToolName::Read,
+                output: "file contents here".into(),
+                title: "src/lib.rs".into(),
+                is_error: false,
+            },
+            MessagePart::Text {
+                text: "Based on what I read, here's the answer.".into(),
+            },
+        ]);
+        let parts = reconstruct_assistant_parts(&msg);
+        assert_eq!(parts.len(), 3);
+        match &parts[0] {
+            AssistantPart::Text(t) => assert!(t.starts_with("I'll read")),
+            other => panic!("expected leading Text, got {other:?}"),
+        }
+        match &parts[1] {
+            AssistantPart::ToolGroup(g) => {
+                assert_eq!(g.status, ToolGroupStatus::Complete);
+                assert_eq!(g.calls.len(), 1);
+                let c = &g.calls[0];
+                assert_eq!(c.call_id, "c1");
+                assert_eq!(c.tool_name, ToolName::Read);
+                assert_eq!(c.args_summary, "src/lib.rs");
+                assert_eq!(c.full_output.as_deref(), Some("file contents here"));
+                assert!(!c.is_error);
+            }
+            other => panic!("expected ToolGroup, got {other:?}"),
+        }
+        match &parts[2] {
+            AssistantPart::Text(t) => assert!(t.starts_with("Based on")),
+            other => panic!("expected trailing Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reconstruct_groups_consecutive_tool_calls() {
+        // Multiple tool calls in a row (no intervening text) collapse
+        // into a single ToolGroup — matches how the UI groups parallel
+        // tool calls in a single Assistant block.
+        let msg = assistant_message(vec![
+            MessagePart::ToolCall {
+                call_id: "c1".into(),
+                tool_name: ToolName::Read,
+                input: serde_json::json!({"path": "a.rs"}),
+                state: ToolCallState::Completed,
+            },
+            MessagePart::ToolResult {
+                call_id: "c1".into(),
+                tool_name: ToolName::Read,
+                output: "...".into(),
+                title: "a.rs".into(),
+                is_error: false,
+            },
+            MessagePart::ToolCall {
+                call_id: "c2".into(),
+                tool_name: ToolName::Read,
+                input: serde_json::json!({"path": "b.rs"}),
+                state: ToolCallState::Completed,
+            },
+            MessagePart::ToolResult {
+                call_id: "c2".into(),
+                tool_name: ToolName::Read,
+                output: "...".into(),
+                title: "b.rs".into(),
+                is_error: false,
+            },
+        ]);
+        let parts = reconstruct_assistant_parts(&msg);
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            AssistantPart::ToolGroup(g) => {
+                assert_eq!(g.calls.len(), 2);
+                assert_eq!(g.calls[0].args_summary, "a.rs");
+                assert_eq!(g.calls[1].args_summary, "b.rs");
+            }
+            other => panic!("expected single ToolGroup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reconstruct_text_between_tool_calls_creates_separate_groups() {
+        // Text in between two tool calls splits them into separate
+        // groups, with the text as its own AssistantPart in between.
+        let msg = assistant_message(vec![
+            MessagePart::ToolCall {
+                call_id: "c1".into(),
+                tool_name: ToolName::Read,
+                input: serde_json::json!({"path": "a.rs"}),
+                state: ToolCallState::Completed,
+            },
+            MessagePart::Text {
+                text: "now let me edit".into(),
+            },
+            MessagePart::ToolCall {
+                call_id: "c2".into(),
+                tool_name: ToolName::Edit,
+                input: serde_json::json!({"file_path": "a.rs"}),
+                state: ToolCallState::Completed,
+            },
+        ]);
+        let parts = reconstruct_assistant_parts(&msg);
+        assert_eq!(parts.len(), 3);
+        assert!(matches!(parts[0], AssistantPart::ToolGroup(_)));
+        assert!(matches!(parts[1], AssistantPart::Text(_)));
+        assert!(matches!(parts[2], AssistantPart::ToolGroup(_)));
+    }
+
+    #[test]
+    fn reconstruct_errored_tool_call_carries_through() {
+        let msg = assistant_message(vec![
+            MessagePart::ToolCall {
+                call_id: "c1".into(),
+                tool_name: ToolName::Read,
+                input: serde_json::json!({"path": "missing.rs"}),
+                state: ToolCallState::Error {
+                    message: String::new(),
+                },
+            },
+            MessagePart::ToolResult {
+                call_id: "c1".into(),
+                tool_name: ToolName::Read,
+                output: "Error: not found".into(),
+                title: "missing.rs".into(),
+                is_error: true,
+            },
+        ]);
+        let parts = reconstruct_assistant_parts(&msg);
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            AssistantPart::ToolGroup(g) => {
+                assert_eq!(g.calls.len(), 1);
+                assert!(g.calls[0].is_error);
+                assert_eq!(g.calls[0].full_output.as_deref(), Some("Error: not found"));
+            }
+            other => panic!("expected ToolGroup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reconstruct_skips_reasoning_parts() {
+        let msg = assistant_message(vec![
+            MessagePart::Reasoning {
+                text: "internal thought".into(),
+            },
+            MessagePart::Text {
+                text: "visible answer".into(),
+            },
+        ]);
+        let parts = reconstruct_assistant_parts(&msg);
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            AssistantPart::Text(t) => assert_eq!(t, "visible answer"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reconstruct_legacy_text_only_message_unchanged() {
+        // Pre-fix saved messages have only Text parts. Reconstruction
+        // must produce the same shape it always did so old sessions
+        // continue to render.
+        let msg = assistant_message(vec![MessagePart::Text {
+            text: "older session content".into(),
+        }]);
+        let parts = reconstruct_assistant_parts(&msg);
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(parts[0], AssistantPart::Text(_)));
+    }
 
     // -- resolve_session_model tests --
 
