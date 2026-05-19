@@ -337,15 +337,35 @@ impl Report {
             // questions. Skip with a re-freeze hint instead of
             // producing misleading verdicts.
             if baseline.user_turns != scenario_results.user_turns {
+                // Branch on count vs content so a same-count-different-text
+                // drift doesn't render as the confusing "{n} turn(s) vs
+                // {n} turn(s)" — the lengths match in that case and the
+                // operator's first instinct would be "this can't be the
+                // right diagnostic." Point at the first differing turn
+                // instead so the actual drift is locatable.
+                let bl = baseline.user_turns.len();
+                let cur = scenario_results.user_turns.len();
+                let detail = if bl == cur {
+                    let first_diff = baseline
+                        .user_turns
+                        .iter()
+                        .zip(&scenario_results.user_turns)
+                        .position(|(a, b)| a != b)
+                        .map(|i| i + 1)
+                        .unwrap_or(1);
+                    format!(
+                        "{bl} turn(s) on both sides but content differs (first at turn {first_diff})"
+                    )
+                } else {
+                    format!("baseline was frozen against {bl} turn(s), results have {cur} turn(s)")
+                };
                 report.scenarios.push(ScenarioReport {
                     scenario: scenario_name.clone(),
                     outcome: ScenarioOutcome::Skipped {
                         reason: format!(
                             "scenario '{scenario_name}' user_turns drifted from baseline: \
-                             baseline was frozen against {} turn(s), results have {} turn(s); \
+                             {detail}; \
                              re-run `steve eval baseline freeze --scenario {scenario_name} --model {}`",
-                            baseline.user_turns.len(),
-                            scenario_results.user_turns.len(),
                             results.model
                         ),
                     },
@@ -1251,6 +1271,65 @@ substring = "ok"
             "Skipped-on-drift scenarios must not contribute provenance; got: {:?}",
             report.baseline_provenance
         );
+    }
+
+    #[tokio::test]
+    async fn build_from_results_skips_when_user_turns_text_drifts_but_count_matches() {
+        // The same-count-different-text case: the baseline's user_turns
+        // and the current run's user_turns have the same length but
+        // different content (e.g. operator tweaked a turn's wording).
+        // The skip-reason must NOT render as "1 turn(s) vs 1 turn(s)" —
+        // that's confusing because both numbers match. Instead it must
+        // surface the content drift with a pointer at the first
+        // differing turn.
+        let tmp = TempDir::new().unwrap();
+        let mut results = results_file_with(vec![("_smoke", 1)]);
+        // Same length as the baseline (write_baseline pins ["go"]), but
+        // different text.
+        results.scenarios.get_mut("_smoke").unwrap().user_turns = vec!["different prompt".into()];
+        write_baseline(tmp.path(), "_smoke", "test/model");
+
+        let judge = FakeJudge::all_wins();
+        let report = Report::build_from_results(
+            &results,
+            tmp.path(),
+            "results.yaml",
+            &judge,
+            Some("fake/judge-model"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.scenarios.len(), 1);
+        match &report.scenarios[0].outcome {
+            ScenarioOutcome::Skipped { reason } => {
+                assert!(
+                    reason.contains("user_turns drifted"),
+                    "expected drift diagnostic; got: {reason}"
+                );
+                assert!(
+                    reason.contains("content differs"),
+                    "expected content-drift wording (NOT a turn-count comparison); got: {reason}"
+                );
+                assert!(
+                    reason.contains("first at turn 1"),
+                    "expected pointer at first differing turn; got: {reason}"
+                );
+                assert!(
+                    reason.contains("steve eval baseline freeze"),
+                    "expected freeze hint; got: {reason}"
+                );
+                // The misleading "{n} turn(s) vs {n} turn(s)" wording
+                // from the count-only branch MUST NOT appear here.
+                assert!(
+                    !reason.contains("baseline was frozen against"),
+                    "count-vs-count wording leaked into content-drift case: {reason}"
+                );
+            }
+            other => panic!("expected Skipped on user_turns drift; got {other:?}"),
+        }
     }
 
     #[tokio::test]
