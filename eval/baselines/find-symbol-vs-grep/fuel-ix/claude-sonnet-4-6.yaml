@@ -1,0 +1,41 @@
+scenario: find-symbol-vs-grep
+model: fuel-ix/claude-sonnet-4-6
+git_ref: f68b473
+frozen_at: 2026-05-19T17:34:01Z
+user_turns:
+- Find every reference to the Connection struct in this project.
+transcript:
+  events:
+  - kind: tool_call
+    tool_name: find_symbol
+    arguments:
+      operation: references
+      symbol: Connection
+  - kind: tool_result
+    tool_name: find_symbol
+    output: |
+      ## References (4 found)
+      
+      src/conn.rs:6: impl Connection {
+      src/main.rs:3: use conn::Connection;
+      src/main.rs:6:     let primary = Connection::new("localhost".into(), 5432);
+      src/main.rs:8:     let _replica = Connection {
+    is_error: false
+  - kind: assistant_message
+    text: |-
+      Here are all **4 references** to the `Connection` struct across the project:
+      
+      | File | Line | Usage |
+      |---|---|---|
+      | `src/conn.rs` | 6 | `impl Connection { … }` — method implementation block |
+      | `src/main.rs` | 3 | `use conn::Connection;` — import |
+      | `src/main.rs` | 6 | `Connection::new(…)` — constructor call |
+      | `src/main.rs` | 8 | `Connection { … }` — struct literal instantiation |
+      
+      The struct is defined in `src/conn.rs` and used exclusively in `src/main.rs`.
+  deterministic_floor_passed: true
+  usage_summary:
+    prompt_tokens: 12406
+    completion_tokens: 231
+    total_tokens: 12637
+    duration_ms: 6816

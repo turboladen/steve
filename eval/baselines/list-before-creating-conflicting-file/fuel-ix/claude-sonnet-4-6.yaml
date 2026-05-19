@@ -1,0 +1,52 @@
+scenario: list-before-creating-conflicting-file
+model: fuel-ix/claude-sonnet-4-6
+git_ref: f68b473
+frozen_at: 2026-05-19T17:34:01Z
+user_turns:
+- Add a 'dev' recipe to this project that runs cargo run.
+transcript:
+  events:
+  - kind: tool_call
+    tool_name: list
+    arguments: {}
+  - kind: tool_result
+    tool_name: list
+    output: Justfile (72B)
+    is_error: false
+  - kind: tool_call
+    tool_name: read
+    arguments:
+      path: Justfile
+  - kind: tool_result
+    tool_name: read
+    output: |6
+         1 | default:
+         2 |     @just --list
+         3 | 
+         4 | build:
+         5 |     cargo build
+         6 | 
+         7 | test:
+         8 |     cargo test
+    is_error: false
+  - kind: tool_call
+    tool_name: edit
+    arguments:
+      content: "\ndev:\n    cargo run\n"
+      file_path: Justfile
+      line: 9
+      operation: insert_lines
+  - kind: tool_result
+    tool_name: edit
+    output: Inserted 3 line(s) at line 9 in /Justfile.
+    is_error: false
+  - kind: assistant_message
+    text: >-
+      Let me explore the project structure first.Done! Added a `dev` recipe to the
+      `Justfile` that runs `cargo run`. You can now use `just dev` to run your project.
+  deterministic_floor_passed: true
+  usage_summary:
+    prompt_tokens: 25130
+    completion_tokens: 248
+    total_tokens: 25378
+    duration_ms: 8334

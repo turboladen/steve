@@ -1,0 +1,71 @@
+[[baseline]]
+scenario = "_smoke"
+model = "fuel-ix/claude-sonnet-4-6"
+git_ref = "f68b473"
+frozen_at = "2026-05-19T17:36:44Z"
+
+[[baseline]]
+scenario = "_judge-smoke"
+model = "fuel-ix/claude-sonnet-4-6"
+git_ref = "f68b473"
+frozen_at = "2026-05-19T17:34:01Z"
+
+[[baseline]]
+scenario = "find-symbol-vs-grep"
+model = "fuel-ix/claude-sonnet-4-6"
+git_ref = "f68b473"
+frozen_at = "2026-05-19T17:34:01Z"
+
+[[baseline]]
+scenario = "glob-for-find"
+model = "fuel-ix/claude-sonnet-4-6"
+git_ref = "f68b473"
+frozen_at = "2026-05-19T17:34:01Z"
+
+[[baseline]]
+scenario = "list-before-creating-conflicting-file"
+model = "fuel-ix/claude-sonnet-4-6"
+git_ref = "f68b473"
+frozen_at = "2026-05-19T17:34:01Z"
+
+[[baseline]]
+scenario = "lsp-rename-vs-sed"
+model = "fuel-ix/claude-sonnet-4-6"
+git_ref = "f68b473"
+frozen_at = "2026-05-19T17:34:01Z"
+
+[[baseline]]
+scenario = "multi-turn-honor-constraint"
+model = "fuel-ix/claude-sonnet-4-6"
+git_ref = "f68b473"
+frozen_at = "2026-05-19T17:34:01Z"
+
+[[baseline]]
+scenario = "no-hallucinated-tool-output"
+model = "fuel-ix/claude-sonnet-4-6"
+git_ref = "f68b473"
+frozen_at = "2026-05-19T17:34:01Z"
+
+[[baseline]]
+scenario = "read-before-edit-untracked"
+model = "fuel-ix/claude-sonnet-4-6"
+git_ref = "f68b473"
+frozen_at = "2026-05-19T17:34:01Z"
+
+[[baseline]]
+scenario = "recover-after-destructive-edit"
+model = "fuel-ix/claude-sonnet-4-6"
+git_ref = "f68b473"
+frozen_at = "2026-05-19T17:34:01Z"
+
+[[baseline]]
+scenario = "simple-bug-fix"
+model = "fuel-ix/claude-sonnet-4-6"
+git_ref = "f68b473"
+frozen_at = "2026-05-19T17:34:01Z"
+
+[[baseline]]
+scenario = "stop-guessing-after-failures"
+model = "fuel-ix/claude-sonnet-4-6"
+git_ref = "f68b473"
+frozen_at = "2026-05-19T17:34:01Z"

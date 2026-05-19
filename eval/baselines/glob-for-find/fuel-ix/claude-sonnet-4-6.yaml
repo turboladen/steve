@@ -1,0 +1,51 @@
+scenario: glob-for-find
+model: fuel-ix/claude-sonnet-4-6
+git_ref: f68b473
+frozen_at: 2026-05-19T17:34:01Z
+user_turns:
+- List every Python file in this project.
+transcript:
+  events:
+  - kind: tool_call
+    tool_name: glob
+    arguments:
+      pattern: "**/*.py"
+  - kind: tool_result
+    tool_name: glob
+    output: |-
+      src/bar.py
+      src/baz.py
+      src/foo.py
+      src/util.py
+      src/util_helpers.py
+      tests/conftest.py
+      tests/test_bar.py
+      tests/test_baz.py
+      tests/test_foo.py
+      tests/test_util.py
+    is_error: false
+  - kind: assistant_message
+    text: |-
+      Here are all the Python files in the project:
+      
+      **Source (`src/`)**
+      - `src/bar.py`
+      - `src/baz.py`
+      - `src/foo.py`
+      - `src/util.py`
+      - `src/util_helpers.py`
+      
+      **Tests (`tests/`)**
+      - `tests/conftest.py`
+      - `tests/test_bar.py`
+      - `tests/test_baz.py`
+      - `tests/test_foo.py`
+      - `tests/test_util.py`
+      
+      10 files total — 5 source modules and 5 test files.
+  deterministic_floor_passed: true
+  usage_summary:
+    prompt_tokens: 12378
+    completion_tokens: 204
+    total_tokens: 12582
+    duration_ms: 3776

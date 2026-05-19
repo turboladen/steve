@@ -1,0 +1,31 @@
+scenario: _smoke
+model: fuel-ix/claude-sonnet-4-6
+git_ref: f68b473
+frozen_at: 2026-05-19T17:36:44Z
+user_turns:
+- There's one file in this directory. Read it and tell me what it says.
+transcript:
+  events:
+  - kind: tool_call
+    tool_name: list
+    arguments: {}
+  - kind: tool_result
+    tool_name: list
+    output: greeting.txt (20B)
+    is_error: false
+  - kind: tool_call
+    tool_name: read
+    arguments:
+      path: greeting.txt
+  - kind: tool_result
+    tool_name: read
+    output: "   1 | hello, eval harness\n"
+    is_error: false
+  - kind: assistant_message
+    text: "The file is `greeting.txt` and it contains:\n\n```\nhello, eval harness\n```"
+  deterministic_floor_passed: true
+  usage_summary:
+    prompt_tokens: 18574
+    completion_tokens: 113
+    total_tokens: 18687
+    duration_ms: 5044
