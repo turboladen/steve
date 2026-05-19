@@ -166,6 +166,96 @@ export OPENAI_API_KEY="sk-..."
 | `providers.*.base_url`    | Yes      | OpenAI-compatible API endpoint                                                  |
 | `providers.*.api_key_env` | No       | Env var holding the API key. Omit for keyless local providers (Ollama, etc.)    |
 | `providers.*.models`      | Yes      | Map of available models for this provider                                       |
+| `mcp_servers`             | No       | Map of MCP server configurations (see [MCP Servers](#mcp-servers))              |
+
+### MCP Servers
+
+Steve can connect to [Model Context Protocol](https://modelcontextprotocol.io)
+servers — external processes (or remote HTTP endpoints) that expose extra tools
+and resources to the LLM. Add them under `mcp_servers`, keyed by a server ID.
+The server ID must not contain `__` (it's the separator inside the
+`mcp__<server_id>__<tool>` tool names that Steve presents to the model). Each
+server entry must use exactly one transport: a `command` (stdio child process)
+or a `url` (HTTP/SSE). Mixing both keys in the same entry silently selects HTTP.
+
+**Local stdio server (child process):**
+
+```jsonc
+{
+  "mcp_servers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" },
+    },
+  },
+}
+```
+
+**Remote HTTP/SSE server with a static bearer token:**
+
+```jsonc
+{
+  "mcp_servers": {
+    "example": {
+      "url": "https://mcp.example.com",
+      "headers": { "Authorization": "Bearer ${MCP_TOKEN}" },
+    },
+  },
+}
+```
+
+When an explicit `Authorization` header is set, Steve does not attempt the
+OAuth fallback on failure — a bad or expired token fails the connection
+outright. Omit the header to let Steve walk through the OAuth flow described
+below.
+
+**Remote OAuth-protected server:** many servers can be configured with just a
+URL. Steve resolves OAuth client credentials in this order:
+
+1. [Dynamic client registration (RFC 7591)](https://datatracker.ietf.org/doc/html/rfc7591)
+   — if the server supports it, Steve registers automatically on first connect.
+2. Config-provided `client_id` (and `client_secret`) — see below.
+3. Built-in well-known credentials — currently shipped for `githubcopilot.com`
+   and `github.com` domains.
+
+The GitHub MCP server falls through to the built-in credentials path, so a URL
+alone is enough — Steve will still walk you through the browser OAuth flow on
+first connect:
+
+```jsonc
+{
+  "mcp_servers": {
+    "github-mcp": { "url": "https://api.githubcopilot.com/mcp/" },
+  },
+}
+```
+
+For servers that don't support dynamic registration and aren't in the built-in
+list, supply a pre-registered `client_id` (and `client_secret` if the provider
+requires one):
+
+```jsonc
+{
+  "mcp_servers": {
+    "custom-oauth-mcp": {
+      "url": "https://mcp.example.com",
+      "client_id": "your-app-client-id",
+      "client_secret": "${MCP_CLIENT_SECRET}",
+    },
+  },
+}
+```
+
+`${VAR}` placeholders inside `env`, `headers`, and `client_secret` are expanded
+from process environment variables at server start, not at config load — keep
+secrets in your shell environment, not in `.steve.jsonc`. (`client_id` is used
+as a literal string and is not env-expanded.)
+
+Project config's `mcp_servers` merges with global config by server ID (project
+wins on conflict). MCP tools are subject to the permission system like any
+other tool, but `AllowAlways` grants are session-only since MCP tool names are
+discovered at runtime.
 
 ## Usage
 
