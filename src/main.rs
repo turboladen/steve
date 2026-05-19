@@ -62,6 +62,14 @@ struct EvalArgs {
     /// Show per-scenario detail in the text output.
     #[arg(long)]
     verbose: bool,
+    /// Override the baselines directory for the chained `run → report`
+    /// path. Mirrors the `--baselines-dir` flag on `steve eval report`,
+    /// so users on the no-subcommand form can point at a custom
+    /// baselines tree without dropping to subcommands. Precedence:
+    /// this flag > `eval.baselines_dir` in `.steve.eval.jsonc` >
+    /// `<project_root>/eval/baselines/`.
+    #[arg(long)]
+    baselines_dir: Option<std::path::PathBuf>,
     #[command(subcommand)]
     command: Option<EvalSubcommand>,
 }
@@ -577,9 +585,8 @@ async fn dispatch_eval(args: EvalArgs) -> Result<()> {
             w.provider_id
         );
     }
-    // No --baselines-dir on the chained path; layer config + default.
     let baselines_dir_used = resolve_baselines_dir(
-        None,
+        args.baselines_dir.as_deref(),
         eval_cfg.baselines_dir.as_deref(),
         &baselines_dir,
         &project.root,

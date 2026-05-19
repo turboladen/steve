@@ -549,7 +549,19 @@ impl Report {
                 ));
             }
         } else {
-            out.push('\n');
+            // No scenarios contributed verdicts (every one was Skipped:
+            // missing baseline, user_turns drift, all-runs-errored, etc.).
+            // Without this line, the operator sees a blank line between
+            // the header and a meaningless `0.000 net win rate` headline
+            // — no signal that the emptiness is *why* the headline looks
+            // the way it does. Per-scenario reasons are in the Scenarios
+            // section below; the stderr "no scenarios graded" message
+            // covers the `steve eval | tee log.txt` case where stdout is
+            // captured but stderr isn't.
+            out.push_str(
+                "  no scenarios graded against any baseline \
+                 (see Scenarios section below for per-scenario reasons)\n\n",
+            );
         }
 
         // Headline.
@@ -1871,6 +1883,36 @@ substring = "ok"
         assert!(out.contains("Skipped"), "got:\n{out}");
         assert!(out.contains("missing-bl"), "got:\n{out}");
         assert!(out.contains("no baseline"), "got:\n{out}");
+    }
+
+    #[test]
+    fn render_text_surfaces_empty_baseline_provenance_explicitly() {
+        // When every scenario is Skipped, no baseline is consulted and
+        // `baseline_provenance` is empty. The render must emit a line
+        // saying so — without it, the operator sees a blank line and a
+        // meaningless `0.000 net win rate` headline with no signal that
+        // the emptiness is *why* the headline looks the way it does.
+        // The `Scenarios section below` pointer references the per-scenario
+        // reasons that follow (`Skipped: <reason>` lines).
+        let mut r = empty_report();
+        r.scenarios = vec![ScenarioReport {
+            scenario: "no-baseline-scenario".into(),
+            outcome: ScenarioOutcome::Skipped {
+                reason: "no baseline file for (no-baseline-scenario, test/model)".into(),
+            },
+        }];
+        assert!(r.baseline_provenance.is_empty(), "test invariant");
+        let out = r.render_text(false);
+        assert!(
+            out.contains("no scenarios graded against any baseline"),
+            "expected empty-provenance diagnostic; got:\n{out}"
+        );
+        // The pointer at the Scenarios section is the recovery route —
+        // make sure the wording stays aligned with the section heading.
+        assert!(
+            out.contains("Scenarios section below"),
+            "expected pointer at per-scenario reasons; got:\n{out}"
+        );
     }
 
     #[test]
