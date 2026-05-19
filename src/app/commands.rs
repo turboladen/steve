@@ -679,38 +679,32 @@ impl App {
         // layer (`AppEvent::LlmToolCall` updates `self.messages` but never
         // pushes `MessagePart::ToolCall` to `streaming_message`), so the
         // spawned task can't reach them after we let go of the borrow.
-        let user_turns = match collect_user_turns(&self.stored_messages) {
-            Ok(turns) => turns,
-            Err(UserTurnError::MidStreamInterjection) => {
-                self.messages.push(MessageBlock::Error {
-                    text: "Session contains a mid-stream interjection \
-                     (consecutive user messages with no assistant reply between them). \
-                     The eval runner sends each user turn only after the previous \
-                     assistant response goes idle, so a scenario generated from this \
-                     session wouldn't replay with the original timing or LLM context. \
-                     Export a session without interjections."
-                        .to_string(),
-                });
+        //
+        // Try strict collection first. If interjections are detected, the
+        // task takes the raw messages and prompts the user for a
+        // merge-or-cancel decision (the prompt has to be task-side so it
+        // doesn't deadlock the event loop).
+        let user_turns_source = match collect_user_turns(&self.stored_messages, CollectMode::Strict)
+        {
+            Ok(turns) if turns.is_empty() => {
+                // Compacted or no-user-turn case — fail loud up front
+                // rather than spawning a task just to surface the error.
+                // `/compact` replaces `stored_messages` with a single
+                // assistant summary (`event_loop.rs:637`); the old
+                // `is_empty()` check on `stored_messages` missed that.
+                let msg = if self.stored_messages.is_empty() {
+                    "No active session to export.".to_string()
+                } else {
+                    "Session has no user turns to export (was it just compacted?).".to_string()
+                };
+                self.messages.push(MessageBlock::Error { text: msg });
                 return;
             }
+            Ok(turns) => UserTurnsSource::PreCollected(turns),
+            Err(UserTurnError::MidStreamInterjection) => {
+                UserTurnsSource::NeedsMergePrompt(self.stored_messages.clone())
+            }
         };
-
-        // Guard against `stored_messages` containing only assistant text
-        // (e.g. after `/compact`, which replaces the whole vector with a
-        // single assistant summary at `event_loop.rs:637`). The previous
-        // `stored_messages.is_empty()` check passed in that case and the
-        // user only saw the failure after typing a scenario name and
-        // having the spawned task bail on empty `user_turns` — fail loud
-        // up front instead.
-        if user_turns.is_empty() {
-            let msg = if self.stored_messages.is_empty() {
-                "No active session to export.".to_string()
-            } else {
-                "Session has no user turns to export (was it just compacted?).".to_string()
-            };
-            self.messages.push(MessageBlock::Error { text: msg });
-            return;
-        }
 
         // Resolve the data-dir base path eagerly. The spawned task takes
         // an already-resolved `PathBuf` so tests can drive it against a
@@ -730,7 +724,7 @@ impl App {
         let event_tx = self.event_tx.clone();
         tokio::spawn(export_scenario_task(
             data_dir,
-            user_turns,
+            user_turns_source,
             fixture_paths,
             session_trace,
             event_tx,
@@ -744,28 +738,70 @@ enum UserTurnError {
     /// between them — a mid-stream interjection (see
     /// `app/helpers.rs::handle_interjection`). The eval runner sends
     /// each `user_turn` only after the previous assistant response has
-    /// gone idle (`eval/runner.rs:166`), so a scenario generated from
-    /// such a session wouldn't replay with the same timing or LLM
-    /// context. Refuse rather than silently produce a misleading
-    /// scaffold.
+    /// gone idle (`eval/runner.rs:166`), so a scenario generated
+    /// straight from such a session wouldn't replay with the same
+    /// timing or LLM context. In `Strict` mode this is an error;
+    /// `Merge` mode concatenates consecutive User messages into one
+    /// turn (with a blank-line separator) so the agent receives all
+    /// that input upfront — close to the original intent without
+    /// the timing-drift trap.
     MidStreamInterjection,
+}
+
+/// Whether `collect_user_turns` should refuse on mid-stream
+/// interjections (the default safe behavior) or fold them into the
+/// preceding turn so the export can still proceed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CollectMode {
+    Strict,
+    Merge,
 }
 
 /// Pull non-empty, trimmed user-turn text from persisted messages.
 /// System messages don't break the User/Assistant alternation check —
 /// they're framework-injected, not part of the conversation order.
-fn collect_user_turns(messages: &[Message]) -> Result<Vec<String>, UserTurnError> {
-    let mut turns = Vec::new();
+///
+/// In `Strict` mode, a consecutive `Role::User` pair (no Assistant
+/// between them) returns `Err(MidStreamInterjection)`. In `Merge`
+/// mode, the consecutive User's text is concatenated into the
+/// preceding turn separated by `\n\n` — the resulting scenario
+/// delivers all that input upfront in one runner turn, which mirrors
+/// what the agent actually saw (it was already processing the prior
+/// message when the interjection arrived).
+fn collect_user_turns(
+    messages: &[Message],
+    mode: CollectMode,
+) -> Result<Vec<String>, UserTurnError> {
+    let mut turns: Vec<String> = Vec::new();
     let mut prev_role: Option<Role> = None;
     for m in messages {
         match m.role {
             Role::User => {
-                if matches!(prev_role, Some(Role::User)) {
-                    return Err(UserTurnError::MidStreamInterjection);
-                }
                 let text = m.text_content();
                 let trimmed = text.trim();
-                if !trimmed.is_empty() {
+                if matches!(prev_role, Some(Role::User)) {
+                    match mode {
+                        CollectMode::Strict => {
+                            return Err(UserTurnError::MidStreamInterjection);
+                        }
+                        CollectMode::Merge => {
+                            if !trimmed.is_empty() {
+                                if let Some(last) = turns.last_mut() {
+                                    last.push_str("\n\n");
+                                    last.push_str(trimmed);
+                                } else {
+                                    // Defensive: a User following a User
+                                    // implies a previous User produced a
+                                    // turn (or was empty-text and dropped).
+                                    // If the empty-text drop left `turns`
+                                    // bare, treat this one as the first
+                                    // turn rather than silently losing it.
+                                    turns.push(trimmed.to_string());
+                                }
+                            }
+                        }
+                    }
+                } else if !trimmed.is_empty() {
                     turns.push(trimmed.to_string());
                 }
                 prev_role = Some(Role::User);
@@ -775,6 +811,19 @@ fn collect_user_turns(messages: &[Message]) -> Result<Vec<String>, UserTurnError
         }
     }
     Ok(turns)
+}
+
+/// Carrier for the user-turn data the spawned task needs. The handler
+/// resolves which variant applies based on whether strict collection
+/// detected interjections. `NeedsMergePrompt` defers the merge-or-cancel
+/// question to the task so the prompt happens off the event-loop borrow
+/// (same reason the name prompt is task-side).
+enum UserTurnsSource {
+    /// Strict collection succeeded; turns are ready to use as-is.
+    PreCollected(Vec<String>),
+    /// Strict collection found interjections; carry the raw messages
+    /// so the task can prompt the user and re-collect in Merge mode.
+    NeedsMergePrompt(Vec<Message>),
 }
 
 /// Walk UI `MessageBlock`s and pull workspace-relative paths the agent
@@ -1022,13 +1071,78 @@ fn strip_tail_suffix(summary: &str) -> Option<&str> {
 /// scaffold-write branch hermetically.
 async fn export_scenario_task(
     data_dir: PathBuf,
-    user_turns: Vec<String>,
+    user_turns_source: UserTurnsSource,
     fixture_paths: Vec<PathBuf>,
     session_trace: String,
     event_tx: tokio::sync::mpsc::UnboundedSender<AppEvent>,
 ) {
     let send_err = |error: String| {
         let _ = event_tx.send(AppEvent::ExportScenarioError { error });
+    };
+
+    // Resolve the user_turns. The simple case is `PreCollected` —
+    // strict collection succeeded in the handler. The interjection
+    // case (`NeedsMergePrompt`) goes through an explicit merge-or-
+    // cancel prompt so the timing-drift tradeoff is the user's
+    // informed choice, not silently produced by the export.
+    let user_turns = match user_turns_source {
+        UserTurnsSource::PreCollected(turns) => turns,
+        UserTurnsSource::NeedsMergePrompt(messages) => {
+            let (merge_tx, merge_rx) = tokio::sync::oneshot::channel();
+            let req = crate::event::QuestionRequest {
+                call_id: "slash-export-scenario-merge-interjection".to_string(),
+                question:
+                    "This session has mid-stream interjections (you typed while the assistant \
+                     was still responding). The eval runner sends one turn at a time, waiting \
+                     for the previous assistant response to go idle — it can't faithfully \
+                     replay the original mid-stream timing. \
+                     Choose Merge to concatenate each interjection into the prior turn (blank-line \
+                     separator) so the agent receives all that input upfront. \
+                     Choose Cancel to keep the strict guard and export a different session."
+                        .to_string(),
+                options: vec!["Cancel".to_string(), "Merge".to_string()],
+                response_tx: merge_tx,
+            };
+            if event_tx.send(AppEvent::QuestionRequest(req)).is_err() {
+                return;
+            }
+            let answer = match merge_rx.await {
+                Ok(a) => a,
+                Err(_) => {
+                    send_err("Scenario export aborted (session reset).".to_string());
+                    return;
+                }
+            };
+            if answer != "Merge" {
+                send_err(
+                    "Scenario export cancelled (interjections preserved by strict guard)."
+                        .to_string(),
+                );
+                return;
+            }
+            match collect_user_turns(&messages, CollectMode::Merge) {
+                Ok(t) if t.is_empty() => {
+                    // Defensive: every User message was empty/whitespace.
+                    send_err(
+                        "Session has no non-empty user turns to export (interjections were all empty)."
+                            .to_string(),
+                    );
+                    return;
+                }
+                Ok(t) => t,
+                // Merge mode is infallible by construction (consecutive
+                // Users no longer return Err) — but match the result
+                // explicitly so future variants surface here at compile
+                // time rather than panicking at runtime.
+                Err(UserTurnError::MidStreamInterjection) => {
+                    send_err(
+                        "internal: Merge mode unexpectedly returned MidStreamInterjection"
+                            .to_string(),
+                    );
+                    return;
+                }
+            }
+        }
     };
 
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
@@ -1562,8 +1676,8 @@ mod tests {
     /// pair and a tempdir as the data-dir. Covers every branch of the
     /// task except the platform-specific `ProjectDirs::from` resolution,
     /// which is handled in `handle_export_scenario` before the spawn.
-    fn one_user_turn() -> Vec<String> {
-        vec!["hello".to_string()]
+    fn one_user_turn_source() -> UserTurnsSource {
+        UserTurnsSource::PreCollected(vec!["hello".to_string()])
     }
 
     fn spawn_task(
@@ -1572,10 +1686,20 @@ mod tests {
         tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
         tokio::task::JoinHandle<()>,
     ) {
+        spawn_task_with_source(data_dir, one_user_turn_source())
+    }
+
+    fn spawn_task_with_source(
+        data_dir: PathBuf,
+        source: UserTurnsSource,
+    ) -> (
+        tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
         let handle = tokio::spawn(export_scenario_task(
             data_dir,
-            one_user_turn(),
+            source,
             Vec::new(),
             "# Session trace\n\n(test trace body)\n".to_string(),
             tx,
@@ -1618,6 +1742,135 @@ mod tests {
                 assert!(error.contains("session reset"), "got {error:?}");
             }
             other => panic!("expected ExportScenarioError, got {other:?}"),
+        }
+    }
+
+    /// Build a `NeedsMergePrompt` source from a synthetic interjection
+    /// session. Used by the merge-prompt task tests below.
+    fn interjection_messages() -> Vec<crate::session::message::Message> {
+        use crate::session::message::Message;
+        vec![
+            Message::user("s", "initial"),
+            Message::assistant("s", "starts replying..."),
+            Message::user("s", "wait actually"), // interjection
+            Message::user("s", "do this instead"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn export_scenario_task_merge_prompt_fires_for_interjection_session() {
+        // With `NeedsMergePrompt`, the task's FIRST event is the
+        // merge-or-cancel prompt — not the name prompt. The user has
+        // to clear the strict guard before being asked for a name.
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut rx, _h) = spawn_task_with_source(
+            tmp.path().to_path_buf(),
+            UserTurnsSource::NeedsMergePrompt(interjection_messages()),
+        );
+        match rx.recv().await.expect("merge prompt") {
+            AppEvent::QuestionRequest(req) => {
+                assert_eq!(req.call_id, "slash-export-scenario-merge-interjection");
+                assert_eq!(
+                    req.options,
+                    vec!["Cancel".to_string(), "Merge".to_string()],
+                    "Cancel must be the first/default option for safety"
+                );
+                assert!(
+                    req.question.contains("mid-stream interjections"),
+                    "expected interjection wording in prompt; got: {:?}",
+                    req.question
+                );
+            }
+            other => panic!("expected merge QuestionRequest first, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn export_scenario_task_merge_cancel_surfaces_friendly_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut rx, _h) = spawn_task_with_source(
+            tmp.path().to_path_buf(),
+            UserTurnsSource::NeedsMergePrompt(interjection_messages()),
+        );
+        let merge_tx = match rx.recv().await.expect("merge prompt") {
+            AppEvent::QuestionRequest(req) => req.response_tx,
+            other => panic!("expected merge QuestionRequest, got {other:?}"),
+        };
+        let _ = merge_tx.send("Cancel".to_string());
+        match rx.recv().await.expect("follow-up") {
+            AppEvent::ExportScenarioError { error } => {
+                assert!(
+                    error.contains("interjections preserved by strict guard"),
+                    "expected strict-guard cancel wording; got: {error:?}"
+                );
+            }
+            other => panic!("expected ExportScenarioError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn export_scenario_task_merge_confirm_proceeds_to_name_prompt() {
+        // After the user confirms Merge, the task should re-collect
+        // user_turns in Merge mode and fall through to the regular
+        // name prompt — i.e. the SECOND prompt should be the name
+        // question, not another merge prompt.
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut rx, _h) = spawn_task_with_source(
+            tmp.path().to_path_buf(),
+            UserTurnsSource::NeedsMergePrompt(interjection_messages()),
+        );
+        let merge_tx = match rx.recv().await.expect("merge prompt") {
+            AppEvent::QuestionRequest(req) => req.response_tx,
+            other => panic!("expected merge QuestionRequest, got {other:?}"),
+        };
+        let _ = merge_tx.send("Merge".to_string());
+        match rx.recv().await.expect("name prompt") {
+            AppEvent::QuestionRequest(req) => {
+                assert_eq!(req.call_id, "slash-export-scenario");
+                assert!(req.question.starts_with("Scenario name"));
+            }
+            other => panic!("expected name QuestionRequest after merge, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn export_scenario_task_merge_confirm_writes_merged_user_turns() {
+        // End-to-end: confirm Merge, give a scenario name, confirm the
+        // written scenario.toml's `user_turns` contains the merged
+        // text (the interjection folded into the prior turn).
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut rx, _h) = spawn_task_with_source(
+            tmp.path().to_path_buf(),
+            UserTurnsSource::NeedsMergePrompt(interjection_messages()),
+        );
+        // Merge prompt
+        let merge_tx = match rx.recv().await.expect("merge prompt") {
+            AppEvent::QuestionRequest(req) => req.response_tx,
+            other => panic!("got {other:?}"),
+        };
+        let _ = merge_tx.send("Merge".to_string());
+        // Name prompt
+        let name_tx = match rx.recv().await.expect("name prompt") {
+            AppEvent::QuestionRequest(req) => req.response_tx,
+            other => panic!("got {other:?}"),
+        };
+        let _ = name_tx.send("interjected-scenario".to_string());
+        // Finish event
+        match rx.recv().await.expect("finish") {
+            AppEvent::ExportScenarioFinish { path, .. } => {
+                let contents = std::fs::read_to_string(&path).unwrap();
+                let parsed = crate::eval::scenario::Scenario::from_toml_str(&contents)
+                    .expect("scaffold parses");
+                assert_eq!(
+                    parsed.user_turns,
+                    vec![
+                        "initial".to_string(),
+                        "wait actually\n\ndo this instead".to_string()
+                    ],
+                    "merged interjection should land in the second turn"
+                );
+            }
+            other => panic!("expected Finish, got {other:?}"),
         }
     }
 
@@ -1861,7 +2114,7 @@ mod tests {
     // ----- Helpers that walk session state -----
 
     #[test]
-    fn collect_user_turns_filters_and_trims_normal_alternation() {
+    fn collect_user_turns_strict_filters_and_trims_normal_alternation() {
         use crate::session::message::Message;
         // Plain alternating User/Assistant pattern with whitespace on
         // the user side. Asserts trim semantics; the alternation check
@@ -1874,7 +2127,7 @@ mod tests {
             Message::user("s", "third"),
         ];
         assert_eq!(
-            collect_user_turns(&msgs).expect("alternation OK"),
+            collect_user_turns(&msgs, CollectMode::Strict).expect("alternation OK"),
             vec![
                 "first".to_string(),
                 "second".to_string(),
@@ -1884,13 +2137,12 @@ mod tests {
     }
 
     #[test]
-    fn collect_user_turns_rejects_consecutive_user_messages() {
+    fn collect_user_turns_strict_rejects_consecutive_user_messages() {
         // Mid-stream interjection: a second User message arrives without
         // an intervening Assistant turn. `handle_interjection` (see
         // `app/helpers.rs:255`) pushes interjections directly into
         // `stored_messages`, so this shape shows up in real sessions.
-        // Refuse rather than produce a scenario that replays with
-        // different semantics.
+        // Strict mode refuses; Merge mode is exercised below.
         use crate::session::message::Message;
         let msgs = vec![
             Message::user("s", "initial"),
@@ -1899,13 +2151,13 @@ mod tests {
             Message::user("s", "do this instead"),
         ];
         assert_eq!(
-            collect_user_turns(&msgs),
+            collect_user_turns(&msgs, CollectMode::Strict),
             Err(UserTurnError::MidStreamInterjection)
         );
     }
 
     #[test]
-    fn collect_user_turns_consecutive_with_empty_text_still_rejected() {
+    fn collect_user_turns_strict_consecutive_with_empty_text_still_rejected() {
         // An interjection with whitespace-only text would otherwise be
         // dropped, but the SECOND User message that follows it (without
         // an intervening Assistant) is still a consecutive-User signal.
@@ -1918,7 +2170,7 @@ mod tests {
             Message::user("s", "real second"),
         ];
         assert_eq!(
-            collect_user_turns(&msgs),
+            collect_user_turns(&msgs, CollectMode::Strict),
             Err(UserTurnError::MidStreamInterjection)
         );
     }
@@ -1944,16 +2196,100 @@ mod tests {
             Message::user("s", "next"),
         ];
         assert_eq!(
-            collect_user_turns(&msgs).expect("system doesn't break turns"),
+            collect_user_turns(&msgs, CollectMode::Strict).expect("system doesn't break turns"),
             vec!["hi".to_string(), "next".to_string()]
         );
     }
 
+    #[test]
+    fn collect_user_turns_merge_concatenates_consecutive_users() {
+        // Merge mode folds an interjection into the prior turn with a
+        // `\n\n` separator so the agent receives both pieces of input
+        // upfront. This is close to what the agent actually saw in the
+        // original session (it was already processing the first message
+        // when the interjection arrived) without forcing the runner's
+        // turn-after-idle semantics on the second piece.
+        use crate::session::message::Message;
+        let msgs = vec![
+            Message::user("s", "first input"),
+            Message::assistant("s", "starts replying..."),
+            Message::user("s", "wait actually"), // interjection
+            Message::user("s", "do this instead"),
+        ];
+        let turns = collect_user_turns(&msgs, CollectMode::Merge).expect("merge succeeds");
+        assert_eq!(
+            turns,
+            vec![
+                "first input".to_string(),
+                "wait actually\n\ndo this instead".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_user_turns_merge_handles_three_consecutive_users() {
+        // Multiple rapid interjections all collapse into the same turn —
+        // the agent saw them all as additional input during one
+        // assistant response window.
+        use crate::session::message::Message;
+        let msgs = vec![
+            Message::user("s", "ask"),
+            Message::assistant("s", "responding..."),
+            Message::user("s", "wait"),
+            Message::user("s", "actually"),
+            Message::user("s", "do X"),
+        ];
+        let turns = collect_user_turns(&msgs, CollectMode::Merge).expect("merge succeeds");
+        assert_eq!(
+            turns,
+            vec!["ask".to_string(), "wait\n\nactually\n\ndo X".to_string()]
+        );
+    }
+
+    #[test]
+    fn collect_user_turns_merge_passes_clean_alternation_through_unchanged() {
+        // Merge mode must NOT alter the output for sessions without
+        // interjections — same shape as Strict mode for that case.
+        use crate::session::message::Message;
+        let msgs = vec![
+            Message::user("s", "first"),
+            Message::assistant("s", "..."),
+            Message::user("s", "second"),
+        ];
+        let strict = collect_user_turns(&msgs, CollectMode::Strict).unwrap();
+        let merge = collect_user_turns(&msgs, CollectMode::Merge).unwrap();
+        assert_eq!(strict, merge);
+        assert_eq!(strict, vec!["first".to_string(), "second".to_string()]);
+    }
+
+    #[test]
+    fn collect_user_turns_merge_handles_empty_interjection_as_structural() {
+        // An empty-text interjection is still STRUCTURALLY an
+        // interjection — the user pushed a User message into the
+        // persistence layer during the assistant's response. In merge
+        // mode the empty interjection contributes no text but it DOES
+        // bind the NEXT User message into the same merged turn,
+        // matching Strict mode's structural interpretation (where the
+        // empty interjection alone is enough to fire the guard error).
+        // No spurious `\n\n`-only suffix is appended; the result is
+        // one merged turn with both non-empty contents.
+        use crate::session::message::Message;
+        let msgs = vec![
+            Message::user("s", "real first"),
+            Message::assistant("s", "..."),
+            Message::user("s", "   "), // empty interjection
+            Message::user("s", "real second"),
+        ];
+        let turns = collect_user_turns(&msgs, CollectMode::Merge).expect("merge succeeds");
+        assert_eq!(turns, vec!["real first\n\nreal second".to_string()]);
+    }
+
     #[tokio::test]
-    async fn command_export_scenario_interjection_session_errors_up_front() {
+    async fn command_export_scenario_interjection_session_prompts_for_merge() {
         // Sanity-check the handler-level surface for the interjection
-        // case: pre-populate `stored_messages` with a U/A/U/U sequence
-        // and confirm the user sees a targeted error before any prompt.
+        // case. The previous behavior was an up-front error; now it
+        // spawns a task that prompts the user for a merge-or-cancel
+        // decision. Confirm the prompt fires with the expected shape.
         let mut app = make_test_app();
         app.stored_messages
             .push(crate::session::message::Message::user("s", "initial"));
@@ -1970,9 +2306,15 @@ mod tests {
                 "instead do this",
             ));
         app.handle_command("/export-scenario").await.unwrap();
+        // The handler now spawns a task that emits a QuestionRequest.
+        // The handler-level surface no longer has a synchronous Error
+        // for this case. Confirm no synchronous Error fired — the task
+        // owns surfacing the question and any subsequent error.
         assert!(
-            has_error_message(&app, "mid-stream interjection"),
-            "expected interjection error, got: {:?}",
+            !has_error_message(&app, "mid-stream interjection"),
+            "interjection should no longer surface as a synchronous \
+             handler error — it goes through the task's merge prompt; \
+             got: {:?}",
             app.messages.last()
         );
     }

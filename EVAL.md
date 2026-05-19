@@ -218,14 +218,18 @@ The scaffold contains:
 
 **Limitations:**
 
-- *Mid-stream interjections are rejected.* If you typed a follow-up
-  message *while* the assistant was still streaming, that turn was
-  persisted as a separate `User` message with no `Assistant` reply
-  between it and the next user turn. The eval runner sends each
-  user turn only after the previous assistant response goes idle, so
-  a scenario generated from an interjected session wouldn't replay
-  with the original timing or LLM context. `/export-scenario`
-  detects this shape and refuses with a clear error.
+- *Mid-stream interjections trigger a merge-or-cancel prompt.* If
+  you typed a follow-up message *while* the assistant was still
+  streaming, that turn was persisted as a separate `User` message
+  with no `Assistant` reply between it and the next user turn. The
+  eval runner sends each user turn only after the previous assistant
+  response goes idle — it can't faithfully replay the original
+  mid-stream timing. `/export-scenario` detects this shape and asks
+  whether to merge each interjection into the prior turn (blank-line
+  separator) so the agent receives all that input upfront in one
+  runner turn, or to cancel and export a different session. Cancel
+  is the default; Merge produces a scenario that's close to the
+  original intent without preserving exact timing.
 
 ### Freezing your first baseline
 
