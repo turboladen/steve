@@ -176,6 +176,8 @@ impl CapturedRun {
             AppEvent::CompactError { .. } => {}
             AppEvent::AgentsUpdateFinish { .. } => {}
             AppEvent::AgentsUpdateError { .. } => {}
+            AppEvent::ExportScenarioFinish { .. } => {}
+            AppEvent::ExportScenarioError { .. } => {}
             AppEvent::TitleGenerated { .. } => {}
             AppEvent::TitleError { .. } => {}
         }

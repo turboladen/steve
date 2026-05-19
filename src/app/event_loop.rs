@@ -695,6 +695,37 @@ impl App {
                     tracing::error!("AGENTS.md update failed");
                 }
             }
+            AppEvent::ExportScenarioFinish { path, name } => {
+                // The question answer's key handler (`key_handling.rs:433`)
+                // sets `Activity::Thinking` after the user submits the
+                // scenario name — reset it here so the status bar doesn't
+                // sit on "Thinking" indefinitely once the scaffold lands.
+                self.status_line_state.set_activity(Activity::Idle);
+                let dir_display = path
+                    .parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                self.messages.push(MessageBlock::System {
+                    text: format!(
+                        "Scenario scaffold written to:\n  {dir_display}/\n    scenario.toml      \u{2014} the manifest you'll edit\n    SESSION_TRACE.md   \u{2014} captured tool calls + final message (reference, not loaded by the runner)\n\n\
+                         Next steps:\n  \
+                         1. Open SESSION_TRACE.md alongside scenario.toml — it has the raw material for the TODOs.\n  \
+                         2. Fill in the TODOs in scenario.toml (description, judge pass_when/fail_when, substring sentinel).\n  \
+                         3. For each fixture you want, physically copy the file into {name}/ at the suggested relative path, then uncomment its entry.\n  \
+                         4. When ready, move {name}/ into Steve's repo at eval/scenarios/.",
+                    ),
+                });
+                self.message_area_state.scroll_to_bottom();
+                tracing::info!(path = %path.display(), name = %name, "scenario scaffold written");
+            }
+            AppEvent::ExportScenarioError { error } => {
+                self.status_line_state.set_activity(Activity::Idle);
+                self.messages.push(MessageBlock::Error {
+                    text: error.clone(),
+                });
+                self.message_area_state.scroll_to_bottom();
+                tracing::error!(%error, "scenario export failed");
+            }
             AppEvent::TitleGenerated { session_id, title } => {
                 self.apply_title_if_current(&session_id, &title);
             }

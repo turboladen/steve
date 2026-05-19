@@ -444,10 +444,23 @@ impl App {
             }
             (KeyCode::Char(c @ '1'..='9'), _) => {
                 if let Some(q) = self.pending_question.as_mut() {
-                    let idx = (c as usize) - ('1' as usize);
-                    if idx < q.options.len() {
-                        q.selected = Some(idx);
-                        self.sync_question_block();
+                    if q.options.is_empty() {
+                        // Free-text-only prompt: digits are part of the
+                        // answer (e.g. `/export-scenario` scenario names
+                        // are allowed to contain digits). Without this
+                        // fallthrough the option-select handler would
+                        // swallow them with no effect.
+                        if q.selected.is_none() {
+                            q.free_text.push(c);
+                            self.sync_question_block();
+                        }
+                    } else {
+                        // Option-selection mode: digit picks the option.
+                        let idx = (c as usize) - ('1' as usize);
+                        if idx < q.options.len() {
+                            q.selected = Some(idx);
+                            self.sync_question_block();
+                        }
                     }
                 }
             }
@@ -754,6 +767,31 @@ mod tests {
         app.handle_key(press(KeyCode::Char('i'))).await.unwrap();
         app.handle_key(press(KeyCode::Enter)).await.unwrap();
         assert_eq!(rx.try_recv().unwrap(), "hi");
+    }
+
+    #[tokio::test]
+    async fn question_digits_append_to_free_text_when_no_options() {
+        // Free-text-only prompts (e.g. `/export-scenario` scenario name)
+        // must let the user type digits — the option-select handler only
+        // owns digits when there are actual options to pick.
+        let mut app = make_test_app();
+        let _rx = make_pending_question(&mut app, Vec::new());
+        for c in ['s', 'c', 'e', 'n', '-', '4', '2'] {
+            app.handle_key(press(KeyCode::Char(c))).await.unwrap();
+        }
+        assert_eq!(app.pending_question.as_ref().unwrap().free_text, "scen-42");
+    }
+
+    #[tokio::test]
+    async fn question_digits_still_select_options_when_present() {
+        // The digit-as-option-selector behavior must keep working when
+        // options DO exist — this is the original purpose of the digit arm.
+        let mut app = make_test_app();
+        let _rx = make_pending_question(&mut app, vec!["red".into(), "blue".into()]);
+        app.handle_key(press(KeyCode::Char('2'))).await.unwrap();
+        assert_eq!(app.pending_question.as_ref().unwrap().selected, Some(1));
+        // Free-text must NOT have accumulated the digit.
+        assert!(app.pending_question.as_ref().unwrap().free_text.is_empty());
     }
 
     // ─── Agents update key tests ───

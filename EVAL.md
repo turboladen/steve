@@ -184,6 +184,58 @@ At runtime:
 
 See *Configuration reference* below for the full schema.
 
+### Bootstrapping a scenario from a real session
+
+When you hit an interesting behavior in a Steve session — a destructive
+edit, a confident hallucination, a successful recovery — capture it as
+a scenario scaffold from inside the TUI with `/export-scenario`. Steve
+prompts for a scenario name, then writes a `scenario.toml` scaffold
+under its data dir at:
+
+- macOS: `~/Library/Application Support/steve/scenarios/<name>/scenario.toml`
+- Linux: `~/.local/share/steve/scenarios/<name>/scenario.toml`
+
+The output is intentionally NOT under the current project root because
+Steve usually runs in a project that isn't its own source repo. When
+you're ready to land the scenario, `mv` the directory into Steve's
+checkout at `eval/scenarios/`.
+
+The scaffold contains:
+
+- `user_turns` — every user message from the session, in order.
+- `[setup].copy_fixtures` — a single array. When the agent touched
+  files during the session, each candidate appears as a
+  commented-out entry inside the array (`  # "src/foo.rs",`); remove
+  the `#` on the entries that are actually scenario fixtures and
+  leave the rest commented or delete them. When the agent didn't
+  touch any files, the array is emitted empty (`copy_fixtures = []`).
+- `[[expectations]]` — a `judge` expectation and a
+  `final_message_contains` expectation, both seeded with `TODO`
+  placeholders. Fill in `pass_when` / `fail_when` and replace the
+  `TODO` substring with an unguessable sentinel from the expected
+  response. The pair models the belt-and-suspenders pattern from
+  `eval/scenarios/no-hallucinated-tool-output/scenario.toml`.
+
+**Limitations:**
+
+- *Reloaded sessions lose fixture suggestions.* They're derived from
+  the agent's tool calls in the current in-memory session. Sessions
+  reloaded from storage (via `/sessions` or by resuming on startup)
+  reconstruct assistant turns as plain text — the tool-call structure
+  isn't persisted today, so `/export-scenario` on a reloaded session
+  produces a scaffold with correct `user_turns` but an empty
+  `copy_fixtures` array. Export while the session is still live.
+  Tracking the persistence fix (which would also fix `/export-debug`)
+  in `steve-quzp`.
+- *Mid-stream interjections are rejected.* If you typed a follow-up
+  message *while* the assistant was still streaming, that turn was
+  persisted as a separate `User` message with no `Assistant` reply
+  between it and the next user turn. The eval runner sends each
+  user turn only after the previous assistant response goes idle, so
+  a scenario generated from an interjected session wouldn't replay
+  with the original timing or LLM context. `/export-scenario`
+  detects this shape and refuses with a clear error.
+
 ### Freezing your first baseline
 
 ```bash
