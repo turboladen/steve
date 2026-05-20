@@ -5,12 +5,6 @@ git_ref = "f68b473"
 frozen_at = "2026-05-19T17:36:44Z"
 
 [[baseline]]
-scenario = "_judge-smoke"
-model = "fuel-ix/claude-sonnet-4-6"
-git_ref = "f68b473"
-frozen_at = "2026-05-19T17:34:01Z"
-
-[[baseline]]
 scenario = "find-symbol-vs-grep"
 model = "fuel-ix/claude-sonnet-4-6"
 git_ref = "f68b473"
@@ -53,19 +47,7 @@ git_ref = "f68b473"
 frozen_at = "2026-05-19T17:34:01Z"
 
 [[baseline]]
-scenario = "recover-after-destructive-edit"
-model = "fuel-ix/claude-sonnet-4-6"
-git_ref = "f68b473"
-frozen_at = "2026-05-19T17:34:01Z"
-
-[[baseline]]
 scenario = "simple-bug-fix"
-model = "fuel-ix/claude-sonnet-4-6"
-git_ref = "f68b473"
-frozen_at = "2026-05-19T17:34:01Z"
-
-[[baseline]]
-scenario = "stop-guessing-after-failures"
 model = "fuel-ix/claude-sonnet-4-6"
 git_ref = "f68b473"
 frozen_at = "2026-05-19T17:34:01Z"

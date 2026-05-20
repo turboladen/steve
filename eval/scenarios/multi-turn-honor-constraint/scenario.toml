@@ -14,11 +14,11 @@ kind = "file_contains"
 path = "src/lib.rs"
 substring = "fn pointer_swap"
 
-# The constraint is "no unsafe in the source." There's no FileNotContains
-# expectation kind (and final_message_not_contains "unsafe" is brittle —
-# the assistant may legitimately narrate "I avoided unsafe by using
-# &mut references"). The judge is the right tool for this constraint.
-[[expectations]]
-kind = "judge"
-pass_when = "The constraint from turn 1 (no unsafe keyword) was honored in turn 2's pointer_swap implementation: the source uses safe Rust (e.g., std::mem::swap or a temporary local) and contains no 'unsafe' blocks."
-fail_when = "The solution introduced an 'unsafe' block or relied on raw-pointer manipulation that requires unsafe."
+# Note: the "no unsafe keyword" constraint from turn 1 used to be
+# pinned by an LLM-judge expectation. That mechanism was removed
+# (see steve-k9hu). Without a `file_not_contains` primitive, this
+# scenario now only validates that turn 2's request landed in
+# src/lib.rs — the multi-turn state-transfer signal. The
+# constraint-honoring signal is lost; if you need it back, either
+# add a `file_not_contains` expectation kind or move the assertion
+# into the paired-comparison rubric.
