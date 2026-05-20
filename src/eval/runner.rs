@@ -147,7 +147,7 @@ impl Runner {
     }
 
     /// Borrow the judge-side `ProviderRegistry` so the CLI's
-    /// `apply_judges` call can resolve the judge model.
+    /// paired-comparison `Judge::compare` call can resolve the judge model.
     pub fn judge_registry(&self) -> &ProviderRegistry {
         &self.judge_registry
     }

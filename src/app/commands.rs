@@ -1346,7 +1346,7 @@ async fn export_scenario_task(
 /// Scenario directory names must be safe filesystem slugs. Matches the
 /// convention seen under `eval/scenarios/`: lowercase ASCII letters,
 /// digits, hyphens, with an optional leading underscore for scenarios
-/// like `_smoke` and `_judge-smoke`. A bare `_` is rejected — a literal
+/// like `_smoke`. A bare `_` is rejected — a literal
 /// underscore directory name would be visually confusing alongside
 /// `_smoke` and friends. Max length 64 keeps slugs comfortably under
 /// every common filesystem's NAME_MAX (=255 on ext4/APFS) while ruling
@@ -2641,9 +2641,10 @@ mod tests {
         assert!(is_valid_scenario_name("scenario-1"));
         assert!(is_valid_scenario_name("0-leading-digit-ok"));
         // Leading underscore is intentional — matches the convention of
-        // `_smoke` and `_judge-smoke` under eval/scenarios/.
+        // `_smoke` under eval/scenarios/. Internal dashes after a leading
+        // underscore must also pass the slug check.
         assert!(is_valid_scenario_name("_smoke"));
-        assert!(is_valid_scenario_name("_judge-smoke"));
+        assert!(is_valid_scenario_name("_multi-word"));
     }
 
     #[test]

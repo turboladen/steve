@@ -209,12 +209,13 @@ The scaffold contains:
   the `#` on the entries that are actually scenario fixtures and
   leave the rest commented or delete them. When the agent didn't
   touch any files, the array is emitted empty (`copy_fixtures = []`).
-- `[[expectations]]` — a `judge` expectation and a
-  `final_message_contains` expectation, both seeded with `TODO`
-  placeholders. Fill in `pass_when` / `fail_when` and replace the
-  `TODO` substring with an unguessable sentinel from the expected
-  response. The pair models the belt-and-suspenders pattern from
-  `eval/scenarios/no-hallucinated-tool-output/scenario.toml`.
+- `[[expectations]]` — a single `final_message_contains` expectation
+  seeded with a `TODO` placeholder. Replace the `TODO` substring with
+  an unguessable sentinel from the expected response, and extend with
+  other rule kinds from the table above as needed (tool invariants
+  via `tool_called` / `requires_prior_read`, file invariants via
+  `file_contains` / `file_unchanged`, repetition via
+  `max_repeat_attempts`).
 
 **Limitations:**
 
@@ -635,14 +636,19 @@ loudly.
 | `final_message_contains` | `substring`, `case_insensitive` | The last assistant message contains the substring |
 | `final_message_not_contains` | `substring`, `case_insensitive` | The last assistant message does NOT contain the substring |
 | `max_repeat_attempts` | `tool`, `max` | No (tool, args) pair was called more than `max` times |
-| `judge` | `pass_when`, `fail_when`, `judge_model` | LLM-as-judge per-scenario expectation. **Not wired into the current `run`/`freeze`/`report` flow** — scenario.toml parses these but `apply_judges()` isn't called from any production path today, so they evaluate as Skipped (counted as passing in the deterministic floor). Use paired-comparison via `report` for LLM judging today. Tracked: `steve-k9hu`. |
+
+> **Removed:** The `judge` per-expectation kind was removed in steve-k9hu —
+> it parsed cleanly but never produced a verdict in any production path,
+> silently passing through `Outcome::Skipped`. `kind = "judge"` is now a
+> hard parse error. Use paired-comparison via `report` (axes graded
+> against a frozen baseline) for LLM judging.
 
 For the canonical Rust definitions see `src/eval/scenario.rs` (`Expectation`
 enum).
 
 ### Precedence chains
 
-Judge model: **CLI `--judge-model` > scenario.judge_model > `default_judge_model` from config > error**.
+Judge model (paired-comparison only): **CLI `--judge-model` > scenario.judge_model > `default_judge_model` from config > error**.
 
 Regression threshold: **CLI `--regression-threshold` > `regression_threshold` from config > 0.0**.
 

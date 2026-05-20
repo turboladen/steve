@@ -13,7 +13,6 @@ use crate::{
         capture::{CapturedRun, RecordedToolCall},
         scenario::{Expectation, Scenario},
     },
-    event::StreamUsage,
     permission::normalize_tool_path,
     tool::ToolName,
 };
@@ -24,11 +23,8 @@ pub struct EvalReport {
 }
 
 impl EvalReport {
-    /// Skipped is neutral: the report passes iff no expectation Failed.
-    /// Unimplemented checks (judge in v1) produce Skipped so a green report
-    /// doesn't silently mean "no real checks ran."
     pub fn passed(&self) -> bool {
-        !self.results.iter().any(|r| r.outcome.is_failed())
+        self.results.iter().all(|r| r.outcome.is_passed())
     }
 }
 
@@ -36,56 +32,24 @@ impl EvalReport {
 /// self-describing output. Because `Expectation` carries `#[serde(tag = "kind")]`,
 /// the JSON output includes a `kind` discriminator alongside the per-variant
 /// fields, so a reader sees what was checked without consulting scenario.toml.
-///
-/// `judge` is populated only for `Expectation::Judge` results after
-/// `apply_judges` runs; non-judge results omit the field from JSON entirely.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpectationResult {
     pub expectation: Expectation,
     pub outcome: Outcome,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub judge: Option<JudgeRecord>,
 }
 
-/// Reproducibility envelope for an LLM-as-judge call: the exact prompts
-/// sent, the verbatim response (pre-parse), and any usage the provider
-/// reported. Carried on `ExpectationResult` so the JSON output is
-/// self-describing — a reader sees what the judge was asked and what it
-/// answered without consulting any side-channel logs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct JudgeRecord {
-    /// Resolved model ref the judge call was sent to (`provider/model_id`).
-    /// `None` when the call never reached the provider — typically because
-    /// no judge model was configured anywhere (CLI, scenario, expectation).
-    /// Kept symmetric with `usage`'s "None ≡ no provider call" meaning.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    pub system_prompt: String,
-    pub user_prompt: String,
-    /// Raw model output before JSON parsing — retained even on parse failure
-    /// so users can debug why the judge produced unparseable output.
-    pub raw_response: String,
-    /// `None` when the call never reached the provider (e.g., model
-    /// resolution failed) or the provider didn't report usage.
-    pub usage: Option<StreamUsage>,
-}
-
-/// Skipped is neutral: a report passes iff no expectation Failed. Skipped
-/// exists for expectations whose evaluation is deferred — e.g. Judge
-/// expectations before apply_judges() runs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Outcome {
     Passed,
     Failed { reason: String },
-    Skipped { reason: String },
 }
 
 impl Outcome {
-    fn is_passed(&self) -> bool {
+    pub fn is_passed(&self) -> bool {
         matches!(self, Outcome::Passed)
     }
-    fn is_failed(&self) -> bool {
+    pub fn is_failed(&self) -> bool {
         matches!(self, Outcome::Failed { .. })
     }
 }
@@ -122,14 +86,10 @@ fn evaluate_one(expectation: &Expectation, captured: &CapturedRun) -> Expectatio
             case_insensitive,
         } => check_final_message(substring, *case_insensitive, false, captured),
         Expectation::MaxRepeatAttempts { tool, max } => check_max_repeat(*tool, *max, captured),
-        Expectation::Judge { .. } => Outcome::Skipped {
-            reason: "evaluate() is structural-only; Judge expectations require a separate apply_judges() pass to produce a verdict".into(),
-        },
     };
     ExpectationResult {
         expectation: expectation.clone(),
         outcome,
-        judge: None,
     }
 }
 
@@ -1474,42 +1434,6 @@ mod tests {
         );
     }
 
-    // ── judge skip ──
-
-    #[test]
-    fn skipped_only_report_passes() {
-        // A report containing nothing but Skipped outcomes (e.g. a scenario
-        // composed entirely of Judge expectations before apply_judges() runs)
-        // must pass — the contract is "no Failed flips passed", and Skipped is neutral.
-        let report = EvalReport {
-            results: vec![
-                ExpectationResult {
-                    expectation: Expectation::Judge {
-                        pass_when: "a".into(),
-                        fail_when: "b".into(),
-                        judge_model: None,
-                    },
-                    outcome: Outcome::Skipped {
-                        reason: "evaluate() is structural-only; Judge expectations require a separate apply_judges() pass to produce a verdict".into(),
-                    },
-                    judge: None,
-                },
-                ExpectationResult {
-                    expectation: Expectation::Judge {
-                        pass_when: "c".into(),
-                        fail_when: "d".into(),
-                        judge_model: None,
-                    },
-                    outcome: Outcome::Skipped {
-                        reason: "evaluate() is structural-only; Judge expectations require a separate apply_judges() pass to produce a verdict".into(),
-                    },
-                    judge: None,
-                },
-            ],
-        };
-        assert!(report.passed(), "Skipped-only report must pass");
-    }
-
     #[test]
     fn eval_report_round_trips_through_json() {
         // The `compare` subcommand will deserialize JSONL records — pin that the
@@ -1523,7 +1447,6 @@ mod tests {
                         tool: ToolName::Read,
                     },
                     outcome: Outcome::Passed,
-                    judge: None,
                 },
                 ExpectationResult {
                     expectation: Expectation::FileContains {
@@ -1534,24 +1457,12 @@ mod tests {
                     outcome: Outcome::Failed {
                         reason: "no match".into(),
                     },
-                    judge: None,
-                },
-                ExpectationResult {
-                    expectation: Expectation::Judge {
-                        pass_when: "x".into(),
-                        fail_when: "y".into(),
-                        judge_model: Some("anthropic/claude-haiku-4-5".into()),
-                    },
-                    outcome: Outcome::Skipped {
-                        reason: "evaluate() is structural-only; Judge expectations require a separate apply_judges() pass to produce a verdict".into(),
-                    },
-                    judge: None,
                 },
             ],
         };
         let json = serde_json::to_string(&original).unwrap();
         let reparsed: EvalReport = serde_json::from_str(&json).unwrap();
-        assert_eq!(reparsed.results.len(), 3);
+        assert_eq!(reparsed.results.len(), 2);
         assert!(matches!(reparsed.results[0].outcome, Outcome::Passed));
         assert!(matches!(
             reparsed.results[0].expectation,
@@ -1563,37 +1474,6 @@ mod tests {
             reparsed.results[1].outcome,
             Outcome::Failed { ref reason } if reason == "no match"
         ));
-        assert!(matches!(
-            reparsed.results[2].outcome,
-            Outcome::Skipped { .. }
-        ));
-        assert!(matches!(
-            reparsed.results[2].expectation,
-            Expectation::Judge { ref pass_when, .. } if pass_when == "x"
-        ));
-    }
-
-    #[test]
-    fn judge_returns_skipped() {
-        let scenario = Scenario {
-            name: "x".into(),
-            description: "x".into(),
-            runs: std::num::NonZeroUsize::new(1).unwrap(),
-            setup: crate::eval::scenario::Setup::default(),
-            user_turns: vec!["hi".into()],
-            expectations: vec![Expectation::Judge {
-                pass_when: "x".into(),
-                fail_when: "y".into(),
-                judge_model: None,
-            }],
-            judge_model: None,
-            scoring: None,
-        };
-        let cap = empty_capture(PathBuf::from("/tmp"));
-        let report = evaluate(&scenario, &cap);
-        assert_eq!(report.results.len(), 1);
-        assert!(matches!(report.results[0].outcome, Outcome::Skipped { .. }));
-        assert!(report.passed());
     }
 
     // ── evaluate roll-up ──
@@ -1692,63 +1572,47 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_mixed_pass_skip_fail_rollup() {
-        // The contract the `compare` subcommand will rely on: Skipped is
-        // neutral (doesn't flip passed), Failed flips it.
-        let scenario = Scenario {
-            name: "x".into(),
-            description: "x".into(),
-            runs: std::num::NonZeroUsize::new(1).unwrap(),
-            setup: crate::eval::scenario::Setup::default(),
-            user_turns: vec!["hi".into()],
-            expectations: vec![
-                Expectation::ToolCalled {
-                    tool: ToolName::Read,
+    fn any_failed_flips_passed() {
+        // The rollup contract: every Passed result yields a passing report;
+        // a single Failed flips it. Pinned because `compare` and the report
+        // exit-code logic rely on this property.
+        let all_passed = EvalReport {
+            results: vec![
+                ExpectationResult {
+                    expectation: Expectation::ToolCalled {
+                        tool: ToolName::Read,
+                    },
+                    outcome: Outcome::Passed,
                 },
-                Expectation::Judge {
-                    pass_when: "x".into(),
-                    fail_when: "y".into(),
-                    judge_model: None,
-                },
-                Expectation::ToolCalled {
-                    tool: ToolName::Bash,
+                ExpectationResult {
+                    expectation: Expectation::ToolCalled {
+                        tool: ToolName::Bash,
+                    },
+                    outcome: Outcome::Passed,
                 },
             ],
-            judge_model: None,
-            scoring: None,
         };
-        let mut cap = empty_capture(PathBuf::from("/tmp"));
-        cap.tool_calls.push(call("c1", ToolName::Read, json!({})));
-        let report = evaluate(&scenario, &cap);
-        assert_eq!(report.results.len(), 3);
-        assert!(
-            report.results[0].outcome.is_passed(),
-            "tool_called: read present"
-        );
-        assert!(matches!(report.results[1].outcome, Outcome::Skipped { .. }));
-        assert!(
-            report.results[2].outcome.is_failed(),
-            "tool_called: bash absent"
-        );
-        assert!(!report.passed(), "any Failed must flip the report");
+        assert!(all_passed.passed(), "all-Passed report must pass");
 
-        // Same scenario without the failing expectation: passed stays true
-        // even though Skipped is in the middle.
-        let scenario_no_fail = Scenario {
-            expectations: vec![
-                Expectation::ToolCalled {
-                    tool: ToolName::Read,
+        let one_failed = EvalReport {
+            results: vec![
+                ExpectationResult {
+                    expectation: Expectation::ToolCalled {
+                        tool: ToolName::Read,
+                    },
+                    outcome: Outcome::Passed,
                 },
-                Expectation::Judge {
-                    pass_when: "x".into(),
-                    fail_when: "y".into(),
-                    judge_model: None,
+                ExpectationResult {
+                    expectation: Expectation::ToolCalled {
+                        tool: ToolName::Edit,
+                    },
+                    outcome: Outcome::Failed {
+                        reason: "edit never called".into(),
+                    },
                 },
             ],
-            ..scenario
         };
-        let report = evaluate(&scenario_no_fail, &cap);
-        assert!(report.passed(), "Pass + Skip alone must pass");
+        assert!(!one_failed.passed(), "any Failed must flip the report");
     }
 
     // ── canonical_json helper unit tests ──
@@ -1766,94 +1630,5 @@ mod tests {
         let v1: serde_json::Value = serde_json::from_str(r#"{"a":1,"b":{"c":2,"d":3}}"#).unwrap();
         let v2: serde_json::Value = serde_json::from_str(r#"{"b":{"d":3,"c":2},"a":1}"#).unwrap();
         assert_eq!(canonical_json(&v1), canonical_json(&v2));
-    }
-
-    // ── JudgeRecord serde round-trip ──
-
-    #[test]
-    fn expectation_result_judge_field_round_trips() {
-        let original = ExpectationResult {
-            expectation: Expectation::Judge {
-                pass_when: "p".into(),
-                fail_when: "f".into(),
-                judge_model: Some("anthropic/claude-haiku-4-5".into()),
-            },
-            outcome: Outcome::Failed {
-                reason: "judge said no".into(),
-            },
-            judge: Some(JudgeRecord {
-                model: Some("anthropic/claude-haiku-4-5".into()),
-                system_prompt: "You are an evaluator.".into(),
-                user_prompt: "PASS_WHEN: p\nFAIL_WHEN: f\n...".into(),
-                raw_response: r#"{"passed": false, "reason": "judge said no"}"#.into(),
-                usage: Some(StreamUsage {
-                    prompt_tokens: 120,
-                    completion_tokens: 32,
-                    total_tokens: 152,
-                }),
-            }),
-        };
-        let json = serde_json::to_string(&original).unwrap();
-        let reparsed: ExpectationResult = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            reparsed.judge.as_ref().and_then(|j| j.model.as_deref()),
-            Some("anthropic/claude-haiku-4-5"),
-            "judge.model must round-trip"
-        );
-        assert_eq!(
-            reparsed.judge.as_ref().and_then(|j| j.usage.clone()),
-            Some(StreamUsage {
-                prompt_tokens: 120,
-                completion_tokens: 32,
-                total_tokens: 152,
-            }),
-            "judge.usage must round-trip via StreamUsage Deserialize"
-        );
-    }
-
-    #[test]
-    fn expectation_result_omits_judge_when_none() {
-        // Non-judge results should not show a `judge` key in JSON, so the
-        // compare differ stays focused on outcome changes rather than
-        // seeing a noisy `"judge": null` field on every result.
-        let result = ExpectationResult {
-            expectation: Expectation::ToolCalled {
-                tool: ToolName::Read,
-            },
-            outcome: Outcome::Passed,
-            judge: None,
-        };
-        let value: serde_json::Value = serde_json::to_value(&result).unwrap();
-        assert!(
-            value.get("judge").is_none(),
-            "judge key must be omitted when None; got JSON: {value}"
-        );
-    }
-
-    #[test]
-    fn judge_record_round_trips_with_model_none() {
-        // The `model: Option<String>` field uses `skip_serializing_if = "Option::is_none"`.
-        // Pin both directions: `model: None` records must (a) omit the
-        // `model` key in JSON output and (b) round-trip back to `None`. A
-        // future refactor that drops the `skip_serializing_if` annotation
-        // would emit `"model": null` and silently bloat compare subcommand JSONL diffs.
-        let original = JudgeRecord {
-            model: None,
-            system_prompt: "sys".into(),
-            user_prompt: "user".into(),
-            raw_response: String::new(),
-            usage: None,
-        };
-        let value: serde_json::Value = serde_json::to_value(&original).unwrap();
-        assert!(
-            value.get("model").is_none(),
-            "model key must be omitted when None; got JSON: {value}"
-        );
-        let json = serde_json::to_string(&original).unwrap();
-        let reparsed: JudgeRecord = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            reparsed, original,
-            "JudgeRecord with model: None must round-trip"
-        );
     }
 }

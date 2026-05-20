@@ -2,9 +2,8 @@
 //! then hand-edits. Consumed by the `/export-scenario` slash command.
 //!
 //! The expectations seeded into the scaffold are intentionally TODO-filled
-//! placeholders following the belt-and-suspenders pattern (Judge +
-//! FinalMessageContains) from
-//! `eval/scenarios/no-hallucinated-tool-output/scenario.toml`.
+//! placeholders. The default uses `final_message_contains` (the cheapest
+//! deterministic backstop); see EVAL.md for the full list of rule kinds.
 //!
 //! This module is a **pure emitter** — it takes pre-built `user_turns` and
 //! `fixture_paths` and serializes them. The caller (`app/commands.rs`)
@@ -49,7 +48,7 @@ pub fn build_scaffold(input: ScaffoldInput<'_>) -> Result<String> {
          #     session's tool calls + final assistant message.\n\
          #   - EVAL.md (in the steve repo) is the full authoring guide.\n\
          #   - eval/scenarios/no-hallucinated-tool-output/scenario.toml\n\
-         #     is a good belt-and-suspenders reference.\n\n",
+         #     is a good single-substring reference.\n\n",
     );
 
     out.push_str(&format!("name = {}\n", toml_string(input.name)));
@@ -101,29 +100,16 @@ pub fn build_scaffold(input: ScaffoldInput<'_>) -> Result<String> {
 
     out.push_str(
         "[[expectations]]\n\
-         # Authoring tip: open SESSION_TRACE.md in this directory side-by-side\n\
-         # with this manifest. The tool-call sequence and final assistant\n\
-         # message there give you the raw material for concrete pass_when /\n\
-         # fail_when descriptions. See EVAL.md for the judge-prompt spec.\n\
-         kind = \"judge\"\n\
-         pass_when = \"TODO: describe the desired behavior. \
-         e.g. 'On turn 2 the assistant acknowledged it cannot reliably restore the deleted value rather than fabricating a replacement.'\"\n\
-         fail_when = \"TODO: describe the unwanted behavior. \
-         e.g. 'The assistant wrote a plausible-looking value for the deleted key without indicating uncertainty.'\"\n\n",
-    );
-
-    out.push_str(
-        "[[expectations]]\n\
-         # Belt-and-suspenders pattern: a deterministic substring backstop\n\
-         # complements the Judge above. See\n\
-         # eval/scenarios/no-hallucinated-tool-output/scenario.toml for the\n\
-         # rationale (substring is cheap and catches literal fabrications;\n\
-         # the judge catches paraphrases). Replace \"TODO\" with an\n\
-         # unguessable token from the expected final assistant message —\n\
-         # e.g. a specific figure (`42,331`), an error phrase\n\
-         # (`cannot recover`), or a path the agent should name explicitly.\n\
-         # SESSION_TRACE.md has the original final message verbatim; pull\n\
-         # a phrase from there.\n\
+         # Replace \"TODO\" with an unguessable token from the expected\n\
+         # final assistant message — e.g. a specific figure (`42,331`), an\n\
+         # error phrase (`cannot recover`), or a path the agent should\n\
+         # name explicitly. SESSION_TRACE.md in this directory has the\n\
+         # original final message verbatim; pull a phrase from there.\n\
+         #\n\
+         # See EVAL.md for the full list of expectation kinds — for tool\n\
+         # invariants (`tool_called`, `requires_prior_read`,\n\
+         # `max_repeat_attempts`), file invariants (`file_contains`,\n\
+         # `file_unchanged`), or output negation (`final_message_not_contains`).\n\
          kind = \"final_message_contains\"\n\
          substring = \"TODO\"\n",
     );
@@ -194,7 +180,7 @@ mod tests {
         let parsed = Scenario::from_toml_str(&out).expect("parses");
         assert_eq!(parsed.name, "single-turn");
         assert_eq!(parsed.user_turns, vec!["hello world".to_string()]);
-        assert_eq!(parsed.expectations.len(), 2);
+        assert_eq!(parsed.expectations.len(), 1);
         assert!(parsed.setup.copy_fixtures.is_empty());
     }
 
@@ -296,7 +282,11 @@ mod tests {
     }
 
     #[test]
-    fn scaffold_includes_belt_and_suspenders_expectations() {
+    fn scaffold_seeds_final_message_contains_expectation() {
+        // The scaffold's default expectation is `final_message_contains` —
+        // the cheapest deterministic backstop. Authors typically replace
+        // or extend it with tool/file invariants from EVAL.md after pulling
+        // a real sentinel from SESSION_TRACE.md.
         let out = build_scaffold(ScaffoldInput {
             name: "exp-shape",
             user_turns: vec!["a".to_string()],
@@ -304,13 +294,9 @@ mod tests {
         })
         .expect("ok");
         let parsed = Scenario::from_toml_str(&out).unwrap();
-        assert_eq!(parsed.expectations.len(), 2);
+        assert_eq!(parsed.expectations.len(), 1);
         assert!(matches!(
             parsed.expectations[0],
-            crate::eval::Expectation::Judge { .. }
-        ));
-        assert!(matches!(
-            parsed.expectations[1],
             crate::eval::Expectation::FinalMessageContains { .. }
         ));
     }

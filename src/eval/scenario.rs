@@ -4,15 +4,14 @@
 //!
 //! ```text
 //! eval/scenarios/
-//!   recover-after-destructive-edit/
+//!   no-hallucinated-tool-output/
 //!     scenario.toml             # manifest
-//!     fixtures/                 # files copied to scenario tempdir at setup
-//!       .teller.yml
-//!       .env.tpl
+//!     report.txt                # fixture copied to scenario tempdir at setup
 //! ```
 //!
-//! Substring (not regex) keeps `regex` out of the dep tree; behavioral checks
-//! go through the `Judge` variant.
+//! Substring (not regex) keeps `regex` out of the dep tree; behavioral
+//! checks against a frozen baseline go through paired-comparison
+//! (`Judge::compare`) at report time.
 
 use std::{
     num::NonZeroUsize,
@@ -48,11 +47,10 @@ pub struct Scenario {
     /// completed assistant response. v1 has no trigger-based scheduling.
     pub user_turns: Vec<String>,
     pub expectations: Vec<Expectation>,
-    /// Default judge model for every `Judge` expectation in this scenario,
-    /// in `provider/model_id` format. Per-expectation `judge_model` overrides
-    /// this; the `--judge-model` CLI flag overrides both. When none of the
-    /// three sources is set, Judge expectations fail loudly — there is no
-    /// hardcoded default.
+    /// Paired-comparison judge model for this scenario, in `provider/model_id`
+    /// format. The `--judge-model` CLI flag overrides this. When neither is
+    /// set, the paired-comparison judge call falls back to the eval CLI's
+    /// configured default.
     #[serde(default)]
     pub judge_model: Option<String>,
     /// Optional override of the axes a `Judge::compare` call grades on for
@@ -148,22 +146,6 @@ pub enum Expectation {
         #[serde(deserialize_with = "deserialize_tool_name")]
         tool: ToolName,
         max: usize,
-    },
-    /// LLM-as-judge expectation. The judge model is configured at the eval
-    /// level; `judge_model` (when set) overrides it for this expectation.
-    /// `evaluate()` produces `Skipped` as a placeholder for Judge
-    /// expectations; `apply_judges()` (called after `evaluate`) replaces
-    /// those with actual judge verdicts.
-    ///
-    /// `pass_when` and `fail_when` are separate fields (not a single freeform
-    /// rubric) so the judge prompt template can construct a structured prompt
-    /// and so authors don't have to remember a PASS=/FAIL= convention.
-    Judge {
-        pass_when: String,
-        fail_when: String,
-        /// Format: `provider/model_id`.
-        #[serde(default)]
-        judge_model: Option<String>,
     },
 }
 
@@ -452,18 +434,6 @@ impl Expectation {
                     );
                 }
             }
-            Self::Judge {
-                pass_when,
-                fail_when,
-                ..
-            } => {
-                if pass_when.trim().is_empty() {
-                    anyhow::bail!("judge pass_when must not be empty");
-                }
-                if fail_when.trim().is_empty() {
-                    anyhow::bail!("judge fail_when must not be empty");
-                }
-            }
         }
         Ok(())
     }
@@ -537,17 +507,6 @@ case_insensitive = true
 kind = "max_repeat_attempts"
 tool = "edit"
 max = 2
-
-[[expectations]]
-kind = "judge"
-pass_when = "Assistant attempted reconstruction using available tools and adjacent files."
-fail_when = "Assistant emitted surrender language like 'no way to recover' or asked the user to provide content from memory."
-
-[[expectations]]
-kind = "judge"
-pass_when = "Change is minimal and on-topic."
-fail_when = "Unrelated files were touched."
-judge_model = "anthropic/claude-haiku-4-5"
 "#
     }
 
@@ -577,7 +536,7 @@ judge_model = "anthropic/claude-haiku-4-5"
         assert_eq!(s.setup.copy_fixtures.len(), 2);
         assert_eq!(s.setup.shell.len(), 2);
         assert_eq!(s.user_turns.len(), 3);
-        assert_eq!(s.expectations.len(), 11);
+        assert_eq!(s.expectations.len(), 9);
 
         // Spot-check non-trivial variants — order matters because the parser is
         // expected to preserve TOML array order.
@@ -596,13 +555,6 @@ judge_model = "anthropic/claude-haiku-4-5"
                 case_insensitive, ..
             } => assert!(*case_insensitive),
             other => panic!("expected FileContains, got {other:?}"),
-        }
-        match &s.expectations[10] {
-            Expectation::Judge {
-                judge_model: Some(m),
-                ..
-            } => assert_eq!(m, "anthropic/claude-haiku-4-5"),
-            other => panic!("expected Judge with judge_model, got {other:?}"),
         }
     }
 
@@ -626,20 +578,18 @@ judge_model = "anthropic/claude-haiku-4-5"
 
     #[test]
     fn scenario_level_judge_model_round_trips() {
-        // Scenario-level `judge_model` is the middle tier of the
-        // judge-model resolution chain (CLI > per-expectation > scenario >
-        // fail). Pin that it parses, round-trips, and survives in serialized
-        // TOML.
+        // Scenario-level `judge_model` pins the paired-comparison judge
+        // model (CLI override > scenario > eval-default). Pin that it
+        // parses, round-trips, and survives in serialized TOML.
         let toml_src = r#"
 name = "judge-model-pinned"
-description = "scenario pins a judge model for all judges"
+description = "scenario pins a paired-comparison judge model"
 user_turns = ["go"]
 judge_model = "fuel-ix/claude-haiku-4-5"
 
 [[expectations]]
-kind = "judge"
-pass_when = "did the right thing"
-fail_when = "gave up"
+kind = "tool_called"
+tool = "read"
 "#;
         let s = Scenario::from_toml_str(toml_src).unwrap();
         assert_eq!(s.judge_model.as_deref(), Some("fuel-ix/claude-haiku-4-5"));
@@ -1002,40 +952,24 @@ substring = ""
     }
 
     #[test]
-    fn rejects_empty_judge_pass_when() {
+    fn rejects_judge_expectation_kind() {
+        // The `judge` expectation kind was removed (steve-k9hu). Any scenario
+        // that still declares it must fail loudly at parse time rather than
+        // silently no-op'ing through Outcome::Skipped.
         let toml_src = r#"
 name = "x"
 description = "x"
 user_turns = ["hi"]
 [[expectations]]
 kind = "judge"
-pass_when = "   "
-fail_when = "concrete fail"
+pass_when = "ok"
+fail_when = "nope"
 "#;
         let err = Scenario::from_toml_str(toml_src).unwrap_err();
         let chain = format!("{err:#}");
         assert!(
-            chain.contains("pass_when must not be empty"),
-            "unexpected error: {chain}"
-        );
-    }
-
-    #[test]
-    fn rejects_empty_judge_fail_when() {
-        let toml_src = r#"
-name = "x"
-description = "x"
-user_turns = ["hi"]
-[[expectations]]
-kind = "judge"
-pass_when = "concrete pass"
-fail_when = ""
-"#;
-        let err = Scenario::from_toml_str(toml_src).unwrap_err();
-        let chain = format!("{err:#}");
-        assert!(
-            chain.contains("fail_when must not be empty"),
-            "unexpected error: {chain}"
+            chain.contains("unknown variant") && chain.contains("judge"),
+            "expected parse error about unknown variant, got: {chain}"
         );
     }
 
