@@ -13,7 +13,6 @@ use crate::{
         capture::{CapturedRun, RecordedToolCall},
         scenario::{Expectation, Scenario},
     },
-    event::StreamUsage,
     permission::normalize_tool_path,
     tool::ToolName,
 };
@@ -36,43 +35,16 @@ impl EvalReport {
 /// self-describing output. Because `Expectation` carries `#[serde(tag = "kind")]`,
 /// the JSON output includes a `kind` discriminator alongside the per-variant
 /// fields, so a reader sees what was checked without consulting scenario.toml.
-///
-/// `judge` is populated only for `Expectation::Judge` results after
-/// `apply_judges` runs; non-judge results omit the field from JSON entirely.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpectationResult {
     pub expectation: Expectation,
     pub outcome: Outcome,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub judge: Option<JudgeRecord>,
 }
 
-/// Reproducibility envelope for an LLM-as-judge call: the exact prompts
-/// sent, the verbatim response (pre-parse), and any usage the provider
-/// reported. Carried on `ExpectationResult` so the JSON output is
-/// self-describing — a reader sees what the judge was asked and what it
-/// answered without consulting any side-channel logs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct JudgeRecord {
-    /// Resolved model ref the judge call was sent to (`provider/model_id`).
-    /// `None` when the call never reached the provider — typically because
-    /// no judge model was configured anywhere (CLI, scenario, expectation).
-    /// Kept symmetric with `usage`'s "None ≡ no provider call" meaning.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    pub system_prompt: String,
-    pub user_prompt: String,
-    /// Raw model output before JSON parsing — retained even on parse failure
-    /// so users can debug why the judge produced unparseable output.
-    pub raw_response: String,
-    /// `None` when the call never reached the provider (e.g., model
-    /// resolution failed) or the provider didn't report usage.
-    pub usage: Option<StreamUsage>,
-}
-
-/// Skipped is neutral: a report passes iff no expectation Failed. Skipped
-/// exists for expectations whose evaluation is deferred — e.g. Judge
-/// expectations before apply_judges() runs.
+/// Skipped is neutral: a report passes iff no expectation Failed. No
+/// production code path emits Skipped on `EvalReport.results` today, but
+/// the variant is kept as a deserialize target for older results files
+/// the `compare` subcommand reads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Outcome {
@@ -123,13 +95,12 @@ fn evaluate_one(expectation: &Expectation, captured: &CapturedRun) -> Expectatio
         } => check_final_message(substring, *case_insensitive, false, captured),
         Expectation::MaxRepeatAttempts { tool, max } => check_max_repeat(*tool, *max, captured),
         Expectation::Judge { .. } => Outcome::Skipped {
-            reason: "evaluate() is structural-only; Judge expectations require a separate apply_judges() pass to produce a verdict".into(),
+            reason: "the `judge` expectation kind is no longer supported; remove this expectation or use paired-comparison via `report` instead".into(),
         },
     };
     ExpectationResult {
         expectation: expectation.clone(),
         outcome,
-        judge: None,
     }
 }
 
@@ -1478,9 +1449,11 @@ mod tests {
 
     #[test]
     fn skipped_only_report_passes() {
-        // A report containing nothing but Skipped outcomes (e.g. a scenario
-        // composed entirely of Judge expectations before apply_judges() runs)
-        // must pass — the contract is "no Failed flips passed", and Skipped is neutral.
+        // A report containing nothing but Skipped outcomes must pass — the
+        // contract is "no Failed flips passed", and Skipped is neutral.
+        // No production path emits Skipped today, but the JSONL wire format
+        // read by `compare` must still treat Skipped as neutral; this pins
+        // that invariant against future regressions.
         let report = EvalReport {
             results: vec![
                 ExpectationResult {
@@ -1490,9 +1463,8 @@ mod tests {
                         judge_model: None,
                     },
                     outcome: Outcome::Skipped {
-                        reason: "evaluate() is structural-only; Judge expectations require a separate apply_judges() pass to produce a verdict".into(),
+                        reason: "deferred".into(),
                     },
-                    judge: None,
                 },
                 ExpectationResult {
                     expectation: Expectation::Judge {
@@ -1501,9 +1473,8 @@ mod tests {
                         judge_model: None,
                     },
                     outcome: Outcome::Skipped {
-                        reason: "evaluate() is structural-only; Judge expectations require a separate apply_judges() pass to produce a verdict".into(),
+                        reason: "deferred".into(),
                     },
-                    judge: None,
                 },
             ],
         };
@@ -1523,7 +1494,6 @@ mod tests {
                         tool: ToolName::Read,
                     },
                     outcome: Outcome::Passed,
-                    judge: None,
                 },
                 ExpectationResult {
                     expectation: Expectation::FileContains {
@@ -1534,7 +1504,6 @@ mod tests {
                     outcome: Outcome::Failed {
                         reason: "no match".into(),
                     },
-                    judge: None,
                 },
                 ExpectationResult {
                     expectation: Expectation::Judge {
@@ -1543,9 +1512,8 @@ mod tests {
                         judge_model: Some("anthropic/claude-haiku-4-5".into()),
                     },
                     outcome: Outcome::Skipped {
-                        reason: "evaluate() is structural-only; Judge expectations require a separate apply_judges() pass to produce a verdict".into(),
+                        reason: "deferred".into(),
                     },
-                    judge: None,
                 },
             ],
         };
@@ -1766,94 +1734,5 @@ mod tests {
         let v1: serde_json::Value = serde_json::from_str(r#"{"a":1,"b":{"c":2,"d":3}}"#).unwrap();
         let v2: serde_json::Value = serde_json::from_str(r#"{"b":{"d":3,"c":2},"a":1}"#).unwrap();
         assert_eq!(canonical_json(&v1), canonical_json(&v2));
-    }
-
-    // ── JudgeRecord serde round-trip ──
-
-    #[test]
-    fn expectation_result_judge_field_round_trips() {
-        let original = ExpectationResult {
-            expectation: Expectation::Judge {
-                pass_when: "p".into(),
-                fail_when: "f".into(),
-                judge_model: Some("anthropic/claude-haiku-4-5".into()),
-            },
-            outcome: Outcome::Failed {
-                reason: "judge said no".into(),
-            },
-            judge: Some(JudgeRecord {
-                model: Some("anthropic/claude-haiku-4-5".into()),
-                system_prompt: "You are an evaluator.".into(),
-                user_prompt: "PASS_WHEN: p\nFAIL_WHEN: f\n...".into(),
-                raw_response: r#"{"passed": false, "reason": "judge said no"}"#.into(),
-                usage: Some(StreamUsage {
-                    prompt_tokens: 120,
-                    completion_tokens: 32,
-                    total_tokens: 152,
-                }),
-            }),
-        };
-        let json = serde_json::to_string(&original).unwrap();
-        let reparsed: ExpectationResult = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            reparsed.judge.as_ref().and_then(|j| j.model.as_deref()),
-            Some("anthropic/claude-haiku-4-5"),
-            "judge.model must round-trip"
-        );
-        assert_eq!(
-            reparsed.judge.as_ref().and_then(|j| j.usage.clone()),
-            Some(StreamUsage {
-                prompt_tokens: 120,
-                completion_tokens: 32,
-                total_tokens: 152,
-            }),
-            "judge.usage must round-trip via StreamUsage Deserialize"
-        );
-    }
-
-    #[test]
-    fn expectation_result_omits_judge_when_none() {
-        // Non-judge results should not show a `judge` key in JSON, so the
-        // compare differ stays focused on outcome changes rather than
-        // seeing a noisy `"judge": null` field on every result.
-        let result = ExpectationResult {
-            expectation: Expectation::ToolCalled {
-                tool: ToolName::Read,
-            },
-            outcome: Outcome::Passed,
-            judge: None,
-        };
-        let value: serde_json::Value = serde_json::to_value(&result).unwrap();
-        assert!(
-            value.get("judge").is_none(),
-            "judge key must be omitted when None; got JSON: {value}"
-        );
-    }
-
-    #[test]
-    fn judge_record_round_trips_with_model_none() {
-        // The `model: Option<String>` field uses `skip_serializing_if = "Option::is_none"`.
-        // Pin both directions: `model: None` records must (a) omit the
-        // `model` key in JSON output and (b) round-trip back to `None`. A
-        // future refactor that drops the `skip_serializing_if` annotation
-        // would emit `"model": null` and silently bloat compare subcommand JSONL diffs.
-        let original = JudgeRecord {
-            model: None,
-            system_prompt: "sys".into(),
-            user_prompt: "user".into(),
-            raw_response: String::new(),
-            usage: None,
-        };
-        let value: serde_json::Value = serde_json::to_value(&original).unwrap();
-        assert!(
-            value.get("model").is_none(),
-            "model key must be omitted when None; got JSON: {value}"
-        );
-        let json = serde_json::to_string(&original).unwrap();
-        let reparsed: JudgeRecord = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            reparsed, original,
-            "JudgeRecord with model: None must round-trip"
-        );
     }
 }
