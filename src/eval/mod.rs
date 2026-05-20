@@ -26,7 +26,7 @@ pub use capture::{CapturedRun, RecordedToolCall};
 pub use expectations::{EvalReport, ExpectationResult, JudgeRecord, Outcome, evaluate};
 pub use history::{HistoryEntry, append_history, read_history};
 pub use html_report::render_html;
-pub use judge::{ComparePair, Judge, JudgeAdapter, JudgeOutcome, JudgeVerdict, apply_judges};
+pub use judge::{ComparePair, Judge, JudgeAdapter, JudgeOutcome, JudgeVerdict};
 pub use report::{
     AxisTotals, BaselineProvenance, Report, ReportTotals, ScenarioOutcome, ScenarioReport,
 };
