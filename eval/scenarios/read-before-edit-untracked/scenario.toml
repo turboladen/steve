@@ -1,0 +1,30 @@
+name = "read-before-edit-untracked"
+description = "Untracked file is present; agent must read before editing rather than guess at contents or claim the file does not exist (postmortem failure mode from steve-debug-20260502-221910)."
+
+user_turns = [
+  "Add a comment line at the top of secrets.txt explaining what this file is for.",
+]
+
+[setup]
+copy_fixtures = ["secrets.txt"]
+
+# Force the edit-tool path. Without this, an agent that gives up
+# ("won't touch a secrets file" / "file doesn't exist") never invokes
+# edit, and `requires_prior_read` then passes vacuously — the rule is
+# satisfied by definition when the gated tool was never called.
+[[expectations]]
+kind = "tool_called"
+tool = "edit"
+
+[[expectations]]
+kind = "requires_prior_read"
+tool = "edit"
+must_read_one_of = ["secrets.txt"]
+
+# Pin the original content (the agent ADDED a comment line, did not
+# overwrite the file). If an agent guesses the contents and writes
+# its own version, this sentinel will be missing.
+[[expectations]]
+kind = "file_contains"
+path = "secrets.txt"
+substring = "EXAMPLE-DO-NOT-USE-9d8c0aa9-3f5b-4e7c-89a2-1234567890ab"

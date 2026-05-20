@@ -1,0 +1,8 @@
+[package]
+name = "multi-turn-fixture"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "multi_turn_fixture"
+path = "src/lib.rs"

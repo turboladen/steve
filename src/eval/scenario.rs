@@ -17,10 +17,17 @@
 use std::{
     num::NonZeroUsize,
     path::{Component, Path, PathBuf},
+    str::FromStr,
 };
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use strum::IntoEnumIterator;
+
+use crate::{
+    eval::score::{Axis, DEFAULT_AXES},
+    tool::ToolName,
+};
 
 /// `deny_unknown_fields` makes typos like `case_insenstive` or `judge_modle`
 /// hard errors at parse time instead of silently parsing as default — for a
@@ -31,7 +38,8 @@ pub struct Scenario {
     /// Must match the scenario directory name; mismatch is treated as rename drift.
     pub name: String,
     pub description: String,
-    /// Pass criterion across multi-run scenarios is `>= ceil(runs / 2)` passes.
+    /// Number of times the agent runs this scenario; each run produces one
+    /// transcript. The runner produces `Vec<CapturedRun>` of length `runs`.
     #[serde(default = "default_runs")]
     pub runs: NonZeroUsize,
     #[serde(default)]
@@ -40,10 +48,28 @@ pub struct Scenario {
     /// completed assistant response. v1 has no trigger-based scheduling.
     pub user_turns: Vec<String>,
     pub expectations: Vec<Expectation>,
+    /// Default judge model for every `Judge` expectation in this scenario,
+    /// in `provider/model_id` format. Per-expectation `judge_model` overrides
+    /// this; the `--judge-model` CLI flag overrides both. When none of the
+    /// three sources is set, Judge expectations fail loudly — there is no
+    /// hardcoded default.
+    #[serde(default)]
+    pub judge_model: Option<String>,
+    /// Optional override of the axes a `Judge::compare` call grades on for
+    /// this scenario. When absent, `scoring_axes()` returns `DEFAULT_AXES`.
+    /// Spec: "Per-scenario axis override — most scenarios inherit the
+    /// defaults; the few with specialized lenses (postmortem-derived ones)
+    /// declare their own."
+    #[serde(default)]
+    pub scoring: Option<Scoring>,
 }
 
 fn default_runs() -> NonZeroUsize {
-    NonZeroUsize::new(1).expect("1 != 0")
+    // Per spec: "Default 3, per-scenario override allowed." The existing
+    // `steve eval <scenario.toml>` path always does a single run regardless
+    // of this field, so this default only fires through the `eval run`
+    // subcommand.
+    NonZeroUsize::new(3).expect("3 != 0")
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -58,6 +84,19 @@ pub struct Setup {
     pub shell: Vec<String>,
 }
 
+/// Per-scenario override of the default judging axes. When absent (the
+/// common case), `Scenario::scoring_axes()` returns `DEFAULT_AXES`. When
+/// present, `axes` must be non-empty — validated by `Scenario::validate`.
+///
+/// `Axis` is a closed enum; serde rejects unknown axis names at parse
+/// time so a typo in `scenario.toml` fails loud rather than silently
+/// producing an unknown-axis judge prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scoring {
+    pub axes: Vec<Axis>,
+}
+
 /// Tagged enum: TOML authors write `kind = "tool_called"` (snake_case) to select
 /// a variant. Unknown kinds are rejected at parse time by serde, and
 /// `deny_unknown_fields` rejects typos in variant fields too.
@@ -65,16 +104,19 @@ pub struct Setup {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Expectation {
     ToolCalled {
-        tool: String,
+        #[serde(deserialize_with = "deserialize_tool_name")]
+        tool: ToolName,
     },
     ToolNotCalled {
-        tool: String,
+        #[serde(deserialize_with = "deserialize_tool_name")]
+        tool: ToolName,
     },
-    /// "Before" uses completion-time ordering of read-class tools
-    /// (read/grep/list/glob/symbols/find_symbol), not call-start time, because
-    /// those execute in parallel.
+    /// Asserts that a "read-class" call against one of `must_read_one_of`
+    /// preceded the first invocation of `tool`. The exact set of read-class
+    /// tools is implementation-defined by the evaluator (see expectations.rs).
     RequiresPriorRead {
-        tool: String,
+        #[serde(deserialize_with = "deserialize_tool_name")]
+        tool: ToolName,
         must_read_one_of: Vec<PathBuf>,
     },
     FileUnchanged {
@@ -98,19 +140,24 @@ pub enum Expectation {
         #[serde(default)]
         case_insensitive: bool,
     },
-    /// Dedup key is `(tool, args_hash)`; identical-arg invocations count toward
-    /// the limit, distinct-arg calls reset it.
+    /// Asserts that no `(tool, arguments)` pair appears more than `max` times
+    /// in the captured tool-call sequence. Argument equality is structural —
+    /// key ordering doesn't matter — so two calls with the same fields in
+    /// different orderings count as one repeat.
     MaxRepeatAttempts {
-        tool: String,
+        #[serde(deserialize_with = "deserialize_tool_name")]
+        tool: ToolName,
         max: usize,
     },
-    /// LLM-as-judge: small judge model (default Haiku 4.5, temperature 0)
-    /// evaluates the structured PASS/FAIL criteria. Inputs and outputs are
-    /// recorded into the JSONL run record for reproducibility.
+    /// LLM-as-judge expectation. The judge model is configured at the eval
+    /// level; `judge_model` (when set) overrides it for this expectation.
+    /// `evaluate()` produces `Skipped` as a placeholder for Judge
+    /// expectations; `apply_judges()` (called after `evaluate`) replaces
+    /// those with actual judge verdicts.
     ///
     /// `pass_when` and `fail_when` are separate fields (not a single freeform
     /// rubric) so the judge prompt template can construct a structured prompt
-    /// and so authors don't have to remember the PASS=/FAIL= convention.
+    /// and so authors don't have to remember a PASS=/FAIL= convention.
     Judge {
         pass_when: String,
         fail_when: String,
@@ -120,15 +167,86 @@ pub enum Expectation {
     },
 }
 
-/// Reject paths that escape the scenario workspace — absolute paths and any
-/// `..` components. Symlink resolution is a runtime concern; this is the
-/// parse-time gate.
+/// Custom deserializer for `Expectation` `tool` fields. Reads a string and
+/// maps it to a `ToolName` variant, but layers four pre-checks that produce
+/// friendlier errors than the bare `ToolName::from_str` failure (a strum
+/// `ParseError` with no surrounding context) — and crucially, that catch
+/// failure modes which would otherwise let a misconfigured scenario report
+/// green forever:
+///
+/// 1. Empty string — surface "must not be empty" instead of letting the
+///    strum parse fail with a bare "Matching variant not found".
+/// 2. Leading/trailing whitespace — `" read"` parses fine as a String but
+///    can never match any variant; without this guard the operator would
+///    see only the strum ParseError, hiding the whitespace as the real bug.
+/// 3. MCP-shaped names (containing `__`) — capture cannot observe MCP
+///    calls (`execute_mcp_tools` emits `StreamNotice`, not `LlmToolCall`,
+///    and `RecordedToolCall.tool_name` is `ToolName`, which has no MCP
+///    variant), so an assertion on an MCP tool would silently never match.
+///    Point at the tracking issue (steve-ap0q) instead of just rejecting.
+/// 4. Unknown builtin — surface the full known-variant list in the message
+///    so the operator can see what they meant to type.
+fn deserialize_tool_name<'de, D>(deserializer: D) -> std::result::Result<ToolName, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    if raw.is_empty() {
+        return Err(serde::de::Error::custom("tool name must not be empty"));
+    }
+    if raw != raw.trim() || raw.trim().is_empty() {
+        return Err(serde::de::Error::custom(format!(
+            "tool {raw:?} must not have leading/trailing whitespace; \
+             tool names are matched exactly against the builtin enum"
+        )));
+    }
+    if raw.contains("__") {
+        return Err(serde::de::Error::custom(format!(
+            "tool {raw:?} looks like an MCP tool name, but MCP capture is not yet \
+             implemented — assertions on MCP calls would never succeed. \
+             Tracked: steve-ap0q. Use a builtin tool name instead."
+        )));
+    }
+    ToolName::from_str(&raw).map_err(|_| {
+        let known: Vec<&'static str> = ToolName::iter().map(|t| t.as_str()).collect();
+        serde::de::Error::custom(format!(
+            "tool {raw:?} is not a known builtin (one of {known:?})"
+        ))
+    })
+}
+
+/// Reject paths that escape the scenario workspace, contain garbage that
+/// will fail at the OS layer with useless EINVAL, or vary in spelling from
+/// the canonical workspace-relative form (which would prevent baseline
+/// lookups from matching). Symlink resolution is a runtime concern; this
+/// is the parse-time gate.
 fn validate_workspace_relative_path(path: &Path, label: &str) -> Result<()> {
     if path.is_absolute() {
         anyhow::bail!("{label} {path:?} must be relative to the scenario dir (got absolute path)");
     }
-    if path.components().any(|c| matches!(c, Component::ParentDir)) {
-        anyhow::bail!("{label} {path:?} must not contain `..` segments (would escape workspace)");
+    // Check for NUL bytes (and other non-printable garbage) by round-tripping
+    // through the bytes representation. A NUL byte slips past `is_absolute`
+    // and `.components()` checks but is rejected by syscalls with a useless
+    // EINVAL — fail at parse with a clear reason instead.
+    let lossy = path.to_string_lossy();
+    if lossy.bytes().any(|b| b == 0) {
+        anyhow::bail!("{label} {path:?} must not contain NUL bytes");
+    }
+    for component in path.components() {
+        match component {
+            Component::ParentDir => anyhow::bail!(
+                "{label} {path:?} must not contain `..` segments (would escape workspace)"
+            ),
+            Component::CurDir => anyhow::bail!(
+                "{label} {path:?} must not contain `.` segments — write the path canonically \
+                 (e.g. `foo/bar`, not `./foo/bar`); baseline lookups are key-equality and a \
+                 leading `./` would never match"
+            ),
+            Component::Normal(_) => {}
+            Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!("{label} {path:?} must not contain a root or prefix component")
+            }
+        }
     }
     Ok(())
 }
@@ -141,7 +259,8 @@ impl Scenario {
             .with_context(|| format!("parsing scenario manifest at {}", path.display()))?;
         scenario.validate()?;
         // Parent-directory match is a filesystem-only invariant; not part of
-        // `validate()` so the Phase 7 generator can validate without a path.
+        // `validate()` so callers that build `Scenario` in memory can
+        // validate without a path.
         let parent_name = path
             .parent()
             .and_then(|p| p.file_name())
@@ -160,7 +279,7 @@ impl Scenario {
     }
 
     /// Skips the parent-directory match check — useful for in-memory scenarios
-    /// (tests, the Phase 7 debug-export generator).
+    /// (tests, struct-literal construction).
     pub fn from_toml_str(toml_src: &str) -> Result<Self> {
         let scenario: Scenario =
             toml::from_str(toml_src).context("parsing scenario manifest from string")?;
@@ -169,7 +288,8 @@ impl Scenario {
     }
 
     /// Self-consistency checks that don't depend on filesystem state. Public so
-    /// the Phase 7 generator can run validation after struct-literal construction.
+    /// callers that build `Scenario` via struct literal can validate after
+    /// construction.
     pub fn validate(&self) -> Result<()> {
         if self.name.trim().is_empty() {
             anyhow::bail!("scenario name must not be empty");
@@ -192,25 +312,115 @@ impl Scenario {
                 .validate()
                 .with_context(|| format!("scenario {} expectation #{}", self.name, idx + 1))?;
         }
+        if let Some(scoring) = &self.scoring {
+            if scoring.axes.is_empty() {
+                anyhow::bail!(
+                    "scenario {} has [scoring] block with empty `axes`; remove the block to use defaults, or list at least one axis",
+                    self.name
+                );
+            }
+            // Reject duplicates: each axis must appear at most once.
+            // Without this, downstream `parse_compare_response`'s
+            // per-axis loop would push N copies of the same PairedScore
+            // and the aggregation report would silently double-count.
+            let mut seen = std::collections::HashSet::new();
+            for axis in &scoring.axes {
+                if !seen.insert(*axis) {
+                    anyhow::bail!(
+                        "scenario {} has duplicate axis {axis} in [scoring].axes; each axis must appear at most once",
+                        self.name
+                    );
+                }
+            }
+        }
         Ok(())
     }
+
+    /// Returns the axes this scenario should be paired-compared on.
+    /// Override-or-default: if `scoring` is present, returns its `axes`
+    /// slice; otherwise returns `DEFAULT_AXES`.
+    pub fn scoring_axes(&self) -> &[Axis] {
+        match &self.scoring {
+            Some(s) => &s.axes,
+            None => &DEFAULT_AXES,
+        }
+    }
+}
+
+/// Walk `scenarios_dir` for subdirectories that contain a `scenario.toml`.
+/// Returns `(name, scenario_toml_path)` pairs in alphabetical order by
+/// name. Missing `scenarios_dir` is treated as "no scenarios" (empty
+/// result, not an error) — this matches the freeze flow's expectation
+/// of being callable on a fresh checkout.
+pub fn discover_scenarios(scenarios_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
+    // Use symlink_metadata so a symlinked scenarios root is rejected —
+    // entries inside are already symlink-checked below; this closes the
+    // gap at the root level. NotFound is treated as "no scenarios" so
+    // a fresh checkout (or running outside the repo) returns empty
+    // rather than erroring; non-NotFound errors propagate with context.
+    let root_ft = match std::fs::symlink_metadata(scenarios_dir) {
+        Ok(m) => m.file_type(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(
+                anyhow::Error::from(e).context(format!("checking {}", scenarios_dir.display()))
+            );
+        }
+    };
+    if root_ft.is_symlink() || !root_ft.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(scenarios_dir)
+        .with_context(|| format!("reading {}", scenarios_dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("iterating {}", scenarios_dir.display()))?;
+        let path = entry.path();
+        // Use entry.file_type() (does NOT follow symlinks) rather than
+        // path.is_dir() (follows symlinks). A symlinked scenario dir could
+        // exfiltrate file content from outside the scenario tree; this matches
+        // ScenarioWorkspace::build's symlink-rejection posture.
+        let ft = entry
+            .file_type()
+            .with_context(|| format!("stat {}", path.display()))?;
+        if ft.is_symlink() || !ft.is_dir() {
+            continue;
+        }
+        let manifest = path.join("scenario.toml");
+        // Use symlink_metadata (does NOT follow symlinks) so a symlinked
+        // scenario.toml doesn't slip past the directory-level guard above.
+        let manifest_ft = match std::fs::symlink_metadata(&manifest) {
+            Ok(m) => m.file_type(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue, // no scenario.toml — not a scenario dir
+            Err(e) => {
+                return Err(anyhow::Error::from(e)
+                    .context(format!("checking scenario manifest {}", manifest.display())));
+            }
+        };
+        if manifest_ft.is_symlink() || !manifest_ft.is_file() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(String::from)
+            .with_context(|| format!("scenario dir {} has non-UTF-8 name", path.display()))?;
+        out.push((name, manifest));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
 }
 
 impl Expectation {
     fn validate(&self) -> Result<()> {
         match self {
-            Self::ToolCalled { tool } | Self::ToolNotCalled { tool } => {
-                if tool.trim().is_empty() {
-                    anyhow::bail!("tool name must not be empty");
-                }
-            }
+            // tool: ToolName is enforced by serde at parse time via
+            // deserialize_tool_name; nothing left to check on these arms.
+            Self::ToolCalled { .. } | Self::ToolNotCalled { .. } => {}
             Self::RequiresPriorRead {
-                tool,
+                tool: _,
                 must_read_one_of,
             } => {
-                if tool.trim().is_empty() {
-                    anyhow::bail!("tool name must not be empty");
-                }
                 if must_read_one_of.is_empty() {
                     anyhow::bail!("must_read_one_of must contain at least one path");
                 }
@@ -235,10 +445,7 @@ impl Expectation {
                     anyhow::bail!("final_message substring must not be empty");
                 }
             }
-            Self::MaxRepeatAttempts { tool, max } => {
-                if tool.trim().is_empty() {
-                    anyhow::bail!("tool name must not be empty");
-                }
+            Self::MaxRepeatAttempts { tool: _, max } => {
                 if *max == 0 {
                     anyhow::bail!(
                         "max_repeat_attempts max must be >= 1 (use tool_not_called for max=0 semantics)"
@@ -349,14 +556,16 @@ judge_model = "anthropic/claude-haiku-4-5"
         let s = Scenario::from_toml_str(minimal_scenario_toml()).unwrap();
         assert_eq!(s.name, "minimal");
         assert_eq!(s.description, "smallest valid scenario");
-        assert_eq!(s.runs.get(), 1, "default runs = 1 when omitted");
+        assert_eq!(s.runs.get(), 3, "default runs = 3 when omitted");
         assert!(s.setup.copy_fixtures.is_empty());
         assert!(s.setup.shell.is_empty());
         assert_eq!(s.user_turns, vec!["hello"]);
         assert_eq!(s.expectations.len(), 1);
         assert!(matches!(
             s.expectations[0],
-            Expectation::ToolCalled { ref tool } if tool == "read"
+            Expectation::ToolCalled {
+                tool: ToolName::Read
+            }
         ));
     }
 
@@ -377,7 +586,7 @@ judge_model = "anthropic/claude-haiku-4-5"
                 tool,
                 must_read_one_of,
             } => {
-                assert_eq!(tool, "edit");
+                assert_eq!(*tool, ToolName::Edit);
                 assert_eq!(must_read_one_of.len(), 2);
             }
             other => panic!("expected RequiresPriorRead, got {other:?}"),
@@ -407,8 +616,8 @@ judge_model = "anthropic/claude-haiku-4-5"
 
     #[test]
     fn round_trip_kitchen_sink_scenario() {
-        // Phase 7 generator emits TOML — round-tripping the full variant set
-        // is the only thing standing between it and silently dropping fields.
+        // If a serialization refactor drops fields silently, the round-trip
+        // test catches it.
         let original = Scenario::from_toml_str(kitchen_sink_toml()).unwrap();
         let serialized = toml::to_string(&original).unwrap();
         let reparsed = Scenario::from_toml_str(&serialized).unwrap();
@@ -416,9 +625,46 @@ judge_model = "anthropic/claude-haiku-4-5"
     }
 
     #[test]
+    fn scenario_level_judge_model_round_trips() {
+        // Scenario-level `judge_model` is the middle tier of the
+        // judge-model resolution chain (CLI > per-expectation > scenario >
+        // fail). Pin that it parses, round-trips, and survives in serialized
+        // TOML.
+        let toml_src = r#"
+name = "judge-model-pinned"
+description = "scenario pins a judge model for all judges"
+user_turns = ["go"]
+judge_model = "fuel-ix/claude-haiku-4-5"
+
+[[expectations]]
+kind = "judge"
+pass_when = "did the right thing"
+fail_when = "gave up"
+"#;
+        let s = Scenario::from_toml_str(toml_src).unwrap();
+        assert_eq!(s.judge_model.as_deref(), Some("fuel-ix/claude-haiku-4-5"));
+        let serialized = toml::to_string(&s).unwrap();
+        assert!(
+            serialized.contains("judge_model = \"fuel-ix/claude-haiku-4-5\""),
+            "serialized TOML must include judge_model: {serialized}"
+        );
+        let reparsed = Scenario::from_toml_str(&serialized).unwrap();
+        assert_eq!(s, reparsed);
+    }
+
+    #[test]
+    fn scenario_judge_model_omitted_defaults_to_none() {
+        let s = Scenario::from_toml_str(minimal_scenario_toml()).unwrap();
+        assert!(
+            s.judge_model.is_none(),
+            "no scenario-level judge_model means None — not a hardcoded default"
+        );
+    }
+
+    #[test]
     fn setup_omitted_equals_setup_explicit_empty() {
-        // Both forms must produce an equivalent Setup so the Phase 2 runner
-        // doesn't branch on author style.
+        // Both forms must produce an equivalent Setup so the runner doesn't
+        // branch on author style.
         let omitted = Scenario::from_toml_str(minimal_scenario_toml()).unwrap();
         let explicit = Scenario::from_toml_str(
             r#"
@@ -603,6 +849,140 @@ must_read_one_of = []
     }
 
     #[test]
+    fn rejects_empty_tool_name() {
+        // The empty-string branch in deserialize_tool_name is the friendliest
+        // landing for a TOML author who left `tool = ""` mid-edit; without
+        // this guard they'd see strum's bare "Matching variant not found"
+        // and have to guess what the empty input means.
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "tool_called"
+tool = ""
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("must not be empty"),
+            "unexpected error: {chain}"
+        );
+    }
+
+    #[test]
+    fn rejects_typoed_tool_name_in_tool_called() {
+        // A misspelled tool name (`raed` for `read`) would silently never
+        // match any tool call, vacuously passing tool_not_called and
+        // requires_prior_read while reporting green forever. Catch at parse.
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "tool_called"
+tool = "raed"
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("not a known builtin") && chain.contains("raed"),
+            "unexpected error: {chain}"
+        );
+    }
+
+    #[test]
+    fn rejects_typoed_tool_name_in_max_repeat_attempts() {
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "max_repeat_attempts"
+tool = "edti"
+max = 2
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("not a known builtin") && chain.contains("edti"),
+            "unexpected error: {chain}"
+        );
+    }
+
+    #[test]
+    fn accepts_all_builtin_tool_names() {
+        // Sanity: every ToolName variant should round-trip through the
+        // validator. Iterates the strum enum so adding a new variant is
+        // automatically covered.
+        use crate::tool::ToolName;
+        use strum::IntoEnumIterator;
+        for name in ToolName::iter() {
+            let toml_src = format!(
+                r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "tool_called"
+tool = "{}"
+"#,
+                name.as_str()
+            );
+            Scenario::from_toml_str(&toml_src)
+                .unwrap_or_else(|e| panic!("builtin {} rejected: {e:#}", name.as_str()));
+        }
+    }
+
+    #[test]
+    fn rejects_tool_name_with_leading_or_trailing_whitespace() {
+        // ToolName::from_str(name.trim()) succeeds for " read ", but the
+        // scenario stores the un-trimmed string and the runtime comparison
+        // against ToolName::as_str() ("read") would never match — silent
+        // false negative. Reject at parse.
+        for bad in [" read", "read ", "  edit  ", "\tbash"] {
+            let toml_src = format!(
+                r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "tool_called"
+tool = "{bad}"
+"#
+            );
+            let err = Scenario::from_toml_str(&toml_src).unwrap_err();
+            let chain = format!("{err:#}");
+            assert!(
+                chain.contains("must not have leading/trailing whitespace"),
+                "expected whitespace rejection for {bad:?}: {chain}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_mcp_tool_name_until_capture_supports_it() {
+        // MCP tool names parse "looking valid by convention" but capture
+        // can't see MCP calls (execute_mcp_tools emits StreamNotice, not
+        // LlmToolCall) — so the assertion would silently pass forever.
+        // Reject at parse with a pointer to the tracking issue.
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[[expectations]]
+kind = "tool_called"
+tool = "mcp__github__create_issue"
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("MCP capture is not yet implemented") && chain.contains("steve-ap0q"),
+            "unexpected error: {chain}"
+        );
+    }
+
+    #[test]
     fn rejects_empty_substring_in_file_contains() {
         let toml_src = r#"
 name = "x"
@@ -696,6 +1076,88 @@ tool = "read"
         assert!(
             chain.contains("unknown field") && chain.contains("runss"),
             "expected serde 'unknown field' rejection: {chain}"
+        );
+    }
+
+    #[test]
+    fn rejects_dot_segment_in_copy_fixtures() {
+        // `./foo` slips past `..` and absolute checks but reads as
+        // [CurDir, Normal("foo")] in components — different from the
+        // baseline's `Normal("foo")` key, so file_unchanged would silently
+        // miss-match. Reject at parse time and tell authors to write
+        // canonically.
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+[setup]
+copy_fixtures = ["./foo"]
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("must not contain `.` segments"),
+            "expected `./` rejection: {chain}"
+        );
+    }
+
+    #[test]
+    fn rejects_nul_byte_in_path() {
+        // NUL slips past every check that uses Path components but is
+        // rejected by syscalls with EINVAL. Catch at parse with a clear
+        // reason instead of a useless runtime error.
+        let toml_src = "
+name = \"x\"
+description = \"x\"
+user_turns = [\"hi\"]
+[[expectations]]
+kind = \"file_unchanged\"
+path = \"foo\\u0000bar\"
+";
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("must not contain NUL bytes"),
+            "expected NUL-byte rejection: {chain}"
+        );
+    }
+
+    #[test]
+    fn validate_reports_failing_expectation_index() {
+        // The validator wraps per-expectation errors with `expectation #N`
+        // — pin that contract so a future refactor that drops the index
+        // wrapping breaks loudly. Build a scenario with three expectations
+        // where the THIRD is malformed.
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["hi"]
+
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+
+[[expectations]]
+kind = "tool_called"
+tool = "edit"
+
+[[expectations]]
+kind = "max_repeat_attempts"
+tool = "edit"
+max = 0
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("expectation #3"),
+            "must surface failing expectation index: {chain}"
+        );
+        assert!(
+            chain.contains("must be >= 1"),
+            "must surface inner cause: {chain}"
         );
     }
 
@@ -796,6 +1258,269 @@ tool = "read"
     }
 
     #[test]
+    fn scenario_without_scoring_block_uses_default_axes() {
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["go"]
+
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+"#;
+        let scenario = Scenario::from_toml_str(toml_src).unwrap();
+        assert_eq!(scenario.scoring, None);
+        assert_eq!(
+            scenario.scoring_axes(),
+            &[Axis::Correctness, Axis::Efficiency, Axis::Conciseness]
+        );
+    }
+
+    #[test]
+    fn scenario_with_scoring_override_returns_overridden_axes() {
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["go"]
+
+[scoring]
+axes = ["robustness", "efficiency"]
+
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+"#;
+        let scenario = Scenario::from_toml_str(toml_src).unwrap();
+        let axes = scenario.scoring_axes();
+        assert_eq!(axes, &[Axis::Robustness, Axis::Efficiency]);
+    }
+
+    #[test]
+    fn scenario_rejects_unknown_axis_name_in_scoring() {
+        // Closed enum: typos like "speed" must fail at load time, not
+        // silently produce an unknown-axis judge prompt.
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["go"]
+
+[scoring]
+axes = ["speed"]
+
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("speed") || msg.contains("variant") || msg.contains("axes"),
+            "expected error to mention the unknown axis name; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn scenario_rejects_empty_scoring_axes() {
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["go"]
+
+[scoring]
+axes = []
+
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("axes") && (msg.contains("empty") || msg.contains("at least one")),
+            "expected error about empty axes list; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn scenario_rejects_duplicate_axes_in_scoring() {
+        // Second review found: `axes = ["correctness", "correctness"]`
+        // deserializes fine, validates fine, and reaches
+        // `parse_compare_response`. If the LLM emits a single
+        // `correctness:` key, the per-axis loop pushes two PairedScore
+        // entries with identical content — downstream aggregation
+        // silently double-counts the axis. Reject at validate time
+        // so the authoring mistake fails loudly.
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["go"]
+
+[scoring]
+axes = ["correctness", "efficiency", "correctness"]
+
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+"#;
+        let err = Scenario::from_toml_str(toml_src).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("duplicate") && msg.contains("correctness"),
+            "expected duplicate-axis rejection naming correctness; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn scoring_block_rejects_unknown_field() {
+        // deny_unknown_fields on Scoring catches typos like `axis` (singular).
+        let toml_src = r#"
+name = "x"
+description = "x"
+user_turns = ["go"]
+
+[scoring]
+axes = ["correctness"]
+extra = "oops"
+
+[[expectations]]
+kind = "tool_called"
+tool = "read"
+"#;
+        assert!(Scenario::from_toml_str(toml_src).is_err());
+    }
+
+    #[test]
+    fn all_committed_scenarios_parse_and_validate() {
+        // Walk every directory under `eval/scenarios/` (relative to the
+        // crate root) and round-trip each `scenario.toml` through
+        // `Scenario::from_file`. Catches authoring typos — wrong field
+        // names, unknown tool variants, malformed must_read paths,
+        // typo'd manifest filenames, and missing fixture files — at
+        // `cargo test` time so authors don't have to spend an LLM-bound
+        // smoke run to find them.
+        let scenarios_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("eval/scenarios");
+        let entries =
+            std::fs::read_dir(&scenarios_dir).expect("eval/scenarios/ should exist alongside src/");
+        let mut parsed = Vec::new();
+        for entry in entries {
+            let entry = entry.expect("readable directory entry");
+            let path = entry.path();
+            // Use file_type() (does NOT follow symlinks) rather than
+            // path.is_dir() (follows symlinks). A symlinked entry could
+            // otherwise let the test traverse outside the repo, and
+            // ScenarioWorkspace::build itself rejects symlink fixtures —
+            // mirror that defensive posture here.
+            let file_type = entry
+                .file_type()
+                .unwrap_or_else(|err| panic!("could not stat {}: {err:#}", path.display()));
+            if file_type.is_symlink() {
+                panic!(
+                    "symlink entry {} under eval/scenarios/ is not allowed — the workspace builder rejects symlinks and the walking test must not silently traverse them",
+                    path.display()
+                );
+            }
+            if !file_type.is_dir() {
+                continue;
+            }
+            let manifest = path.join("scenario.toml");
+            // A directory under eval/scenarios/ without a manifest is
+            // never legitimate (no cases like "fixtures dir at the top
+            // level" exist). A typo'd `senario.toml` would otherwise
+            // silently skip and the author wouldn't notice. Use
+            // symlink_metadata (does NOT follow symlinks) so a
+            // symlinked manifest doesn't slip past the top-level
+            // symlink defense.
+            let manifest_meta = std::fs::symlink_metadata(&manifest).unwrap_or_else(|_| {
+                panic!(
+                    "scenario directory {} is missing manifest at {} — likely a typo'd manifest filename",
+                    path.display(),
+                    manifest.display()
+                )
+            });
+            assert!(
+                manifest_meta.file_type().is_file(),
+                "scenario manifest {} must be a regular file (got {}) — symlinked or directory manifests are not allowed",
+                manifest.display(),
+                describe_file_type(manifest_meta.file_type())
+            );
+            let scenario = Scenario::from_file(&manifest).unwrap_or_else(|err| {
+                panic!(
+                    "scenario manifest {} failed to parse: {err:#}",
+                    manifest.display()
+                )
+            });
+            // Verify each fixture file actually exists AND is a regular
+            // file (not a directory or symlink). This mirrors
+            // ScenarioWorkspace::build, which uses std::fs::copy (fails
+            // on directories) and explicitly rejects symlinks. Catching
+            // these mismatches here saves an LLM-bound smoke run.
+            for fixture in &scenario.setup.copy_fixtures {
+                let resolved = path.join(fixture);
+                let meta = std::fs::symlink_metadata(&resolved).unwrap_or_else(|err| {
+                    panic!(
+                        "scenario {}: copy_fixtures entry {} not found at {} ({err})",
+                        scenario.name,
+                        fixture.display(),
+                        resolved.display()
+                    )
+                });
+                assert!(
+                    meta.file_type().is_file(),
+                    "scenario {}: copy_fixtures entry {} at {} must be a regular file (got {})",
+                    scenario.name,
+                    fixture.display(),
+                    resolved.display(),
+                    describe_file_type(meta.file_type())
+                );
+            }
+            parsed.push(scenario.name);
+        }
+        assert!(
+            !parsed.is_empty(),
+            "expected at least one scenario under {}",
+            scenarios_dir.display()
+        );
+        // _smoke is the canonical baseline scenario invoked by the
+        // manual smoke run (`cargo run -- eval
+        // eval/scenarios/_smoke/scenario.toml`). It's a developer
+        // convention, not a hardcoded code path — but pinning its
+        // presence here catches an accidental delete or rename that
+        // the bare !is_empty() guard would miss.
+        assert!(
+            parsed.iter().any(|n| n == "_smoke"),
+            "_smoke scenario missing from {}; parsed scenarios: {parsed:?}",
+            scenarios_dir.display()
+        );
+        // VALIDATION.md tracks per-scenario FAIL-then-PASS validation
+        // results for the modified scenarios. Pin its presence so a
+        // rename/delete trips the test rather than silently losing the
+        // validation history. Not a structural check — just existence.
+        let validation_md =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("eval/VALIDATION.md");
+        assert!(
+            validation_md.is_file(),
+            "eval/VALIDATION.md missing (or not a regular file) at {}",
+            validation_md.display()
+        );
+    }
+
+    /// Render a `FileType` in human-readable form for panic messages.
+    /// `FileType`'s `Debug` impl on Unix prints raw `st_mode` bits
+    /// (`FileType { mode: 0o040755 }`), which doesn't help an author
+    /// diagnose "why is the walking test panicking?"
+    fn describe_file_type(ft: std::fs::FileType) -> &'static str {
+        if ft.is_dir() {
+            "directory"
+        } else if ft.is_symlink() {
+            "symlink"
+        } else if ft.is_file() {
+            "regular file"
+        } else {
+            "non-regular file (fifo/socket/device)"
+        }
+    }
+
+    #[test]
     fn from_file_validates_directory_name_match() {
         use std::io::Write;
         let tmp = tempfile::tempdir().unwrap();
@@ -845,5 +1570,115 @@ tool = "read"
         .unwrap();
         let s = Scenario::from_file(&manifest).unwrap();
         assert_eq!(s.name, "kitchen-sink");
+    }
+
+    #[test]
+    fn discover_scenarios_returns_empty_for_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let scenarios = discover_scenarios(&dir.path().join("does-not-exist")).unwrap();
+        assert!(scenarios.is_empty());
+    }
+
+    #[test]
+    fn discover_scenarios_returns_empty_for_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let scenarios = discover_scenarios(dir.path()).unwrap();
+        assert!(scenarios.is_empty());
+    }
+
+    #[test]
+    fn discover_scenarios_finds_subdirs_with_scenario_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        // Subdir with a scenario.toml — should be discovered.
+        std::fs::create_dir_all(dir.path().join("foo")).unwrap();
+        std::fs::write(dir.path().join("foo/scenario.toml"), b"# pretend manifest").unwrap();
+        // Subdir without scenario.toml — should be skipped.
+        std::fs::create_dir_all(dir.path().join("bar")).unwrap();
+        // File at top level — should be skipped (not a scenario dir).
+        std::fs::write(dir.path().join("loose.toml"), b"").unwrap();
+
+        let scenarios = discover_scenarios(dir.path()).unwrap();
+        let names: Vec<&str> = scenarios.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["foo"]);
+    }
+
+    #[test]
+    fn discover_scenarios_returns_alphabetical_order() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["zebra", "alpha", "middle"] {
+            std::fs::create_dir_all(dir.path().join(name)).unwrap();
+            std::fs::write(dir.path().join(name).join("scenario.toml"), b"#").unwrap();
+        }
+        let scenarios = discover_scenarios(dir.path()).unwrap();
+        let names: Vec<&str> = scenarios.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "middle", "zebra"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_scenarios_returns_empty_for_symlinked_root() {
+        // The discovery root itself is a symlink — same exfiltration
+        // concern as for symlinked entries inside, so silently treat it
+        // as "no scenarios" (the dispatch_eval guard surfaces the
+        // user-facing error).
+        let target = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(target.path().join("foo")).unwrap();
+        std::fs::write(target.path().join("foo/scenario.toml"), b"#").unwrap();
+
+        let parent = tempfile::tempdir().unwrap();
+        let symlinked_root = parent.path().join("scenarios-symlink");
+        std::os::unix::fs::symlink(target.path(), &symlinked_root).unwrap();
+
+        let scenarios = discover_scenarios(&symlinked_root).unwrap();
+        assert!(
+            scenarios.is_empty(),
+            "symlinked discovery root must be rejected, got: {:?}",
+            scenarios
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_scenarios_skips_symlinked_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        // Real scenario dir.
+        std::fs::create_dir_all(dir.path().join("real")).unwrap();
+        std::fs::write(dir.path().join("real/scenario.toml"), b"#").unwrap();
+        // Symlinked scenario dir pointing outside the discovery root.
+        let target = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(target.path().join("inner")).unwrap();
+        std::os::unix::fs::symlink(target.path(), dir.path().join("symlinked")).unwrap();
+
+        let scenarios = discover_scenarios(dir.path()).unwrap();
+        let names: Vec<&str> = scenarios.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["real"], "symlinked entries must be skipped");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_scenarios_skips_symlinked_scenario_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(target.path(), b"# pretend manifest").unwrap();
+
+        // Real subdir containing a symlinked scenario.toml.
+        std::fs::create_dir_all(dir.path().join("real-with-symlink")).unwrap();
+        std::os::unix::fs::symlink(
+            target.path(),
+            dir.path().join("real-with-symlink/scenario.toml"),
+        )
+        .unwrap();
+
+        // Real subdir with a real scenario.toml (control).
+        std::fs::create_dir_all(dir.path().join("real")).unwrap();
+        std::fs::write(dir.path().join("real/scenario.toml"), b"#").unwrap();
+
+        let scenarios = discover_scenarios(dir.path()).unwrap();
+        let names: Vec<&str> = scenarios.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["real"],
+            "symlinked scenario.toml inside a real directory must be skipped"
+        );
     }
 }

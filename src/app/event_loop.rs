@@ -300,9 +300,12 @@ impl App {
 
             // -- Streaming events --
             AppEvent::LlmResponseStart if self.streaming_active => {
-                // Save the completed assistant message from the previous response
+                // Save the completed assistant message from the previous response.
+                // `has_content` covers text + tool calls + tool results — the
+                // older `!text_content().is_empty()` check would have dropped
+                // a turn that emitted tool calls but no text.
                 if let Some(msg) = self.streaming_message.take()
-                    && !msg.text_content().is_empty()
+                    && msg.has_content()
                 {
                     let mgr = SessionManager::new(&self.storage, &self.project.id);
                     let _ = mgr.save_message(&msg);
@@ -366,6 +369,21 @@ impl App {
                         diff_content,
                     );
                 }
+                // Mirror the tool call into the persisted-shape Message
+                // so `stored_messages` (and therefore reloaded sessions)
+                // round-trip the agent's actions. Without this push,
+                // `/export-debug` showed no tool-call sections and
+                // `/export-scenario` lost fixture suggestions after
+                // reload (steve-quzp).
+                if let Some(msg) = &mut self.streaming_message {
+                    msg.parts
+                        .push(crate::session::message::MessagePart::ToolCall {
+                            call_id: call_id.clone(),
+                            tool_name,
+                            input: arguments.clone(),
+                            state: crate::session::message::ToolCallState::Running,
+                        });
+                }
                 self.status_line_state.set_activity(Activity::RunningTool {
                     tool_name,
                     args_summary,
@@ -382,10 +400,62 @@ impl App {
                 if let Some(last) = self.last_assistant_mut() {
                     last.complete_tool_call(
                         &call_id,
-                        summary,
+                        summary.clone(),
                         output.output.clone(),
                         output.is_error,
                     );
+                }
+
+                // Mirror the result into the persisted shape: update the
+                // matching ToolCall's state to Completed/Error and push a
+                // ToolResult part for downstream consumers (`/export-debug`
+                // iterates these). See LlmToolCall handler for the push
+                // side of the pair.
+                //
+                // Three details:
+                // - `state = Error { message }` carries a short snippet of
+                //   `output.output` (80-char truncate) so reloaded sessions
+                //   surface SOMETHING about what went wrong rather than a
+                //   bare "Error {}". Full output is on the sibling
+                //   `MessagePart::ToolResult` for consumers that want it.
+                // - `title` uses `output.title` (the canonical UI label
+                //   produced by the tool itself) rather than recomputing
+                //   from `input`. The tool decides how it wants to be
+                //   labeled.
+                // - `output` is capped at 200 lines via
+                //   `crate::export::truncate_tool_output` so session
+                //   storage doesn't grow without bound on large file
+                //   reads or verbose command outputs.
+                //   `/export-debug` already displays only 200 lines, so
+                //   the cap doesn't reduce what any consumer would see
+                //   anyway; it just bounds data-at-rest.
+                if let Some(msg) = &mut self.streaming_message {
+                    use crate::session::message::{MessagePart, ToolCallState};
+                    for part in msg.parts.iter_mut() {
+                        if let MessagePart::ToolCall {
+                            call_id: cid,
+                            state,
+                            ..
+                        } = part
+                            && cid == &call_id
+                        {
+                            *state = if output.is_error {
+                                ToolCallState::Error {
+                                    message: crate::truncate_chars(&output.output, 80),
+                                }
+                            } else {
+                                ToolCallState::Completed
+                            };
+                            break;
+                        }
+                    }
+                    msg.parts.push(MessagePart::ToolResult {
+                        call_id: call_id.clone(),
+                        tool_name,
+                        output: crate::export::truncate_tool_output(&output.output, 200),
+                        title: output.title.clone(),
+                        is_error: output.is_error,
+                    });
                 }
 
                 // On successful write tool completion: invalidate file index + record changeset
@@ -694,6 +764,37 @@ impl App {
                     self.message_area_state.scroll_to_bottom();
                     tracing::error!("AGENTS.md update failed");
                 }
+            }
+            AppEvent::ExportScenarioFinish { path, name } => {
+                // The question answer's key handler (`key_handling.rs:433`)
+                // sets `Activity::Thinking` after the user submits the
+                // scenario name — reset it here so the status bar doesn't
+                // sit on "Thinking" indefinitely once the scaffold lands.
+                self.status_line_state.set_activity(Activity::Idle);
+                let dir_display = path
+                    .parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                self.messages.push(MessageBlock::System {
+                    text: format!(
+                        "Scenario scaffold written to:\n  {dir_display}/\n    scenario.toml      \u{2014} the manifest you'll edit\n    SESSION_TRACE.md   \u{2014} captured tool calls + final message (reference, not loaded by the runner)\n\n\
+                         Next steps:\n  \
+                         1. Open SESSION_TRACE.md alongside scenario.toml — it has the raw material for the TODOs.\n  \
+                         2. Fill in the TODOs in scenario.toml (description, judge pass_when/fail_when, substring sentinel).\n  \
+                         3. For each fixture you want, physically copy the file into {name}/ at the suggested relative path, then uncomment its entry.\n  \
+                         4. When ready, move {name}/ into Steve's repo at eval/scenarios/.",
+                    ),
+                });
+                self.message_area_state.scroll_to_bottom();
+                tracing::info!(path = %path.display(), name = %name, "scenario scaffold written");
+            }
+            AppEvent::ExportScenarioError { error } => {
+                self.status_line_state.set_activity(Activity::Idle);
+                self.messages.push(MessageBlock::Error {
+                    text: error.clone(),
+                });
+                self.message_area_state.scroll_to_bottom();
+                tracing::error!(%error, "scenario export failed");
             }
             AppEvent::TitleGenerated { session_id, title } => {
                 self.apply_title_if_current(&session_id, &title);

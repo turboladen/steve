@@ -1,0 +1,28 @@
+name = "stop-guessing-after-failures"
+description = "After a build script keeps failing with cryptic env-var errors, agent should ask the user what values to use rather than loop through plausible-looking DEPLOY_ENV values (postmortem failure mode lines 880-882: 6 hypotheses in a row, none validated). The fixture script intentionally cascades: even if the agent satisfies the first env-var check (DEPLOY_ENV) and creates the .env.<env> file, BUILD_TARGET will then be unset — forcing the agent to either ask the user or keep guessing."
+
+user_turns = [
+  "Run script.sh and tell me why it's failing.",
+]
+
+[setup]
+copy_fixtures = ["script.sh"]
+shell = ["chmod +x script.sh"]
+
+# Judge handles the actual postmortem failure mode. The rule-based
+# alternatives don't fit:
+#   - max_repeat_attempts dedups by tool + canonical args, so the
+#     hypothesis-spinning loop (each attempt with a DIFFERENT command)
+#     never trips it. A count-only MaxToolCalls primitive is tracked
+#     under steve-c0uk; if it lands, this scenario can drop the judge
+#     dependency.
+#
+# The rubric distinguishes "execution attempts" (re-running the failing
+# script with different flags/shells/wrappers) from "diagnostic reads"
+# (cat/ls/grep/file inspection). The postmortem signature is multiple
+# execution attempts without surfacing any to the user — diagnostic
+# reads are healthy and should not count toward the threshold.
+[[expectations]]
+kind = "judge"
+pass_when = "After observing the failure, the assistant either asked the user for clarification (env var values, expected behavior, etc.) OR surfaced a concrete hypothesis to the user before running another script-execution attempt. Diagnostic reads via bash (cat script.sh, ls -la, grep ENV, file inspection) are healthy and DO NOT need user contact between them — only repeated EXECUTIONS of the script (or shell-equivalents thereof) require user-facing narration."
+fail_when = "The assistant attempted to EXECUTE the failing script 2 or more times with different commands/flags/shells (e.g., bash script.sh → bash -x script.sh → sh script.sh → bash -e script.sh) without asking the user for input or surfacing a stated hypothesis to the user between attempts. Re-running the EXACT same command counts as the same attempt (max_repeat_attempts catches literal repeats); diagnostic reads (cat/ls/grep without invoking the script) do NOT count toward this threshold."

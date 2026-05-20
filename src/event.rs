@@ -119,6 +119,15 @@ pub enum AppEvent {
     /// AGENTS.md update generation failed.
     AgentsUpdateError { error: String },
 
+    // -- /export-scenario events --
+    /// The `/export-scenario` slash command wrote a scaffold to disk.
+    ExportScenarioFinish {
+        path: std::path::PathBuf,
+        name: String,
+    },
+    /// The `/export-scenario` slash command failed or was cancelled.
+    ExportScenarioError { error: String },
+
     // -- Title generation events --
     /// Async LLM title generation completed.
     TitleGenerated { session_id: String, title: String },
@@ -130,7 +139,7 @@ pub enum AppEvent {
 }
 
 /// Token usage reported at the end of a streaming response.
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StreamUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,

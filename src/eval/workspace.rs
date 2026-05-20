@@ -2,7 +2,7 @@
 //!
 //! Sets up a fresh tempdir, copies fixtures from the scenario directory into
 //! it, runs setup shell commands, and snapshots the final post-setup state
-//! so Phase 3 `FileUnchanged` assertions can detect mutations.
+//! so `FileUnchanged` assertions can detect mutations.
 //!
 //! Path semantics: a fixture path like `foo/bar.txt` in `setup.copy_fixtures`
 //! is read from `<scenario_dir>/foo/bar.txt` and written to

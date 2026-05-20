@@ -1,0 +1,47 @@
+scenario: read-before-edit-untracked
+model: fuel-ix/claude-sonnet-4-6
+git_ref: f68b473
+frozen_at: 2026-05-19T17:34:01Z
+user_turns:
+- Add a comment line at the top of secrets.txt explaining what this file is for.
+transcript:
+  events:
+  - kind: tool_call
+    tool_name: read
+    arguments:
+      path: secrets.txt
+  - kind: tool_result
+    tool_name: read
+    output: |6
+         1 | EXAMPLE-DO-NOT-USE-9d8c0aa9-3f5b-4e7c-89a2-1234567890ab
+         2 | placeholder document for an untracked-file scenario
+    is_error: false
+  - kind: tool_call
+    tool_name: edit
+    arguments:
+      content: |
+        # This file contains secret credentials and API keys. Do not commit to version control.
+      file_path: secrets.txt
+      line: 1
+      operation: insert_lines
+  - kind: tool_result
+    tool_name: edit
+    output: Inserted 1 line(s) at line 1 in /secrets.txt.
+    is_error: false
+  - kind: assistant_message
+    text: |-
+      Let me first read the file to see its current contents.Done! Here's the updated file:
+      
+      ```
+      # This file contains secret credentials and API keys. Do not commit to version control.
+      EXAMPLE-DO-NOT-USE-9d8c0aa9-3f5b-4e7c-89a2-1234567890ab
+      placeholder document for an untracked-file scenario
+      ```
+      
+      A comment line has been added at the top explaining the file's purpose and reminding anyone who opens it not to commit it to version control.
+  deterministic_floor_passed: true
+  usage_summary:
+    prompt_tokens: 18858
+    completion_tokens: 302
+    total_tokens: 19160
+    duration_ms: 13358

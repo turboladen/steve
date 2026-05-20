@@ -213,7 +213,13 @@ fn format_tool_state(state: &ToolCallState) -> &'static str {
 }
 
 /// Truncate tool output to `max_lines`, keeping first half and last half if over limit.
-fn truncate_tool_output(output: &str, max_lines: usize) -> String {
+/// Truncate a tool output to `max_lines` total lines by keeping
+/// `max_lines / 2` from the head and the same count from the tail,
+/// joined by an `... (N lines omitted) ...` separator. Also called
+/// from the streaming pipeline (`event_loop.rs`) when persisting
+/// `MessagePart::ToolResult` so session storage doesn't grow without
+/// bound on large file reads / verbose command outputs.
+pub(crate) fn truncate_tool_output(output: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = output.lines().collect();
     if lines.len() <= max_lines {
         return output.to_string();
