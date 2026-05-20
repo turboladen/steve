@@ -411,13 +411,29 @@ impl App {
                 // ToolResult part for downstream consumers (`/export-debug`
                 // iterates these). See LlmToolCall handler for the push
                 // side of the pair.
+                //
+                // Three details:
+                // - `state = Error { message }` carries a short snippet of
+                //   `output.output` (80-char truncate) so reloaded sessions
+                //   surface SOMETHING about what went wrong rather than a
+                //   bare "Error {}". Full output is on the sibling
+                //   `MessagePart::ToolResult` for consumers that want it.
+                // - `title` uses `output.title` (the canonical UI label
+                //   produced by the tool itself) rather than recomputing
+                //   from `input`. The tool decides how it wants to be
+                //   labeled.
+                // - `output` is capped at 200 lines via
+                //   `crate::export::truncate_tool_output` so session
+                //   storage doesn't grow without bound on large file
+                //   reads or verbose command outputs.
+                //   `/export-debug` already displays only 200 lines, so
+                //   the cap doesn't reduce what any consumer would see
+                //   anyway; it just bounds data-at-rest.
                 if let Some(msg) = &mut self.streaming_message {
                     use crate::session::message::{MessagePart, ToolCallState};
-                    let mut title = String::new();
                     for part in msg.parts.iter_mut() {
                         if let MessagePart::ToolCall {
                             call_id: cid,
-                            input,
                             state,
                             ..
                         } = part
@@ -425,20 +441,19 @@ impl App {
                         {
                             *state = if output.is_error {
                                 ToolCallState::Error {
-                                    message: String::new(),
+                                    message: crate::truncate_chars(&output.output, 80),
                                 }
                             } else {
                                 ToolCallState::Completed
                             };
-                            title = extract_args_summary(tool_name, input);
                             break;
                         }
                     }
                     msg.parts.push(MessagePart::ToolResult {
                         call_id: call_id.clone(),
                         tool_name,
-                        output: output.output.clone(),
-                        title,
+                        output: crate::export::truncate_tool_output(&output.output, 200),
+                        title: output.title.clone(),
                         is_error: output.is_error,
                     });
                 }
