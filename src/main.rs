@@ -188,7 +188,14 @@ async fn run() -> Result<()> {
                 .with_target(true)
                 .with_thread_ids(false),
         )
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("steve=info")))
+        // `steve=info` is target-prefixed: events whose target doesn't start
+        // with `steve` (notably `rmcp::*`) would otherwise be filtered to OFF.
+        // Adding `rmcp=warn` keeps the MCP transport's own warnings/errors
+        // visible without info-level chatter.
+        .with(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("steve=info,rmcp=warn")),
+        )
         .init();
 
     tracing::info!("steve starting up");
