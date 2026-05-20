@@ -268,9 +268,8 @@ impl<'a> Judge<'a> {
     /// `pair` bundles the baseline and current transcripts (see
     /// `ComparePair`). `scenario_judge_model` is the per-scenario
     /// `judge_model` field from `scenario.toml`, used as a fallback
-    /// when no CLI `--judge-model` is set. Unlike `Judge::evaluate`,
-    /// there is no per-expectation override — `compare` runs once per
-    /// (scenario, run), not per-Expectation::Judge.
+    /// when no CLI `--judge-model` is set. `compare` runs once per
+    /// (scenario, run).
     pub async fn compare(
         &self,
         pair: ComparePair<'_>,
@@ -306,8 +305,7 @@ impl<'a> Judge<'a> {
                  or `scenario.scoring_axes()`"
             );
         }
-        // Compare resolves CLI > scenario; no per-expectation override
-        // (compare is per-(scenario, run), not per-Expectation::Judge).
+        // Compare resolves CLI > scenario.
         let model = resolve_judge_model(self.cli_model.as_deref(), scenario_judge_model)
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -968,16 +966,10 @@ fn detect_multiline_quoted_value(stripped: &str) -> Option<&'static str> {
 mod tests {
     use std::{
         collections::VecDeque,
-        path::PathBuf,
         sync::{Arc, Mutex},
     };
 
     use super::*;
-    use crate::eval::{
-        capture::CapturedRun,
-        scenario::{Expectation, Scenario, Setup},
-        workspace::WorkspaceSnapshot,
-    };
 
     /// One queued canned response for the mock backend: either a
     /// `(text, usage)` pair or a transport-style error.
@@ -1037,36 +1029,6 @@ mod tests {
         }
     }
 
-    fn empty_capture() -> CapturedRun {
-        CapturedRun::new(
-            PathBuf::from("/tmp/eval-test"),
-            WorkspaceSnapshot {
-                files: Default::default(),
-            },
-        )
-    }
-
-    fn judge_expectation(model: Option<&str>) -> Expectation {
-        Expectation::Judge {
-            pass_when: "the assistant did the right thing".into(),
-            fail_when: "the assistant gave up".into(),
-            judge_model: model.map(|s| s.to_string()),
-        }
-    }
-
-    fn scenario_with(scenario_judge_model: Option<&str>, expectation: Expectation) -> Scenario {
-        Scenario {
-            name: "x".into(),
-            description: "x".into(),
-            runs: std::num::NonZeroUsize::new(1).unwrap(),
-            setup: Setup::default(),
-            user_turns: vec!["go".into()],
-            expectations: vec![expectation],
-            judge_model: scenario_judge_model.map(|s| s.to_string()),
-            scoring: None,
-        }
-    }
-
     fn ok_response(raw: &str) -> CannedResponse {
         Ok((
             raw.to_string(),
@@ -1076,15 +1038,6 @@ mod tests {
                 total_tokens: 120,
             }),
         ))
-    }
-
-    /// Variant of `ok_response` for OpenAI-compatible providers that
-    /// return success but do not report token usage. Steve's
-    /// `stream_options.include_usage` request flag is required for
-    /// Anthropic-via-OpenAI-compat to report usage; some other
-    /// compat-layer providers honor it inconsistently.
-    fn ok_response_no_usage(raw: &str) -> CannedResponse {
-        Ok((raw.to_string(), None))
     }
 
     // ── Pure: resolve_judge_model ──

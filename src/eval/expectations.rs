@@ -23,11 +23,8 @@ pub struct EvalReport {
 }
 
 impl EvalReport {
-    /// Skipped is neutral: the report passes iff no expectation Failed.
-    /// Unimplemented checks (judge in v1) produce Skipped so a green report
-    /// doesn't silently mean "no real checks ran."
     pub fn passed(&self) -> bool {
-        !self.results.iter().any(|r| r.outcome.is_failed())
+        self.results.iter().all(|r| r.outcome.is_passed())
     }
 }
 
@@ -41,23 +38,18 @@ pub struct ExpectationResult {
     pub outcome: Outcome,
 }
 
-/// Skipped is neutral: a report passes iff no expectation Failed. No
-/// production code path emits Skipped on `EvalReport.results` today, but
-/// the variant is kept as a deserialize target for older results files
-/// the `compare` subcommand reads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Outcome {
     Passed,
     Failed { reason: String },
-    Skipped { reason: String },
 }
 
 impl Outcome {
-    fn is_passed(&self) -> bool {
+    pub fn is_passed(&self) -> bool {
         matches!(self, Outcome::Passed)
     }
-    fn is_failed(&self) -> bool {
+    pub fn is_failed(&self) -> bool {
         matches!(self, Outcome::Failed { .. })
     }
 }
@@ -94,9 +86,6 @@ fn evaluate_one(expectation: &Expectation, captured: &CapturedRun) -> Expectatio
             case_insensitive,
         } => check_final_message(substring, *case_insensitive, false, captured),
         Expectation::MaxRepeatAttempts { tool, max } => check_max_repeat(*tool, *max, captured),
-        Expectation::Judge { .. } => Outcome::Skipped {
-            reason: "the `judge` expectation kind is no longer supported; remove this expectation or use paired-comparison via `report` instead".into(),
-        },
     };
     ExpectationResult {
         expectation: expectation.clone(),
@@ -1445,42 +1434,6 @@ mod tests {
         );
     }
 
-    // ── judge skip ──
-
-    #[test]
-    fn skipped_only_report_passes() {
-        // A report containing nothing but Skipped outcomes must pass — the
-        // contract is "no Failed flips passed", and Skipped is neutral.
-        // No production path emits Skipped today, but the JSONL wire format
-        // read by `compare` must still treat Skipped as neutral; this pins
-        // that invariant against future regressions.
-        let report = EvalReport {
-            results: vec![
-                ExpectationResult {
-                    expectation: Expectation::Judge {
-                        pass_when: "a".into(),
-                        fail_when: "b".into(),
-                        judge_model: None,
-                    },
-                    outcome: Outcome::Skipped {
-                        reason: "deferred".into(),
-                    },
-                },
-                ExpectationResult {
-                    expectation: Expectation::Judge {
-                        pass_when: "c".into(),
-                        fail_when: "d".into(),
-                        judge_model: None,
-                    },
-                    outcome: Outcome::Skipped {
-                        reason: "deferred".into(),
-                    },
-                },
-            ],
-        };
-        assert!(report.passed(), "Skipped-only report must pass");
-    }
-
     #[test]
     fn eval_report_round_trips_through_json() {
         // The `compare` subcommand will deserialize JSONL records — pin that the
@@ -1505,21 +1458,11 @@ mod tests {
                         reason: "no match".into(),
                     },
                 },
-                ExpectationResult {
-                    expectation: Expectation::Judge {
-                        pass_when: "x".into(),
-                        fail_when: "y".into(),
-                        judge_model: Some("anthropic/claude-haiku-4-5".into()),
-                    },
-                    outcome: Outcome::Skipped {
-                        reason: "deferred".into(),
-                    },
-                },
             ],
         };
         let json = serde_json::to_string(&original).unwrap();
         let reparsed: EvalReport = serde_json::from_str(&json).unwrap();
-        assert_eq!(reparsed.results.len(), 3);
+        assert_eq!(reparsed.results.len(), 2);
         assert!(matches!(reparsed.results[0].outcome, Outcome::Passed));
         assert!(matches!(
             reparsed.results[0].expectation,
@@ -1531,37 +1474,6 @@ mod tests {
             reparsed.results[1].outcome,
             Outcome::Failed { ref reason } if reason == "no match"
         ));
-        assert!(matches!(
-            reparsed.results[2].outcome,
-            Outcome::Skipped { .. }
-        ));
-        assert!(matches!(
-            reparsed.results[2].expectation,
-            Expectation::Judge { ref pass_when, .. } if pass_when == "x"
-        ));
-    }
-
-    #[test]
-    fn judge_returns_skipped() {
-        let scenario = Scenario {
-            name: "x".into(),
-            description: "x".into(),
-            runs: std::num::NonZeroUsize::new(1).unwrap(),
-            setup: crate::eval::scenario::Setup::default(),
-            user_turns: vec!["hi".into()],
-            expectations: vec![Expectation::Judge {
-                pass_when: "x".into(),
-                fail_when: "y".into(),
-                judge_model: None,
-            }],
-            judge_model: None,
-            scoring: None,
-        };
-        let cap = empty_capture(PathBuf::from("/tmp"));
-        let report = evaluate(&scenario, &cap);
-        assert_eq!(report.results.len(), 1);
-        assert!(matches!(report.results[0].outcome, Outcome::Skipped { .. }));
-        assert!(report.passed());
     }
 
     // ── evaluate roll-up ──
@@ -1660,63 +1572,47 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_mixed_pass_skip_fail_rollup() {
-        // The contract the `compare` subcommand will rely on: Skipped is
-        // neutral (doesn't flip passed), Failed flips it.
-        let scenario = Scenario {
-            name: "x".into(),
-            description: "x".into(),
-            runs: std::num::NonZeroUsize::new(1).unwrap(),
-            setup: crate::eval::scenario::Setup::default(),
-            user_turns: vec!["hi".into()],
-            expectations: vec![
-                Expectation::ToolCalled {
-                    tool: ToolName::Read,
+    fn any_failed_flips_passed() {
+        // The rollup contract: every Passed result yields a passing report;
+        // a single Failed flips it. Pinned because `compare` and the report
+        // exit-code logic rely on this property.
+        let all_passed = EvalReport {
+            results: vec![
+                ExpectationResult {
+                    expectation: Expectation::ToolCalled {
+                        tool: ToolName::Read,
+                    },
+                    outcome: Outcome::Passed,
                 },
-                Expectation::Judge {
-                    pass_when: "x".into(),
-                    fail_when: "y".into(),
-                    judge_model: None,
-                },
-                Expectation::ToolCalled {
-                    tool: ToolName::Bash,
+                ExpectationResult {
+                    expectation: Expectation::ToolCalled {
+                        tool: ToolName::Bash,
+                    },
+                    outcome: Outcome::Passed,
                 },
             ],
-            judge_model: None,
-            scoring: None,
         };
-        let mut cap = empty_capture(PathBuf::from("/tmp"));
-        cap.tool_calls.push(call("c1", ToolName::Read, json!({})));
-        let report = evaluate(&scenario, &cap);
-        assert_eq!(report.results.len(), 3);
-        assert!(
-            report.results[0].outcome.is_passed(),
-            "tool_called: read present"
-        );
-        assert!(matches!(report.results[1].outcome, Outcome::Skipped { .. }));
-        assert!(
-            report.results[2].outcome.is_failed(),
-            "tool_called: bash absent"
-        );
-        assert!(!report.passed(), "any Failed must flip the report");
+        assert!(all_passed.passed(), "all-Passed report must pass");
 
-        // Same scenario without the failing expectation: passed stays true
-        // even though Skipped is in the middle.
-        let scenario_no_fail = Scenario {
-            expectations: vec![
-                Expectation::ToolCalled {
-                    tool: ToolName::Read,
+        let one_failed = EvalReport {
+            results: vec![
+                ExpectationResult {
+                    expectation: Expectation::ToolCalled {
+                        tool: ToolName::Read,
+                    },
+                    outcome: Outcome::Passed,
                 },
-                Expectation::Judge {
-                    pass_when: "x".into(),
-                    fail_when: "y".into(),
-                    judge_model: None,
+                ExpectationResult {
+                    expectation: Expectation::ToolCalled {
+                        tool: ToolName::Edit,
+                    },
+                    outcome: Outcome::Failed {
+                        reason: "edit never called".into(),
+                    },
                 },
             ],
-            ..scenario
         };
-        let report = evaluate(&scenario_no_fail, &cap);
-        assert!(report.passed(), "Pass + Skip alone must pass");
+        assert!(!one_failed.passed(), "any Failed must flip the report");
     }
 
     // ── canonical_json helper unit tests ──

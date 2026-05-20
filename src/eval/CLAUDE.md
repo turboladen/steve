@@ -27,8 +27,10 @@ lowercase, off-by-one column alignment).
   REQUIRES the target tool to fire.
 - **`MaxRepeatAttempts` dedups by tool + canonical-args JSON.** Catches
   literal-repeat loops; does NOT catch "agent loops with different commands"
-  (the postmortem hypothesis-spinning pattern). Use Judge for count-style
-  failure modes. Count-only `MaxToolCalls` primitive tracked: `steve-c0uk`.
+  (the postmortem hypothesis-spinning pattern). Rule-based assertions cannot
+  express this today; the paired-comparison judge (`Judge::compare`) is the
+  available behavioral signal. Count-only `MaxToolCalls` primitive tracked:
+  `steve-c0uk`.
 - **`tool_not_called(X)` is brittle** — almost any tool has a legitimate
   fallback role. Prefer `tool_called(preferred)` + outcome-pinning via
   `file_contains` on the post-edit file content. Outcome-pinning is robust
@@ -37,7 +39,8 @@ lowercase, off-by-one column alignment).
 - **`is_read_class()` is intentionally narrow** (`Read | Symbols` only) for
   `RequiresPriorRead`. For "did the agent see the content at all?" (where
   `grep` would also count) use `final_message_contains` on an unguessable
-  sentinel + Judge instead.
+  sentinel — the unguessable substring forces the model to have seen the
+  actual content via SOME content-returning tool.
 - **Read accepts `path` (string) XOR `paths` (array).** Evaluator's
   `read_path_args` (in `expectations.rs`) handles both forms — Read-specific
   branch. Adding a new multi-path tool requires updating that helper.
