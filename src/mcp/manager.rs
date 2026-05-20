@@ -75,9 +75,15 @@ impl McpManager {
                     self.servers.insert(server_id.clone(), server);
                 }
                 Err(e) => {
-                    tracing::error!(server = %server_id, error = %e, "failed to start MCP server");
-                    let msg = e.to_string();
-                    let short = msg
+                    // Render with `{e:#}` (alternate Display) so the full anyhow
+                    // chain reaches the log file. Plain `%e` would surface only
+                    // the outermost context (e.g. "failed to spawn MCP server
+                    // process"), masking the cause that actually pinpoints the
+                    // problem ("No such file or directory", "Permission denied",
+                    // the child's own protocol-level message, etc.).
+                    let chain = format!("{e:#}");
+                    tracing::error!(server = %server_id, error = %chain, "failed to start MCP server");
+                    let short = chain
                         .lines()
                         .next()
                         .unwrap_or("connection failed")

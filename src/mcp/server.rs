@@ -50,7 +50,12 @@ impl McpServer {
                         let reader = tokio::io::BufReader::new(stderr);
                         let mut lines = reader.lines();
                         while let Ok(Some(line)) = lines.next_line().await {
-                            tracing::debug!(server = %sid, "mcp stderr: {line}");
+                            // info! (not debug!) so the child's stderr survives the
+                            // default `steve=info` filter — when a stdio MCP child
+                            // fails to initialize, this is often the only signal of
+                            // why (the rmcp transport error just says "connection
+                            // closed: initialize response").
+                            tracing::info!(server = %sid, "mcp stderr: {line}");
                         }
                     });
                 }
