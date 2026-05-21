@@ -738,6 +738,7 @@ mod tests {
         app.pending_permission = Some(PendingPermission {
             tool_name: ToolName::Bash,
             summary: "test".into(),
+            is_mcp: false,
             response_tx: tx,
         });
 

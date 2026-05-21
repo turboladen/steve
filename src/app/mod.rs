@@ -69,6 +69,12 @@ struct PendingPermission {
     tool_name: crate::tool::ToolName,
     #[allow(dead_code)]
     summary: String,
+    /// True when this prompt represents an MCP tool call — i.e. `tool_name` is the
+    /// `ToolName::Bash` placeholder used by `stream/phases.rs` for MCP permission
+    /// requests. The "AllowAlways" handler uses this to skip persisting the placeholder
+    /// (steve-8a86): MCP grants are session-only by design, but writing the placeholder
+    /// would silently auto-allow Bash project-wide.
+    is_mcp: bool,
     response_tx: tokio::sync::oneshot::Sender<PermissionReply>,
 }
 
