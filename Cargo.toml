@@ -31,6 +31,7 @@ serde-saphyr = "0.0.26"
 # emitted file can't be parsed back even by serde-saphyr itself. Drop
 # this dep when the upstream writer is fixed; tracked as steve-hv1c.
 serde_yaml_ng = "0.10"
+serde_ignored = "0.1"
 serde_json = "1"
 toml = "1.1"
 
