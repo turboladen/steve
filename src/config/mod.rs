@@ -245,7 +245,7 @@ fn load_global_from(dir_override: Option<&Path>, warnings: &mut Vec<String>) -> 
         return Config::default();
     };
     tracing::info!(path = %path.display(), "loading global config");
-    match load_jsonc_file(&path) {
+    match load_jsonc_file(&path, warnings) {
         Ok(config) => config,
         Err(e) => {
             let msg = format_config_error(&path, &e);
@@ -261,7 +261,7 @@ fn load_global_from(dir_override: Option<&Path>, warnings: &mut Vec<String>) -> 
 fn load_project(project_root: &Path, warnings: &mut Vec<String>) -> Result<Config> {
     let path = project_root.join(".steve.jsonc");
     if path.exists() {
-        match load_jsonc_file(&path) {
+        match load_jsonc_file(&path, warnings) {
             Ok(config) => Ok(config),
             Err(e) => {
                 let msg = format_config_error(&path, &e);
@@ -283,7 +283,11 @@ fn format_config_error(path: &Path, error: &anyhow::Error) -> String {
 }
 
 /// Parse a JSONC file into a Config. Works for both `.json` and `.jsonc`.
-fn load_jsonc_file(path: &Path) -> Result<Config> {
+///
+/// Unknown fields (e.g. `mcpServers` instead of `mcp_servers`) are surfaced
+/// through `warnings` so the user sees them at startup instead of having the
+/// typo silently deserialize to a default value.
+fn load_jsonc_file(path: &Path, warnings: &mut Vec<String>) -> Result<Config> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read config file: {}", path.display()))?;
 
@@ -292,8 +296,15 @@ fn load_jsonc_file(path: &Path) -> Result<Config> {
             .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", path.display()))?;
 
     match json_value {
-        Some(value) => serde_json::from_value(value)
-            .with_context(|| format!("failed to deserialize config from {}", path.display())),
+        Some(value) => {
+            let display_path = path.display().to_string();
+            serde_ignored::deserialize(value, |unknown_path| {
+                warnings.push(format!(
+                    "Unknown config field in {display_path}: `{unknown_path}` (typo?)"
+                ));
+            })
+            .with_context(|| format!("failed to deserialize config from {display_path}"))
+        }
         None => Ok(Config::default()),
     }
 }
@@ -762,7 +773,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.json");
         std::fs::write(&path, r#"{"model": "test/m"}"#).unwrap();
-        let config = load_jsonc_file(&path).unwrap();
+        let mut warnings = Vec::new();
+        let config = load_jsonc_file(&path, &mut warnings).unwrap();
         assert_eq!(config.model, Some("test/m".into()));
     }
 
@@ -771,7 +783,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.jsonc");
         std::fs::write(&path, "{\n  // comment\n  \"model\": \"test/m\"\n}").unwrap();
-        let config = load_jsonc_file(&path).unwrap();
+        let mut warnings = Vec::new();
+        let config = load_jsonc_file(&path, &mut warnings).unwrap();
         assert_eq!(config.model, Some("test/m".into()));
     }
 
@@ -779,7 +792,8 @@ mod tests {
     fn load_jsonc_file_missing_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nonexistent.json");
-        assert!(load_jsonc_file(&path).is_err());
+        let mut warnings = Vec::new();
+        assert!(load_jsonc_file(&path, &mut warnings).is_err());
     }
 
     #[test]
@@ -856,6 +870,119 @@ mod tests {
         assert_eq!(config.model, None, "steve.jsonc should not be loaded");
     }
 
+    // -- Unknown-field warning tests (steve-l918) --
+
+    #[test]
+    fn unknown_top_level_field_warns() {
+        // A typo at the top level (e.g. `mcpServers` instead of `mcp_servers`)
+        // must surface as a warning, not silently deserialize to default.
+        let dir = tempfile::tempdir().unwrap();
+        let empty_global = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".steve.jsonc"),
+            r#"{"model": "openai/gpt-4o", "mcpServers": {}}"#,
+        )
+        .unwrap();
+
+        let (config, warnings) = load_with_global(dir.path(), Some(empty_global.path())).unwrap();
+
+        // The valid field still loaded.
+        assert_eq!(config.model, Some("openai/gpt-4o".into()));
+        // The typo'd field produced a warning naming it.
+        let joined = warnings.join("\n");
+        assert!(
+            warnings.iter().any(|w| w.contains("mcpServers")),
+            "expected a warning mentioning `mcpServers`, got: {joined}",
+        );
+    }
+
+    #[test]
+    fn unknown_nested_field_warns() {
+        // A typo nested inside providers.<id> (e.g. `modls` instead of `models`)
+        // must surface with the full dotted path so the user can find it.
+        let dir = tempfile::tempdir().unwrap();
+        let empty_global = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".steve.jsonc"),
+            r#"{
+                "providers": {
+                    "openai": {
+                        "base_url": "https://api.openai.com/v1",
+                        "api_key_env": "OPENAI_API_KEY",
+                        "modls": {}
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let (_config, warnings) = load_with_global(dir.path(), Some(empty_global.path())).unwrap();
+
+        let joined = warnings.join("\n");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("providers.openai.modls")),
+            "expected a warning mentioning nested path `providers.openai.modls`, got: {joined}",
+        );
+    }
+
+    #[test]
+    fn multiple_unknowns_all_reported() {
+        // Two unrelated typos should both surface — we don't stop at the first one.
+        let dir = tempfile::tempdir().unwrap();
+        let empty_global = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".steve.jsonc"),
+            r#"{"mcpServers": {}, "permissionRules": []}"#,
+        )
+        .unwrap();
+
+        let (_config, warnings) = load_with_global(dir.path(), Some(empty_global.path())).unwrap();
+
+        let joined = warnings.join("\n");
+        assert!(
+            warnings.iter().any(|w| w.contains("mcpServers")),
+            "expected warning for `mcpServers`, got: {joined}",
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("permissionRules")),
+            "expected warning for `permissionRules`, got: {joined}",
+        );
+    }
+
+    #[test]
+    fn known_fields_no_unknown_warning() {
+        // A fully valid config must produce zero unknown-field warnings.
+        // (Other warning kinds — e.g. parse errors — would never fire here.)
+        let dir = tempfile::tempdir().unwrap();
+        let empty_global = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".steve.jsonc"),
+            r#"{
+                "model": "openai/gpt-4o",
+                "auto_compact": true,
+                "providers": {
+                    "openai": {
+                        "base_url": "https://api.openai.com/v1",
+                        "api_key_env": "OPENAI_API_KEY",
+                        "models": {
+                            "gpt-4o": { "id": "gpt-4o", "name": "GPT-4o" }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let (_config, warnings) = load_with_global(dir.path(), Some(empty_global.path())).unwrap();
+
+        assert!(
+            warnings.is_empty(),
+            "valid config should produce no warnings, got: {warnings:?}",
+        );
+    }
+
     #[test]
     fn global_merge_with_empty_project() {
         // Simulate: global config has providers, empty project config
@@ -872,8 +999,9 @@ mod tests {
         std::fs::write(dir.path().join(".steve.jsonc"), "{}").unwrap();
 
         // Load and verify global providers are preserved
-        let global = load_jsonc_file(&global_dir.path().join("config.jsonc")).unwrap();
         let mut warnings = Vec::new();
+        let global =
+            load_jsonc_file(&global_dir.path().join("config.jsonc"), &mut warnings).unwrap();
         let project = load_project(dir.path(), &mut warnings).unwrap();
         let merged = global.merge(project);
 
