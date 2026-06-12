@@ -653,6 +653,10 @@ impl App {
                 self.pending_permission = Some(PendingPermission {
                     tool_name: req.tool_name,
                     summary: req.arguments_summary,
+                    // MCP permission requests carry a non-None display_name override
+                    // (see PermissionRequest doc + stream/phases.rs); use that as the
+                    // discriminator since the tool_name is a placeholder.
+                    is_mcp: req.display_name.is_some(),
                     response_tx: req.response_tx,
                 });
             }

@@ -390,7 +390,7 @@ impl App {
             (KeyCode::Char('a'), _) | (KeyCode::Char('A'), _) => {
                 if let Some(perm) = self.pending_permission.take() {
                     let tool_str = perm.tool_name.as_str().to_string();
-                    let is_mcp = perm.summary.starts_with("MCP: ");
+                    let is_mcp = perm.is_mcp;
                     let _ = perm.response_tx.send(PermissionReply::AllowAlways);
                     self.remove_last_permission_block();
                     self.status_line_state.set_activity(Activity::Thinking);
@@ -592,6 +592,24 @@ mod tests {
         app.pending_permission = Some(PendingPermission {
             tool_name: ToolName::Bash,
             summary: "test command".into(),
+            is_mcp: false,
+            response_tx: tx,
+        });
+        rx
+    }
+
+    /// Construct a PendingPermission matching what `stream/phases.rs` produces for an
+    /// MCP tool call: `tool_name` is the documented `ToolName::Bash` placeholder, and
+    /// `summary` is the raw args preview (NOT prefixed with "MCP: " — that prefix
+    /// lives on `display_name`, which doesn't survive into `PendingPermission`).
+    fn make_pending_mcp_permission(
+        app: &mut App,
+    ) -> tokio::sync::oneshot::Receiver<PermissionReply> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        app.pending_permission = Some(PendingPermission {
+            tool_name: ToolName::Bash,
+            summary: "{}".into(),
+            is_mcp: true,
             response_tx: tx,
         });
         rx
@@ -652,6 +670,34 @@ mod tests {
             rx.try_recv().unwrap(),
             PermissionReply::AllowAlways
         ));
+    }
+
+    /// Regression: granting AllowAlways on an MCP-shaped permission request must
+    /// NOT persist the placeholder `ToolName::Bash` into `config.allow_tools`.
+    /// Pre-fix bug (steve-8a86): the handler used `summary.starts_with("MCP: ")`
+    /// as the discriminator, but `summary` is the args preview ("{}") — not the
+    /// display name — so the MCP branch was never taken and Bash got silently
+    /// auto-allowed project-wide.
+    #[tokio::test]
+    async fn permission_a_on_mcp_does_not_persist_bash_placeholder() {
+        let mut app = make_test_app();
+        let pre_allow_tools = app.config.allow_tools.clone();
+        let mut rx = make_pending_mcp_permission(&mut app);
+
+        app.handle_key(press(KeyCode::Char('a'))).await.unwrap();
+
+        // Reply still goes through — in-memory MCP session grant happens upstream
+        // in stream/phases.rs and is not under test here.
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            PermissionReply::AllowAlways
+        ));
+
+        // The critical assertion: allow_tools must be unchanged.
+        assert_eq!(
+            app.config.allow_tools, pre_allow_tools,
+            "MCP AllowAlways must not silently persist Bash to allow_tools",
+        );
     }
 
     #[tokio::test]
